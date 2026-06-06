@@ -47,7 +47,6 @@ reports session-level R@k using the dataset's native session_id gold.
 """
 from __future__ import annotations
 
-import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
