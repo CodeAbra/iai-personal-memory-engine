@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,11 @@ DAILY_QUOTA_BUDGET_PCT: float = 0.01
 WEEKLY_BUFFER_PCT: float = 0.07
 ESTIMATED_DAILY_TOKEN_CEILING: int = 1_000_000
 CREDENTIALS_PATH: Path = Path.home() / ".claude" / ".credentials.json"
+# On macOS, Claude Code stores OAuth credentials in the login Keychain rather
+# than CREDENTIALS_PATH, so the file is absent on a normal desktop-app /
+# `claude /login` setup. This generic-password item holds the same
+# `{"claudeAiOauth": {...}}` payload and is used as a fallback.
+KEYCHAIN_SERVICE: str = "Claude Code-credentials"
 BUDGET_STATE_KEY: str = "claude_budget"
 
 
@@ -32,13 +38,46 @@ _VALID_SUBSCRIPTION_TYPES: frozenset[str] = frozenset({
 _REQUIRED_SCOPE: str = "user:inference"
 
 
-def verify_credentials_subscription() -> dict:
-    if not CREDENTIALS_PATH.exists():
-        return {"ok": False, "reason": "credentials_file_missing"}
+def _read_keychain_credentials() -> dict | None:
+    """Best-effort read of Claude Code's macOS Keychain credentials item.
+
+    Claude Code on macOS keeps OAuth credentials in the login Keychain instead
+    of CREDENTIALS_PATH, so the file is absent on a normal desktop-app /
+    ``claude /login`` setup. The generic-password item holds the same
+    ``{"claudeAiOauth": {...}}`` payload. Returns None when unavailable
+    (non-macOS, item absent, or the user denies the Keychain prompt).
+    """
+    if sys.platform != "darwin":
+        return None
     try:
-        data = json.loads(CREDENTIALS_PATH.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"ok": False, "reason": "credentials_unreadable", "error": str(exc)}
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    try:
+        return json.loads(out.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+
+
+def verify_credentials_subscription() -> dict:
+    if CREDENTIALS_PATH.exists():
+        try:
+            data = json.loads(CREDENTIALS_PATH.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "reason": "credentials_unreadable", "error": str(exc)}
+    else:
+        # macOS keeps credentials in the Keychain, not the JSON file.
+        data = _read_keychain_credentials()
+    if data is None:
+        return {"ok": False, "reason": "credentials_file_missing"}
 
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
     if isinstance(oauth, dict) and oauth.get("subscriptionType"):
@@ -173,10 +212,24 @@ def _scrubbed_env() -> dict[str, str]:
     return result
 
 
+def _bare_mode_enabled() -> bool:
+    """Whether to pass ``--bare`` to ``claude`` for consolidation calls.
+
+    ``--bare`` keeps the daemon's own ``claude -p`` calls from triggering hooks,
+    auto-memory, etc., and is the default. On some macOS setups (credentials in
+    the Keychain), ``claude --bare -p`` reports ``Not logged in`` while a plain
+    ``claude -p`` authenticates normally; such users can set
+    ``IAI_MCP_CLAUDE_BARE=0`` to drop the flag.
+    """
+    val = os.environ.get("IAI_MCP_CLAUDE_BARE", "1").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
 def _build_cmd(prompt: str, model: str) -> list[str]:
-    return [
-        "claude",
-        "--bare",
+    cmd = ["claude"]
+    if _bare_mode_enabled():
+        cmd.append("--bare")
+    cmd += [
         "-p",
         prompt,
         "--output-format",
@@ -189,6 +242,7 @@ def _build_cmd(prompt: str, model: str) -> list[str]:
         "--model",
         model,
     ]
+    return cmd
 
 
 async def _terminate_then_kill(proc, grace_sec: float) -> None:
