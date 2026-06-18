@@ -717,8 +717,29 @@ class HippoQuery:
             active_count = len(db._label_map)
             if active_count == 0:
                 return pd.DataFrame()
-            k_clamped = min(k, active_count)
-            labels, distances = db._hnsw.knn_query(self._ann_vector, k=k_clamped)
+            # Clamp k to the live hnswlib index count, not just the label_map
+            # count. The two can diverge briefly during boot/rebuild, and
+            # hnswlib raises "Probably ef or M is too small" when asked for
+            # more neighbors than the index actually contains.
+            hnsw_count = db._hnsw.get_current_count()
+            k_clamped = min(k, active_count, hnsw_count)
+            if k_clamped == 0:
+                return pd.DataFrame()
+            try:
+                labels, distances = db._hnsw.knn_query(
+                    self._ann_vector, k=k_clamped
+                )
+            except RuntimeError as exc:
+                # Defensive: hnswlib still raises this on rare label-map/index
+                # skew. Treat as "no neighbors found" so the insert path's
+                # pattern-separation gate can proceed instead of failing the
+                # whole capture.
+                _log.warning(
+                    "hnswlib knn_query failed (k=%d, hnsw_count=%d, "
+                    "active_count=%d); returning empty result: %s",
+                    k_clamped, hnsw_count, active_count, exc,
+                )
+                return pd.DataFrame()
 
         flat_labels: list[int] = labels[0].tolist()
         # Clamp cosine distance to its mathematical range — the BLAS backend
