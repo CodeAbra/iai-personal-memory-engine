@@ -240,6 +240,7 @@ def _community_gate_max_node(
         return []
 
     mat = np.stack(rows).astype(np.float32, copy=False)
+    mat = np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
     norms = np.linalg.norm(mat, axis=1)
     norms[norms == 0.0] = 1.0
     mat = mat / norms[:, None]
@@ -528,7 +529,11 @@ def _recall_core(
     if cnorm > 0.0:
         cue_vec = cue_vec / cnorm
     if pool_embs.size:
-        shared_cos = np.matmul(pool_embs, cue_vec).astype(np.float32)
+        _pe = np.nan_to_num(pool_embs, nan=0.0, posinf=0.0, neginf=0.0)
+        _pe_norms = np.linalg.norm(_pe, axis=1)
+        _pe_norms[_pe_norms == 0.0] = 1.0
+        _pe = _pe / _pe_norms[:, None]
+        shared_cos = np.matmul(_pe, cue_vec).astype(np.float32)
     else:
         shared_cos = np.empty(0, dtype=np.float32)
     if shared_cos.size:

@@ -397,7 +397,7 @@ class HippoDB:
             if candidate.exists():
                 try:
                     idx = hnswlib.Index(space="cosine", dim=self._embed_dim)
-                    idx.load_index(str(candidate), max_elements=cap)
+                    idx.load_index(str(candidate), max_elements=cap, allow_replace_deleted=True)
                     idx.set_ef(max(HNSW_EF, RECALL_INDEX_EF))
                     idx.set_num_threads(1)
                     self._hnsw: hnswlib.Index = idx
