@@ -13,6 +13,7 @@ BENCH_DIR = WORKTREE_ROOT / "bench"
 
 BENCH_SCRIPTS_NEEDING_SHIM = [
     "_night_runner.py",
+    "capture_dedup_lock.py",
     "community_pipeline_perf.py",
     "consolidation_rss_peak.py",
     "contradiction_longitudinal_claude.py",
