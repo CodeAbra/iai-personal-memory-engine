@@ -242,3 +242,50 @@ def test_capture_turn_concurrent_drains_do_not_duplicate(iai_home, tmp_path):
 
     count = _count_episodic_records(store)
     assert count == 1, f"Expected exactly 1 episodic record in the store, found {count}"
+
+
+def test_capture_turn_embeds_content_not_cue(iai_home, monkeypatch):
+    """Regression: capture_turn() must embed the message CONTENT, not the cue label.
+
+    capture_transcript() passes a positional cue ("session <id> turn <n>") and
+    capture_turn() used to embed ``cue or text``, so every episodic capture's
+    vector was the embedding of a near-identical positional label instead of the
+    message body. That collapsed the stored embedding space (unrelated turns at
+    cosine ~0.9+) and broke the similarity graph and semantic recall.
+    """
+    import iai_mcp.embed as embed_mod
+    from iai_mcp import capture as capture_mod
+
+    seen: dict[str, str] = {}
+
+    class _RecordingEmbedder:
+        DIM = 384
+
+        def embed(self, text: str) -> list[float]:
+            seen["text"] = text
+            vec = [0.0] * 384
+            vec[0] = 1.0  # valid unit vector; avoids zero-norm edge cases downstream
+            return vec
+
+    # capture_turn imports embedder_for_store from iai_mcp.embed at call time.
+    monkeypatch.setattr(
+        embed_mod, "embedder_for_store", lambda store: _RecordingEmbedder()
+    )
+
+    store = _open_store()
+    cue = f"session {SESSION_ID} turn 7"
+    content = "Le constat d'état des lieux a été réalisé dans l'appartement."
+    capture_mod.capture_turn(
+        store,
+        cue=cue,
+        text=content,
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+    )
+
+    assert seen.get("text") == content, (
+        "capture_turn embedded the wrong string -- it must embed the message "
+        f"content, not the cue. Got: {seen.get('text')!r}"
+    )
+    assert seen["text"] != cue
