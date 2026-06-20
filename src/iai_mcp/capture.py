@@ -277,7 +277,11 @@ def capture_turn(
     from iai_mcp.events import TELEMETRY_EMBED_NATIVE_FAILURE, write_event
 
     try:
-        emb = embedder_for_store(store).embed(cue or text)
+        # Embed the CONTENT, never the cue. capture_transcript / deferred-drain pass
+        # a positional cue ("session <id> turn <n>"); embedding that collapsed every
+        # stored vector onto near-identical label embeddings, destroying graph
+        # structure and semantic recall. The cue stays a provenance label only.
+        emb = embedder_for_store(store).embed(text)
     except Exception as exc:
         write_event(
             store,
