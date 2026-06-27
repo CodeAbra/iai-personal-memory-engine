@@ -43,10 +43,23 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 } >> "$log" 2>/dev/null
 
 # precache for SessionStart hook
-# Read the daemon-written cache whenever it is non-empty (no age cap).
+# Read the daemon-written cache whenever it is non-empty AND younger than the
+# max-age safety net. Default: 43200s (12h). Set
+# IAI_MCP_SESSION_CACHE_MAX_AGE_SEC=0 to disable the cap (legacy behaviour:
+# serve the cache regardless of age). Unset / non-numeric → 43200s.
+#
+# Rationale: if the daemon is down, crashed, or its regeneration path is
+# silently failing, we MUST NOT re-inject a multi-day-old prefix into every
+# new Claude/Codex session. The TTL is a back-stop; the primary defence is
+# `daemon._maybe_refresh_session_start_cache`, which refreshes the cache on
+# WAKE whenever new records land.
 # Each branch writes a contract log marker. Falls through to the live CLI path
 # on any miss.
 cache_path="$HOME/.iai-mcp/.session-start-payload.cached.md"
+cache_max_age="${IAI_MCP_SESSION_CACHE_MAX_AGE_SEC-43200}"
+case "$cache_max_age" in
+  ''|*[!0-9]*) cache_max_age=43200 ;;
+esac
 if [ -s "$cache_path" ]; then
   # Cross-platform mtime: try GNU stat, then BSD stat.
   cache_mtime=$(stat -c %Y "$cache_path" 2>/dev/null || stat -f %m "$cache_path" 2>/dev/null || echo 0)
@@ -55,13 +68,17 @@ if [ -s "$cache_path" ]; then
   else
     now_epoch=$(date +%s)
     age=$(( now_epoch - cache_mtime ))
-    cache_out=$(head -c 10000 "$cache_path" 2>/dev/null || true)
-    if [ -n "$cache_out" ]; then
-      printf '%s' "$cache_out"
-      echo "$ts cache-hit age=${age}s bytes=${#cache_out}" >> "$log" 2>/dev/null
-      exit 0
+    if [ "$cache_max_age" -gt 0 ] && [ "$age" -gt "$cache_max_age" ]; then
+      echo "$ts cache-stale age=${age}s max=${cache_max_age}s -> live-cli" >> "$log" 2>/dev/null
+    else
+      cache_out=$(head -c 10000 "$cache_path" 2>/dev/null || true)
+      if [ -n "$cache_out" ]; then
+        printf '%s' "$cache_out"
+        echo "$ts cache-hit age=${age}s bytes=${#cache_out}" >> "$log" 2>/dev/null
+        exit 0
+      fi
+      echo "$ts cache-miss empty (file existed but read returned 0 bytes)" >> "$log" 2>/dev/null
     fi
-    echo "$ts cache-miss empty (file existed but read returned 0 bytes)" >> "$log" 2>/dev/null
   fi
 elif [ -e "$cache_path" ]; then
   echo "$ts cache-miss empty (zero-byte file)" >> "$log" 2>/dev/null

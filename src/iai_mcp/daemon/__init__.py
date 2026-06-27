@@ -71,7 +71,16 @@ S4_FIRST_ITER_GRACE_SEC: float = float(
 )
 
 SESSION_START_CACHE_PATH = Path.home() / ".iai-mcp" / ".session-start-payload.cached.md"
+SESSION_START_CACHE_META_PATH = (
+    Path.home() / ".iai-mcp" / ".session-start-payload.cached.meta.json"
+)
 from iai_mcp.session import SESSION_START_CACHE_MAX_CHARS  # noqa: E402 -- placed after PATH constant for readability
+
+SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT: float = 60.0
+# Single-flight lock for refreshes — the SLEEP path also routes through it so a
+# WAKE refresh kicked from the wake-sequence hook never races a sleep-pipeline
+# write on the same file.
+_session_start_cache_lock = threading.Lock()
 
 INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC: float = 30.0
 
@@ -369,47 +378,380 @@ def _update_pending_digest(state: dict, cycle_result: dict) -> None:
     state["pending_digest"] = digest
 
 
-def _write_session_start_cache(store, *, cache_path: Path = SESSION_START_CACHE_PATH) -> None:
+def _default_session_start_cache_meta_path(cache_path: Path) -> Path:
+    """Canonical sidecar path next to ``cache_path``.
+
+    ``Path.with_suffix(".meta.json")`` REPLACES the existing suffix, so
+    ``.session-start-payload.cached.md`` → ``.session-start-payload.cached.meta.json``
+    (matches ``SESSION_START_CACHE_META_PATH``). Both the writer and the
+    reader route through this single helper so a future change to the naming
+    convention cannot accidentally desync them.
+    """
+    return cache_path.with_suffix(".meta.json")
+
+
+def _session_start_cache_watermark(store) -> dict:
+    """Cheap probe used to decide whether the cache needs regenerating.
+
+    Returns a dict with `records_count`, `max_vec_label`, `max_created_at`,
+    `max_updated_at`. The probe runs a single SELECT — no rebuild, no spawn —
+    so it is safe to call on every WAKE tick.
+
+    ``max_vec_label`` is the monotone AUTOINCREMENT primary key on the records
+    table: it strictly increases on every insert, so it catches records inserted
+    *now* with an *old* ``created_at`` (e.g. backfilled from a transcript), which
+    a ``MAX(created_at)`` comparison would miss.
+    """
     try:
-        from iai_mcp import retrieve
-        from iai_mcp.session import (
-            _compose_session_start_payload,
-            format_payload_as_markdown,
-        )
+        with store.db._conn_lock:
+            row = store.db._conn.execute(
+                "SELECT COUNT(*),"
+                " COALESCE(MAX(vec_label), 0),"
+                " COALESCE(MAX(created_at), ''),"
+                " COALESCE(MAX(updated_at), '')"
+                " FROM records WHERE tombstoned_at IS NULL"
+            ).fetchone()
+    except Exception as exc:  # noqa: BLE001 -- watermark probe MUST NOT crash
+        log.debug("session_start_cache watermark probe failed: %s", exc)
+        return {
+            "records_count": -1,
+            "max_vec_label": -1,
+            "max_created_at": "",
+            "max_updated_at": "",
+        }
+    if not row:
+        return {
+            "records_count": 0,
+            "max_vec_label": 0,
+            "max_created_at": "",
+            "max_updated_at": "",
+        }
+    return {
+        "records_count": int(row[0] or 0),
+        "max_vec_label": int(row[1] or 0),
+        "max_created_at": str(row[2] or ""),
+        "max_updated_at": str(row[3] or ""),
+    }
 
-        _graph, assignment, rc = retrieve.build_runtime_graph(store)
-        payload = _compose_session_start_payload(
-            store,
-            assignment,
-            rc,
-            session_id="precache",
-            profile_state={"wake_depth": "standard"},
-        )
-        rendered = format_payload_as_markdown(payload)
-        if not rendered:
-            return
-        if len(rendered) > SESSION_START_CACHE_MAX_CHARS:
-            rendered = rendered[:SESSION_START_CACHE_MAX_CHARS]
 
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+def _load_session_start_cache_meta(meta_path: Path) -> dict | None:
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        log.debug("session_start_cache meta load failed: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _save_session_start_cache_meta(meta_path: Path, meta: dict) -> None:
+    try:
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(rendered)
+            json.dump(meta, f, separators=(",", ":"))
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, cache_path)
-    except Exception as exc:  # noqa: BLE001 -- cache write MUST NOT crash the REM loop
-        log.warning("session start cache write failed: %s", exc, exc_info=True)
+        os.replace(tmp_path, meta_path)
+    except (OSError, ValueError) as exc:
+        log.debug("session_start_cache meta save failed: %s", exc)
+
+
+def _runtime_graph_cache_is_warm(store) -> bool:
+    """Cheap probe: returns False if a full runtime-graph rebuild is required.
+
+    Wraps `retrieve._runtime_graph_rebuild_needed` (a disk read + COUNT(*), no
+    rebuild) so the WAKE refresh path can skip cleanly with reason
+    ``runtime_graph_cache_cold`` instead of spawning the expensive child fleet
+    inside the lifecycle tick.
+    """
+    try:
+        from iai_mcp import retrieve
+        return not retrieve._runtime_graph_rebuild_needed(store)
+    except Exception as exc:  # noqa: BLE001 -- probe MUST NOT crash
+        log.debug("runtime_graph_cache warm probe failed: %s", exc)
+        return False
+
+
+def _should_refresh_session_start_cache(
+    store,
+    *,
+    cache_path: Path,
+    meta_path: Path,
+    min_interval_sec: float,
+    now_monotonic: float | None = None,
+) -> tuple[bool, str, dict]:
+    """Decide whether the cache should be regenerated right now.
+
+    Returns ``(should_refresh, reason, current_watermark)``. ``reason`` is the
+    string emitted into the ``session_start_cache_write_skipped`` / ``_started``
+    events so the user can tell at a glance why a tick did or did not refresh.
+
+    Decisions, in order:
+
+    * No cache file yet → ``cache_absent``.
+    * Cache exists but mtime is younger than ``min_interval_sec`` → block to
+      avoid thrashing under burst ingestion (``min_interval_not_elapsed``).
+    * No meta sidecar (older install or pre-watermark cache) → refresh and
+      backfill the sidecar (``meta_absent``).
+    * Watermark probe matches the stored watermark exactly → nothing new,
+      ``no_new_records``.
+    * Otherwise refresh (``watermark_changed``).
+    """
+    current = _session_start_cache_watermark(store)
+    try:
+        cache_mtime = cache_path.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        return True, "cache_absent", current
+
+    if min_interval_sec > 0:
+        age = time.time() - cache_mtime
+        if age < min_interval_sec:
+            return False, "min_interval_not_elapsed", current
+
+    stored = _load_session_start_cache_meta(meta_path)
+    if not stored:
+        return True, "meta_absent", current
+
+    if (
+        int(stored.get("records_count", -1)) == current["records_count"]
+        and int(stored.get("max_vec_label", -1)) == current["max_vec_label"]
+        and str(stored.get("max_created_at", "")) == current["max_created_at"]
+        and str(stored.get("max_updated_at", "")) == current["max_updated_at"]
+    ):
+        return False, "no_new_records", current
+
+    return True, "watermark_changed", current
+
+
+def _emit_session_start_cache_event(
+    store,
+    kind: str,
+    data: dict,
+    *,
+    severity: str = "info",
+) -> None:
+    """Best-effort event write that never crashes the caller."""
+    try:
+        write_event(store, kind, data, severity=severity)
+    except Exception:  # noqa: BLE001 -- event write must not crash the refresh path
+        log.debug("failed to write %s event", kind)
+
+
+def _write_session_start_cache(
+    store,
+    *,
+    cache_path: Path = SESSION_START_CACHE_PATH,
+    meta_path: Path | None = None,
+    trigger: str = "sleep_pipeline",
+    force_rebuild: bool = True,
+) -> dict:
+    """Write the SessionStart cache from the current memory store.
+
+    Parameters
+    ----------
+    cache_path : Path
+        Target file; defaults to ``~/.iai-mcp/.session-start-payload.cached.md``.
+    meta_path : Path
+        Sidecar with the watermark; defaults to ``cache_path`` + ``.meta.json``
+        so a custom ``cache_path`` (tests) keeps the meta next to the cache.
+    trigger : str
+        Why this write was kicked: ``sleep_pipeline`` (under EXCLUSIVE lock,
+        rebuild allowed), ``wake_sequence`` (after fresh ingest/reembed),
+        ``periodic_wake`` (watermark drifted), ``manual`` (CLI / test).
+    force_rebuild : bool
+        When True (the SLEEP path), we let ``build_runtime_graph`` do whatever
+        rebuild it needs — we already hold EX and the consolidation window is the
+        right moment for the expensive recompute. When False (WAKE path), we
+        skip with ``runtime_graph_cache_cold`` rather than spawn a rebuild on a
+        live tick.
+
+    Returns a small status dict with the reason and watermark so callers
+    (e.g. tests) can assert without grovelling through events.
+    """
+    started_at = time.monotonic()
+    if not _session_start_cache_lock.acquire(blocking=False):
+        _emit_session_start_cache_event(
+            store,
+            "session_start_cache_write_skipped",
+            {"reason": "refresh_in_progress", "trigger": trigger,
+             "cache_path": str(cache_path)},
+        )
+        return {"action": "skipped", "reason": "refresh_in_progress"}
+
+    if meta_path is None:
+        meta_path = _default_session_start_cache_meta_path(cache_path)
+
+    try:
+        _emit_session_start_cache_event(
+            store,
+            "session_start_cache_write_started",
+            {"trigger": trigger, "cache_path": str(cache_path),
+             "force_rebuild": bool(force_rebuild)},
+        )
+
+        if not force_rebuild and not _runtime_graph_cache_is_warm(store):
+            _emit_session_start_cache_event(
+                store,
+                "session_start_cache_write_skipped",
+                {"reason": "runtime_graph_cache_cold", "trigger": trigger,
+                 "cache_path": str(cache_path),
+                 "duration_ms": int((time.monotonic() - started_at) * 1000)},
+            )
+            return {"action": "skipped", "reason": "runtime_graph_cache_cold"}
+
         try:
-            write_event(
+            from iai_mcp import retrieve
+            from iai_mcp.session import (
+                _compose_session_start_payload,
+                format_payload_as_markdown,
+            )
+
+            _graph, assignment, rc = retrieve.build_runtime_graph(store)
+            payload = _compose_session_start_payload(
+                store,
+                assignment,
+                rc,
+                session_id="precache",
+                profile_state={"wake_depth": "standard"},
+            )
+            rendered = format_payload_as_markdown(payload)
+            if not rendered:
+                _emit_session_start_cache_event(
+                    store,
+                    "session_start_cache_write_skipped",
+                    {"reason": "empty_render", "trigger": trigger,
+                     "cache_path": str(cache_path),
+                     "duration_ms": int((time.monotonic() - started_at) * 1000)},
+                )
+                return {"action": "skipped", "reason": "empty_render"}
+            if len(rendered) > SESSION_START_CACHE_MAX_CHARS:
+                rendered = rendered[:SESSION_START_CACHE_MAX_CHARS]
+
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(rendered)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, cache_path)
+
+            watermark = _session_start_cache_watermark(store)
+            meta = {
+                "records_count": watermark["records_count"],
+                "max_vec_label": watermark["max_vec_label"],
+                "max_created_at": watermark["max_created_at"],
+                "max_updated_at": watermark["max_updated_at"],
+                "rendered_chars": len(rendered),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "trigger": trigger,
+            }
+            _save_session_start_cache_meta(meta_path, meta)
+
+            _emit_session_start_cache_event(
+                store,
+                "session_start_cache_write_success",
+                {
+                    "trigger": trigger,
+                    "cache_path": str(cache_path),
+                    "rendered_chars": len(rendered),
+                    "records_count": watermark["records_count"],
+                    "max_vec_label": watermark["max_vec_label"],
+                    "max_record_created_at": watermark["max_created_at"],
+                    "max_updated_at": watermark["max_updated_at"],
+                    "duration_ms": int((time.monotonic() - started_at) * 1000),
+                },
+            )
+            return {
+                "action": "wrote",
+                "rendered_chars": len(rendered),
+                "watermark": watermark,
+            }
+        except Exception as exc:  # noqa: BLE001 -- cache write MUST NOT crash the loop
+            log.warning("session start cache write failed: %s", exc, exc_info=True)
+            _emit_session_start_cache_event(
                 store,
                 "session_start_cache_write_failed",
-                {"error": str(exc)[:200]},
+                {
+                    "trigger": trigger,
+                    "cache_path": str(cache_path),
+                    "reason": type(exc).__name__,
+                    "error": str(exc)[:200],
+                    "duration_ms": int((time.monotonic() - started_at) * 1000),
+                },
                 severity="warning",
             )
-        except Exception:  # noqa: BLE001 -- event write inside boundary guard
-            log.debug("failed to write session_start_cache_write_failed event")
+            return {"action": "failed", "reason": type(exc).__name__}
+    finally:
+        _session_start_cache_lock.release()
+
+
+def _maybe_refresh_session_start_cache(
+    store,
+    *,
+    trigger: str,
+    cache_path: Path = SESSION_START_CACHE_PATH,
+    meta_path: Path | None = None,
+    min_interval_sec: float | None = None,
+    force_rebuild: bool = False,
+) -> dict:
+    """Best-effort WAKE-time refresh.
+
+    Always:
+      * runs the cheap watermark probe + min-interval gate before doing any work;
+      * acquires the single-flight lock non-blocking;
+      * skips if the runtime graph cache is cold;
+      * never raises — callers from the lifecycle tick depend on this.
+    """
+    if meta_path is None:
+        meta_path = _default_session_start_cache_meta_path(cache_path)
+    if min_interval_sec is None:
+        try:
+            min_interval_sec = float(
+                os.environ.get(
+                    "IAI_MCP_SESSION_CACHE_REFRESH_MIN_SEC",
+                    str(SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT),
+                )
+            )
+        except (TypeError, ValueError):
+            min_interval_sec = SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT
+
+    try:
+        should, reason, _wm = _should_refresh_session_start_cache(
+            store,
+            cache_path=cache_path,
+            meta_path=meta_path,
+            min_interval_sec=min_interval_sec,
+        )
+    except Exception as exc:  # noqa: BLE001 -- gate probe must not crash
+        log.debug("session_start_cache should-refresh probe failed: %s", exc)
+        return {"action": "skipped", "reason": "probe_failed"}
+
+    if not should:
+        _emit_session_start_cache_event(
+            store,
+            "session_start_cache_write_skipped",
+            {"reason": reason, "trigger": trigger, "cache_path": str(cache_path)},
+        )
+        return {"action": "skipped", "reason": reason}
+
+    try:
+        return _write_session_start_cache(
+            store,
+            cache_path=cache_path,
+            meta_path=meta_path,
+            trigger=trigger,
+            force_rebuild=force_rebuild,
+        )
+    except Exception as exc:  # noqa: BLE001 -- belt-and-suspenders; _write already guards
+        log.debug("session_start_cache refresh wrapper failed: %s", exc)
+        return {"action": "failed", "reason": type(exc).__name__}
 
 
 async def _tick_body(
@@ -1424,6 +1766,28 @@ async def main() -> int:
                                     _kick_drowsy_rgc_rebuild(store)
                                 except Exception:  # noqa: BLE001 -- best-effort
                                     log.debug("drowsy-edge kick failed", exc_info=True)
+                                # Kick a light, best-effort SessionStart cache refresh:
+                                # new records just got embedded (reembed_count > 0 or
+                                # ingest_count > 0), so what the hook would serve from
+                                # disk is now stale. _maybe_refresh_session_start_cache
+                                # gates on min-interval + single-flight + runtime-graph
+                                # warm — if any of those say no, it emits a _skipped
+                                # event and returns.
+                                if (
+                                    int(_wake_seq_result.get("reembed_count", 0) or 0) > 0
+                                    or int(_wake_seq_result.get("ingest_count", 0) or 0) > 0
+                                ):
+                                    try:
+                                        await asyncio.to_thread(
+                                            _maybe_refresh_session_start_cache,
+                                            store,
+                                            trigger="wake_sequence",
+                                        )
+                                    except Exception:  # noqa: BLE001 -- best-effort
+                                        log.debug(
+                                            "wake_sequence cache refresh failed",
+                                            exc_info=True,
+                                        )
                         except Exception:  # noqa: BLE001 -- wake sequence non-fatal
                             log.debug("lifecycle_tick pending_embeddings_wake_sequence failed", exc_info=True)
                     if (
@@ -1439,6 +1803,30 @@ async def main() -> int:
                             log.debug("daemon_lock_downgrade: EX→SH on first WAKE entry")
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_downgrade failed", exc_info=True)
+
+                    # Periodic WAKE/DROWSY safety net: if the daemon never reaches
+                    # SLEEP (long-lived Claude sessions keep activity recent), the
+                    # sleep-pipeline cache writer never fires and the precache file
+                    # drifts. _maybe_refresh_session_start_cache is a cheap probe
+                    # (SQL COUNT + sidecar read), gated by:
+                    #   * min-interval (default 60s, IAI_MCP_SESSION_CACHE_REFRESH_MIN_SEC)
+                    #   * single-flight lock
+                    #   * watermark (records_count + max_vec_label + max_*_at)
+                    #   * runtime-graph-cache warm probe (skip if cold)
+                    # so a quiet tick costs one SELECT + one stat() and emits at
+                    # most one _skipped event.
+                    if current in (_LifecycleState.WAKE, _LifecycleState.DROWSY):
+                        try:
+                            await asyncio.to_thread(
+                                _maybe_refresh_session_start_cache,
+                                store,
+                                trigger="periodic_wake",
+                            )
+                        except Exception:  # noqa: BLE001 -- best-effort
+                            log.debug(
+                                "lifecycle_tick periodic session_start_cache refresh failed",
+                                exc_info=True,
+                            )
 
                     _prev_lifecycle_state[0] = current
                     if current is _LifecycleState.SLEEP:
@@ -1466,8 +1854,18 @@ async def main() -> int:
                         )
 
                         # --- WAKE hook (UNDER LOCK_EX, BEFORE downgrade) ---
+                        # The SLEEP path explicitly passes force_rebuild=True: we
+                        # hold the EXCLUSIVE lock for the whole consolidation
+                        # window, so a runtime-graph rebuild here is the cheapest
+                        # place to absorb the cost — the WAKE refresh paths skip
+                        # the rebuild with reason=runtime_graph_cache_cold instead.
                         try:
-                            await asyncio.to_thread(_write_session_start_cache, store)
+                            await asyncio.to_thread(
+                                _write_session_start_cache,
+                                store,
+                                trigger="sleep_pipeline",
+                                force_rebuild=True,
+                            )
                         except Exception:  # noqa: BLE001 -- precache MUST NOT crash
                             log.debug("lifecycle_tick _write_session_start_cache failed", exc_info=True)
                         try:
@@ -1704,6 +2102,13 @@ __all__ = [
     "_is_inside_window",
     "_update_pending_digest",
     "_write_session_start_cache",
+    "_maybe_refresh_session_start_cache",
+    "_should_refresh_session_start_cache",
+    "_session_start_cache_watermark",
+    "_load_session_start_cache_meta",
+    "_save_session_start_cache_meta",
+    "_default_session_start_cache_meta_path",
+    "_runtime_graph_cache_is_warm",
     "_tick_body",
     "_scheduler_tick",
     "_s4_offline_loop",
@@ -1718,7 +2123,9 @@ __all__ = [
     "S4_OFFLINE_INTERVAL_SEC",
     "S4_FIRST_ITER_GRACE_SEC",
     "SESSION_START_CACHE_PATH",
+    "SESSION_START_CACHE_META_PATH",
     "SESSION_START_CACHE_MAX_CHARS",
+    "SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT",
     "INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC",
     "_DAEMON_NOFILE_FLOOR_DEFAULT",
     # daemon_config
