@@ -80,6 +80,10 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
         _daemon, "SESSION_START_CACHE_PATH",
         fake_root / ".session-start-payload.cached.md", raising=False,
     )
+    monkeypatch.setattr(
+        _daemon, "SESSION_START_CACHE_META_PATH",
+        fake_root / ".session-start-payload.cached.meta.json", raising=False,
+    )
     monkeypatch.setattr(_crypto, "_DEFAULT_STORE_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_backup, "DEFAULT_STORE_PATH", str(fake_root), raising=False)
     yield fake_root
