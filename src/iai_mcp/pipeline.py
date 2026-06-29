@@ -72,6 +72,94 @@ def _read_record_payload(graph, rid: UUID, store: MemoryStore):
         logger.debug("read_record_payload_store_fallback_failed rid=%s: %s", rid, exc)
         return None
 
+
+def _is_record_active(store: MemoryStore, record_id: UUID) -> bool:
+    try:
+        from iai_mcp.store import _uuid_literal
+
+        tbl = store.db.open_table("records")
+        df = (
+            tbl.search()
+            .where(f"id = '{_uuid_literal(record_id)}' AND tombstoned_at IS NULL")
+            .select(["id"])
+            .limit(1)
+            .to_pandas()
+        )
+        return not df.empty
+    except Exception as exc:  # noqa: BLE001 -- recall must degrade, not crash
+        logger.debug("active_record_check_failed rid=%s: %s", record_id, exc)
+        return True
+
+
+def _filter_active_hits(hits: list[MemoryHit], store: MemoryStore) -> list[MemoryHit]:
+    return [hit for hit in hits if _is_record_active(store, hit.record_id)]
+
+
+def _filter_active_ids(ids: list[UUID], store: MemoryStore) -> list[UUID]:
+    return [record_id for record_id in ids if _is_record_active(store, record_id)]
+
+
+_DURABLE_RECALL_CUE_MARKERS = (
+    "decision",
+    "décision",
+    "etat-courant",
+    "état-courant",
+    "etat courant",
+    "état courant",
+    "piege",
+    "piège",
+    "source",
+    "preference",
+    "préférence",
+    "regle",
+    "règle",
+    "durable",
+    "important",
+)
+_DURABLE_TIERS = {"semantic", "procedural", "parametric"}
+_DURABLE_TIER_BOOST = 0.08
+
+
+def _cue_wants_durable_recall(cue: str) -> bool:
+    cue_lower = (cue or "").lower()
+    return any(marker in cue_lower for marker in _DURABLE_RECALL_CUE_MARKERS)
+
+
+def _record_tier_for_hit(
+    hit: MemoryHit,
+    *,
+    records_cache: dict[UUID, "object"],
+    store: MemoryStore,
+) -> str | None:
+    rec = records_cache.get(hit.record_id)
+    if rec is None:
+        try:
+            rec = store.get(hit.record_id)
+        except Exception as exc:  # noqa: BLE001 -- ranking must degrade, not crash
+            logger.debug("durable_tier_lookup_failed rid=%s: %s", hit.record_id, exc)
+            return None
+    return str(getattr(rec, "tier", "") or "")
+
+
+def _apply_durable_tier_bias(
+    hits: list[MemoryHit],
+    *,
+    cue: str,
+    mode: str,
+    records_cache: dict[UUID, "object"],
+    store: MemoryStore,
+) -> None:
+    if mode != "concept" or not _cue_wants_durable_recall(cue):
+        return
+    for hit in hits:
+        tier = _record_tier_for_hit(hit, records_cache=records_cache, store=store)
+        if tier not in _DURABLE_TIERS:
+            continue
+        base = hit.sort_score if hit.sort_score is not None else hit.score
+        hit.sort_score = float(base) + _DURABLE_TIER_BOOST
+        hit.reason = f"{hit.reason} | durable-tier +{_DURABLE_TIER_BOOST:.2f}"
+
+
 W_COSINE = 1.0
 W_AAAK = 0.3
 W_DEGREE = 0.1
@@ -874,7 +962,7 @@ def _recall_core(
         )
         budget_used += tokens
 
-    activation_trace = list({*seed_ids, *spread_ids})
+    activation_trace = _filter_active_ids(list({*seed_ids, *spread_ids}), store)
 
     try:
         _top_hit_id_for_telemetry: str | None = None
@@ -950,6 +1038,7 @@ def _apply_post_rank_pipeline(
     knobs_applied: dict | None = None,
     contradicts_outgoing: dict[str, list[str]] | None = None,
 ) -> tuple[list[MemoryHit], list[MemoryHit], list[dict], list[dict]]:
+    hits = _filter_active_hits(hits, store)
     s4_scope_hits = hits[:_POST_RANK_MAX_HITS]
 
     if hits:
@@ -1161,6 +1250,13 @@ def recall_for_response(
     )
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
+    _apply_durable_tier_bias(
+        core.scored_hits,
+        cue=cue,
+        mode=mode,
+        records_cache=core._records_cache,
+        store=store,
+    )
     # Rank on the internal unclamped key (falls back to score when a hit was
     # built without sort_score), so ordering is preserved across the display
     # clamp applied at serialization. Tie-break on record_id so equal-scoring
@@ -1317,6 +1413,19 @@ def recall_for_benchmark(
             patterns_observed=core.patterns_observed,
         )
 
+    _apply_durable_tier_bias(
+        core.scored_hits,
+        cue=cue,
+        mode=mode,
+        records_cache=core._records_cache,
+        store=store,
+    )
+    core.scored_hits.sort(
+        key=lambda h: (
+            -(h.sort_score if h.sort_score is not None else h.score),
+            str(h.record_id),
+        ),
+    )
     hits = core.scored_hits[:k_hits]
     budget_used = sum(len(h.literal_surface) // 4 for h in hits)
 

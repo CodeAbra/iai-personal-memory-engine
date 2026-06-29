@@ -690,11 +690,19 @@ def capture_transcript(
                 text = str(content).strip()
             if not text:
                 continue
+            normalized = _normalize_ambient_capture_event(text)
+            if normalized is None:
+                counts["skipped"] += 1
+                continue
+            text, tier, cue_tag = normalized
+            cue = f"session {session_id} turn {seen}"
+            if cue_tag:
+                cue = f"{cue} {cue_tag}"
             result = capture_turn(
                 store,
-                cue=f"session {session_id} turn {seen}",
+                cue=cue,
                 text=text,
-                tier="episodic",
+                tier=tier,
                 session_id=session_id,
                 role=role,
                 ts=obj.get("timestamp"),
@@ -714,10 +722,18 @@ _NOISE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("startswith", "<command-name>"),
     ("startswith", "Base directory for this skill:"),
     ("startswith", "<task-notification>"),
+    ("startswith", "Contexte éventuel donné par Loïc :"),
+    ("startswith", "Contexte eventuel donne par Loic :"),
     ("equals",     "[Request interrupted by user]"),
 )
 
-
+_DURABLE_MEMORY_RE = re.compile(
+    r"(?im)^(?:Mémoire durable pour IAE|Mémoire durable IAE|Memoire durable IAE)\s*:"
+)
+_DURABLE_NOTHING_RE = re.compile(
+    r"(?i)^(?:Mémoire durable pour IAE|Mémoire durable IAE|Memoire durable IAE)\s*:\s*"
+    r"(?:rien\s+[àa]\s+capturer|nothing\s+to\s+capture)\.?\s*$"
+)
 def _is_noise(text: str) -> bool:
     for match_type, pattern in _NOISE_PATTERNS:
         if match_type == "startswith":
@@ -727,6 +743,78 @@ def _is_noise(text: str) -> bool:
             if text == pattern:
                 return True
     return False
+
+
+def _extract_durable_memory_block(text: str) -> str | None:
+    match = _DURABLE_MEMORY_RE.search(text)
+    if not match:
+        return None
+
+    tail = text[match.start():].splitlines()
+    if not tail:
+        return None
+
+    heading = tail[0].strip()
+    if _DURABLE_NOTHING_RE.match(heading):
+        return None
+
+    bullets: list[str] = []
+    for line in tail[1:]:
+        stripped = line.strip()
+        if not stripped:
+            if bullets:
+                break
+            continue
+        if stripped.startswith(("- ", "* ")):
+            bullets.append(stripped)
+            if len(bullets) >= 8:
+                break
+            continue
+        if bullets:
+            break
+
+    if not bullets:
+        return None
+    return "\n".join([heading, *bullets])[:MAX_CAPTURE_LEN]
+
+
+def _is_journalise_scaffold(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "contexte éventuel donné par loïc" in lowered
+        or "contexte eventuel donne par loic" in lowered
+        or (
+            "résume la session" in lowered
+            and "journal/" in lowered
+            and "mémoire durable" in lowered
+        )
+        or (
+            "resume la session" in lowered
+            and "journal/" in lowered
+            and "memoire durable" in lowered
+        )
+    )
+
+
+def _normalize_ambient_capture_event(
+    text: str,
+    *,
+    tier: str = "episodic",
+) -> tuple[str, str, str | None] | None:
+    stripped = (text or "").strip()
+    if not stripped or _is_noise(stripped):
+        return None
+
+    durable = _extract_durable_memory_block(stripped)
+    if durable is not None:
+        return durable, "semantic", "memoire-durable-iae"
+    if _DURABLE_MEMORY_RE.search(stripped):
+        return None
+
+    if _is_journalise_scaffold(stripped):
+        return None
+
+    return stripped, tier, None
 
 
 def _parse_transcript_line(
@@ -750,10 +838,10 @@ def _parse_transcript_line(
         text = "\n".join(parts).strip()
     else:
         text = str(content).strip()
-    if not text:
+    normalized = _normalize_ambient_capture_event(text)
+    if normalized is None:
         return None
-    if _is_noise(text):
-        return None
+    text, _tier, _cue_tag = normalized
     return role, text, obj.get("uuid"), obj.get("timestamp")
 
 
@@ -766,6 +854,7 @@ def write_deferred_event(
     ts: str | None = None,
     source_uuid: str | None = None,
 ) -> Path:
+    normalized = _normalize_ambient_capture_event(text)
     deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
     deferred_dir.mkdir(parents=True, exist_ok=True)
     path = deferred_dir / f"{session_id}.live.jsonl"
@@ -779,10 +868,16 @@ def write_deferred_event(
                 "cwd": cwd or os.getcwd(),
             }
             fh.write(json.dumps(header, ensure_ascii=False) + "\n")
+        if normalized is None:
+            return path
+        text, tier, cue_tag = normalized
+        cue = f"session {session_id} turn"
+        if cue_tag:
+            cue = f"{cue} {cue_tag}"
         event = {
             "text": text,
-            "cue": f"session {session_id} turn",
-            "tier": "episodic",
+            "cue": cue,
+            "tier": tier,
             "role": role,
             "ts": ts if ts else datetime.now(timezone.utc).isoformat(),
         }
@@ -935,10 +1030,17 @@ def write_deferred_captures(
                         text = str(content).strip()
                     if not text:
                         continue
+                    normalized = _normalize_ambient_capture_event(text)
+                    if normalized is None:
+                        continue
+                    text, tier, cue_tag = normalized
+                    cue = f"session {session_id} turn {seen}"
+                    if cue_tag:
+                        cue = f"{cue} {cue_tag}"
                     event = {
                         "text": text,
-                        "cue": f"session {session_id} turn {seen}",
-                        "tier": "episodic",
+                        "cue": cue,
+                        "tier": tier,
                         "role": role,
                         "ts": obj.get("timestamp") or datetime.now(timezone.utc).isoformat(),
                     }
@@ -1163,6 +1265,17 @@ def _drain_deferred_captures_locked(
                 ev = json.loads(ln)
                 tier = ev.get("tier", "episodic")
                 role = ev.get("role", "user")
+                raw_text = ev.get("text", "")
+                normalized = _normalize_ambient_capture_event(raw_text, tier=tier)
+                if normalized is None:
+                    counts["events_skipped"] += 1
+                    total_events_processed += 1
+                    processed_in_file += 1
+                    continue
+                text, tier, cue_tag = normalized
+                cue = ev.get("cue", "")
+                if cue_tag and cue_tag not in cue:
+                    cue = f"{cue} {cue_tag}".strip()
 
                 # Pre-embed idem skip for conversational episodic events. The tag
                 # is reproduced exactly as capture_turn computes it (stripped,
@@ -1171,7 +1284,7 @@ def _drain_deferred_captures_locked(
                 # embedding), so it can never match a stored tag — leave those to
                 # fall through to capture_turn's own "too short" skip.
                 if _is_episodic_conversational(tier, role):
-                    norm_text = (ev.get("text", "") or "").strip()
+                    norm_text = text
                     if MIN_CAPTURE_LEN <= len(norm_text):
                         if len(norm_text) > MAX_CAPTURE_LEN:
                             norm_text = norm_text[:MAX_CAPTURE_LEN]
@@ -1226,8 +1339,8 @@ def _drain_deferred_captures_locked(
                 # is dedup-findable by tag and verbatim-recallable immediately.
                 result = _drain_write_pending(
                     store,
-                    cue=ev.get("cue", ""),
-                    text=ev.get("text", ""),
+                    cue=cue,
+                    text=text,
                     tier=tier,
                     session_id=session_id,
                     role=role,
@@ -1475,14 +1588,20 @@ def drain_permanent_failed_files(
                         continue
                     text = (ev.get("text") or "").strip()
                     role = ev.get("role", "user")
-                    if not text or _is_noise(text):
+                    tier = ev.get("tier", "episodic")
+                    normalized = _normalize_ambient_capture_event(text, tier=tier)
+                    if normalized is None:
                         file_dropped += 1
                         continue
+                    text, tier, cue_tag = normalized
+                    cue = ev.get("cue") or "recovered turn"
+                    if cue_tag and cue_tag not in cue:
+                        cue = f"{cue} {cue_tag}".strip()
                     result = capture_turn(
                         store,
-                        cue=ev.get("cue") or "recovered turn",
+                        cue=cue,
                         text=text,
-                        tier=ev.get("tier", "episodic"),
+                        tier=tier,
                         session_id=session_id,
                         role=role,
                         ts=ev.get("ts"),
@@ -1506,11 +1625,19 @@ def drain_permanent_failed_files(
                         file_dropped += 1
                         continue
                     role, text, src_uuid, src_ts = parsed
+                    normalized = _normalize_ambient_capture_event(text)
+                    if normalized is None:
+                        file_dropped += 1
+                        continue
+                    text, tier, cue_tag = normalized
+                    cue = "recovered turn"
+                    if cue_tag:
+                        cue = f"{cue} {cue_tag}"
                     result = capture_turn(
                         store,
-                        cue="recovered turn",
+                        cue=cue,
                         text=text,
-                        tier="episodic",
+                        tier=tier,
                         session_id=raw_session_id,
                         role=role,
                         ts=src_ts,
@@ -1629,11 +1756,21 @@ def _drain_active_live_captures_impl(
                 new_offset += 1
                 counts["events_skipped"] += 1
                 continue
+            tier = ev.get("tier", "episodic")
+            normalized = _normalize_ambient_capture_event(ev.get("text", ""), tier=tier)
+            if normalized is None:
+                new_offset += 1
+                counts["events_skipped"] += 1
+                continue
+            text, tier, cue_tag = normalized
+            cue = ev.get("cue", "")
+            if cue_tag and cue_tag not in cue:
+                cue = f"{cue} {cue_tag}".strip()
             result = capture_turn(
                 store,
-                cue=ev.get("cue", ""),
-                text=ev.get("text", ""),
-                tier=ev.get("tier", "episodic"),
+                cue=cue,
+                text=text,
+                tier=tier,
                 session_id=file_session_id,
                 role=ev.get("role", "user"),
                 ts=ev.get("ts"),

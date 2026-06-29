@@ -86,6 +86,26 @@ def test_query_returns_top_k(tmp_path):
     assert len(results) == 3
 
 
+def test_query_similar_excludes_tombstoned_records(tmp_path):
+    store = MemoryStore(path=tmp_path)
+    live = _make(text="live fact", vec=[0.1] * EMBED_DIM)
+    tombstoned = _make(text="stale fact", vec=[0.1] * EMBED_DIM)
+    store.insert(live)
+    store.insert(tombstoned)
+
+    now = datetime.now(timezone.utc).isoformat()
+    store.db._conn.execute(
+        "UPDATE records SET tombstoned_at = ? WHERE id = ?",
+        (now, str(tombstoned.id)),
+    )
+    store.db._conn.commit()
+
+    ids = {record.id for record, _score in store.query_similar([0.1] * EMBED_DIM, k=10)}
+
+    assert live.id in ids
+    assert tombstoned.id not in ids
+
+
 def test_invalid_tier_rejected():
     with pytest.raises(ValueError):
         _make(tier="unknown-tier")

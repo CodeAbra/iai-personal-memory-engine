@@ -63,3 +63,7 @@ Thumbs.db
 *.lancedb
 lancedb/
 runtime_*.json
+
+# Local backups (montées chirurgicales iai-pme)
+.venv-pkg-bak-*/
+*.bak-*

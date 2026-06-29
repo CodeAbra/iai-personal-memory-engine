@@ -8,7 +8,7 @@ import pytest
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
-from iai_mcp.types import EMBED_DIM, MemoryRecord, RecallResponse
+from iai_mcp.types import EMBED_DIM, MemoryHit, MemoryRecord, RecallResponse
 
 
 class _FakeEmbedder:
@@ -128,6 +128,102 @@ def test_recall_for_response_returns_recall_response_type(tmp_path) -> None:
     assert isinstance(resp.hints, list)
     assert isinstance(resp.cue_mode, str)
     assert isinstance(resp.patterns_observed, list)
+
+
+def test_active_id_filter_excludes_tombstoned_records(tmp_path) -> None:
+    from iai_mcp.pipeline import _filter_active_ids
+
+    store = MemoryStore(path=tmp_path / "hippo")
+    live = _make([1.0] + [0.0] * (EMBED_DIM - 1), text="live")
+    stale = _make([1.0] + [0.0] * (EMBED_DIM - 1), text="stale")
+    store.insert(live)
+    store.insert(stale)
+    store.db._conn.execute(
+        "UPDATE records SET tombstoned_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), str(stale.id)),
+    )
+    store.db._conn.commit()
+
+    assert _filter_active_ids([live.id, stale.id], store) == [live.id]
+
+
+def test_durable_tier_bias_prefers_semantic_for_durable_cues(tmp_path) -> None:
+    from iai_mcp.pipeline import _apply_durable_tier_bias
+
+    store = MemoryStore(path=tmp_path / "hippo")
+    semantic = _make(
+        [1.0] + [0.0] * (EMBED_DIM - 1),
+        text="durable source",
+        tier="semantic",
+    )
+    episodic = _make(
+        [1.0] + [0.0] * (EMBED_DIM - 1),
+        text="chatty session recap",
+        tier="episodic",
+    )
+    store.insert(semantic)
+    store.insert(episodic)
+    hits = [
+        MemoryHit(
+            record_id=semantic.id,
+            score=0.9,
+            sort_score=0.9,
+            reason="base",
+            literal_surface=semantic.literal_surface,
+            adjacent_suggestions=[],
+        ),
+        MemoryHit(
+            record_id=episodic.id,
+            score=0.91,
+            sort_score=0.91,
+            reason="base",
+            literal_surface=episodic.literal_surface,
+            adjacent_suggestions=[],
+        ),
+    ]
+
+    _apply_durable_tier_bias(
+        hits,
+        cue="decision etat-courant source",
+        mode="concept",
+        records_cache={semantic.id: semantic, episodic.id: episodic},
+        store=store,
+    )
+
+    assert hits[0].sort_score is not None
+    assert hits[0].sort_score > hits[1].sort_score
+    assert "durable-tier" in hits[0].reason
+
+
+def test_durable_tier_bias_skips_verbatim_mode(tmp_path) -> None:
+    from iai_mcp.pipeline import _apply_durable_tier_bias
+
+    store = MemoryStore(path=tmp_path / "hippo")
+    semantic = _make(
+        [1.0] + [0.0] * (EMBED_DIM - 1),
+        text="durable source",
+        tier="semantic",
+    )
+    store.insert(semantic)
+    hit = MemoryHit(
+        record_id=semantic.id,
+        score=0.9,
+        sort_score=0.9,
+        reason="base",
+        literal_surface=semantic.literal_surface,
+        adjacent_suggestions=[],
+    )
+
+    _apply_durable_tier_bias(
+        [hit],
+        cue="decision etat-courant source",
+        mode="verbatim",
+        records_cache={semantic.id: semantic},
+        store=store,
+    )
+
+    assert hit.sort_score == 0.9
+    assert hit.reason == "base"
 
 
 def test_recall_for_response_packs_under_budget(tmp_path) -> None:

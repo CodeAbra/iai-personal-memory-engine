@@ -811,7 +811,7 @@ class MemoryStore:
         if tbl.count_rows() == 0:
             return []
         q = tbl.search(list(vec)).distance_type("cosine")
-        where_clause = "COALESCE(embedding_pending, 0) = 0"
+        where_clause = "tombstoned_at IS NULL AND COALESCE(embedding_pending, 0) = 0"
         if tier is not None:
             where_clause = f"tier = '{tier}' AND " + where_clause
         q = q.where(where_clause)
