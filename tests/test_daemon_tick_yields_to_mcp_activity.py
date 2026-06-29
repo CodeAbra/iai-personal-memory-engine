@@ -114,3 +114,88 @@ def test_mcp_recent_activity_probe():
     assert daemon_mod._mcp_recent_activity(recent, window_sec=30.0) is True
     assert daemon_mod._mcp_recent_activity(stale, window_sec=30.0) is False
     assert daemon_mod._mcp_recent_activity(None, window_sec=30.0) is False
+
+
+def test_capture_queue_retry_waits_for_quiet_socket(tick_env, monkeypatch):
+    from iai_mcp import daemon as daemon_mod
+
+    store, _ = tick_env
+    writes: list = []
+    handled: list = []
+
+    class _FakeCaptureQueue:
+        calls = 0
+
+        def ingest_pending(self, handler):
+            self.calls += 1
+            handler({"literal_surface": "queued"})
+            return 1
+
+        def pending_count(self):
+            return 0
+
+    monkeypatch.setattr(daemon_mod, "write_event", lambda *a, **kw: writes.append((a, kw)))
+    monkeypatch.setattr(daemon_mod, "save_state", lambda state: None)
+
+    state = {daemon_mod.CAPTURE_QUEUE_RETRY_PENDING_KEY: True}
+    queue = _FakeCaptureQueue()
+    recent_socket = types.SimpleNamespace(last_activity_ts=time.monotonic())
+
+    asyncio.run(
+        daemon_mod._retry_capture_queue_drain_if_due(
+            store,
+            state,
+            capture_queue=queue,
+            capture_handler=handled.append,
+            mcp_socket=recent_socket,
+        )
+    )
+
+    assert queue.calls == 0
+    assert handled == []
+    assert state[daemon_mod.CAPTURE_QUEUE_RETRY_PENDING_KEY] is True
+    assert writes == []
+
+
+def test_capture_queue_retry_drains_when_socket_is_quiet(tick_env, monkeypatch):
+    from iai_mcp import daemon as daemon_mod
+
+    store, _ = tick_env
+    writes: list = []
+    handled: list = []
+
+    class _FakeCaptureQueue:
+        calls = 0
+
+        def ingest_pending(self, handler):
+            self.calls += 1
+            handler({"literal_surface": "queued"})
+            return 1
+
+        def pending_count(self):
+            return 0
+
+    monkeypatch.setattr(daemon_mod, "write_event", lambda *a, **kw: writes.append((a, kw)))
+    monkeypatch.setattr(daemon_mod, "save_state", lambda state: None)
+
+    state = {daemon_mod.CAPTURE_QUEUE_RETRY_PENDING_KEY: True}
+    queue = _FakeCaptureQueue()
+    stale_socket = types.SimpleNamespace(last_activity_ts=time.monotonic() - 120.0)
+
+    asyncio.run(
+        daemon_mod._retry_capture_queue_drain_if_due(
+            store,
+            state,
+            capture_queue=queue,
+            capture_handler=handled.append,
+            mcp_socket=stale_socket,
+        )
+    )
+
+    assert queue.calls == 1
+    assert handled == [{"literal_surface": "queued"}]
+    assert state[daemon_mod.CAPTURE_QUEUE_RETRY_PENDING_KEY] is False
+    assert state["_capture_queue_pending_count"] == 0
+    assert writes
+    assert writes[0][0][1] == "capture_queue_drained"
+    assert writes[0][0][2]["phase"] == "tick_retry"

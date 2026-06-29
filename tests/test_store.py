@@ -161,6 +161,32 @@ def test_query_similar_fast_failure_degrades_without_pandas(tmp_path, monkeypatc
     assert store.query_similar([0.1] * EMBED_DIM, k=3) == []
 
 
+def test_query_similar_fast_catches_hnsw_runtime_error(tmp_path):
+    import threading
+    import types
+
+    store = MemoryStore(path=tmp_path)
+
+    class _BrokenHnsw:
+        def get_current_count(self):
+            return 1
+
+        def knn_query(self, *_args, **_kwargs):
+            raise RuntimeError("label map skew")
+
+    fake_db = types.SimpleNamespace(
+        _hnsw_lock=threading.Lock(),
+        _label_map={1: "abc"},
+        _hnsw=_BrokenHnsw(),
+    )
+    query = types.SimpleNamespace(
+        _ann_db=fake_db,
+        _ann_vector=[0.1] * EMBED_DIM,
+    )
+
+    assert store._query_similar_fast(query, "tombstoned_at IS NULL", 3) == []
+
+
 def test_query_similar_excludes_tombstoned_records(tmp_path):
     store = MemoryStore(path=tmp_path)
     live = _make(text="live fact", vec=[0.1] * EMBED_DIM)

@@ -11,16 +11,17 @@ from iai_mcp.sigma import compute_and_emit
 logger = logging.getLogger(__name__)
 
 AUDIT_INTERVAL_SEC: int = 60 * 60
+AUDIT_FIRST_ITER_GRACE_MAX_SEC: float = 60.0
 
 
 def _first_iter_grace_sec(effective_interval: float) -> float:
     raw = os.environ.get("IAI_MCP_AUDIT_FIRST_ITER_GRACE_SEC")
     if raw is None:
-        return max(0.0, float(effective_interval))
+        return min(max(0.0, float(effective_interval)), AUDIT_FIRST_ITER_GRACE_MAX_SEC)
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return max(0.0, float(effective_interval))
+        return min(max(0.0, float(effective_interval)), AUDIT_FIRST_ITER_GRACE_MAX_SEC)
 
 
 async def continuous_audit(

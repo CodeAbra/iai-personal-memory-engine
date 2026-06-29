@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -22,34 +23,30 @@ def _endpoint_ready_path(sock_path: Path) -> Path:
 def short_socket_paths(tmp_path, monkeypatch):
     from iai_mcp import concurrency, daemon_state
 
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = sock_dir / "d.sock"
-    state_path = tmp_path / ".daemon-state.json"
+    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_raw:
+        sock_dir = Path(sock_dir_raw)
+        sock_path = sock_dir / "d.sock"
+        state_path = tmp_path / ".daemon-state.json"
 
-    monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
-    monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-    # Isolate the IPC endpoint per-test. POSIX uses this as the unix socket
-    # path; Windows persists the ephemeral TCP port to "<sock_path>.port".
-    # Both SocketServer.serve() and open_ipc_connection() resolve through it,
-    # so concurrent tests never collide on the shared default endpoint.
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
-    store_root = tmp_path / "store_root"
-    store_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
+        monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
+        monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
+        # Isolate the IPC endpoint per-test. POSIX uses this as the unix socket
+        # path; Windows persists the ephemeral TCP port to "<sock_path>.port".
+        # Both SocketServer.serve() and open_ipc_connection() resolve through it,
+        # so concurrent tests never collide on the shared default endpoint.
+        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+        store_root = tmp_path / "store_root"
+        store_root.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
 
-    try:
-        yield None, sock_path, state_path
-    finally:
         try:
-            if sock_path.exists():
-                sock_path.unlink()
-        except OSError:
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
-            pass
+            yield None, sock_path, state_path
+        finally:
+            try:
+                if sock_path.exists():
+                    sock_path.unlink()
+            except OSError:
+                pass
 
 async def _send_jsonrpc(
     sock_path: Path,
@@ -143,6 +140,38 @@ def test_memory_recall_routed_over_socket(short_socket_paths):
     assert resp["id"] == 1, resp
     assert "result" in resp, resp
     assert "hits" in resp["result"], resp["result"]
+
+
+@pytest.mark.perf
+def test_memory_recall_socket_round_trip_latency(short_socket_paths, monkeypatch):
+    _, sock_path, _ = short_socket_paths
+    from iai_mcp import core
+    from iai_mcp.store import MemoryStore
+
+    def _fast_dispatch(store, method, params):
+        assert method == "memory_recall"
+        assert params["cue"] == "latency probe"
+        return {"hits": [], "_recall_latency_ms": 0.1}
+
+    monkeypatch.setattr(core, "dispatch", _fast_dispatch)
+    store = MemoryStore()
+
+    async def _runner(sock_path, store):
+        t0 = time.perf_counter()
+        resp = await _send_jsonrpc(
+            sock_path,
+            "memory_recall",
+            {"cue": "latency probe", "budget_tokens": 100},
+            req_id=7,
+        )
+        return resp, (time.perf_counter() - t0) * 1000.0
+
+    resp, elapsed_ms = asyncio.run(_with_socket_server(sock_path, store, _runner))
+
+    assert resp["jsonrpc"] == "2.0", resp
+    assert resp["id"] == 7, resp
+    assert resp["result"]["hits"] == []
+    assert elapsed_ms < 250.0, f"socket round-trip took {elapsed_ms:.1f} ms"
 
 def test_session_start_payload_routed(short_socket_paths):
     _, sock_path, _ = short_socket_paths

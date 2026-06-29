@@ -841,7 +841,15 @@ class MemoryStore:
             k_clamped = min(max(0, int(k)), active_count, hnsw_count)
             if k_clamped == 0:
                 return []
-            labels, distances = db._hnsw.knn_query(ann_vector, k=k_clamped)
+            try:
+                labels, distances = db._hnsw.knn_query(ann_vector, k=k_clamped)
+            except RuntimeError as exc:
+                logger.warning(
+                    "hnswlib knn_query failed (k=%d, hnsw_count=%d, "
+                    "active_count=%d); returning empty result: %s",
+                    k_clamped, hnsw_count, active_count, exc,
+                )
+                return []
 
         flat_labels = [int(label) for label in labels[0].tolist()]
         if not flat_labels:

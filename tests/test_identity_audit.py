@@ -119,6 +119,23 @@ def test_audit_defers_first_iteration_by_default(monkeypatch):
     assert s5_calls == []
 
 
+def test_first_iter_grace_default_is_capped(monkeypatch):
+    from iai_mcp import identity_audit
+
+    monkeypatch.delenv("IAI_MCP_AUDIT_FIRST_ITER_GRACE_SEC", raising=False)
+
+    assert identity_audit._first_iter_grace_sec(3600.0) == 60.0
+    assert identity_audit._first_iter_grace_sec(30.0) == 30.0
+
+
+def test_first_iter_grace_env_override_wins(monkeypatch):
+    from iai_mcp import identity_audit
+
+    monkeypatch.setenv("IAI_MCP_AUDIT_FIRST_ITER_GRACE_SEC", "0.25")
+
+    assert identity_audit._first_iter_grace_sec(3600.0) == 0.25
+
+
 def test_audit_survives_s5_exception_and_emits_event(monkeypatch):
     from iai_mcp import identity_audit
 

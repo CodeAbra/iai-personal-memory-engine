@@ -64,6 +64,8 @@ TICK_INTERVAL_SEC: int = 30
 STARTUP_DEFERRED_DRAIN_GRACE_SEC: float = float(
     os.environ.get("IAI_MCP_STARTUP_DEFERRED_DRAIN_GRACE_SEC", "20.0")
 )
+CAPTURE_QUEUE_RETRY_PENDING_KEY: str = "_capture_queue_drain_retry_pending"
+CAPTURE_QUEUE_LAST_RETRY_KEY: str = "_capture_queue_drain_last_retry_at"
 
 DEFAULT_CYCLE_COUNT: int = 4
 
@@ -169,6 +171,89 @@ def _mcp_recent_activity(mcp_socket, *, window_sec: float) -> bool:
         return (time.monotonic() - float(mcp_socket.last_activity_ts)) < window_sec
     except Exception:  # noqa: BLE001 -- activity probe must never crash scheduling
         return False
+
+
+def _capture_queue_pending_count(capture_queue) -> int | None:
+    try:
+        return int(capture_queue.pending_count())
+    except Exception:  # noqa: BLE001 -- telemetry only
+        return None
+
+
+def _set_capture_queue_retry_state(
+    state: dict,
+    *,
+    pending: bool,
+    pending_count: int | None = None,
+) -> None:
+    state[CAPTURE_QUEUE_RETRY_PENDING_KEY] = bool(pending)
+    state[CAPTURE_QUEUE_LAST_RETRY_KEY] = datetime.now(timezone.utc).isoformat()
+    if pending_count is not None:
+        state["_capture_queue_pending_count"] = pending_count
+
+
+def _drain_capture_queue_once(store, capture_queue, capture_handler, *, phase: str) -> dict:
+    ingested = int(capture_queue.ingest_pending(capture_handler))
+    pending_count = _capture_queue_pending_count(capture_queue)
+    payload = {"phase": phase, "ingested": ingested}
+    if pending_count is not None:
+        payload["pending_count"] = pending_count
+    if ingested > 0:
+        write_event(store, "capture_queue_drained", payload, severity="info")
+    return {
+        "ingested": ingested,
+        "pending_count": pending_count,
+        "pending": bool(pending_count) if pending_count is not None else False,
+    }
+
+
+async def _retry_capture_queue_drain_if_due(
+    store: MemoryStore,
+    state: dict,
+    *,
+    capture_queue=None,
+    capture_handler: Callable[[dict], None] | None = None,
+    mcp_socket: SocketServer | None = None,
+) -> None:
+    if (
+        capture_queue is None
+        or capture_handler is None
+        or not state.get(CAPTURE_QUEUE_RETRY_PENDING_KEY)
+    ):
+        return
+    if _mcp_recent_activity(mcp_socket, window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC):
+        return
+    try:
+        result = await asyncio.to_thread(
+            _drain_capture_queue_once,
+            store,
+            capture_queue,
+            capture_handler,
+            phase="tick_retry",
+        )
+        _set_capture_queue_retry_state(
+            state,
+            pending=bool(result.get("pending")),
+            pending_count=result.get("pending_count"),
+        )
+        await asyncio.to_thread(save_state, state)
+    except Exception as exc:  # noqa: BLE001 -- tick retry must never crash daemon
+        _set_capture_queue_retry_state(state, pending=True)
+        log.warning("capture queue retry drain failed: %s", exc, exc_info=True)
+        try:
+            await asyncio.to_thread(
+                write_event,
+                store,
+                "capture_queue_drain_failed",
+                {"phase": "tick_retry", "error": str(exc)[:200]},
+                severity="warning",
+            )
+        except Exception:  # noqa: BLE001 -- event write inside boundary guard
+            log.debug("capture_queue_drain_failed retry event write failed")
+        try:
+            await asyncio.to_thread(save_state, state)
+        except (OSError, ValueError) as save_exc:
+            log.debug("save_state after capture queue retry failure failed: %s", save_exc)
 
 
 # Idle-countdown decisions. The lifecycle tick translates these into FSM events.
@@ -779,6 +864,8 @@ async def _tick_body(
     state: dict,
     *,
     mcp_socket: SocketServer | None = None,
+    capture_queue=None,
+    capture_handler: Callable[[dict], None] | None = None,
 ) -> None:
     try:
         from iai_mcp.daemon_state import (
@@ -891,6 +978,16 @@ async def _tick_body(
     except Exception as e:  # noqa: BLE001 -- periodic flush MUST NOT crash tick
         log.debug("edges buffer periodic flush skipped: %s", str(e)[:120])
 
+    try:
+        await _retry_capture_queue_drain_if_due(
+            store,
+            state,
+            capture_queue=capture_queue,
+            capture_handler=capture_handler,
+            mcp_socket=mcp_socket,
+        )
+    except Exception:  # noqa: BLE001 -- retry boundary must not affect tick
+        log.debug("tick step capture_queue_retry failed", exc_info=True)
 
     if state.get("scheduler_paused") is True:
         try:
@@ -960,11 +1057,19 @@ async def _scheduler_tick(
     *,
     tick_body: Callable[..., Awaitable[None]] | None = None,
     mcp_socket: SocketServer | None = None,
+    capture_queue=None,
+    capture_handler: Callable[[dict], None] | None = None,
 ) -> None:
     body = tick_body or _tick_body
     while True:
         try:
-            await body(store, state, mcp_socket=mcp_socket)
+            await body(
+                store,
+                state,
+                mcp_socket=mcp_socket,
+                capture_queue=capture_queue,
+                capture_handler=capture_handler,
+            )
         except TypeError:
             try:
                 await body(store, state)
@@ -1414,27 +1519,53 @@ async def main() -> int:
                         mcp_socket,
                         window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC,
                     ):
+                        pending_count = _capture_queue_pending_count(_capture_queue)
+                        retry_pending = (
+                            pending_count is None or pending_count > 0
+                        )
+                        _set_capture_queue_retry_state(
+                            state,
+                            pending=retry_pending,
+                            pending_count=pending_count,
+                        )
+                        await asyncio.to_thread(save_state, state)
+                        payload = {
+                            "reason": "recent_mcp_activity",
+                            "retry_pending": retry_pending,
+                        }
+                        if pending_count is not None:
+                            payload["pending_count"] = pending_count
                         await asyncio.to_thread(
                             write_event,
                             store,
                             "capture_queue_drain_startup_skipped",
-                            {"reason": "recent_mcp_activity"},
+                            payload,
                             severity="info",
                         )
                         return
-                    ingested = await asyncio.to_thread(
-                        _capture_queue.ingest_pending, _capture_handler,
+                    result = await asyncio.to_thread(
+                        _drain_capture_queue_once,
+                        store,
+                        _capture_queue,
+                        _capture_handler,
+                        phase="startup",
                     )
-                    if ingested > 0:
-                        await asyncio.to_thread(
-                            write_event,
-                            store,
-                            "capture_queue_drained",
-                            {"phase": "startup", "ingested": ingested},
-                            severity="info",
-                        )
+                    _set_capture_queue_retry_state(
+                        state,
+                        pending=bool(result.get("pending")),
+                        pending_count=result.get("pending_count"),
+                    )
+                    await asyncio.to_thread(save_state, state)
                 except Exception as exc:  # noqa: BLE001 -- never block socket serving
+                    _set_capture_queue_retry_state(state, pending=True)
                     log.warning("capture queue drain failed at startup: %s", exc, exc_info=True)
+                    try:
+                        await asyncio.to_thread(save_state, state)
+                    except (OSError, ValueError) as save_exc:
+                        log.debug(
+                            "save_state after startup capture queue failure failed: %s",
+                            save_exc,
+                        )
                     try:
                         await asyncio.to_thread(
                             write_event,
@@ -1616,7 +1747,13 @@ async def main() -> int:
         )
 
         tick_task = asyncio.create_task(
-            _scheduler_tick(store, state, mcp_socket=mcp_socket)
+            _scheduler_tick(
+                store,
+                state,
+                mcp_socket=mcp_socket,
+                capture_queue=_capture_queue,
+                capture_handler=_capture_handler,
+            )
         )
         audit_task = asyncio.create_task(
             continuous_audit(store, shutdown)
