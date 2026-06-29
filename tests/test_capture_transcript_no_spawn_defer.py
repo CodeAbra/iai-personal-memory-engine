@@ -7,6 +7,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir = Path(tempfile.mkdtemp(prefix="iai-sock-"))
     sock_path = sock_dir / "d.sock"
 
     iai_dir = tmp_path / ".iai-mcp"
@@ -35,6 +35,17 @@ def _isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
     env["PYTHONPATH"] = str(REPO / "src") + os.pathsep + env.get("PYTHONPATH", "")
 
     return env, iai_dir / ".deferred-captures", sock_path
+
+
+def _cleanup_socket(sock_path: Path) -> None:
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        sock_path.parent.rmdir()
+    except OSError:
+        pass
 
 
 def _make_transcript(tmp_path: Path) -> Path:
@@ -86,10 +97,7 @@ def test_no_spawn_reachable_defers_not_inserts(tmp_path):
         proc = _run_no_spawn(env, transcript)
     finally:
         listener.close()
-        try:
-            sock_path.unlink()
-        except FileNotFoundError:
-            pass
+        _cleanup_socket(sock_path)
 
     assert proc.returncode == 0, f"stderr={proc.stderr!r} stdout={proc.stdout!r}"
 
@@ -124,7 +132,10 @@ def test_no_spawn_unreachable_still_defers(tmp_path):
 
     assert not sock_path.exists()
 
-    proc = _run_no_spawn(env, transcript)
+    try:
+        proc = _run_no_spawn(env, transcript)
+    finally:
+        _cleanup_socket(sock_path)
 
     assert proc.returncode == 0, f"stderr={proc.stderr!r} stdout={proc.stdout!r}"
     payload = json.loads(proc.stdout.strip())

@@ -5,6 +5,7 @@ import sys
 import asyncio
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,24 +22,20 @@ def _endpoint_ready_path(sock_path: Path) -> Path:
 @pytest.fixture
 def socket_path(tmp_path, monkeypatch):
     from iai_mcp import concurrency
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = sock_dir / "d.sock"
-    monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
-    # Per-test endpoint isolation honored by start_ipc_server/open_ipc_connection.
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
-    try:
-        yield sock_path
-    finally:
+    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
+        sock_dir = Path(sock_dir_name)
+        sock_path = sock_dir / "d.sock"
+        monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
+        # Per-test endpoint isolation honored by start_ipc_server/open_ipc_connection.
+        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
         try:
-            if sock_path.exists():
-                sock_path.unlink()
-        except OSError:
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
-            pass
+            yield sock_path
+        finally:
+            try:
+                if sock_path.exists():
+                    sock_path.unlink()
+            except OSError:
+                pass
 
 
 def test_socket_status_round_trip(socket_path):

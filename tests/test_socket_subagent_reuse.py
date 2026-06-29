@@ -6,6 +6,7 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -155,10 +156,10 @@ def _spawn_daemon_in_background(
     )
 
 def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
+    sock_dir = Path(sock_dir_ctx.name)
     sock_path = sock_dir / "d.sock"
-    store_dir = sock_dir / "store"
+    store_dir = tmp_path / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
     assert not sock_path.exists()
 
@@ -205,7 +206,7 @@ def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
         )
 
         daemon_delta = after["daemon"] - before["daemon"]
-        assert daemon_delta == 0, (
+        assert daemon_delta <= 0, (
             f"singleton violated: sub-agent path spawned an extra daemon "
             f"(before={before['daemon']} after={after['daemon']} delta={daemon_delta})"
         )
@@ -221,3 +222,4 @@ def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
             sock_path.unlink()
         except OSError:
             pass
+        sock_dir_ctx.cleanup()

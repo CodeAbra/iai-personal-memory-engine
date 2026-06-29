@@ -173,8 +173,8 @@ def _drop_fake_daemon_conn(proc: subprocess.Popen) -> None:
 
 @pytest.fixture
 def fake_daemon():
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
+    sock_dir = Path(sock_dir_ctx.name)
     sock_path = sock_dir / "d.sock"
 
     proc = _spawn_fake_daemon(sock_path)
@@ -200,6 +200,7 @@ def fake_daemon():
         shutil.rmtree(sock_dir, ignore_errors=True)
     except OSError:
         pass
+    sock_dir_ctx.cleanup()
 
 def _spawn_wrapper(
     built_wrapper: Path,

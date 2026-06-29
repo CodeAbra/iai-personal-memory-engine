@@ -7,6 +7,7 @@ import signal
 import socket as sk
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,23 +24,19 @@ from _socket_test_helpers import (
 @pytest.fixture
 def short_socket_paths(tmp_path):
     lock_path = tmp_path / ".lock"
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = sock_dir / "d.sock"
     state_path = tmp_path / ".daemon-state.json"
 
-    try:
-        yield lock_path, sock_path, state_path
-    finally:
+    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
+        sock_dir = Path(sock_dir_name)
+        sock_path = sock_dir / "d.sock"
         try:
-            if sock_path.exists():
-                sock_path.unlink()
-        except OSError:
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
-            pass
+            yield lock_path, sock_path, state_path
+        finally:
+            try:
+                if sock_path.exists():
+                    sock_path.unlink()
+            except OSError:
+                pass
 
 def _count_iai_mcp_processes() -> dict[str, int]:
     counts = {"core": 0, "daemon": 0}
