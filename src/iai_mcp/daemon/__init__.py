@@ -370,6 +370,24 @@ def _wake_hook_rebuild_if_cold(store) -> None:
         log.debug("wake-hook graph-cache rebuild failed", exc_info=True)
 
 
+async def _boot_preload_recall_structural(store) -> None:
+    try:
+        from iai_mcp import runtime_graph_cache as _rgc_mod
+    except Exception:  # noqa: BLE001 -- preload is best-effort
+        log.debug("boot_preload runtime_graph_cache import failed", exc_info=True)
+        return
+
+    try:
+        # WAKE boot must not stream the whole Hippo store. The recall hot path is
+        # ANN-first and only needs the structural overlay or last-good snapshot;
+        # expensive rebuilds belong to sleep / drowsy paths.
+        await asyncio.to_thread(_rgc_mod.load_recall_structural, store)
+    except Exception as exc:  # noqa: BLE001 -- preload MUST NOT crash daemon
+        log.debug("boot_preload failed: %s", exc, exc_info=True)
+    finally:
+        _rgc_mod.preload_ready.set()
+
+
 def transition(state: dict, new_fsm: str) -> None:
     current = state.get("fsm_state", STATE_WAKE)
     allowed = VALID_TRANSITIONS.get(current, set())
@@ -1581,23 +1599,7 @@ async def main() -> int:
             asyncio.create_task(_capture_queue_drain_and_report())
 
         try:
-            from iai_mcp import runtime_graph_cache as _rgc_mod
-
-            async def _boot_preload() -> None:
-                try:
-                    # WAKE boot must not stream the whole Hippo store. The recall
-                    # hot path is ANN-first and only needs the structural overlay
-                    # or last-good snapshot; expensive rebuilds belong to sleep /
-                    # drowsy paths.
-                    await asyncio.to_thread(
-                        _rgc_mod.load_recall_structural, store,
-                    )
-                except Exception as _exc:  # noqa: BLE001 -- preload MUST NOT crash daemon
-                    log.debug("boot_preload failed: %s", _exc, exc_info=True)
-                finally:
-                    _rgc_mod.preload_ready.set()
-
-            asyncio.create_task(_boot_preload())
+            asyncio.create_task(_boot_preload_recall_structural(store))
         except Exception:  # noqa: BLE001 -- scheduling failure must not block boot
             log.debug("boot_preload scheduling failed", exc_info=True)
             try:

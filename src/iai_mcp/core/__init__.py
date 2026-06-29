@@ -240,6 +240,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _global_edges_hebb = store.incident_edges(
                             _all_cand_ids,
                             edge_types=["hebbian"],
+                            # Keep the full degree signal: capping here makes
+                            # hubs with very different connectivity
+                            # indistinguishable in the ranking blend.
                             top_k=None,
                         )
                         graph._global_degree = {
@@ -266,6 +269,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _contr_edges = store.incident_edges(
                             _all_candidate_ids,
                             edge_types=["contradicts"],
+                            # Contradictions are correctness signals, not
+                            # neighbourhood garnish; do not hide low-weight
+                            # contradicts behind an arbitrary cap.
                             top_k=None,
                         )
                         _contr_dst_ids = []

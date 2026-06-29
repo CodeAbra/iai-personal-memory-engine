@@ -107,44 +107,62 @@ def test_incident_edges_batched_one_query(store):
     assert result[records[2].id] == [], "records[2] with no edges must return empty list"
 
 
-def test_incident_edges_parameterized_bind(store):
-    import inspect
-    src = inspect.getsource(store.incident_edges)
-    assert '"?"' in src or "'?'" in src or "\"?\"\n" in src or "join(\"?\"" in src or 'join("?"' in src or "? " in src, (
-        "incident_edges source must build parameterized placeholders with '?'"
-    )
-
+def test_incident_edges_edge_type_filter_treats_values_as_data(store):
     a = _make_rec(seed=10)
     b = _make_rec(seed=11)
+    c = _make_rec(seed=12)
+    malicious_type = "hebbian') OR 1=1 --"
+    for rec in (a, b, c):
+        store.insert(rec)
+    store.boost_edges([(a.id, b.id)], edge_type="hebbian", delta=0.5)
+    store.db._conn.execute(
+        "INSERT INTO edges (src, dst, edge_type, weight, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (str(a.id), str(c.id), malicious_type, 0.9, "2026-06-29T00:00:00+00:00"),
+    )
+    store.db._conn.commit()
+
+    hebbian_only = store.incident_edges(
+        [a.id], edge_types=["hebbian"], top_k=None,
+    )
+    exact_malicious = store.incident_edges(
+        [a.id], edge_types=[malicious_type], top_k=None,
+    )
+
+    assert {t[0] for t in hebbian_only[a.id]} == {b.id}
+    assert {t[0] for t in exact_malicious[a.id]} == {c.id}
+
+
+def test_incident_edges_top_k_batches_inbound_and_outbound_for_multiple_ids(store):
+    a = _make_rec(seed=20)
+    b = _make_rec(seed=21)
+    c = _make_rec(seed=22)
+    d = _make_rec(seed=23)
+    for rec in (a, b, c, d):
+        store.insert(rec)
+    store.boost_edges([(a.id, b.id)], delta=0.5)
+    store.boost_edges([(c.id, a.id)], delta=0.8)
+    store.boost_edges([(d.id, b.id)], delta=0.7)
+
+    result = store.incident_edges([a.id, b.id], top_k=2)
+
+    assert {t[0] for t in result[a.id]} == {b.id, c.id}
+    assert {t[0] for t in result[b.id]} == {a.id, d.id}
+    assert [t[2] for t in result[a.id]] == sorted(
+        [t[2] for t in result[a.id]], reverse=True,
+    )
+
+
+def test_incident_edges_empty_edge_type_filter_returns_empty(store):
+    a = _make_rec(seed=30)
+    b = _make_rec(seed=31)
     store.insert(a)
     store.insert(b)
     store.boost_edges([(a.id, b.id)], delta=0.5)
 
-    res_a = store.incident_edges([a.id])
-    res_b = store.incident_edges([b.id])
-    assert b.id in {t[0] for t in res_a.get(a.id, [])}, "B must be A's neighbour"
-    assert a.id in {t[0] for t in res_b.get(b.id, [])}, "A must be B's neighbour"
-
-
-def test_incident_edges_or_bind_two_placeholders(store):
-    import inspect
-    src = inspect.getsource(store.incident_edges)
-    assert "src IN" in src or "src in" in src.lower(), (
-        "incident_edges must use 'src IN (...)' in the OR-bind SQL"
-    )
-    assert "dst IN" in src or "dst in" in src.lower(), (
-        "incident_edges must use 'dst IN (...)' in the OR-bind SQL"
-    )
-
-    a = _make_rec(seed=20)
-    b = _make_rec(seed=21)
-    store.insert(a)
-    store.insert(b)
-    store.boost_edges([(a.id, b.id)])
-
-    result = store.incident_edges([a.id, b.id])
-    assert b.id in {t[0] for t in result.get(a.id, [])}, "B must appear from A"
-    assert a.id in {t[0] for t in result.get(b.id, [])}, "A must appear from B"
+    assert store.incident_edges([a.id, b.id], edge_types=[]) == {
+        a.id: [],
+        b.id: [],
+    }
 
 
 def test_incident_edges_top_k_cap(store):

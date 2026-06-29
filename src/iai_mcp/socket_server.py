@@ -22,6 +22,9 @@ ERR_PARSE_ERROR = -32700
 
 IDLE_SECS_DEFAULT = 1800
 RECALL_BUSY_REASON = "recall_busy"
+# Intentionally conservative: one in-flight recall plus one retry is enough for
+# the common single-client MCP case. Multi-client deployments can raise this via
+# IAI_MCP_RECALL_CONCURRENCY.
 RECALL_CONCURRENCY_DEFAULT = 2
 RECALL_SLOT_WAIT_SEC_DEFAULT = 0.25
 

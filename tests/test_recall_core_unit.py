@@ -747,17 +747,30 @@ def test_preload_ready_flag_exists_and_is_event():
     )
 
 
-def test_boot_preload_does_not_rebuild_runtime_graph():
-    import inspect
+def test_boot_preload_does_not_rebuild_runtime_graph(monkeypatch):
+    import asyncio
     import iai_mcp.daemon as daemon_mod
+    import iai_mcp.retrieve as retrieve_mod
+    import iai_mcp.runtime_graph_cache as rgc_mod
 
-    source = inspect.getsource(daemon_mod)
-    start = source.index("async def _boot_preload")
-    end = source.index("asyncio.create_task(_boot_preload())", start)
-    preload_source = source[start:end]
+    calls: list = []
+    rgc_mod.preload_ready.clear()
 
-    assert "load_recall_structural" in preload_source
-    assert "build_runtime_graph" not in preload_source
+    def _no_build_runtime_graph(*_args, **_kwargs):
+        raise AssertionError("boot preload must not rebuild runtime graph")
+
+    def _load_recall_structural(store):
+        calls.append(store)
+        return _flat_assignment([]), [], 0, "cold_degrade"
+
+    monkeypatch.setattr(retrieve_mod, "build_runtime_graph", _no_build_runtime_graph)
+    monkeypatch.setattr(rgc_mod, "load_recall_structural", _load_recall_structural)
+
+    store = object()
+    asyncio.run(daemon_mod._boot_preload_recall_structural(store))
+
+    assert calls == [store]
+    assert rgc_mod.preload_ready.is_set()
 
 
 def test_session_start_payload_dispatch_does_not_rebuild_runtime_graph(tmp_path, monkeypatch):
