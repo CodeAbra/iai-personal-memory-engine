@@ -61,6 +61,7 @@ def _records_schema_at_dim(dim: int) -> pa.Schema:
             ("valence", pa.float32()),
             ("hv_tier", pa.string()),
             ("structure_hv_payload", pa.binary()),
+            ("embedding_pending", pa.int32()),
         ]
     )
 
@@ -146,6 +147,7 @@ def _stage_record_to_table(
         s5_trust_score=rec.s5_trust_score,
         profile_modulation_gain=rec.profile_modulation_gain,
         schema_version=rec.schema_version,
+        embedding_pending=rec.embedding_pending,
     )
     target_tbl.add([store._to_row(new_rec)])
 
