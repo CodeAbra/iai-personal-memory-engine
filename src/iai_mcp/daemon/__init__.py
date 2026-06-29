@@ -61,6 +61,9 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 }
 
 TICK_INTERVAL_SEC: int = 30
+STARTUP_DEFERRED_DRAIN_GRACE_SEC: float = float(
+    os.environ.get("IAI_MCP_STARTUP_DEFERRED_DRAIN_GRACE_SEC", "20.0")
+)
 
 DEFAULT_CYCLE_COUNT: int = 4
 
@@ -157,6 +160,15 @@ def _raise_fd_limit() -> None:
 def _should_drain_on_drowsy_edge(prev, current) -> bool:
     from iai_mcp.lifecycle_state import LifecycleState as _L
     return prev is _L.WAKE and current is _L.DROWSY
+
+
+def _mcp_recent_activity(mcp_socket, *, window_sec: float) -> bool:
+    if mcp_socket is None:
+        return False
+    try:
+        return (time.monotonic() - float(mcp_socket.last_activity_ts)) < window_sec
+    except Exception:  # noqa: BLE001 -- activity probe must never crash scheduling
+        return False
 
 
 # Idle-countdown decisions. The lifecycle tick translates these into FSM events.
@@ -610,13 +622,17 @@ def _write_session_start_cache(
             return {"action": "skipped", "reason": "runtime_graph_cache_cold"}
 
         try:
-            from iai_mcp import retrieve
             from iai_mcp.session import (
                 _compose_session_start_payload,
                 format_payload_as_markdown,
             )
 
-            _graph, assignment, rc = retrieve.build_runtime_graph(store)
+            if force_rebuild:
+                from iai_mcp import retrieve
+                _graph, assignment, rc = retrieve.build_runtime_graph(store)
+            else:
+                from iai_mcp import runtime_graph_cache as _rgc
+                assignment, rc, _max_degree, _source = _rgc.load_recall_structural(store)
             payload = _compose_session_start_payload(
                 store,
                 assignment,
@@ -1285,6 +1301,8 @@ async def main() -> int:
         except Exception:  # noqa: BLE001 -- boot MUST NOT block on wake-handler
             log.debug("wake signal consume failed", exc_info=True)
 
+        _capture_queue = None
+        _capture_handler = None
         try:
             from iai_mcp.capture import capture_turn as _capture_turn
             from iai_mcp.capture_queue import CaptureQueue
@@ -1299,24 +1317,13 @@ async def main() -> int:
                     "role": record.get("role", "user"),
                 }
                 _capture_turn(store, **kwargs)
-
-            ingested = await asyncio.to_thread(
-                _capture_queue.ingest_pending, _capture_handler,
-            )
-            if ingested > 0:
-                write_event(
-                    store,
-                    "capture_queue_drained",
-                    {"phase": "startup", "ingested": ingested},
-                    severity="info",
-                )
         except Exception as exc:  # noqa: BLE001 -- never block boot on queue drain
-            log.warning("capture queue drain failed at startup: %s", exc, exc_info=True)
+            log.warning("capture queue init failed at startup: %s", exc, exc_info=True)
             try:
                 write_event(
                     store,
                     "capture_queue_drain_failed",
-                    {"phase": "startup", "error": str(exc)[:200]},
+                    {"phase": "startup_init", "error": str(exc)[:200]},
                     severity="warning",
                 )
             except Exception:  # noqa: BLE001 -- event write inside boundary guard
@@ -1398,19 +1405,60 @@ async def main() -> int:
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
         await asyncio.sleep(0.05)
 
+        if _capture_queue is not None and _capture_handler is not None:
+            async def _capture_queue_drain_and_report() -> None:
+                try:
+                    if STARTUP_DEFERRED_DRAIN_GRACE_SEC > 0:
+                        await asyncio.sleep(STARTUP_DEFERRED_DRAIN_GRACE_SEC)
+                    if _mcp_recent_activity(
+                        mcp_socket,
+                        window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC,
+                    ):
+                        await asyncio.to_thread(
+                            write_event,
+                            store,
+                            "capture_queue_drain_startup_skipped",
+                            {"reason": "recent_mcp_activity"},
+                            severity="info",
+                        )
+                        return
+                    ingested = await asyncio.to_thread(
+                        _capture_queue.ingest_pending, _capture_handler,
+                    )
+                    if ingested > 0:
+                        await asyncio.to_thread(
+                            write_event,
+                            store,
+                            "capture_queue_drained",
+                            {"phase": "startup", "ingested": ingested},
+                            severity="info",
+                        )
+                except Exception as exc:  # noqa: BLE001 -- never block socket serving
+                    log.warning("capture queue drain failed at startup: %s", exc, exc_info=True)
+                    try:
+                        await asyncio.to_thread(
+                            write_event,
+                            store,
+                            "capture_queue_drain_failed",
+                            {"phase": "startup", "error": str(exc)[:200]},
+                            severity="warning",
+                        )
+                    except Exception:  # noqa: BLE001 -- event write inside boundary guard
+                        log.debug("capture_queue_drain_failed event write failed")
+
+            asyncio.create_task(_capture_queue_drain_and_report())
+
         try:
             from iai_mcp import runtime_graph_cache as _rgc_mod
 
             async def _boot_preload() -> None:
                 try:
-                    from iai_mcp import retrieve as _retrieve_preload
-                    # build_runtime_graph already persists the cache internally
-                    # (with the full node_payload) on a miss. The previous extra
-                    # save(..., node_payload=None, ...) here overwrote that good
-                    # cache with a payload-less one (forcing a pandas re-read on
-                    # the next hit) — so we just warm the cache and drop it.
+                    # WAKE boot must not stream the whole Hippo store. The recall
+                    # hot path is ANN-first and only needs the structural overlay
+                    # or last-good snapshot; expensive rebuilds belong to sleep /
+                    # drowsy paths.
                     await asyncio.to_thread(
-                        _retrieve_preload.build_runtime_graph, store,
+                        _rgc_mod.load_recall_structural, store,
                     )
                 except Exception as _exc:  # noqa: BLE001 -- preload MUST NOT crash daemon
                     log.debug("boot_preload failed: %s", _exc, exc_info=True)
@@ -1431,6 +1479,20 @@ async def main() -> int:
 
             async def _drain_and_report() -> None:
                 try:
+                    if STARTUP_DEFERRED_DRAIN_GRACE_SEC > 0:
+                        await asyncio.sleep(STARTUP_DEFERRED_DRAIN_GRACE_SEC)
+                    if _mcp_recent_activity(
+                        mcp_socket,
+                        window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC,
+                    ):
+                        await asyncio.to_thread(
+                            write_event,
+                            store,
+                            "deferred_drain_startup_skipped",
+                            {"reason": "recent_mcp_activity"},
+                            severity="info",
+                        )
+                        return
                     drain_counts = await asyncio.to_thread(_drain, store)
                     if drain_counts.get("files_drained") or drain_counts.get(
                         "files_failed"

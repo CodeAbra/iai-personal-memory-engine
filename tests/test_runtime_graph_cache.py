@@ -573,3 +573,11 @@ def test_hippea_cascade_not_on_fragmentation_path():
     assert "build_runtime_graph" in source, (
         "the hippea cascade must use the interval-gated recall builder"
     )
+
+
+def test_runtime_graph_rebuild_keeps_pandas_off_daemon_scan_paths():
+    source = inspect.getsource(retrieve._build_runtime_graph_impl)
+
+    assert 'open_table("edges").to_pandas' not in source
+    assert "import pandas as _pd" not in source
+    assert ".isna(" not in source

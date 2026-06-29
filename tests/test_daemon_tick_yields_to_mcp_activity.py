@@ -103,3 +103,14 @@ def test_tick_body_works_with_none_mcp_socket(tick_env, monkeypatch):
     asyncio.run(daemon_mod._tick_body(store, state, mcp_socket=None))
 
     assert "last_tick_at" in state
+
+
+def test_mcp_recent_activity_probe():
+    from iai_mcp import daemon as daemon_mod
+
+    recent = types.SimpleNamespace(last_activity_ts=time.monotonic() - 2.0)
+    stale = types.SimpleNamespace(last_activity_ts=time.monotonic() - 120.0)
+
+    assert daemon_mod._mcp_recent_activity(recent, window_sec=30.0) is True
+    assert daemon_mod._mcp_recent_activity(stale, window_sec=30.0) is False
+    assert daemon_mod._mcp_recent_activity(None, window_sec=30.0) is False

@@ -166,6 +166,21 @@ def test_incident_edges_top_k_cap(store):
     assert weights == sorted(weights, reverse=True), "Neighbours must be sorted by weight desc"
 
 
+def test_incident_edges_top_k_ranks_across_inbound_and_outbound(store):
+    hub = _make_rec(seed=150)
+    low_out = _make_rec(seed=151)
+    high_in = _make_rec(seed=152)
+    for rec in (hub, low_out, high_in):
+        store.insert(rec)
+
+    store.boost_edges([(hub.id, low_out.id)], delta=0.1, edge_type="hebbian")
+    store.boost_edges([(high_in.id, hub.id)], delta=0.9, edge_type="hebbian")
+
+    result = store.incident_edges([hub.id], top_k=1)
+
+    assert result[hub.id] == [(high_in.id, "hebbian", pytest.approx(0.9))]
+
+
 def test_incident_edges_uncapped_contradicts(store):
     hub = _make_rec(seed=200)
     store.insert(hub)

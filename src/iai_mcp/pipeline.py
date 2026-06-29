@@ -74,29 +74,36 @@ def _read_record_payload(graph, rid: UUID, store: MemoryStore):
 
 
 def _is_record_active(store: MemoryStore, record_id: UUID) -> bool:
-    try:
-        from iai_mcp.store import _uuid_literal
+    return record_id in _active_id_set([record_id], store)
 
-        tbl = store.db.open_table("records")
-        df = (
-            tbl.search()
-            .where(f"id = '{_uuid_literal(record_id)}' AND tombstoned_at IS NULL")
-            .select(["id"])
-            .limit(1)
-            .to_pandas()
-        )
-        return not df.empty
+
+def _active_id_set(ids: list[UUID], store: MemoryStore) -> set[UUID]:
+    if not ids:
+        return set()
+    unique_ids = list(dict.fromkeys(ids))
+    id_strings = [str(record_id) for record_id in unique_ids]
+    placeholders = ", ".join("?" for _ in id_strings)
+    try:
+        with store.db._conn_lock:
+            rows = store.db._conn.execute(
+                f"SELECT id FROM records WHERE id IN ({placeholders}) "
+                "AND tombstoned_at IS NULL",
+                id_strings,
+            ).fetchall()
+        return {UUID(str(row["id"] if hasattr(row, "keys") else row[0])) for row in rows}
     except Exception as exc:  # noqa: BLE001 -- recall must degrade, not crash
-        logger.debug("active_record_check_failed rid=%s: %s", record_id, exc)
-        return True
+        logger.debug("active_record_batch_check_failed n=%s: %s", len(ids), exc)
+        return set(unique_ids)
 
 
 def _filter_active_hits(hits: list[MemoryHit], store: MemoryStore) -> list[MemoryHit]:
-    return [hit for hit in hits if _is_record_active(store, hit.record_id)]
+    active_ids = _active_id_set([hit.record_id for hit in hits], store)
+    return [hit for hit in hits if hit.record_id in active_ids]
 
 
 def _filter_active_ids(ids: list[UUID], store: MemoryStore) -> list[UUID]:
-    return [record_id for record_id in ids if _is_record_active(store, record_id)]
+    active_ids = _active_id_set(ids, store)
+    return [record_id for record_id in ids if record_id in active_ids]
 
 
 _DURABLE_RECALL_CUE_MARKERS = (
@@ -118,6 +125,31 @@ _DURABLE_RECALL_CUE_MARKERS = (
 )
 _DURABLE_TIERS = {"semantic", "procedural", "parametric"}
 _DURABLE_TIER_BOOST = 0.08
+_EMBEDDING_CLIP_ABS = 1_000_000.0
+
+
+def _finite_float32_array(values) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(arr, -_EMBEDDING_CLIP_ABS, _EMBEDDING_CLIP_ABS)
+
+
+def _normalise_rows(mat: np.ndarray) -> np.ndarray:
+    if not mat.size:
+        return mat.astype(np.float32, copy=False)
+    mat = _finite_float32_array(mat).astype(np.float32, copy=False)
+    norms = np.linalg.norm(mat, axis=1)
+    norms = np.nan_to_num(norms, nan=0.0, posinf=0.0, neginf=0.0)
+    norms[norms <= 0.0] = 1.0
+    return mat / norms[:, None]
+
+
+def _normalise_vec(vec: list[float] | np.ndarray) -> np.ndarray:
+    out = _finite_float32_array(vec).reshape(-1)
+    norm = float(np.linalg.norm(out))
+    if not np.isfinite(norm) or norm <= 0.0:
+        return out
+    return out / norm
 
 
 def _cue_wants_durable_recall(cue: str) -> bool:
@@ -267,10 +299,7 @@ def _community_gate(
     top_n: int = 3,
     member_embeddings: dict[UUID, list[float]] | None = None,
 ) -> list[UUID]:
-    cue_vec = np.asarray(cue_emb, dtype=np.float32)
-    cue_norm = float(np.linalg.norm(cue_vec))
-    if cue_norm > 0.0:
-        cue_vec = cue_vec / cue_norm
+    cue_vec = _normalise_vec(cue_emb)
 
     if member_embeddings is not None:
         return _community_gate_max_node(
@@ -281,12 +310,7 @@ def _community_gate(
     if not centroids:
         return []
     cids = list(centroids.keys())
-    mat = np.asarray(
-        [centroids[c] for c in cids], dtype=np.float32
-    )
-    norms = np.linalg.norm(mat, axis=1)
-    norms[norms == 0.0] = 1.0
-    mat = mat / norms[:, None]
+    mat = _normalise_rows(np.asarray([centroids[c] for c in cids], dtype=np.float32))
     scores = mat @ cue_vec
     order = np.argsort(-scores, kind="stable")
     return [cids[int(i)] for i in order[:top_n]]
@@ -327,12 +351,10 @@ def _community_gate_max_node(
     if not rows:
         return []
 
-    mat = np.stack(rows).astype(np.float32, copy=False)
-    mat = np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
-    norms = np.linalg.norm(mat, axis=1)
-    norms[norms == 0.0] = 1.0
-    mat = mat / norms[:, None]
-    member_scores = mat @ cue_vec
+    mat = _normalise_rows(np.stack(rows).astype(np.float32, copy=False))
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        member_scores = mat @ cue_vec
+    member_scores = np.nan_to_num(member_scores, nan=0.0, posinf=0.0, neginf=0.0)
 
     comm_max = np.maximum.reduceat(member_scores, breaks)
 
@@ -448,7 +470,7 @@ def _find_anti_hits(
 
     try:
         _contr_map = store.incident_edges(
-            hit_ids, edge_types=["contradicts"], top_k=None,
+            hit_ids, edge_types=["contradicts"], top_k=max(k * 4, 10),
         )
     except Exception as exc:  # noqa: BLE001 -- anti-hits is enrichment; degrade to []
         logger.debug("_find_anti_hits incident_edges failed: %s", exc)
@@ -611,7 +633,11 @@ def _recall_core(
         logger.debug("records_cache_graph_build_failed: %s", exc)
         records_cache = {}
     if not records_cache:
-        records_cache = {r.id: r for r in store.all_records()}
+        try:
+            records_cache = store.get_batch(list(graph.iter_nodes()))
+        except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
+            logger.debug("records_cache_batch_build_failed: %s", exc)
+            records_cache = {}
 
     episodic_ids: set | None = None
     if mode == "verbatim":
@@ -623,16 +649,12 @@ def _recall_core(
     _pool_t0 = time.perf_counter()
     pool_ids, pool_embs = _collect_graph_pool(graph, records_cache, store)
     _recall_pool_collection_ms = (time.perf_counter() - _pool_t0) * 1000.0
-    cue_vec = np.asarray(cue_emb, dtype=np.float32)
-    cnorm = float(np.linalg.norm(cue_vec))
-    if cnorm > 0.0:
-        cue_vec = cue_vec / cnorm
+    cue_vec = _normalise_vec(cue_emb)
     if pool_embs.size:
-        pool_embs = np.nan_to_num(pool_embs, nan=0.0, posinf=0.0, neginf=0.0)
-        pool_norms = np.linalg.norm(pool_embs, axis=1)
-        pool_norms[pool_norms == 0.0] = 1.0
-        pool_embs = pool_embs / pool_norms[:, None]
-        shared_cos = np.matmul(pool_embs, cue_vec).astype(np.float32)
+        pool_embs = _normalise_rows(pool_embs)
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            shared_cos = np.matmul(pool_embs, cue_vec).astype(np.float32)
+        shared_cos = np.nan_to_num(shared_cos, nan=0.0, posinf=0.0, neginf=0.0)
     else:
         shared_cos = np.empty(0, dtype=np.float32)
     if shared_cos.size:
@@ -704,23 +726,11 @@ def _recall_core(
     for i, rid in enumerate(pool_ids):
         centrality_arr[i] = float(graph.get_centrality(rid))
     if not np.any(centrality_arr) and pool_ids:
-        try:
-            from iai_mcp.centrality_approx import centrality_for_runtime
-
-            # Bounded recompute on the recall path: exact below the node-count
-            # cutoff, deterministic k-source sampled betweenness above it. The
-            # long-lived recall process must never run an unbounded O(V*E)
-            # Brandes pass when the warm graph is large.
-            cen_dict = centrality_for_runtime(graph)
-            for i, rid in enumerate(pool_ids):
-                centrality_arr[i] = float(cen_dict.get(rid, 0.0))
-        except Exception as exc:  # noqa: BLE001 -- emit diagnostic then re-raise as NativeError
-            write_event(
-                store,
-                "recall_centrality_failed",
-                {"error_type": type(exc).__name__, "error": str(exc)},
-            )
-            raise NativeError(f"centrality recompute failed: {exc}") from exc
+        write_event(
+            store,
+            "recall_centrality_degraded",
+            {"reason": "missing_cached_centrality", "n_pool": len(pool_ids)},
+        )
     _recall_centrality_ms = (time.perf_counter() - _centrality_t0) * 1000.0
 
     seed_indices = _pick_seeds(

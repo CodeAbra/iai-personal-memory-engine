@@ -250,6 +250,47 @@ def classify_regime(N: int, sigma: Optional[float]) -> str:
     return "healthy"
 
 
+def _centrality_for_topology_rich_club(graph: "MemoryGraph") -> dict:
+    """Centrality map for daemon topology without an exact in-parent pass.
+
+    Runtime graph rebuilds already copy persisted centrality into node payloads.
+    Reuse that map when it contains signal; otherwise fall back to the bounded
+    approximation used by the warm graph cache. This keeps the long-lived daemon
+    away from ``MemoryGraph.centrality()`` / exact Brandes betweenness.
+    """
+    centrality: dict = {}
+    has_signal = False
+    for node_id in graph.iter_nodes():
+        try:
+            value = float(graph.get_centrality(node_id) or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            value = 0.0
+        if math.isfinite(value) and value != 0.0:
+            has_signal = True
+        if not math.isfinite(value):
+            value = 0.0
+        centrality[node_id] = value
+    if has_signal:
+        return centrality
+
+    try:
+        from iai_mcp.centrality_approx import (
+            approximate_centrality,
+            runtime_k,
+            runtime_method,
+        )
+
+        return approximate_centrality(
+            graph,
+            method=runtime_method(),
+            k=runtime_k(),
+            normalize=False,
+        )
+    except (RuntimeError, ValueError, TypeError, AttributeError):
+        logger.debug("topology_rich_club_centrality_degraded", exc_info=True)
+        return centrality
+
+
 def compute_topology_snapshot(graph, *, assignment=None) -> dict:
     """Topology metrics for `graph`.
 
@@ -324,7 +365,8 @@ def compute_topology_snapshot(graph, *, assignment=None) -> dict:
         except (RuntimeError, ValueError, TypeError):
             community_count = 0
         try:
-            rc = rich_club_nodes(graph, percent=0.10)
+            rc_centrality = _centrality_for_topology_rich_club(graph)
+            rc = rich_club_nodes(graph, percent=0.10, centrality=rc_centrality)
             rich_club_ratio = (len(rc) / N) if N > 0 else 0.0
         except (RuntimeError, ValueError, TypeError):
             rich_club_ratio = 0.0

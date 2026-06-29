@@ -86,6 +86,81 @@ def test_query_returns_top_k(tmp_path):
     assert len(results) == 3
 
 
+def test_query_similar_does_not_use_pandas_ann_path(tmp_path, monkeypatch):
+    from iai_mcp.hippo._table import HippoQuery
+
+    store = MemoryStore(path=tmp_path)
+    rec = _make()
+    store.insert(rec)
+
+    def _no_to_pandas(*_args, **_kwargs):
+        raise AssertionError("query_similar hot path must not call to_pandas")
+
+    monkeypatch.setattr(HippoQuery, "to_pandas", _no_to_pandas)
+
+    results = store.query_similar([0.1] * EMBED_DIM, k=3)
+
+    assert results and results[0][0].id == rec.id
+
+
+def test_get_does_not_use_pandas_path(tmp_path, monkeypatch):
+    from iai_mcp.hippo._table import HippoQuery, HippoTable
+
+    store = MemoryStore(path=tmp_path)
+    rec = _make(text="direct get")
+    store.insert(rec)
+
+    def _no_to_pandas(*_args, **_kwargs):
+        raise AssertionError("get hot path must not call to_pandas")
+
+    monkeypatch.setattr(HippoQuery, "to_pandas", _no_to_pandas)
+    monkeypatch.setattr(HippoTable, "to_pandas", _no_to_pandas)
+
+    got = store.get(rec.id)
+
+    assert got is not None
+    assert got.id == rec.id
+    assert got.literal_surface == "direct get"
+
+
+def test_from_row_hot_paths_do_not_call_pandas_isna(tmp_path, monkeypatch):
+    import pandas as pd
+
+    store = MemoryStore(path=tmp_path)
+    rec = _make(text="no pandas isna")
+    store.insert(rec)
+
+    def _no_isna(*_args, **_kwargs):
+        raise AssertionError("_from_row hot path must not call pandas.isna")
+
+    monkeypatch.setattr(pd, "isna", _no_isna)
+
+    got = store.get(rec.id)
+    results = store.query_similar([0.1] * EMBED_DIM, k=3)
+
+    assert got is not None
+    assert got.id == rec.id
+    assert results and results[0][0].id == rec.id
+
+
+def test_query_similar_fast_failure_degrades_without_pandas(tmp_path, monkeypatch):
+    from iai_mcp.hippo._table import HippoQuery
+
+    store = MemoryStore(path=tmp_path)
+    store.insert(_make())
+
+    def _fast_fails(*_args, **_kwargs):
+        raise RuntimeError("forced fast-path failure")
+
+    def _no_to_pandas(*_args, **_kwargs):
+        raise AssertionError("query_similar fallback must not call to_pandas")
+
+    monkeypatch.setattr(store, "_query_similar_fast", _fast_fails)
+    monkeypatch.setattr(HippoQuery, "to_pandas", _no_to_pandas)
+
+    assert store.query_similar([0.1] * EMBED_DIM, k=3) == []
+
+
 def test_query_similar_excludes_tombstoned_records(tmp_path):
     store = MemoryStore(path=tmp_path)
     live = _make(text="live fact", vec=[0.1] * EMBED_DIM)

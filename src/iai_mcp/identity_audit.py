@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from iai_mcp.events import write_event
 from iai_mcp.s5 import detect_drift_anomaly
@@ -12,16 +13,34 @@ logger = logging.getLogger(__name__)
 AUDIT_INTERVAL_SEC: int = 60 * 60
 
 
+def _first_iter_grace_sec(effective_interval: float) -> float:
+    raw = os.environ.get("IAI_MCP_AUDIT_FIRST_ITER_GRACE_SEC")
+    if raw is None:
+        return max(0.0, float(effective_interval))
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return max(0.0, float(effective_interval))
+
+
 async def continuous_audit(
     store,
     shutdown: asyncio.Event,
     *,
     interval_sec: float | None = None,
 ) -> None:
+    effective_interval: float = (
+        float(interval_sec) if interval_sec is not None else float(AUDIT_INTERVAL_SEC)
+    )
+    first_grace = _first_iter_grace_sec(effective_interval)
+    if first_grace > 0:
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=first_grace)
+            return
+        except asyncio.TimeoutError:
+            pass
+
     while not shutdown.is_set():
-        effective_interval: float = (
-            float(interval_sec) if interval_sec is not None else float(AUDIT_INTERVAL_SEC)
-        )
         try:
             await asyncio.to_thread(detect_drift_anomaly, store, 5)
         except Exception as exc:  # noqa: BLE001 -- daemon must never die

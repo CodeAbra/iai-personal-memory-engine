@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 import networkx as nx
 import pytest
@@ -134,3 +136,28 @@ def test_compute_sigma_ceiling_env_override(monkeypatch):
     g = nx.connected_watts_strogatz_graph(300, 6, 0.1, seed=42)
     mg = _nx_graph_to_memory_graph(g)
     assert compute_sigma(mg) is None
+
+
+def test_topology_snapshot_reuses_payload_centrality_for_rich_club(monkeypatch):
+    from iai_mcp import sigma
+    from iai_mcp.graph import MemoryGraph
+
+    graph = MemoryGraph()
+    nodes = [uuid4() for _ in range(12)]
+    for idx, node_id in enumerate(nodes):
+        graph.add_node(node_id, community_id=None, embedding=[0.0] * 8)
+        graph.set_node_centrality(node_id, float(idx + 1))
+    for left, right in zip(nodes, nodes[1:]):
+        graph.add_edge(left, right, weight=1.0, edge_type="hebbian")
+
+    def fail_exact_centrality(self):
+        raise AssertionError("topology snapshot must not call exact centrality")
+
+    monkeypatch.setattr(MemoryGraph, "centrality", fail_exact_centrality)
+
+    snap = sigma.compute_topology_snapshot(
+        graph,
+        assignment=SimpleNamespace(community_centroids={0: [nodes[0]]}),
+    )
+
+    assert snap["rich_club_ratio"] > 0.0

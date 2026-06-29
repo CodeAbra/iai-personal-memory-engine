@@ -36,6 +36,17 @@ STALE_DOWNWEIGHT_FACTOR: float = 0.5
 _STALE_REASON_SUFFIX: str = " · stale"
 
 
+def _has_tombstone_marker(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and math.isnan(value):
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    return text.lower() not in {"none", "nan", "nat", "<na>"}
+
+
 # The community graph is an enhancement layer over the index recall path: a
 # record is findable by cosine/ANN as soon as it lands in the index, before it
 # is ever folded into the community graph. So the community graph may lag the
@@ -780,21 +791,13 @@ def _build_runtime_graph_impl(store: MemoryStore):
         ):
             if int(row.get("embedding_pending") or 0) != 0:
                 continue
-            # Defensive in-loop guard mirroring the SQL filter: the batch reader
-            # yields a Python None for a NULL tombstoned_at, but a backend that
-            # surfaces the column via a datetime/NA representation could stringify
-            # a live value; only a real, non-empty timestamp string marks a
-            # tombstone. (pandas is imported lazily so the streaming path keeps no
-            # hard pandas dependency.)
+            # Defensive in-loop guard mirroring the SQL filter: only a real,
+            # non-empty timestamp string marks a tombstone. Keep pandas out of
+            # this daemon rebuild path; it showed up in live latency profiles
+            # while recall was waiting on the daemon.
             _tomb = row.get("tombstoned_at")
-            if _tomb is not None:
-                try:
-                    import pandas as _pd
-                    _is_na = bool(_pd.isna(_tomb))
-                except Exception:  # noqa: BLE001 -- pandas absent / unhashable value
-                    _is_na = False
-                if not _is_na and str(_tomb).strip():
-                    continue
+            if _has_tombstone_marker(_tomb):
+                continue
             rid = UUID(row["id"])
             _comm_raw = row.get("community_id")
             community_id = UUID(_comm_raw) if _comm_raw else None
@@ -869,8 +872,11 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 },
             )
 
-    edges_df = store.db.open_table("edges").to_pandas()
-    for _, row in edges_df.iterrows():
+    with store.db._conn_lock:
+        edge_rows = store.db._conn.execute(
+            "SELECT src, dst, edge_type, weight FROM edges"
+        ).fetchall()
+    for row in edge_rows:
         # Skip edges whose endpoints are not live nodes: graph.add_edge() does
         # setdefault() on both endpoints, so an edge referencing a tombstoned
         # record would re-create it as a payload-less node and undo the tombstone

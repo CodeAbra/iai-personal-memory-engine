@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -131,7 +132,7 @@ def test_recall_for_response_returns_recall_response_type(tmp_path) -> None:
 
 
 def test_active_id_filter_excludes_tombstoned_records(tmp_path) -> None:
-    from iai_mcp.pipeline import _filter_active_ids
+    from iai_mcp.pipeline import _active_id_set, _filter_active_ids
 
     store = MemoryStore(path=tmp_path / "hippo")
     live = _make([1.0] + [0.0] * (EMBED_DIM - 1), text="live")
@@ -145,6 +146,110 @@ def test_active_id_filter_excludes_tombstoned_records(tmp_path) -> None:
     store.db._conn.commit()
 
     assert _filter_active_ids([live.id, stale.id], store) == [live.id]
+    assert _active_id_set([live.id, stale.id, live.id], store) == {live.id}
+
+
+def test_recall_for_response_sanitizes_non_finite_vectors(tmp_path) -> None:
+    from iai_mcp.pipeline import recall_for_response
+
+    store = MemoryStore(path=tmp_path / "hippo")
+    recs = [
+        _make([1.0] + [0.0] * (EMBED_DIM - 1), text="inf rec"),
+        _make([0.0, 1.0] + [0.0] * (EMBED_DIM - 2), text="nan rec"),
+    ]
+    for rec in recs:
+        store.insert(rec)
+    graph_vectors = [
+        [float("inf")] + [0.0] * (EMBED_DIM - 1),
+        [float("nan")] + [1.0] + [0.0] * (EMBED_DIM - 2),
+    ]
+    graph = MemoryGraph()
+    for rec, graph_vec in zip(recs, graph_vectors):
+        graph.add_node(rec.id, community_id=None, embedding=list(graph_vec))
+        graph.set_node_payload(rec.id, {
+            "embedding": list(graph_vec),
+            "surface": rec.literal_surface,
+            "centrality": 0.0,
+            "tier": rec.tier,
+            "tags": [],
+            "language": "en",
+        })
+    assignment = _flat_assignment(recs)
+    bad_cue = [float("nan"), float("inf")] + [0.0] * (EMBED_DIM - 2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        resp = recall_for_response(
+            store=store,
+            graph=graph,
+            assignment=assignment,
+            rich_club=[],
+            embedder=_FakeEmbedder(vec=bad_cue),
+            cue="non finite cue",
+            session_id="s-non-finite",
+        )
+
+    assert isinstance(resp, RecallResponse)
+
+
+def test_recall_for_response_does_not_recompute_missing_centrality(
+    tmp_path, monkeypatch,
+) -> None:
+    from iai_mcp import centrality_approx
+    from iai_mcp.pipeline import recall_for_response
+
+    store, graph, recs = _build_store_and_graph(tmp_path, n=5)
+    assignment = _flat_assignment(recs)
+
+    def _raise_if_called(_graph):
+        raise AssertionError("recall hot path must not recompute graph centrality")
+
+    monkeypatch.setattr(centrality_approx, "centrality_for_runtime", _raise_if_called)
+
+    resp = recall_for_response(
+        store=store,
+        graph=graph,
+        assignment=assignment,
+        rich_club=[],
+        embedder=_FakeEmbedder(),
+        cue="missing centrality",
+        session_id="s-missing-centrality",
+    )
+
+    assert isinstance(resp, RecallResponse)
+    assert isinstance(resp.hits, list)
+
+
+def test_recall_for_response_uses_batch_cache_not_all_records(
+    tmp_path, monkeypatch,
+) -> None:
+    from iai_mcp.pipeline import recall_for_response
+
+    store, graph, recs = _build_store_and_graph(tmp_path, n=5)
+    graph_without_payload = MemoryGraph()
+    for rec in recs:
+        graph_without_payload.add_node(
+            rec.id, community_id=None, embedding=list(rec.embedding),
+        )
+    assignment = _flat_assignment(recs)
+
+    def _no_all_records():
+        raise AssertionError("recall hot path must not call all_records")
+
+    monkeypatch.setattr(store, "all_records", _no_all_records)
+
+    resp = recall_for_response(
+        store=store,
+        graph=graph_without_payload,
+        assignment=assignment,
+        rich_club=[],
+        embedder=_FakeEmbedder(),
+        cue="batch cache",
+        session_id="s-batch-cache",
+    )
+
+    assert isinstance(resp, RecallResponse)
+    assert isinstance(resp.hits, list)
 
 
 def test_durable_tier_bias_prefers_semantic_for_durable_cues(tmp_path) -> None:

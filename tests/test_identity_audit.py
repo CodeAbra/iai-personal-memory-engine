@@ -92,6 +92,33 @@ def test_audit_shuts_down_cleanly(monkeypatch):
     asyncio.run(runner())
 
 
+def test_audit_defers_first_iteration_by_default(monkeypatch):
+    from iai_mcp import identity_audit
+
+    s5_calls: list = []
+
+    def fake_s5(store, window):
+        s5_calls.append(1)
+        return []
+
+    monkeypatch.setattr(identity_audit, "detect_drift_anomaly", fake_s5)
+    monkeypatch.setattr(identity_audit, "compute_and_emit", lambda s: {})
+    monkeypatch.delenv("IAI_MCP_AUDIT_FIRST_ITER_GRACE_SEC", raising=False)
+
+    async def runner():
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(
+            identity_audit.continuous_audit(object(), shutdown, interval_sec=10.0)
+        )
+        await asyncio.sleep(0.03)
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(runner())
+
+    assert s5_calls == []
+
+
 def test_audit_survives_s5_exception_and_emits_event(monkeypatch):
     from iai_mcp import identity_audit
 

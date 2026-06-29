@@ -616,16 +616,15 @@ class MemoryStore:
         self._fire_graph_sync_hook("delete", _DeleteShim(record_id))
 
     def get(self, record_id: UUID) -> MemoryRecord | None:
-        tbl = self.db.open_table(RECORDS_TABLE)
-        df = (
-            tbl.search()
-            .where(f"id = '{_uuid_literal(record_id)}'")
-            .limit(1)
-            .to_pandas()
+        rid = _uuid_literal(record_id)
+        sql = (  # nosemgrep: sql-injection
+            f"SELECT {self._RECORD_COLS} FROM records WHERE id = ? LIMIT 1"
         )
-        if df.empty:
+        with self.db._conn_lock:
+            raw = self.db._conn.execute(sql, (rid,)).fetchone()
+        if raw is None:
             return None
-        return self._from_row(df.iloc[0].to_dict())
+        return self._from_row(self._decode_raw_row(dict(raw)))
 
     def all_records(self) -> list[MemoryRecord]:
         tbl = self.db.open_table(RECORDS_TABLE)
@@ -674,17 +673,22 @@ class MemoryStore:
     def centrality_for_ids(self, ids: list[UUID]) -> dict[UUID, float]:
         if not ids:
             return {}
-        target = frozenset(str(i) for i in ids)
+        str_ids = list(dict.fromkeys(str(i) for i in ids))
+        placeholders = ", ".join("?" for _ in str_ids)
         out: dict[UUID, float] = {}
-        for row in self.iter_record_columns(["id", "centrality"]):
-            raw_id = row.get("id")
+        with self.db._conn_lock:
+            rows = self.db._conn.execute(
+                f"SELECT id, centrality FROM records WHERE id IN ({placeholders})",
+                str_ids,
+            ).fetchall()
+        for row in rows:
+            raw_id = row["id"] if hasattr(row, "keys") else row[0]
             if raw_id is None:
                 continue
             id_str = str(raw_id)
-            if id_str not in target:
-                continue
             try:
-                centrality = float(row.get("centrality") or 0.0)
+                raw_centrality = row["centrality"] if hasattr(row, "keys") else row[1]
+                centrality = float(raw_centrality or 0.0)
             except (TypeError, ValueError):
                 centrality = 0.0
             try:
@@ -808,22 +812,69 @@ class MemoryStore:
             )
 
         tbl = self.db.open_table(RECORDS_TABLE)
-        if tbl.count_rows() == 0:
-            return []
         q = tbl.search(list(vec)).distance_type("cosine")
         where_clause = "tombstoned_at IS NULL AND COALESCE(embedding_pending, 0) = 0"
         if tier is not None:
             where_clause = f"tier = '{tier}' AND " + where_clause
-        q = q.where(where_clause)
-        results = q.limit(k).to_pandas()
-        out: list[tuple[MemoryRecord, float]] = []
-        for _, row in results.iterrows():
-            record = self._from_row(row.to_dict())
-            distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
-            score = 1.0 - distance
-            out.append((record, score))
+        try:
+            out = self._query_similar_fast(q, where_clause, k)
+        except Exception as exc:  # noqa: BLE001 -- preserve legacy fallback
+            logger.warning("query_similar_fast_failed_degraded: %s", exc)
+            out = []
         if _return_records_only:
             return [r for r, _s in out]
+        return out
+
+    def _query_similar_fast(
+        self,
+        query,
+        where_clause: str,
+        k: int,
+    ) -> list[tuple[MemoryRecord, float]]:
+        db = query._ann_db
+        ann_vector = query._ann_vector
+        if db is None or ann_vector is None:
+            return []
+        with db._hnsw_lock:
+            active_count = len(db._label_map)
+            hnsw_count = db._hnsw.get_current_count()
+            k_clamped = min(max(0, int(k)), active_count, hnsw_count)
+            if k_clamped == 0:
+                return []
+            labels, distances = db._hnsw.knn_query(ann_vector, k=k_clamped)
+
+        flat_labels = [int(label) for label in labels[0].tolist()]
+        if not flat_labels:
+            return []
+        flat_distances = [
+            max(0.0, min(2.0, float(distance))) for distance in distances[0]
+        ]
+        dist_map = {
+            int(label): float(distance)
+            for label, distance in zip(flat_labels, flat_distances)
+        }
+
+        placeholders = ", ".join("?" for _ in flat_labels)
+        sql = (  # nosemgrep: sql-injection
+            f"SELECT {self._RECORD_COLS}, vec_label FROM records"
+            f" WHERE vec_label IN ({placeholders}) AND ({where_clause})"
+        )
+        with self.db._conn_lock:
+            raw_rows = self.db._conn.execute(sql, flat_labels).fetchall()
+
+        out: list[tuple[MemoryRecord, float]] = []
+        sort_distance_by_id: dict[UUID, float] = {}
+        for raw in raw_rows:
+            row_dict = self._decode_raw_row(dict(raw))
+            label = int(row_dict.get("vec_label") or 0)
+            try:
+                record = self._from_row(row_dict)
+            except Exception:  # noqa: BLE001 -- skip corrupt rows, never crash recall
+                continue
+            distance = dist_map.get(label, 1.0)
+            sort_distance_by_id[record.id] = distance
+            out.append((record, 1.0 - distance))
+        out.sort(key=lambda item: sort_distance_by_id.get(item[0].id, 1.0))
         return out
 
     def pattern_separation_gate(
@@ -1080,6 +1131,53 @@ class MemoryStore:
 
         str_ids = [str(i) for i in ids]
         id_set = set(str_ids)
+
+        if edge_types == []:
+            return {i: [] for i in ids}
+
+        if top_k is not None:
+            result: dict[UUID, list[tuple[UUID, str, float]]] = {i: [] for i in ids}
+            limit = max(0, int(top_k))
+            if limit <= 0:
+                return result
+
+            edge_type_sql = ""
+            edge_type_params: list[str] = []
+            if edge_types is not None:
+                et_ph = ", ".join("?" for _ in edge_types)
+                edge_type_sql = f" AND edge_type IN ({et_ph})"
+                edge_type_params = list(edge_types)
+
+            with self.db._conn_lock:
+                for uid, sid in zip(ids, str_ids):
+                    rows = []
+                    rows.extend(self.db._conn.execute(
+                        "SELECT dst, edge_type, weight FROM edges"
+                        f" WHERE src = ?{edge_type_sql}"
+                        " ORDER BY weight DESC LIMIT ?",
+                        [sid, *edge_type_params, limit],
+                    ).fetchall())
+                    rows.extend(self.db._conn.execute(
+                        "SELECT src, edge_type, weight FROM edges"
+                        f" WHERE dst = ? AND src != ?{edge_type_sql}"
+                        " ORDER BY weight DESC LIMIT ?",
+                        [sid, sid, *edge_type_params, limit],
+                    ).fetchall())
+
+                    for row in rows:
+                        nbr_s = str(row[0] if hasattr(row, "__getitem__") else row["dst"])
+                        et = str(row[1] if hasattr(row, "__getitem__") else row["edge_type"])
+                        wt = float(row[2] if hasattr(row, "__getitem__") else row["weight"])
+                        try:
+                            neighbour = UUID(nbr_s)
+                        except (ValueError, AttributeError):
+                            continue
+                        result[uid].append((neighbour, et, wt))
+
+                    result[uid].sort(key=lambda t: t[2], reverse=True)
+                    result[uid] = result[uid][:limit]
+
+            return result
 
         ph = ", ".join("?" for _ in str_ids)
         sql = (  # nosemgrep: sql-injection
@@ -1679,8 +1777,6 @@ class MemoryStore:
     def _from_row(self, row: dict) -> MemoryRecord:
         from uuid import UUID as _UUID
 
-        import pandas as pd
-
         def _safe_int(val: Any, default: int) -> int:
             if val is None:
                 return default
@@ -1696,14 +1792,24 @@ class MemoryStore:
             if val is None:
                 return None
             try:
-                if pd.isna(val):
+                if val != val:
+                    return None
+            except (TypeError, ValueError):
+                pass
+            try:
+                if str(val) in {"NaT", "nan", "NaN"}:
                     return None
             except (TypeError, ValueError):
                 pass
             if isinstance(val, datetime):
                 return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
             if hasattr(val, "to_pydatetime"):
-                dt = val.to_pydatetime()
+                try:
+                    dt = val.to_pydatetime()
+                except (TypeError, ValueError, AttributeError):
+                    return None
+                if dt is None:
+                    return None
                 return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
             try:
                 dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))

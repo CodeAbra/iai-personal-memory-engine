@@ -240,7 +240,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _global_edges_hebb = store.incident_edges(
                             _all_cand_ids,
                             edge_types=["hebbian"],
-                            top_k=None,
+                            top_k=20,
                         )
                         graph._global_degree = {
                             str(_cid): len(_nbrs)
@@ -266,7 +266,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _contr_edges = store.incident_edges(
                             _all_candidate_ids,
                             edge_types=["contradicts"],
-                            top_k=None,
+                            top_k=10,
                         )
                         _contr_dst_ids = []
                         for _src_id, _edges in _contr_edges.items():
@@ -801,7 +801,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 total_dynamic_tokens=1000,
             )
             return _payload_to_json(empty)
-        _graph, assignment, rc = retrieve.build_runtime_graph(store)
+        from iai_mcp import runtime_graph_cache as _rgc
+        assignment, rc, _max_degree, _source = _rgc.load_recall_structural(store)
         payload = assemble_session_start(
             store, assignment, rc,
             session_id=sid,
@@ -1119,8 +1120,8 @@ def _first_turn_recall_hook(
         if not warm_hit_ids and str(session_id) not in _CORE_CASCADE_FIRED_PER_SESSION:
             try:
                 from iai_mcp.hippea_cascade import compute_core_side_warm_snapshot
-                from iai_mcp import retrieve as _retrieve
-                _graph, assignment, _rc = _retrieve.build_runtime_graph(store)
+                from iai_mcp import runtime_graph_cache as _rgc
+                assignment, _rc, _max_degree, _source = _rgc.load_recall_structural(store)
                 warm_ids = compute_core_side_warm_snapshot(
                     store, assignment, top_k=3, max_records=50,
                 )

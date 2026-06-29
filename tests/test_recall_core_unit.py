@@ -747,6 +747,43 @@ def test_preload_ready_flag_exists_and_is_event():
     )
 
 
+def test_boot_preload_does_not_rebuild_runtime_graph():
+    import inspect
+    import iai_mcp.daemon as daemon_mod
+
+    source = inspect.getsource(daemon_mod)
+    start = source.index("async def _boot_preload")
+    end = source.index("asyncio.create_task(_boot_preload())", start)
+    preload_source = source[start:end]
+
+    assert "load_recall_structural" in preload_source
+    assert "build_runtime_graph" not in preload_source
+
+
+def test_session_start_payload_dispatch_does_not_rebuild_runtime_graph():
+    import inspect
+    import iai_mcp.core as core_mod
+
+    source = inspect.getsource(core_mod)
+    start = source.index('if method == "session_start_payload"')
+    end = source.index('if method == "session_refresh_if_stale"', start)
+    payload_source = source[start:end]
+
+    assert "load_recall_structural" in payload_source
+    assert "build_runtime_graph" not in payload_source
+
+
+def test_wake_session_cache_write_uses_structural_snapshot_unless_forced():
+    import inspect
+    import iai_mcp.daemon as daemon_mod
+
+    source = inspect.getsource(daemon_mod._write_session_start_cache)
+
+    assert "load_recall_structural" in source
+    assert "if force_rebuild" in source
+    assert source.index("load_recall_structural") > source.index("if force_rebuild")
+
+
 def test_uncapped_contradicts_ts_by_id(tmp_path, monkeypatch):
     store = _make_store_hermetic(tmp_path, monkeypatch)
 

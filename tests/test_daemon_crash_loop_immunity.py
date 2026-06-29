@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -237,7 +238,7 @@ def test_socket_binds_before_drain_completes(tmp_path, monkeypatch, request):
 
     keyring.core._keyring_backend = None
 
-    tmp_socket = tmp_path / f"iai-test-{os.getpid()}.sock"
+    tmp_socket = Path(tempfile.gettempdir()) / f"iai-test-{os.getpid()}-{time.monotonic_ns()}.sock"
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_socket))
 
     def _cleanup_socket():

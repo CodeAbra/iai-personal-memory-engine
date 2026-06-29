@@ -224,8 +224,8 @@ def _invoke_first_turn_hook(session_id="sess-a", cue="hello"):
             "iai_mcp.retrieve.recall",
             return_value=mock.MagicMock(hits=[], budget_used=0, anti_hits=[]),
         ), mock.patch(
-            "iai_mcp.retrieve.build_runtime_graph",
-            return_value=(None, _make_assignment_with_communities(), None),
+            "iai_mcp.runtime_graph_cache.load_recall_structural",
+            return_value=(_make_assignment_with_communities(), None, 0, "test"),
         ):
             _core._first_turn_recall_hook(response, params=params, store=store)
     return response
@@ -296,8 +296,8 @@ def test_m04_regression_fence_cascade_is_read_only():
     ), mock.patch(
         "iai_mcp.retrieve.recall", side_effect=_recall_side_effect,
     ), mock.patch(
-        "iai_mcp.retrieve.build_runtime_graph",
-        return_value=(None, _make_assignment_with_communities(), None),
+        "iai_mcp.runtime_graph_cache.load_recall_structural",
+        return_value=(_make_assignment_with_communities(), None, 0, "test"),
     ):
         from iai_mcp import core as _core
 
@@ -313,6 +313,39 @@ def test_m04_regression_fence_cascade_is_read_only():
             ):
                 _core._first_turn_recall_hook(resp, params=params, store=store)
     assert len(observed_results) == 3
+
+
+def test_first_turn_core_cascade_does_not_rebuild_runtime_graph():
+    from iai_mcp import core as _core
+
+    response: dict = {}
+    params = {"session_id": "sess-no-rebuild", "cue": "hello"}
+    store = mock.MagicMock()
+    store.get = mock.MagicMock(return_value=None)
+
+    with mock.patch(
+        "iai_mcp.hippea_cascade.snapshot_warm_ids", return_value=[]
+    ), mock.patch(
+        "iai_mcp.hippea_cascade.compute_core_side_warm_snapshot",
+        return_value=[uuid4()],
+    ), mock.patch(
+        "iai_mcp.runtime_graph_cache.load_recall_structural",
+        return_value=(_make_assignment_with_communities(), None, 0, "test"),
+    ) as load_structural, mock.patch(
+        "iai_mcp.retrieve.build_runtime_graph",
+        side_effect=AssertionError("runtime graph rebuild must stay off recall hot path"),
+    ), mock.patch(
+        "iai_mcp.daemon_state.consume_first_turn", return_value=True
+    ), mock.patch(
+        "iai_mcp.daemon_state.load_state", return_value={}
+    ), mock.patch(
+        "iai_mcp.retrieve.recall",
+        return_value=mock.MagicMock(hits=[], budget_used=0, anti_hits=[]),
+    ):
+        _core._first_turn_recall_hook(response, params=params, store=store)
+
+    assert "first_turn_recall" in response
+    assert load_structural.call_count == 1
 
 
 def test_response_carries_warm_lru_source():
