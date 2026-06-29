@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -172,6 +173,65 @@ def test_memory_recall_socket_round_trip_latency(short_socket_paths, monkeypatch
     assert resp["id"] == 7, resp
     assert resp["result"]["hits"] == []
     assert elapsed_ms < 250.0, f"socket round-trip took {elapsed_ms:.1f} ms"
+
+
+def test_memory_recall_socket_concurrency_limit_returns_busy(short_socket_paths, monkeypatch):
+    _, sock_path, _ = short_socket_paths
+    from iai_mcp import core
+    from iai_mcp.store import MemoryStore
+
+    monkeypatch.setenv("IAI_MCP_RECALL_CONCURRENCY", "1")
+    monkeypatch.setenv("IAI_MCP_RECALL_SLOT_WAIT_SEC", "0.02")
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    calls: list[str] = []
+
+    def _dispatch(store, method, params):
+        assert method == "memory_recall"
+        cue = params["cue"]
+        calls.append(cue)
+        if cue == "slow":
+            slow_started.set()
+            assert release_slow.wait(timeout=2.0)
+        return {"hits": [], "_recall_latency_ms": 0.1, "cue": cue}
+
+    monkeypatch.setattr(core, "dispatch", _dispatch)
+    store = MemoryStore()
+
+    async def _runner(sock_path, store):
+        slow_task = asyncio.create_task(
+            _send_jsonrpc(
+                sock_path,
+                "memory_recall",
+                {"cue": "slow", "budget_tokens": 100},
+                req_id="slow",
+                timeout=5.0,
+            )
+        )
+        for _ in range(200):
+            if slow_started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert slow_started.is_set(), "slow recall never acquired the only slot"
+
+        busy = await _send_jsonrpc(
+            sock_path,
+            "memory_recall",
+            {"cue": "busy", "budget_tokens": 100},
+            req_id="busy",
+            timeout=5.0,
+        )
+        release_slow.set()
+        slow = await slow_task
+        return slow, busy
+
+    slow, busy = asyncio.run(_with_socket_server(sock_path, store, _runner))
+
+    assert slow["result"]["cue"] == "slow"
+    assert busy["result"]["_degraded"] is True
+    assert busy["result"]["_reason"] == "recall_busy"
+    assert calls == ["slow"]
 
 def test_session_start_payload_routed(short_socket_paths):
     _, sock_path, _ = short_socket_paths

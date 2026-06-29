@@ -111,6 +111,7 @@ def _hermetic_env(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "store"))
     monkeypatch.delenv("IAI_DAEMON_SOCKET_PATH", raising=False)
+    monkeypatch.delenv("IAI_RECALL_READ_TIMEOUT", raising=False)
     yield
 
 

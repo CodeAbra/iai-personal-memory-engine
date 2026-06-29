@@ -240,7 +240,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _global_edges_hebb = store.incident_edges(
                             _all_cand_ids,
                             edge_types=["hebbian"],
-                            top_k=20,
+                            top_k=None,
                         )
                         graph._global_degree = {
                             str(_cid): len(_nbrs)
@@ -266,7 +266,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _contr_edges = store.incident_edges(
                             _all_candidate_ids,
                             edge_types=["contradicts"],
-                            top_k=10,
+                            top_k=None,
                         )
                         _contr_dst_ids = []
                         for _src_id, _edges in _contr_edges.items():

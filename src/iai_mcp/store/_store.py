@@ -1156,34 +1156,56 @@ class MemoryStore:
                 edge_type_sql = f" AND edge_type IN ({et_ph})"
                 edge_type_params = list(edge_types)
 
+            ph = ", ".join("?" for _ in str_ids)
+            outbound_sql = (  # nosemgrep: sql-injection
+                f"SELECT src, dst, edge_type, weight FROM edges"
+                f" WHERE src IN ({ph}){edge_type_sql}"
+            )
+            inbound_sql = (  # nosemgrep: sql-injection
+                f"SELECT src, dst, edge_type, weight FROM edges"
+                f" WHERE dst IN ({ph}) AND src != dst{edge_type_sql}"
+            )
             with self.db._conn_lock:
-                for uid, sid in zip(ids, str_ids):
-                    rows = []
-                    rows.extend(self.db._conn.execute(
-                        "SELECT dst, edge_type, weight FROM edges"
-                        f" WHERE src = ?{edge_type_sql}"
-                        " ORDER BY weight DESC LIMIT ?",
-                        [sid, *edge_type_params, limit],
-                    ).fetchall())
-                    rows.extend(self.db._conn.execute(
-                        "SELECT src, edge_type, weight FROM edges"
-                        f" WHERE dst = ? AND src != ?{edge_type_sql}"
-                        " ORDER BY weight DESC LIMIT ?",
-                        [sid, sid, *edge_type_params, limit],
-                    ).fetchall())
+                outbound_rows = self.db._conn.execute(
+                    outbound_sql, [*str_ids, *edge_type_params],
+                ).fetchall()
+                inbound_rows = self.db._conn.execute(
+                    inbound_sql, [*str_ids, *edge_type_params],
+                ).fetchall()
 
-                    for row in rows:
-                        nbr_s = str(row[0] if hasattr(row, "__getitem__") else row["dst"])
-                        et = str(row[1] if hasattr(row, "__getitem__") else row["edge_type"])
-                        wt = float(row[2] if hasattr(row, "__getitem__") else row["weight"])
-                        try:
-                            neighbour = UUID(nbr_s)
-                        except (ValueError, AttributeError):
-                            continue
-                        result[uid].append((neighbour, et, wt))
+            id_to_uuid: dict[str, UUID] = {str(i): i for i in ids}
 
-                    result[uid].sort(key=lambda t: t[2], reverse=True)
-                    result[uid] = result[uid][:limit]
+            for row in outbound_rows:
+                src_s = str(row[0] if hasattr(row, "__getitem__") else row["src"])
+                dst_s = str(row[1] if hasattr(row, "__getitem__") else row["dst"])
+                et = str(row[2] if hasattr(row, "__getitem__") else row["edge_type"])
+                wt = float(row[3] if hasattr(row, "__getitem__") else row["weight"])
+                qid = id_to_uuid.get(src_s)
+                if qid is None:
+                    continue
+                try:
+                    neighbour = UUID(dst_s)
+                except (ValueError, AttributeError):
+                    continue
+                result[qid].append((neighbour, et, wt))
+
+            for row in inbound_rows:
+                src_s = str(row[0] if hasattr(row, "__getitem__") else row["src"])
+                dst_s = str(row[1] if hasattr(row, "__getitem__") else row["dst"])
+                et = str(row[2] if hasattr(row, "__getitem__") else row["edge_type"])
+                wt = float(row[3] if hasattr(row, "__getitem__") else row["weight"])
+                qid = id_to_uuid.get(dst_s)
+                if qid is None:
+                    continue
+                try:
+                    neighbour = UUID(src_s)
+                except (ValueError, AttributeError):
+                    continue
+                result[qid].append((neighbour, et, wt))
+
+            for uid, edges in result.items():
+                edges.sort(key=lambda t: t[2], reverse=True)
+                result[uid] = edges[:limit]
 
             return result
 

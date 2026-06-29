@@ -470,7 +470,7 @@ def _find_anti_hits(
 
     try:
         _contr_map = store.incident_edges(
-            hit_ids, edge_types=["contradicts"], top_k=max(k * 4, 10),
+            hit_ids, edge_types=["contradicts"], top_k=None,
         )
     except Exception as exc:  # noqa: BLE001 -- anti-hits is enrichment; degrade to []
         logger.debug("_find_anti_hits incident_edges failed: %s", exc)

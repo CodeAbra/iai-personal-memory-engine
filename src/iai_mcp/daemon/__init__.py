@@ -65,6 +65,7 @@ STARTUP_DEFERRED_DRAIN_GRACE_SEC: float = float(
     os.environ.get("IAI_MCP_STARTUP_DEFERRED_DRAIN_GRACE_SEC", "20.0")
 )
 CAPTURE_QUEUE_RETRY_PENDING_KEY: str = "_capture_queue_drain_retry_pending"
+# Telemetry only: useful for diagnosing repeated startup skips / retry failures.
 CAPTURE_QUEUE_LAST_RETRY_KEY: str = "_capture_queue_drain_last_retry_at"
 
 DEFAULT_CYCLE_COUNT: int = 4

@@ -760,28 +760,64 @@ def test_boot_preload_does_not_rebuild_runtime_graph():
     assert "build_runtime_graph" not in preload_source
 
 
-def test_session_start_payload_dispatch_does_not_rebuild_runtime_graph():
-    import inspect
+def test_session_start_payload_dispatch_does_not_rebuild_runtime_graph(tmp_path, monkeypatch):
     import iai_mcp.core as core_mod
+    import iai_mcp.retrieve as retrieve_mod
+    import iai_mcp.runtime_graph_cache as rgc_mod
 
-    source = inspect.getsource(core_mod)
-    start = source.index('if method == "session_start_payload"')
-    end = source.index('if method == "session_refresh_if_stale"', start)
-    payload_source = source[start:end]
+    store = _make_store_hermetic(tmp_path, monkeypatch)
+    recs = _insert_recs(store, 3)
+    assignment = _flat_assignment(recs)
 
-    assert "load_recall_structural" in payload_source
-    assert "build_runtime_graph" not in payload_source
+    def _no_build_runtime_graph(*_args, **_kwargs):
+        raise AssertionError("session_start_payload must not rebuild runtime graph")
+
+    monkeypatch.setattr(retrieve_mod, "build_runtime_graph", _no_build_runtime_graph)
+    monkeypatch.setattr(
+        rgc_mod,
+        "load_recall_structural",
+        lambda _store: (assignment, [recs[0].id], 0, "warm"),
+    )
+
+    payload = core_mod.dispatch(
+        store,
+        "session_start_payload",
+        {"session_id": "session-start-no-rebuild"},
+    )
+
+    assert "l0" in payload
+    assert "l1" in payload
+    assert "wake_depth" in payload
 
 
-def test_wake_session_cache_write_uses_structural_snapshot_unless_forced():
-    import inspect
+def test_wake_session_cache_write_uses_structural_snapshot_unless_forced(tmp_path, monkeypatch):
     import iai_mcp.daemon as daemon_mod
+    import iai_mcp.retrieve as retrieve_mod
+    import iai_mcp.runtime_graph_cache as rgc_mod
 
-    source = inspect.getsource(daemon_mod._write_session_start_cache)
+    store = _make_store_hermetic(tmp_path, monkeypatch)
+    recs = _insert_recs(store, 3)
+    assignment = _flat_assignment(recs)
 
-    assert "load_recall_structural" in source
-    assert "if force_rebuild" in source
-    assert source.index("load_recall_structural") > source.index("if force_rebuild")
+    def _no_build_runtime_graph(*_args, **_kwargs):
+        raise AssertionError("WAKE session cache write must not rebuild runtime graph")
+
+    monkeypatch.setattr(retrieve_mod, "build_runtime_graph", _no_build_runtime_graph)
+    monkeypatch.setattr(daemon_mod, "_runtime_graph_cache_is_warm", lambda _store: True)
+    monkeypatch.setattr(
+        rgc_mod,
+        "load_recall_structural",
+        lambda _store: (assignment, [recs[0].id], 0, "warm"),
+    )
+
+    result = daemon_mod._write_session_start_cache(
+        store,
+        cache_path=tmp_path / "session-start.cached.md",
+        trigger="periodic_wake",
+        force_rebuild=False,
+    )
+
+    assert result["action"] == "wrote"
 
 
 def test_uncapped_contradicts_ts_by_id(tmp_path, monkeypatch):
@@ -812,6 +848,136 @@ def test_uncapped_contradicts_ts_by_id(tmp_path, monkeypatch):
     assert len(uncapped_nbrs) == 6, "UNCAPPED should return all 6 contradicts targets"
     assert len(capped_nbrs) <= 5, "Capped top_k=5 should return at most 5"
     assert uncapped_nbrs >= capped_nbrs, "UNCAPPED must be a superset of capped"
+
+
+def test_memory_recall_global_degree_uses_uncapped_hub_edges(monkeypatch):
+    import iai_mcp.core as core_mod
+    import iai_mcp.embed as embed_mod
+    import iai_mcp.runtime_graph_cache as rgc_mod
+    import iai_mcp.pipeline as pipeline_mod
+    from iai_mcp.types import RecallResponse
+
+    hub = _make([1.0] + [0.0] * (EMBED_DIM - 1), text="hub")
+    spokes = [
+        _make([0.0, 1.0] + [0.0] * (EMBED_DIM - 2), text=f"spoke{i}")
+        for i in range(51)
+    ]
+    contradicts = [
+        _make([0.0, 0.0, 1.0] + [0.0] * (EMBED_DIM - 3), text=f"contr{i}")
+        for i in range(12)
+    ]
+    all_records = {r.id: r for r in [hub, *spokes, *contradicts]}
+    assignment = _flat_assignment([hub])
+    captured: dict[str, Any] = {"incident_calls": []}
+
+    class _Table:
+        def count_rows(self):
+            return 1
+
+    class _Db:
+        def open_table(self, name):
+            assert name == "records"
+            return _Table()
+
+    class _Store:
+        db = _Db()
+
+        def query_similar(self, vec, k):
+            return [(hub, 1.0)]
+
+        def incident_edges(self, ids, edge_types=None, top_k=5):
+            captured["incident_calls"].append((tuple(ids), edge_types, top_k))
+            if edge_types == ["hebbian"]:
+                assert top_k is None
+                return {
+                    hub.id: [
+                        (spoke.id, "hebbian", 1.0)
+                        for spoke in spokes
+                    ],
+                }
+            if edge_types == ["contradicts"]:
+                assert top_k is None
+                return {
+                    hub.id: [
+                        (rec.id, "contradicts", 1.0)
+                        for rec in contradicts
+                    ],
+                }
+            return {i: [] for i in ids}
+
+        def get_batch(self, ids):
+            return {rid: all_records[rid] for rid in ids if rid in all_records}
+
+        def reinforce_record(self, *_args, **_kwargs):
+            return None
+
+        def get(self, rid):
+            return all_records.get(rid)
+
+    class _Embedder:
+        def embed(self, text):
+            return [1.0] + [0.0] * (EMBED_DIM - 1)
+
+    def _fake_embedder_for_store(store):
+        return _Embedder()
+
+    def _fake_recall_for_response(**kwargs):
+        captured["graph"] = kwargs["graph"]
+        captured["tv_maps"] = kwargs.get("tv_maps")
+        return RecallResponse(
+            hits=[],
+            anti_hits=[],
+            activation_trace=[],
+            budget_used=0,
+        )
+
+    monkeypatch.setattr(rgc_mod, "load_recall_structural", lambda store: (assignment, [], 0, "warm"))
+    monkeypatch.setattr(embed_mod, "embedder_for_store", _fake_embedder_for_store)
+    monkeypatch.setattr(pipeline_mod, "recall_for_response", _fake_recall_for_response)
+
+    core_mod.dispatch(_Store(), "memory_recall", {"cue": "hub", "budget_tokens": 100})
+
+    graph = captured["graph"]
+    assert graph._global_degree[str(hub.id)] == 51
+    outgoing, ts_by_id = captured["tv_maps"]
+    assert len(outgoing[str(hub.id)]) == 12
+    assert str(contradicts[-1].id) in ts_by_id
+    assert any(call[1] == ["hebbian"] and call[2] is None for call in captured["incident_calls"])
+    assert any(call[1] == ["contradicts"] and call[2] is None for call in captured["incident_calls"])
+
+
+def test_find_anti_hits_queries_uncapped_contradictions():
+    from iai_mcp.graph import MemoryGraph
+    from iai_mcp.pipeline import _find_anti_hits
+    from iai_mcp.types import MemoryHit
+
+    hit_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    class _Store:
+        def incident_edges(self, ids, edge_types=None, top_k=5):
+            captured["ids"] = ids
+            captured["edge_types"] = edge_types
+            captured["top_k"] = top_k
+            return {hit_id: []}
+
+        @property
+        def db(self):
+            raise RuntimeError("db unused by this test")
+
+    hits = [
+        MemoryHit(
+            record_id=hit_id,
+            score=1.0,
+            reason="test",
+            literal_surface="hit",
+            adjacent_suggestions=[],
+        )
+    ]
+
+    assert _find_anti_hits(hits, _Store(), MemoryGraph(), k=3) == []
+    assert captured["edge_types"] == ["contradicts"]
+    assert captured["top_k"] is None
 
 
 def test_find_anti_hits_does_not_call_edges_to_pandas(tmp_path, monkeypatch):
