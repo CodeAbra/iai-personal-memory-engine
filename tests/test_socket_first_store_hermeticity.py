@@ -163,7 +163,8 @@ class TestSendSocketRequestOverride:
         assert result is None
 
     def test_socket_request_default_without_override(self, monkeypatch):
-        from iai_mcp.cli import SOCKET_PATH, _send_socket_request
+        from iai_mcp._ipc import SOCKET_PATH
+        from iai_mcp.cli import _send_socket_request
 
         monkeypatch.delenv("IAI_DAEMON_SOCKET_PATH", raising=False)
 

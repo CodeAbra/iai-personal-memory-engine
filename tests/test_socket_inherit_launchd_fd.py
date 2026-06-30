@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import socket
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -48,8 +49,7 @@ def _bind_to_fd_3(sock_path: Path) -> Iterator[socket.socket]:
             pass
 
 def _short_sock_path(suffix: str) -> Path:
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir = Path(tempfile.mkdtemp(prefix=f"iai-sock-{suffix}-"))
     return sock_dir / "d.sock"
 
 def _cleanup_sock(sock_path: Path) -> None:

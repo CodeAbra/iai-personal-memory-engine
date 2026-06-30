@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -176,10 +177,10 @@ def _wait_for_daemon_socket(sock_path: Path, timeout_sec: float = 30.0) -> bool:
 def test_start_throws_DaemonUnreachableError_when_socket_missing(
     built_wrapper, tmp_path
 ):
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
+    sock_dir = Path(sock_dir_ctx.name)
     sock_path = sock_dir / "d.sock"
-    store_dir = sock_dir / "store"
+    store_dir = tmp_path / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
 
     assert not sock_path.exists(), f"tmp socket pre-exists: {sock_path}"
@@ -291,13 +292,14 @@ def test_start_throws_DaemonUnreachableError_when_socket_missing(
             sock_path.unlink()
         except OSError:
             pass
+        sock_dir_ctx.cleanup()
 
 
 def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path):
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
+    sock_dir = Path(sock_dir_ctx.name)
     sock_path = sock_dir / "d.sock"
-    store_dir = sock_dir / "store"
+    store_dir = tmp_path / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
     assert not sock_path.exists()
 
@@ -363,3 +365,4 @@ def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path)
             sock_path.unlink()
         except OSError:
             pass
+        sock_dir_ctx.cleanup()

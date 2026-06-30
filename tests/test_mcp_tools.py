@@ -33,10 +33,10 @@ def built_wrapper() -> Path:
 
 @pytest.fixture(scope="module")
 def daemon_sock() -> "Path":
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
+    sock_dir = Path(sock_dir_ctx.name)
     sock_path = sock_dir / "d.sock"
-    store_dir = sock_dir / "store"
+    store_dir = Path(tempfile.mkdtemp(prefix="iai-store-"))
     store_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
@@ -91,7 +91,8 @@ def daemon_sock() -> "Path":
     except OSError:
         pass
     try:
-        shutil.rmtree(sock_dir, ignore_errors=True)
+        sock_dir_ctx.cleanup()
+        shutil.rmtree(store_dir, ignore_errors=True)
     except OSError:
         pass
 

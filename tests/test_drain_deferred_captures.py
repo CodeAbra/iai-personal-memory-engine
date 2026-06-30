@@ -6,6 +6,7 @@ import platform
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -361,6 +362,7 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-drain-integration-pass")
+    monkeypatch.setenv("IAI_MCP_STARTUP_DEFERRED_DRAIN_GRACE_SEC", "0")
 
     iai_dir = tmp_path / ".iai-mcp"
     iai_dir.mkdir(parents=True, exist_ok=True)
@@ -377,8 +379,8 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
     )
     assert bad.exists()
 
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
+    sock_dir = Path(sock_dir_ctx.name)
     sock_path = sock_dir / "d.sock"
 
     proc = None
@@ -423,5 +425,6 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
             sock_dir.rmdir()
         except OSError:
             pass
+        sock_dir_ctx.cleanup()
         import keyring.core
         keyring.core._keyring_backend = None

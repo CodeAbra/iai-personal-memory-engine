@@ -21,29 +21,25 @@ def _endpoint_ready_path(sock_path: Path) -> Path:
 def short_socket_paths(tmp_path, monkeypatch):
     from iai_mcp import concurrency, daemon_state
 
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = sock_dir / "d.sock"
     state_path = tmp_path / ".daemon-state.json"
 
-    monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
-    monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-    # Per-test endpoint isolation (unix socket on POSIX; TCP port file on
-    # Windows) via the env var start_ipc_server/open_ipc_connection honor.
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
+        sock_dir = Path(sock_dir_name)
+        sock_path = sock_dir / "d.sock"
+        monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
+        monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
+        # Per-test endpoint isolation (unix socket on POSIX; TCP port file on
+        # Windows) via the env var start_ipc_server/open_ipc_connection honor.
+        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
 
-    try:
-        yield None, sock_path, state_path
-    finally:
         try:
-            if sock_path.exists():
-                sock_path.unlink()
-        except OSError:
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
-            pass
+            yield None, sock_path, state_path
+        finally:
+            try:
+                if sock_path.exists():
+                    sock_path.unlink()
+            except OSError:
+                pass
 
 
 async def _send_ndjson(sock_path: Path, message: dict, *, timeout: float = 5.0) -> dict:

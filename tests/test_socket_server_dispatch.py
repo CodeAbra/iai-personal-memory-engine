@@ -22,34 +22,30 @@ def _endpoint_ready_path(sock_path: Path) -> Path:
 def short_socket_paths(tmp_path, monkeypatch):
     from iai_mcp import concurrency, daemon_state
 
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = sock_dir / "d.sock"
     state_path = tmp_path / ".daemon-state.json"
-
-    monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
     monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-    # Isolate the IPC endpoint per-test. POSIX uses this as the unix socket
-    # path; Windows persists the ephemeral TCP port to "<sock_path>.port".
-    # Both SocketServer.serve() and open_ipc_connection() resolve through it,
-    # so concurrent tests never collide on the shared default endpoint.
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
     store_root = tmp_path / "store_root"
     store_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
 
-    try:
-        yield None, sock_path, state_path
-    finally:
+    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
+        sock_dir = Path(sock_dir_name)
+        sock_path = sock_dir / "d.sock"
+        monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
+        # Isolate the IPC endpoint per-test. POSIX uses this as the unix socket
+        # path; Windows persists the ephemeral TCP port to "<sock_path>.port".
+        # Both SocketServer.serve() and open_ipc_connection() resolve through it,
+        # so concurrent tests never collide on the shared default endpoint.
+        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+
         try:
-            if sock_path.exists():
-                sock_path.unlink()
-        except OSError:
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
-            pass
+            yield None, sock_path, state_path
+        finally:
+            try:
+                if sock_path.exists():
+                    sock_path.unlink()
+            except OSError:
+                pass
 
 async def _send_jsonrpc(
     sock_path: Path,

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -17,33 +18,29 @@ from _socket_test_helpers import bind_fake_daemon_socket
 @pytest.fixture
 def short_socket_paths(tmp_path, monkeypatch):
     lock_path = tmp_path / ".lock"
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path = sock_dir / "d.sock"
     state_path = tmp_path / ".daemon-state.json"
     store_dir = tmp_path / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
 
     from iai_mcp import cli, daemon_state
 
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
-    monkeypatch.setenv("IAI_MCP_STORE", str(store_dir))
-    monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-    monkeypatch.setattr(cli, "LOCK_PATH", lock_path)
-    monkeypatch.setattr(cli, "SOCKET_PATH", sock_path)
+    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
+        sock_dir = Path(sock_dir_name)
+        sock_path = sock_dir / "d.sock"
+        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+        monkeypatch.setenv("IAI_MCP_STORE", str(store_dir))
+        monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
+        monkeypatch.setattr(cli, "LOCK_PATH", lock_path)
+        monkeypatch.setattr(cli, "SOCKET_PATH", sock_path)
 
-    try:
-        yield lock_path, sock_path, state_path
-    finally:
         try:
-            if sock_path.exists():
-                sock_path.unlink()
-        except OSError:
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
-            pass
+            yield lock_path, sock_path, state_path
+        finally:
+            try:
+                if sock_path.exists():
+                    sock_path.unlink()
+            except OSError:
+                pass
 
 
 def test_clean_environment_yields_check_a_fail_exit_1(short_socket_paths, capsys):
