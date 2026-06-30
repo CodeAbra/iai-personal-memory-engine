@@ -208,6 +208,24 @@ class SleepPipeline:
     def reset_quarantine(self) -> None:
         self._clear_quarantine(reason="manual_reset")
 
+    def recover_expired_quarantine(self) -> bool:
+        """Eagerly clear an expired (or malformed) quarantine.
+
+        Normally an expired quarantine is only cleared the next time a sleep
+        cycle is attempted (``run`` -> ``_check_and_maybe_auto_recover_quarantine``).
+        A daemon that never reaches a sleep window — e.g. pinned in WAKE with
+        active sessions — would otherwise carry a zombie quarantine entry in
+        ``lifecycle_state.json`` indefinitely, which keeps ``doctor`` (l)
+        reporting a long-expired quarantine. Calling this at daemon boot makes
+        the entry self-heal regardless of sleep scheduling.
+
+        Returns True if a quarantine entry was present and has now been cleared
+        (expired or malformed), False otherwise (none present, or still active).
+        """
+        had_quarantine = self._load_quarantine() is not None
+        still_active = self._check_and_maybe_auto_recover_quarantine()
+        return had_quarantine and not still_active
+
 
     def _load_progress(self) -> Any:
         progress = self._load_state_record().get("sleep_cycle_progress")

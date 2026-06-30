@@ -1725,6 +1725,20 @@ async def main() -> int:
         _idle_detector = _IdleDetector()
         _sleep_pipeline = _SleepPipeline(store=store)
 
+        # Eagerly clear a long-expired quarantine at boot. Auto-recovery
+        # otherwise only fires when a sleep cycle is next attempted, so a daemon
+        # that never reaches a sleep window (e.g. pinned in WAKE with active
+        # sessions) would carry a zombie quarantine entry indefinitely and keep
+        # `doctor` (l) reporting a quarantine that expired days ago.
+        try:
+            if _sleep_pipeline.recover_expired_quarantine():
+                log.warning(
+                    "sleep_quarantine_boot_recovered: expired quarantine "
+                    "cleared at boot"
+                )
+        except Exception as _q_exc:  # noqa: BLE001 -- boot recovery must never wedge startup
+            log.debug("quarantine boot-recover failed: %s", _q_exc)
+
         from pathlib import Path as _PathS2
         # Boot normalization for a crash mid-SLEEP: lifecycle_state.json can be
         # left at current_state=SLEEP with sleep_cycle_progress=None -- an

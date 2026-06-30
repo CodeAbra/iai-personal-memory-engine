@@ -433,6 +433,59 @@ def test_pipeline_reset_quarantine_clears(
         SleepStep.DREAM_DECAY,
     )
 
+def test_recover_expired_quarantine_clears_without_sleep_cycle(
+    pipeline: SleepPipeline,
+    state_path: Path,
+):
+    # An expired quarantine must be clearable WITHOUT attempting a sleep cycle
+    # (the daemon calls this at boot). Without it, a daemon that never sleeps
+    # carries a zombie quarantine entry indefinitely.
+    now = datetime.now(timezone.utc)
+    record = default_state()
+    record["quarantine"] = {
+        "until_ts": (now - timedelta(hours=1)).isoformat(),
+        "reason": "sleep step 3 (DREAM_DECAY) failed 3x",
+        "since_ts": (now - timedelta(hours=25)).isoformat(),
+    }
+    save_state(record, state_path)
+
+    cleared = pipeline.recover_expired_quarantine()
+
+    assert cleared is True
+    assert load_state(state_path)["quarantine"] is None
+    assert pipeline.is_quarantined() is False
+
+
+def test_recover_expired_quarantine_keeps_active_quarantine(
+    pipeline: SleepPipeline,
+    state_path: Path,
+):
+    # An ACTIVE quarantine must survive the boot-time recovery probe.
+    now = datetime.now(timezone.utc)
+    record = default_state()
+    record["quarantine"] = {
+        "until_ts": (now + timedelta(hours=12)).isoformat(),
+        "reason": "still cooling down",
+        "since_ts": now.isoformat(),
+    }
+    save_state(record, state_path)
+
+    cleared = pipeline.recover_expired_quarantine()
+
+    assert cleared is False
+    assert load_state(state_path)["quarantine"] is not None
+    assert pipeline.is_quarantined() is True
+
+
+def test_recover_expired_quarantine_noop_when_absent(
+    pipeline: SleepPipeline,
+    state_path: Path,
+):
+    save_state(default_state(), state_path)
+    assert pipeline.recover_expired_quarantine() is False
+    assert load_state(state_path)["quarantine"] is None
+
+
 def test_pipeline_force_run_ignores_quarantine(
     pipeline: SleepPipeline,
     monkeypatch: pytest.MonkeyPatch,
