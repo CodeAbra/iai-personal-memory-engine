@@ -59,6 +59,7 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     import iai_mcp.daemon as _daemon
     import iai_mcp.crypto as _crypto
     import iai_mcp.backup as _backup
+    import iai_mcp.lilli.profile.knobs as _knobs
     monkeypatch.setattr(_hippo, "_DEFAULT_IAI_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_store, "DEFAULT_STORAGE_PATH", fake_root, raising=False)
     monkeypatch.setattr(_conc, "SOCKET_PATH", fake_root / ".daemon.sock", raising=False)
@@ -86,6 +87,10 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(_crypto, "_DEFAULT_STORE_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_backup, "DEFAULT_STORE_PATH", str(fake_root), raising=False)
+    monkeypatch.setattr(
+        _knobs, "PROFILE_OVERRIDES_PATH",
+        fake_root / ".profile-knobs.json", raising=False,
+    )
     yield fake_root
 
 

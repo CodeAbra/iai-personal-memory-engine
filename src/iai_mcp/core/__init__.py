@@ -40,6 +40,12 @@ _CORE_CASCADE_FIRED_PER_SESSION: set[str] = set()
 
 _profile_state: dict[str, Any] = profile.default_state()
 
+# Knobs a user has explicitly set (via profile_set). These are persisted and
+# rehydrated at boot, and are protected from bayesian auto-tuning so an explicit
+# answer outranks an inferred one. Populated by rehydrate_profile_overrides()
+# at boot and by the profile_set dispatch below.
+_pinned_knobs: set[str] = set()
+
 _posterior_state: dict[str, Any] = {}
 
 _arousal_state: object | None = None
@@ -54,6 +60,32 @@ DEFERRED_KNOBS: frozenset[str] = frozenset(
     profile.PHASE_2_DEFERRED | profile.PHASE_3_DEFERRED
 )
 assert len(DEFERRED_KNOBS) == 0, "all 10 autistic-kernel knobs live"
+
+
+def rehydrate_profile_overrides(*, path: "object | None" = None) -> dict:
+    """Load persisted explicit knob overrides into live state at daemon boot.
+
+    ``_profile_state`` starts as ``default_state()``; this replays the knobs a
+    user explicitly set in a prior run so their stated preferences survive a
+    restart (previously every restart silently reverted to defaults). Applied
+    over the defaults and recorded in ``_pinned_knobs`` so bayesian auto-tuning
+    will not overwrite them. Best-effort: never raises into the boot sequence.
+    """
+    try:
+        overrides = (
+            profile.load_profile_overrides()
+            if path is None
+            else profile.load_profile_overrides(path=path)
+        )
+    except Exception:  # noqa: BLE001 -- boot rehydrate must not wedge startup
+        return {}
+    if not overrides:
+        return {}
+    with _profile_lock:
+        for knob, value in overrides.items():
+            _profile_state[knob] = value
+            _pinned_knobs.add(knob)
+    return overrides
 
 
 def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
@@ -613,6 +645,16 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         signal = params["signal"]
         observed = params["observed"]
         with _profile_lock:
+            # An explicitly-set (pinned) knob outranks inferred signals — leave
+            # the user's stated answer untouched rather than letting the tuner
+            # drift it.
+            if knob in _pinned_knobs:
+                return {
+                    "new_value": _profile_state.get(knob),
+                    "knob": knob,
+                    "signal": signal,
+                    "pinned": True,
+                }
             new_val, new_post = bayesian_update(
                 knob, signal, observed, _profile_state, _posterior_state,
             )
@@ -793,9 +835,18 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             _spec = profile.PROFILE_KNOBS.get(_knob)
             if _spec is not None:
                 _value = profile.coerce_json_stringified(_spec.value_schema, _value)
-            return profile.profile_set(
+            result = profile.profile_set(
                 _knob, _value, _profile_state, store=store,
             )
+            # On an explicit, accepted set: pin the knob and persist all pinned
+            # overrides so the value survives a daemon restart and outranks
+            # bayesian auto-tuning.
+            if result.get("status") == "ok":
+                _pinned_knobs.add(params["knob"])
+                profile.save_profile_overrides(
+                    {k: _profile_state[k] for k in _pinned_knobs if k in _profile_state}
+                )
+            return result
 
     if method == "session_start_payload":
         from iai_mcp.session import assemble_session_start, SessionStartPayload
@@ -1243,6 +1294,7 @@ __all__ = [
     "dispatch",
     "main",
     "UnknownMethodError",
+    "rehydrate_profile_overrides",
     "_profile_state",
     "LIVE_KNOBS",
     "DEFERRED_KNOBS",

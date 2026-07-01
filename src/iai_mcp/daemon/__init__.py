@@ -1149,6 +1149,23 @@ async def main() -> int:
         )
     )
 
+    # Replay explicitly-set profile knobs from the previous run. _profile_state
+    # starts as defaults and is never otherwise rehydrated, so without this a
+    # user's stated preferences (e.g. dunn_quadrant, inertia_awareness) silently
+    # revert to defaults on every restart. Best-effort; never blocks boot.
+    try:
+        from iai_mcp import core as _core
+
+        _restored = _core.rehydrate_profile_overrides()
+        if _restored:
+            log.info(
+                "profile: rehydrated %d pinned knob override(s) from disk: %s",
+                len(_restored),
+                ", ".join(sorted(_restored)),
+            )
+    except Exception:  # noqa: BLE001 -- profile rehydrate MUST NOT wedge boot
+        log.debug("profile override rehydrate failed", exc_info=True)
+
     try:
         hippo_lock_path = store.root / "hippo" / ".lock"
         cleanup_stale_consolidation_intent(hippo_lock_path)

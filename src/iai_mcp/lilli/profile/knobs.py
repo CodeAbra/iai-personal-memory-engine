@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -360,6 +363,72 @@ def profile_set(
             pass
 
     return {"status": "ok", "knob": knob, "value": value}
+
+
+# ---------------------------------------------------------------------------
+# Durable overrides: persist explicitly-set (pinned) knobs across restarts.
+#
+# _profile_state in core is initialised once to default_state() and never
+# rehydrated, so every daemon restart reset all knobs to defaults. These
+# helpers persist the knobs a user explicitly set (via profile_set) and reload
+# them at boot, so a stated preference survives restarts and outranks the
+# default. A knob present in the overrides file is "pinned"; core protects
+# pinned knobs from bayesian auto-tuning so an explicit answer wins.
+# ---------------------------------------------------------------------------
+
+PROFILE_OVERRIDES_PATH = Path.home() / ".iai-mcp" / ".profile-knobs.json"
+
+
+def save_profile_overrides(
+    overrides: dict[str, Any], *, path: Path | None = None,
+) -> None:
+    """Atomically persist the pinned-knob overrides map. Best-effort.
+
+    ``overrides`` is ``{knob: value}`` for every explicitly-set knob. Writing is
+    never allowed to raise into the caller (a failed persist must not fail the
+    ``profile_set`` it is attached to).
+    """
+    if path is None:
+        path = PROFILE_OVERRIDES_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(overrides, f, separators=(",", ":"), sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def load_profile_overrides(*, path: Path | None = None) -> dict[str, Any]:
+    """Load + re-validate persisted overrides.
+
+    Only phase-1 (live) knobs whose stored value still passes the current schema
+    are returned; unknown, deferred, or now-invalid entries are dropped so a
+    stale or hand-edited file can never inject a bad value into live state.
+    """
+    if path is None:
+        path = PROFILE_OVERRIDES_PATH
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for knob, value in data.items():
+        spec = PROFILE_KNOBS.get(knob)
+        if spec is None or spec.phase != 1:
+            continue
+        ok, _ = _validate(spec.value_schema, value)
+        if ok:
+            out[knob] = value
+    return out
 
 
 def bayesian_update(
