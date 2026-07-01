@@ -110,6 +110,61 @@ def test_successful_migration_promotes_old_to_records(tmp_path, monkeypatch):
     assert store.db.open_table("records").count_rows() >= 19
 
 
+def test_migration_preserves_structural_metadata_and_pending_flag(
+    tmp_path,
+    monkeypatch,
+):
+    from iai_mcp.types import MemoryRecord, STRUCTURE_HV_BYTES
+
+    src = _DimEmbedder(384)
+    target = _DimEmbedder(1024)
+    store = _fresh_store(tmp_path, 384, monkeypatch)
+    rid = uuid4()
+    now = datetime.now(timezone.utc)
+    structure_hv = b"\x02" * STRUCTURE_HV_BYTES
+    structure_payload = b'{"source":"migration-test"}'
+    rec = MemoryRecord(
+        id=rid,
+        tier="episodic",
+        literal_surface="Pending structured record survives reembed migration.",
+        aaak_index="",
+        embedding=src.embed("Pending structured record survives reembed migration."),
+        structure_hv=structure_hv,
+        community_id=None,
+        centrality=0.0,
+        detail_level=1,
+        pinned=False,
+        stability=0.5,
+        difficulty=0.3,
+        last_reviewed=now,
+        never_decay=False,
+        never_merge=False,
+        provenance=[],
+        created_at=now,
+        updated_at=now,
+        tags=["test"],
+        language="en",
+        s5_trust_score=0.5,
+        profile_modulation_gain={},
+        schema_version=4,
+        hv_tier="sparse_vsa",
+        structure_hv_payload=structure_payload,
+        embedding_pending=1,
+    )
+    store.insert(rec)
+
+    from iai_mcp.migrate import migrate_reembed_to_current_dim
+    migrate_reembed_to_current_dim(store, target)
+
+    migrated = store.get(rid)
+    assert migrated is not None
+    assert len(migrated.embedding) == target.DIM
+    assert migrated.structure_hv == structure_hv
+    assert migrated.hv_tier == "sparse_vsa"
+    assert migrated.structure_hv_payload == structure_payload
+    assert migrated.embedding_pending == 1
+
+
 def test_mid_migration_kill_preserves_old_table(tmp_path, monkeypatch):
     src = _DimEmbedder(384)
     store = _fresh_store(tmp_path, 384, monkeypatch)
