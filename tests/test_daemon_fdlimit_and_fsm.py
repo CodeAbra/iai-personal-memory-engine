@@ -137,9 +137,6 @@ class TestPlistRendersFdFloor:
         assert "NumberOfFiles" in text
 
     def test_rendered_plist_contains_fd_floor(self, tmp_path, monkeypatch):
-        import importlib
-        import os
-
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USER", "testuser")
 
@@ -149,10 +146,7 @@ class TestPlistRendersFdFloor:
         assert "SoftResourceLimits" in rendered
         assert "NumberOfFiles" in rendered
 
-        try:
-            import defusedxml.ElementTree as ET
-        except ModuleNotFoundError:
-            import xml.etree.ElementTree as ET
+        import defusedxml.ElementTree as ET
 
         root = ET.fromstring(rendered)
         top_dict = root.find("dict")
