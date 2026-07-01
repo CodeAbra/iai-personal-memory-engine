@@ -336,6 +336,42 @@ def test_should_refresh_when_watermark_changes(tmp_path, monkeypatch):
     assert reason == "watermark_changed"
 
 
+def test_should_refresh_skips_when_watermark_probe_fails(tmp_path, monkeypatch):
+    from iai_mcp import daemon as daemon_mod
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    _seed(store)
+
+    cache, meta = _cache_paths(tmp_path)
+    cache.write_text("seed")
+    meta.write_text(json.dumps({
+        "records_count": 3,
+        "max_vec_label": 3,
+        "max_created_at": "z",
+        "max_updated_at": "z",
+    }))
+    old = time.time() - 600
+    os.utime(cache, (old, old))
+
+    monkeypatch.setattr(
+        daemon_mod,
+        "_session_start_cache_watermark",
+        lambda _store: {
+            "records_count": -1,
+            "max_vec_label": -1,
+            "max_created_at": "",
+            "max_updated_at": "",
+            "probe_failed": True,
+        },
+    )
+
+    should, reason, _wm = daemon_mod._should_refresh_session_start_cache(
+        store, cache_path=cache, meta_path=meta, min_interval_sec=60.0,
+    )
+    assert not should
+    assert reason == "probe_failed"
+
+
 # ---------------------------------------------------------------------------
 # _write_session_start_cache: telemetry + skip paths
 # ---------------------------------------------------------------------------
@@ -424,6 +460,70 @@ def test_write_force_rebuild_ignores_cold_probe(tmp_path, monkeypatch):
     )
     assert result["action"] == "wrote"
     assert cache.exists()
+
+
+def test_sleep_pipeline_write_waits_for_single_flight_lock(tmp_path, monkeypatch):
+    """The authoritative SLEEP refresh should wait behind an in-flight refresh
+    instead of dropping the write for this cycle."""
+    from iai_mcp import daemon as daemon_mod
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    _seed(store)
+
+    monkeypatch.setattr(daemon_mod, "SESSION_START_CACHE_LOCK_TIMEOUT_SEC", 5.0)
+    cache, meta = _cache_paths(tmp_path)
+    result: dict[str, dict] = {}
+    daemon_mod._session_start_cache_lock.acquire()
+
+    def _run_sleep_write():
+        result["value"] = daemon_mod._write_session_start_cache(
+            store, cache_path=cache, meta_path=meta,
+            trigger="sleep_pipeline", force_rebuild=True,
+        )
+
+    t = threading.Thread(target=_run_sleep_write)
+    try:
+        t.start()
+        time.sleep(0.05)
+        assert t.is_alive(), "sleep_pipeline write should block while lock is held"
+    finally:
+        daemon_mod._session_start_cache_lock.release()
+
+    t.join(timeout=5)
+    assert not t.is_alive(), "sleep_pipeline write did not finish after lock release"
+    assert result["value"]["action"] == "wrote"
+    assert cache.exists()
+
+
+def test_sleep_pipeline_write_times_out_if_single_flight_lock_stalls(
+    tmp_path, monkeypatch,
+):
+    """A stuck in-flight refresh should degrade to an observable skip, not hang
+    the daemon's SLEEP pipeline forever."""
+    from iai_mcp import daemon as daemon_mod
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    _seed(store)
+
+    monkeypatch.setattr(daemon_mod, "SESSION_START_CACHE_LOCK_TIMEOUT_SEC", 0.01)
+    cache, meta = _cache_paths(tmp_path)
+    daemon_mod._session_start_cache_lock.acquire()
+    try:
+        result = daemon_mod._write_session_start_cache(
+            store, cache_path=cache, meta_path=meta,
+            trigger="sleep_pipeline", force_rebuild=True,
+        )
+    finally:
+        daemon_mod._session_start_cache_lock.release()
+
+    assert result == {"action": "skipped", "reason": "refresh_in_progress"}
+    assert not cache.exists()
+    skipped = _query_events(store, "session_start_cache_write_skipped")
+    assert any(
+        (e.get("data") or {}).get("reason") == "refresh_in_progress"
+        and (e.get("data") or {}).get("trigger") == "sleep_pipeline"
+        for e in skipped
+    ), skipped
 
 
 def test_write_emits_failed_event_on_render_crash(tmp_path, monkeypatch):
@@ -515,6 +615,41 @@ def test_maybe_refresh_respects_min_interval_env(tmp_path, monkeypatch):
         cache_path=cache, meta_path=meta, force_rebuild=True,
     )
     assert r2 == {"action": "skipped", "reason": "min_interval_not_elapsed"}
+
+
+def test_periodic_noop_skips_do_not_emit_event_churn(tmp_path, monkeypatch):
+    from iai_mcp import daemon as daemon_mod
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    _seed(store)
+
+    cache, meta = _cache_paths(tmp_path)
+    daemon_mod._write_session_start_cache(
+        store, cache_path=cache, meta_path=meta,
+        trigger="manual", force_rebuild=True,
+    )
+
+    r1 = daemon_mod._maybe_refresh_session_start_cache(
+        store, trigger="periodic_wake",
+        cache_path=cache, meta_path=meta,
+        min_interval_sec=60.0, force_rebuild=True,
+    )
+    assert r1 == {"action": "skipped", "reason": "min_interval_not_elapsed"}
+
+    old = time.time() - 600
+    os.utime(cache, (old, old))
+    r2 = daemon_mod._maybe_refresh_session_start_cache(
+        store, trigger="periodic_wake",
+        cache_path=cache, meta_path=meta,
+        min_interval_sec=60.0, force_rebuild=True,
+    )
+    assert r2 == {"action": "skipped", "reason": "no_new_records"}
+
+    skipped = _query_events(store, "session_start_cache_write_skipped")
+    assert not [
+        e for e in skipped
+        if (e.get("data") or {}).get("trigger") == "periodic_wake"
+    ], skipped
 
 
 def test_maybe_refresh_runs_when_new_records_after_interval(tmp_path, monkeypatch):

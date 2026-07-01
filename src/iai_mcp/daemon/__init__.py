@@ -77,6 +77,7 @@ SESSION_START_CACHE_META_PATH = (
 from iai_mcp.session import SESSION_START_CACHE_MAX_CHARS  # noqa: E402 -- placed after PATH constant for readability
 
 SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT: float = 60.0
+SESSION_START_CACHE_LOCK_TIMEOUT_SEC: float = 300.0
 # Single-flight lock for refreshes — the SLEEP path also routes through it so a
 # WAKE refresh kicked from the wake-sequence hook never races a sleep-pipeline
 # write on the same file.
@@ -422,6 +423,7 @@ def _session_start_cache_watermark(store) -> dict:
             "max_vec_label": -1,
             "max_created_at": "",
             "max_updated_at": "",
+            "probe_failed": True,
         }
     if not row:
         return {
@@ -508,6 +510,9 @@ def _should_refresh_session_start_cache(
     * Otherwise refresh (``watermark_changed``).
     """
     current = _session_start_cache_watermark(store)
+    if current.get("probe_failed"):
+        return False, "probe_failed", current
+
     try:
         cache_mtime = cache_path.stat().st_mtime
     except (FileNotFoundError, OSError):
@@ -579,7 +584,14 @@ def _write_session_start_cache(
     (e.g. tests) can assert without grovelling through events.
     """
     started_at = time.monotonic()
-    if not _session_start_cache_lock.acquire(blocking=False):
+    block_on_lock = bool(force_rebuild and trigger == "sleep_pipeline")
+    if block_on_lock:
+        lock_acquired = _session_start_cache_lock.acquire(
+            timeout=SESSION_START_CACHE_LOCK_TIMEOUT_SEC,
+        )
+    else:
+        lock_acquired = _session_start_cache_lock.acquire(blocking=False)
+    if not lock_acquired:
         _emit_session_start_cache_event(
             store,
             "session_start_cache_write_skipped",
@@ -738,11 +750,15 @@ def _maybe_refresh_session_start_cache(
         return {"action": "skipped", "reason": "probe_failed"}
 
     if not should:
-        _emit_session_start_cache_event(
-            store,
-            "session_start_cache_write_skipped",
-            {"reason": reason, "trigger": trigger, "cache_path": str(cache_path)},
-        )
+        if not (
+            trigger == "periodic_wake"
+            and reason in {"min_interval_not_elapsed", "no_new_records"}
+        ):
+            _emit_session_start_cache_event(
+                store,
+                "session_start_cache_write_skipped",
+                {"reason": reason, "trigger": trigger, "cache_path": str(cache_path)},
+            )
         return {"action": "skipped", "reason": reason}
 
     try:
@@ -2160,6 +2176,7 @@ __all__ = [
     "SESSION_START_CACHE_META_PATH",
     "SESSION_START_CACHE_MAX_CHARS",
     "SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT",
+    "SESSION_START_CACHE_LOCK_TIMEOUT_SEC",
     "INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC",
     "_DAEMON_NOFILE_FLOOR_DEFAULT",
     # daemon_config
