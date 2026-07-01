@@ -783,8 +783,18 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
     if method == "profile_set":
         with _profile_lock:
+            _knob = params["knob"]
+            _value = params["value"]
+            # Untyped MCP / JSON-RPC clients can lose the JSON type of a value
+            # (a bool `true` arrives as the string "true"), which the strict
+            # profile_set validator would reject. Undo only that exact
+            # stringification here, at the client edge; profile_set itself
+            # stays strict for every other case.
+            _spec = profile.PROFILE_KNOBS.get(_knob)
+            if _spec is not None:
+                _value = profile.coerce_json_stringified(_spec.value_schema, _value)
             return profile.profile_set(
-                params["knob"], params["value"], _profile_state, store=store,
+                _knob, _value, _profile_state, store=store,
             )
 
     if method == "session_start_payload":

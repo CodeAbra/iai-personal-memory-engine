@@ -151,6 +151,63 @@ def default_state() -> dict[str, Any]:
     }
 
 
+def coerce_json_stringified(schema: str, value: Any) -> Any:
+    """Undo JSON-type loss at an untyped-client boundary (e.g. an MCP tool).
+
+    Some JSON-RPC / MCP clients deliver a knob value as a *string* even when
+    the schema is bool/numeric — the JSON boolean ``true`` arrives as the
+    string ``"true"``. The strict, type-exact ``profile_set`` then rejects it
+    with ``value must be bool, got str``, so bool / numeric knobs become
+    unsettable through those clients.
+
+    This reverses *only* that exact stringification, and nothing else:
+
+    * ``"true"`` / ``"false"`` (case-insensitive) → the bool. Loose truthy
+      spellings (``"yes"``, ``"1"``, the int ``1``) are deliberately NOT
+      coerced — ``profile_set`` rejects those on purpose, and this boundary
+      must not widen that contract.
+    * a numeric string for an ``int_range`` / ``float_range`` knob → the number.
+    * ``dict`` values are coerced element-wise against the inner schema.
+
+    Anything it can't confidently convert is returned untouched, so the strict
+    validator still rejects it with a clear message. Intended for the MCP /
+    dispatch edge; ``profile_set`` itself stays strict.
+    """
+    if schema == "bool":
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s == "true":
+                return True
+            if s == "false":
+                return False
+        return value
+
+    if schema.startswith("int_range:"):
+        if isinstance(value, str):
+            try:
+                return int(value.strip())
+            except (TypeError, ValueError):
+                return value
+        return value
+
+    if schema.startswith("float_range:"):
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except (TypeError, ValueError):
+                return value
+        return value
+
+    if schema.startswith("dict:"):
+        if isinstance(value, dict):
+            _, _, val_type = schema[len("dict:"):].partition(":")
+            if val_type:
+                return {k: coerce_json_stringified(val_type, v) for k, v in value.items()}
+        return value
+
+    return value
+
+
 def _validate(schema: str, value: Any) -> tuple[bool, str]:
     if schema == "bool":
         if isinstance(value, bool):

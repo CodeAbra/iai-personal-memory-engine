@@ -5,6 +5,7 @@ from iai_mcp.profile import (
     PHASE_2_DEFERRED,
     PHASE_3_DEFERRED,
     PROFILE_KNOBS,
+    coerce_json_stringified,
     default_state,
     profile_get,
     profile_set,
@@ -161,3 +162,54 @@ def test_profile_set_scene_construction_scaffold_rejects_string():
     state = default_state()
     r = profile_set("scene_construction_scaffold", "yes", state)
     assert r["status"] == "error"
+
+
+# --- coerce_json_stringified: undo JSON-type loss at the untyped-client edge ---
+
+def test_coerce_bool_true_false_strings():
+    assert coerce_json_stringified("bool", "true") is True
+    assert coerce_json_stringified("bool", "false") is False
+    assert coerce_json_stringified("bool", "True") is True
+    assert coerce_json_stringified("bool", "FALSE") is False
+
+
+def test_coerce_bool_passes_through_real_bools():
+    assert coerce_json_stringified("bool", True) is True
+    assert coerce_json_stringified("bool", False) is False
+
+
+def test_coerce_bool_does_not_widen_strict_contract():
+    # The loose spellings profile_set rejects on purpose must NOT be coerced:
+    # int 1 and truthy words stay as-is so the strict validator still rejects them.
+    assert coerce_json_stringified("bool", 1) == 1
+    assert coerce_json_stringified("bool", "yes") == "yes"
+    assert coerce_json_stringified("bool", "1") == "1"
+    assert coerce_json_stringified("bool", "on") == "on"
+
+
+def test_coerce_numeric_strings():
+    assert coerce_json_stringified("float_range:0.0..1.0", "0.5") == 0.5
+    assert coerce_json_stringified("int_range:0..10", "3") == 3
+    # non-numeric strings are left for the validator to reject
+    assert coerce_json_stringified("float_range:0.0..1.0", "abc") == "abc"
+
+
+def test_coerce_dict_recurses_on_values():
+    out = coerce_json_stringified("dict:str:float_range:0.0..1.0", {"music": "0.9"})
+    assert out == {"music": 0.9}
+
+
+def test_coerce_enum_left_untouched():
+    assert coerce_json_stringified("enum:neutral|seeking", "seeking") == "seeking"
+
+
+def test_coerce_then_set_bool_end_to_end():
+    # Mirrors the dispatch edge: coerce a stringified bool, then the strict
+    # profile_set accepts it. This is the path that was previously unsettable
+    # for bool knobs via the MCP tool.
+    state = default_state()
+    spec = PROFILE_KNOBS["inertia_awareness"]
+    value = coerce_json_stringified(spec.value_schema, "true")
+    r = profile_set("inertia_awareness", value, state)
+    assert r["status"] == "ok"
+    assert state["inertia_awareness"] is True
