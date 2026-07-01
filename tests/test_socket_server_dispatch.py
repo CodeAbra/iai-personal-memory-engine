@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,65 @@ def test_memory_recall_routed_over_socket(short_socket_paths):
     assert resp["id"] == 1, resp
     assert "result" in resp, resp
     assert "hits" in resp["result"], resp["result"]
+
+
+def test_memory_recall_socket_concurrency_limit_returns_busy(
+    short_socket_paths,
+    monkeypatch,
+):
+    _, sock_path, _ = short_socket_paths
+    from iai_mcp import core
+    from iai_mcp.store import MemoryStore
+
+    monkeypatch.setenv("IAI_MCP_RECALL_CONCURRENCY", "1")
+    monkeypatch.setenv("IAI_MCP_RECALL_SLOT_WAIT_SEC", "0.02")
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    calls: list[str] = []
+
+    def _dispatch(store, method, params):
+        assert method == "memory_recall"
+        cue = params["cue"]
+        calls.append(cue)
+        if cue == "slow":
+            slow_started.set()
+            assert release_slow.wait(timeout=2.0)
+        return {"hits": [], "_recall_latency_ms": 0.1, "cue": cue}
+
+    monkeypatch.setattr(core, "dispatch", _dispatch)
+    store = MemoryStore()
+
+    async def _runner(sock_path, store):
+        slow_task = asyncio.create_task(
+            _send_jsonrpc(
+                sock_path,
+                "memory_recall",
+                {"cue": "slow", "budget_tokens": 100},
+                req_id=11,
+                timeout=2.0,
+            )
+        )
+        assert await asyncio.to_thread(slow_started.wait, 2.0)
+        busy = await _send_jsonrpc(
+            sock_path,
+            "memory_recall",
+            {"cue": "busy", "budget_tokens": 100},
+            req_id=12,
+            timeout=2.0,
+        )
+        release_slow.set()
+        slow = await slow_task
+        return slow, busy
+
+    slow, busy = asyncio.run(_with_socket_server(sock_path, store, _runner))
+
+    assert slow["result"]["cue"] == "slow"
+    assert busy["result"]["hits"] == []
+    assert busy["result"]["_degraded"] is True
+    assert busy["result"]["_reason"] == "recall_busy"
+    assert calls == ["slow"]
+
 
 def test_session_start_payload_routed(short_socket_paths):
     _, sock_path, _ = short_socket_paths

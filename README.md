@@ -345,6 +345,8 @@ Measured on an Apple M2 Max (64 GB). The harnesses are the proof — run them yo
 |---|---|---|
 | `IAI_MCP_STORE` | `~/.iai-mcp/` | Data directory |
 | `IAI_MCP_PYTHON` | — | Absolute path to the venv Python (for the MCP host config) |
+| `IAI_MCP_RECALL_CONCURRENCY` | `2` | Maximum cued `memory_recall` calls dispatched concurrently by the socket daemon |
+| `IAI_MCP_RECALL_SLOT_WAIT_SEC` | `0.25` | How long an overflow cued recall waits for a slot before returning `_degraded: recall_busy` |
 
 The old `IAI_MCP_EMBED_MODEL` knob is gone — the embedder is a single built-in English-only model. There are many internal tuning knobs (`IAI_MCP_*`), but you shouldn't need to touch them.
 

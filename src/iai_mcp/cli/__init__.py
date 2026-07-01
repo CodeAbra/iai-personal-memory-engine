@@ -130,8 +130,8 @@ def _send_jsonrpc_request(
         finally:
             try:
                 writer.close()
-                await writer.wait_closed()
-            except OSError:
+                await asyncio.wait_for(writer.wait_closed(), timeout=0.25)
+            except (OSError, asyncio.TimeoutError):
                 pass
 
     try:
@@ -162,8 +162,8 @@ def _send_socket_request(req: dict, *, timeout: float = 30.0) -> dict | None:
         finally:
             try:
                 writer.close()
-                await writer.wait_closed()
-            except OSError:
+                await asyncio.wait_for(writer.wait_closed(), timeout=0.25)
+            except (OSError, asyncio.TimeoutError):
                 pass
 
     return asyncio.run(_runner())
