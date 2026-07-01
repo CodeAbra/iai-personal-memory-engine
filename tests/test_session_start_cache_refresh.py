@@ -441,6 +441,58 @@ def test_write_skips_when_runtime_graph_cache_cold(tmp_path, monkeypatch):
     ), skipped
 
 
+def test_write_wake_refresh_uses_structural_cache_not_runtime_rebuild(
+    tmp_path, monkeypatch,
+):
+    """A warm WAKE refresh should format from the structural cache and must not
+    call retrieve.build_runtime_graph on the daemon hot path."""
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp import retrieve as retrieve_mod
+    from iai_mcp import runtime_graph_cache as rgc_mod
+    from iai_mcp import session as session_mod
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    _seed(store)
+
+    monkeypatch.setattr(
+        daemon_mod, "_runtime_graph_cache_is_warm", lambda _store: True,
+    )
+    monkeypatch.setattr(
+        retrieve_mod,
+        "build_runtime_graph",
+        lambda _store: (_ for _ in ()).throw(
+            AssertionError("WAKE refresh must not rebuild runtime graph")
+        ),
+    )
+    calls: list[str] = []
+
+    def _load_recall_structural(_store):
+        calls.append("load_recall_structural")
+        return {}, {}, 0, "normal"
+
+    monkeypatch.setattr(rgc_mod, "load_recall_structural", _load_recall_structural)
+    monkeypatch.setattr(
+        session_mod,
+        "_compose_session_start_payload",
+        lambda *_a, **_kw: {"l0": [], "l1": [], "wake_depth": "standard"},
+    )
+    monkeypatch.setattr(
+        session_mod,
+        "format_payload_as_markdown",
+        lambda _payload: "cached wake payload",
+    )
+
+    cache, meta = _cache_paths(tmp_path)
+    result = daemon_mod._write_session_start_cache(
+        store, cache_path=cache, meta_path=meta,
+        trigger="periodic_wake", force_rebuild=False,
+    )
+
+    assert result["action"] == "wrote"
+    assert calls == ["load_recall_structural"]
+    assert cache.read_text() == "cached wake payload"
+
+
 def test_write_force_rebuild_ignores_cold_probe(tmp_path, monkeypatch):
     """The SLEEP branch passes force_rebuild=True; even a cold probe shouldn't
     stop the write — that's the cheapest moment to absorb the rebuild cost."""
