@@ -21,6 +21,25 @@ ERR_INVALID_PARAMS = -32602
 ERR_PARSE_ERROR = -32700
 
 IDLE_SECS_DEFAULT = 1800
+RECALL_BUSY_REASON = "recall_busy"
+RECALL_CONCURRENCY_DEFAULT = 2
+RECALL_SLOT_WAIT_SEC_DEFAULT = 0.25
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
 
 
 def _inherit_activated_socket() -> socket.socket | None:
@@ -73,10 +92,43 @@ class SocketServer:
         if idle_secs is None:
             idle_secs = IDLE_SECS_DEFAULT
         self.idle_secs = idle_secs
+        self._recall_slots = asyncio.Semaphore(
+            _env_int("IAI_MCP_RECALL_CONCURRENCY", RECALL_CONCURRENCY_DEFAULT)
+        )
+        self._recall_slot_wait_sec = _env_float(
+            "IAI_MCP_RECALL_SLOT_WAIT_SEC",
+            RECALL_SLOT_WAIT_SEC_DEFAULT,
+        )
         self.last_activity_ts: float = time.monotonic()
         self.active_connections: int = 0
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self._state = state
+
+    async def _dispatch_jsonrpc_method(self, method: str, params: dict) -> Any:
+        from iai_mcp.core import dispatch
+
+        if method != "memory_recall" or "cue" not in params:
+            return await asyncio.to_thread(dispatch, self.store, method, params)
+
+        try:
+            await asyncio.wait_for(
+                self._recall_slots.acquire(),
+                timeout=max(self._recall_slot_wait_sec, 0.001),
+            )
+        except asyncio.TimeoutError:
+            return {
+                "hits": [],
+                "anti_hits": [],
+                "activation_trace": [],
+                "budget_used": 0,
+                "_degraded": True,
+                "_reason": RECALL_BUSY_REASON,
+            }
+
+        try:
+            return await asyncio.to_thread(dispatch, self.store, method, params)
+        finally:
+            self._recall_slots.release()
 
     async def handle(
         self,
@@ -157,10 +209,7 @@ class SocketServer:
                 # here, so they no longer keep the daemon awake.
                 self.last_activity_ts = time.monotonic()
                 try:
-                    from iai_mcp.core import dispatch
-                    result = await asyncio.to_thread(
-                        dispatch, self.store, method, params,
-                    )
+                    result = await self._dispatch_jsonrpc_method(method, params)
                     resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
                 except UnknownMethodError as e:
                     resp = {
