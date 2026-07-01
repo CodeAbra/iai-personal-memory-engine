@@ -61,6 +61,7 @@ def _records_schema_at_dim(dim: int) -> pa.Schema:
             ("valence", pa.float32()),
             ("hv_tier", pa.string()),
             ("structure_hv_payload", pa.binary()),
+            ("embedding_pending", pa.int32()),
         ]
     )
 
@@ -146,6 +147,11 @@ def _stage_record_to_table(
         s5_trust_score=rec.s5_trust_score,
         profile_modulation_gain=rec.profile_modulation_gain,
         schema_version=rec.schema_version,
+        hv_tier=rec.hv_tier,
+        structure_hv_payload=rec.structure_hv_payload,
+        # Keep pending rows pending even though this pass writes a target-dim
+        # placeholder embedding; the normal pending drain owns readiness flips.
+        embedding_pending=rec.embedding_pending,
     )
     target_tbl.add([store._to_row(new_rec)])
 

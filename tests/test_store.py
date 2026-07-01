@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from iai_mcp.store import MemoryStore
-from iai_mcp.types import EMBED_DIM, MemoryRecord
+from iai_mcp.types import EMBED_DIM, STRUCTURE_HV_BYTES, MemoryRecord
 
 
 def _make(
@@ -100,6 +100,71 @@ def test_persistence_across_store_instances(tmp_path):
     got = store2.get(r.id)
     assert got is not None
     assert got.literal_surface == "persistent fact"
+
+
+def test_sql_record_projection_preserves_structure_and_pending(tmp_path):
+    store = MemoryStore(path=tmp_path)
+    structure_hv = b"\x01" * STRUCTURE_HV_BYTES
+    payload = b'{"tier":"sparse"}'
+    rec = _make(text="structured pending record")
+    rec.structure_hv = structure_hv
+    rec.hv_tier = "sparse_vsa"
+    rec.structure_hv_payload = payload
+    rec.embedding_pending = 1
+    store.insert(rec)
+
+    batch = store.get_batch([rec.id])
+
+    got = batch[rec.id]
+    assert got.structure_hv == structure_hv
+    assert got.hv_tier == "sparse_vsa"
+    assert got.structure_hv_payload == payload
+    assert got.embedding_pending == 1
+
+
+def test_direct_recency_projection_preserves_structure_metadata(tmp_path):
+    from iai_mcp.hippo._recall import direct_recency_rows_from_store
+
+    store = MemoryStore(path=tmp_path)
+    structure_hv = b"\x03" * STRUCTURE_HV_BYTES
+    payload = b'{"source":"direct-recency"}'
+    rec = _make(text="direct recency structured record")
+    rec.structure_hv = structure_hv
+    rec.hv_tier = "sparse_vsa"
+    rec.structure_hv_payload = payload
+    rec.embedding_pending = 1
+    store.insert(rec)
+
+    rows = direct_recency_rows_from_store(tmp_path, limit=1)
+
+    assert rows
+    row = rows[0]
+    assert row["id"] == str(rec.id)
+    assert bytes(row["structure_hv"]) == structure_hv
+    assert row["hv_tier"] == "sparse_vsa"
+    assert bytes(row["structure_hv_payload"]) == payload
+    assert int(row["embedding_pending"]) == 1
+
+
+def test_recent_pending_markers_preserve_structure_metadata(tmp_path):
+    store = MemoryStore(path=tmp_path)
+    structure_hv = b"\x04" * STRUCTURE_HV_BYTES
+    payload = b'{"source":"pending-markers"}'
+    rec = _make(text="pending marker structured record")
+    rec.structure_hv = structure_hv
+    rec.hv_tier = "sparse_vsa"
+    rec.structure_hv_payload = payload
+    rec.embedding_pending = 1
+    store.insert(rec)
+
+    markers = store.recent_pending_markers(n=5)
+
+    assert markers
+    got = next(marker for marker in markers if marker.id == rec.id)
+    assert got.structure_hv == structure_hv
+    assert got.hv_tier == "sparse_vsa"
+    assert got.structure_hv_payload == payload
+    assert got.embedding_pending == 1
 
 
 def test_uuid_literal_accepts_uuid_and_canonical_str():
