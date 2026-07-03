@@ -34,6 +34,53 @@ _TEST_PASSPHRASE = "iai-mcp-test-passphrase-2026-04-30"
 
 
 @pytest.fixture(autouse=True)
+def _home_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``Path.home()`` honor ``$HOME`` on every platform.
+
+    On Windows ``pathlib.Path.home()`` resolves via ``USERPROFILE`` and ignores
+    ``HOME``, but the hermetic test suite (57 fixtures) redirects the operator
+    home by setting ``HOME`` only. Without this, product code that calls
+    ``Path.home()`` at runtime (e.g. ``memory_bank``, the maintenance CLI)
+    reads the real profile dir on Windows and the redirect silently leaks.
+
+    The override reads ``os.environ`` at call time so per-test
+    ``monkeypatch.setenv("HOME", ...)`` overrides are picked up automatically.
+    No-op behaviour on POSIX, where ``Path.home()`` already honors ``HOME``.
+
+    On Windows we additionally mirror any ``HOME`` write into ``USERPROFILE``.
+    In-process code goes through the patched ``Path.home()`` above, but child
+    processes spawned by subprocess-based tests inherit ``os.environ`` and
+    resolve ``Path.home()`` via ``USERPROFILE`` — so the redirect must live in
+    the environment too. Wrapping ``monkeypatch.setenv`` keeps ``USERPROFILE``
+    in sync with whatever ``HOME`` each of the ~57 home-setting fixtures picks.
+    """
+    import pathlib
+
+    _orig_home = pathlib.Path.home.__func__
+
+    def _home(cls):
+        env_home = os.environ.get("HOME")
+        if env_home:
+            return pathlib.Path(env_home)
+        return _orig_home(cls)
+
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(_home))
+
+    if os.name == "nt":
+        _orig_setenv = monkeypatch.setenv
+
+        def _setenv_mirror(name, value, prepend=None):
+            _orig_setenv(name, value, prepend=prepend)
+            if name == "HOME":
+                _orig_setenv("USERPROFILE", value)
+
+        monkeypatch.setenv = _setenv_mirror  # type: ignore[method-assign]
+        # Mirror any HOME already present before the first wrapped setenv call.
+        if os.environ.get("HOME"):
+            _orig_setenv("USERPROFILE", os.environ["HOME"])
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     base = tmp_path_factory.mktemp("iai-hermetic")
     fake_root = base / ".iai-mcp"

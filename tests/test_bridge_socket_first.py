@@ -15,6 +15,14 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "mcp-wrapper"
 
+# The mcp-wrapper build path assumes POSIX bash + npm tooling; the CI Windows
+# runner has no Node setup and `subprocess(["npm", ...])` cannot resolve the
+# npm.cmd shim without a shell. Matches test_bridge_no_spawn_path.py.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="bash + npm tooling assumed POSIX (mcp-wrapper build path)",
+)
+
 
 @pytest.fixture(scope="module")
 def built_wrapper() -> Path:

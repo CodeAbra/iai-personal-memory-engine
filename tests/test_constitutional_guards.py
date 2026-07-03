@@ -47,7 +47,7 @@ def test_no_api_key_in_daemon():
     subprocess with the user's subscription instead."""
     offenders: list[str] = []
     for f in _existing_daemon_files():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         if "ANTHROPIC_API_KEY" in text:
             offenders.append(f.name)
     assert not offenders, f"violation: ANTHROPIC_API_KEY found in {offenders}"
@@ -74,7 +74,7 @@ def test_no_api_key_anywhere_in_src():
     probe has been removed."""
     offenders: list[str] = []
     for f in _all_iai_mcp_files():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         if "ANTHROPIC_API_KEY" in text:
             offenders.append(str(f.relative_to(SRC.parent.parent)))
     assert not offenders, (
@@ -97,7 +97,7 @@ def test_no_anthropic_sdk_import_anywhere_in_src():
     import_pattern = re.compile(r"^(?:from anthropic\b|import anthropic\b)", re.MULTILINE)
     offenders: list[tuple[str, list[str]]] = []
     for f in _all_iai_mcp_files():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         matches = import_pattern.findall(text)
         if matches:
             offenders.append((str(f.relative_to(SRC.parent.parent)), matches))
@@ -113,7 +113,7 @@ def test_no_anthropic_client_construction_anywhere_in_src():
     paths are removed."""
     offenders: list[tuple[str, str]] = []
     for f in _all_iai_mcp_files():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         if "anthropic.Anthropic(" in text:
             # Surface the surrounding line for diagnostic clarity.
             for line in text.splitlines():
@@ -144,7 +144,7 @@ def test_no_anthropic_messages_sdk_calls_anywhere_in_src():
     )
     offenders: list[tuple[str, str]] = []
     for f in _all_iai_mcp_files():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         for pat in forbidden_patterns:
             if pat in text:
                 for line in text.splitlines():
@@ -172,7 +172,7 @@ def test_reconsolidation_critic_does_not_modify_literal_surface():
     """
     f = SRC / "reconsolidation_critic.py"
     assert f.exists(), "reconsolidation_critic.py missing"
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     forbidden = (
         re.compile(r"\.literal_surface\s*="),
         re.compile(r"store\.insert\b"),
@@ -207,7 +207,7 @@ def test_no_anthropic_dependency_in_pyproject():
     pyproject.toml; this guard prevents an accidental re-pin."""
     pyproject = SRC.parent.parent / "pyproject.toml"
     assert pyproject.exists(), "pyproject.toml missing"
-    text = pyproject.read_text()
+    text = pyproject.read_text(encoding="utf-8")
     # Block actual dependency lines like `"anthropic>=0.40.0",`, but allow
     # comments mentioning the SDK.
     dep_pattern = re.compile(r'^\s*"anthropic[>=<~!]', re.MULTILINE)
@@ -229,7 +229,7 @@ def test_no_lockf_anywhere():
     modules -- mixing the two is also a bug."""
     offenders: list[str] = []
     for f in SRC.glob("*.py"):
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         if "fcntl.lockf" in text:
             offenders.append(f.name)
     assert not offenders, f"fcntl.lockf forbidden, found in {offenders}"
@@ -246,7 +246,7 @@ def test_no_literal_surface_mutation_in_daemon():
     pattern = re.compile(r"\.literal_surface\s*=")
     offenders: list[tuple[str, list[str]]] = []
     for f in _existing_daemon_files():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         matches = pattern.findall(text)
         if matches:
             offenders.append((f.name, matches))
@@ -263,7 +263,7 @@ def test_no_hardcoded_clock_time_in_quiet_window():
     f = SRC / "quiet_window.py"
     if not f.exists():
         return  # module not yet created
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     # Look for common patterns that would indicate clock-based decisions.
     forbidden = [
         r"\b22:00\b",
@@ -368,7 +368,7 @@ def test_no_cache_control_in_session_assembler():
     """
     f = SRC / "session.py"
     assert f.exists(), "session.py missing"
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     # Comments that mention "cache_control" are fine (they document the
     # pitfall). We only guard against actual code references like setattr/
     # cache_control=... — scan for the pattern with an equals sign.
@@ -390,7 +390,7 @@ def test_no_api_key_in_response_decorator():
     """response_decorator.py stays local-only."""
     f = SRC / "response_decorator.py"
     assert f.exists(), "response_decorator.py missing"
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     lower = text.lower()
     assert "anthropic" not in lower, (
         "violation: response_decorator references 'anthropic'"
@@ -414,7 +414,7 @@ def test_identity_audit_has_no_lock_import():
     f = SRC / "identity_audit.py"
     if not f.exists():
         return
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     # No import of iai_mcp.concurrency, no `ProcessLock` symbol reference.
     assert "iai_mcp.concurrency" not in text, (
         "violation: identity_audit.py imports iai_mcp.concurrency"
@@ -438,7 +438,7 @@ def test_no_api_key_in_hippea_cascade():
     f = SRC / "hippea_cascade.py"
     if not f.exists():
         return  # module not yet created
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     assert "ANTHROPIC_API_KEY" not in text, (
         "violation: ANTHROPIC_API_KEY in hippea_cascade.py"
     )
@@ -460,7 +460,7 @@ def test_hippea_cascade_is_read_only_against_store():
     f = SRC / "hippea_cascade.py"
     if not f.exists():
         return
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     forbidden_calls = [
         "store.insert(",
         "store.append_provenance(",

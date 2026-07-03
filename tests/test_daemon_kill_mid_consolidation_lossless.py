@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from iai_mcp.hippo import HippoLockHeldError
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
@@ -170,13 +171,29 @@ def test_sigkill_mid_write_leaves_store_lossless():
                 raise AssertionError("writer child never signalled readiness")
             time.sleep(0.01)
 
-        os.kill(child.pid, signal.SIGKILL)
+        # Windows has no SIGKILL; os.kill(pid, SIGTERM) maps to TerminateProcess,
+        # which is the same abrupt no-cleanup kill this test needs to prove the
+        # store stays lossless after a hard kill mid-write.
+        os.kill(child.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         child.wait(timeout=30)
         child = None
 
         churn_vec = [0.0] * K_SEEDS + [1.0] + [0.0] * (EMBED_DIM - K_SEEDS - 1)
 
-        reopened = MemoryStore(path=tmp_root)
+        # Windows TerminateProcess (os.kill SIGTERM) releases the killed child's
+        # byte-range lock on the hippo .lock asynchronously during process
+        # teardown, so the reopen can briefly race the lock release. Poll until
+        # the exclusive lock is free. First attempt succeeds on POSIX.
+        reopened = None
+        for _ in range(50):
+            try:
+                reopened = MemoryStore(path=tmp_root)
+                break
+            except HippoLockHeldError:
+                time.sleep(0.1)
+        assert reopened is not None, (
+            "hippo lock not released within 5s after killing the writer child"
+        )
         try:
 
             for i, sid in enumerate(seed_ids):

@@ -36,12 +36,12 @@ def test_linux_proc_cpuinfo_with_avx2_returns_true(
     monkeypatch.setattr(cf.platform, "machine", lambda: "x86_64")
 
     def _fake_read_text(self, *a, **kw):
-        if str(self) == "/proc/cpuinfo":
+        if self.as_posix() == "/proc/cpuinfo":
             return _LINUX_CPUINFO_WITH_AVX2
         raise FileNotFoundError(str(self))
 
     def _fake_exists(self):
-        return str(self) == "/proc/cpuinfo"
+        return self.as_posix() == "/proc/cpuinfo"
 
     monkeypatch.setattr(Path, "read_text", _fake_read_text)
     monkeypatch.setattr(Path, "exists", _fake_exists)
@@ -61,12 +61,12 @@ def test_linux_proc_cpuinfo_without_avx2_returns_false(
     monkeypatch.setattr(cf.platform, "machine", lambda: "x86_64")
 
     def _fake_read_text(self, *a, **kw):
-        if str(self) == "/proc/cpuinfo":
+        if self.as_posix() == "/proc/cpuinfo":
             return _LINUX_CPUINFO_WITHOUT_AVX2
         raise FileNotFoundError(str(self))
 
     def _fake_exists(self):
-        return str(self) == "/proc/cpuinfo"
+        return self.as_posix() == "/proc/cpuinfo"
 
     monkeypatch.setattr(Path, "read_text", _fake_read_text)
     monkeypatch.setattr(Path, "exists", _fake_exists)
