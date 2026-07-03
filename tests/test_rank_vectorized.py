@@ -179,7 +179,7 @@ def test_R4_empty_reachable_returns_empty_hits(tmp_path: Path):
 
 def test_R5_tie_break_deterministic_by_uuid(tmp_path: Path, monkeypatch):
     import iai_mcp.pipeline as _p
-    monkeypatch.setattr(_p, "_age_penalty", lambda _ts: 0.0)
+    monkeypatch.setattr(_p, "_age_penalty", lambda _ts, _now: 0.0)
 
     store = MemoryStore(path=tmp_path / "lancedb")
     store.root = tmp_path

@@ -163,13 +163,18 @@ def _aaak_overlap(cue_text: str, aaak_index: str) -> float:
     return len(cue_set & idx_set) / len(cue_set | idx_set)
 
 
-def _age_penalty(created_at: datetime) -> float:
-    now = datetime.now(timezone.utc)
+def _age_penalty(created_at: datetime, now: datetime) -> float:
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
-    days = (now - created_at).total_seconds() / 86400.0
-    if days < 0:
+    # Round to whole seconds: AGE_HALF_LIFE_DAYS is a days-scale constant, so
+    # sub-second creation-time jitter (e.g. between records seeded in a tight
+    # loop) carries no real signal here but is fine-grained enough to break
+    # float-equality ties between otherwise-identical records, non-reproducibly,
+    # since it depends on the exact instant `now` happens to be read.
+    seconds = round((now - created_at).total_seconds())
+    if seconds < 0:
         return 0.0
+    days = seconds / 86400.0
     return min(1.0, days / AGE_HALF_LIFE_DAYS)
 
 
@@ -735,6 +740,8 @@ def _recall_core(
 
     corrector_base_score: dict[str, float] = {}
 
+    _scoring_now = datetime.now(timezone.utc)
+
     scored: list[tuple[float, UUID, float, float, float, float, float, float]] = []
     if reachable_indices.size:
         from iai_mcp.hebbian_structure import structural_similarity
@@ -747,7 +754,7 @@ def _recall_core(
             cos = float(shared_cos[i])
             aaak = _aaak_overlap(cue, rec.aaak_index)
             deg = float(degree.get(str(cid), 0))
-            age = _age_penalty(rec.created_at)
+            age = _age_penalty(rec.created_at, _scoring_now)
             if log_max_deg > 0.0:
                 deg_norm = log(1.0 + deg) / log_max_deg
             else:
