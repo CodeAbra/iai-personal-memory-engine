@@ -250,6 +250,10 @@ from ._analytics import (
     cmd_build_native,
     cmd_migrate,
     cmd_deferred_unlock_dead_pids,
+    cmd_episodes_recent,
+    cmd_curiosity_pending,
+    cmd_events_query,
+    cmd_schema_list,
 )
 
 from ._maintenance import (
@@ -1063,6 +1067,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="list terminal files + event counts without inserting or renaming",
     )
     dpf.set_defaults(func=cmd_drain_permanent_failed)
+
+    er = sub.add_parser(
+        "episodes-recent",
+        help=(
+            "recent captured user turns. Routes through daemon socket when "
+            "daemon is running; direct-open fallback when it is not."
+        ),
+    )
+    er.add_argument("--n", type=int, default=10, help="how many turns (default 10, max 1000)")
+    er.add_argument("--session-id", default=None, help="filter to a specific session UUID")
+    er.set_defaults(func=cmd_episodes_recent)
+
+    cp = sub.add_parser(
+        "curiosity-pending",
+        help=(
+            "pending curiosity questions queued by the sleep daemon. "
+            "Routes through daemon socket when running; direct-open "
+            "fallback when it is not."
+        ),
+    )
+    cp.add_argument("--session-id", default=None, help="filter to a specific session UUID")
+    cp.set_defaults(func=cmd_curiosity_pending)
+
+    eq = sub.add_parser(
+        "events-query",
+        help=(
+            "user-visible event log (contradictions, trajectory metrics, "
+            "etc). Routes through daemon socket when running; direct-open "
+            "fallback when it is not."
+        ),
+    )
+    eq.add_argument("--kind", required=True, help="event kind, e.g. s4_contradiction, trajectory_metric")
+    eq.add_argument("--since", default=None, help="ISO-8601 timestamp; only events at or after this")
+    eq.add_argument("--severity", default=None, choices=["info", "warning", "critical"])
+    eq.add_argument("--limit", type=int, default=100, help="max events (default 100, capped at 1000)")
+    eq.set_defaults(func=cmd_events_query)
+
+    sl = sub.add_parser(
+        "schema-list",
+        help=(
+            "induced Tier-0/Tier-1 schemas. Routes through daemon socket "
+            "when running; direct-open fallback when it is not."
+        ),
+    )
+    sl.add_argument("--domain", default=None, help="only schemas tagged with this domain")
+    sl.add_argument("--confidence-min", type=float, default=0.0, help="minimum confidence (0.0-1.0)")
+    sl.set_defaults(func=cmd_schema_list)
 
     return parser
 

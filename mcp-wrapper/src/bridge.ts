@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import {
   type ConnectTarget,
+  authenticateConnection,
   createDaemonConnection,
   daemonUnreachableHint,
   getDaemonConnectTarget,
@@ -74,13 +75,15 @@ export class PythonCoreBridge {
       throw new DaemonUnreachableError(daemonUnreachableHint());
     }
 
-    let sock: net.Socket;
+    let sock: net.Socket | null = null;
     try {
       sock = await this.connectWithTimeout(
         target,
         SOCKET_CONNECT_TIMEOUT_MS,
       );
+      authenticateConnection(sock, target);
     } catch (e) {
+      try { sock?.destroy(); } catch {  }
       throw new DaemonUnreachableError(daemonUnreachableHint());
     }
     this.sock = sock;
@@ -198,10 +201,12 @@ export class PythonCoreBridge {
         if (target === null) {
           return;
         }
-        this.sock = await this.connectWithTimeout(
+        const sock = await this.connectWithTimeout(
           target,
           SOCKET_CONNECT_TIMEOUT_MS,
         );
+        authenticateConnection(sock, target);
+        this.sock = sock;
         this.attachSocketHandlers();
       } catch {
       } finally {
@@ -279,6 +284,12 @@ export function emitSessionOpen(sessionId: string): Promise<void> {
         return;
       }
       const sock = createDaemonConnection(target, () => {
+        try {
+          authenticateConnection(sock, target);
+        } catch {
+          try { sock.destroy(); } catch {  }
+          return;
+        }
         const msg =
           JSON.stringify({
             type: "session_open",

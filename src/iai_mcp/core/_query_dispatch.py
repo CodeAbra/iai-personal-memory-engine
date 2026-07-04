@@ -151,3 +151,56 @@ def _events_query_dispatch(store: MemoryStore, params: dict) -> dict:
             "source_ids": e.get("source_ids", []),
         })
     return {"events": out_events, "count": len(out_events)}
+
+
+def _episodes_recent_dispatch(store: MemoryStore, params: dict) -> dict:
+    """Shared by the `episodes_recent` RPC method and the `episodes-recent`
+    CLI direct-open fallback, so the two can never drift."""
+    from iai_mcp.capture import read_pending_live_events
+
+    n = max(0, min(int(params.get("n", 10)), 1000))
+    session_id = params.get("session_id")
+    pending = read_pending_live_events(session_id=session_id)
+    records = store.recent_user_turns(n, session_id=session_id, pending_live_events=pending)
+    turns: list[dict] = []
+    for r in records:
+        if r.id is None:
+            su = getattr(r, "_pending_source_uuid", None)
+            idem = getattr(r, "_pending_idem_tag", "")
+            if su:
+                rid = f"pending:{su}"
+            else:
+                idem_hex = idem[5:] if idem.startswith("idem:") else idem
+                rid = f"pending:{idem_hex}" if idem_hex else "pending:unknown"
+        else:
+            rid = str(r.id)
+        turns.append({
+            "record_id": rid,
+            "literal_surface": r.literal_surface,
+            "session_id": (r.provenance or [{}])[0].get("session_id"),
+            "captured_at": (
+                r.created_at.isoformat() if r.created_at else None
+            ),
+        })
+    return {"turns": turns, "count": len(turns)}
+
+
+def _curiosity_pending_dispatch(store: MemoryStore, params: dict) -> dict:
+    """Shared by the `curiosity_pending` RPC method and the
+    `curiosity-pending` CLI direct-open fallback."""
+    from iai_mcp.curiosity import pending_questions
+
+    qs = pending_questions(store, params.get("session_id"))
+    return {
+        "questions": [
+            {
+                "id": str(q.id),
+                "text": q.text,
+                "tier": q.tier,
+                "entropy": q.entropy,
+                "triggered_by_record_ids": [str(t) for t in q.triggered_by_record_ids],
+            }
+            for q in qs
+        ],
+        "count": len(qs),
+    }

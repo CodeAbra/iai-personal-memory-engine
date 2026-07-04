@@ -267,6 +267,142 @@ def cmd_bank_recall(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_episodes_recent(args: argparse.Namespace) -> int:
+    """Recent captured user turns. Routes through the daemon socket when the
+    daemon is reachable; direct-open fallback (same pattern as bank-recall /
+    drain-permanent-failed) when it is not — so callers like the nightly
+    digest never depend on an MCP wrapper being up for a plain store read."""
+    import json as _json
+
+    from iai_mcp import cli as _cli
+
+    params: dict = {"n": args.n}
+    if args.session_id:
+        params["session_id"] = args.session_id
+
+    resp = _cli._send_jsonrpc_request("episodes_recent", params)
+    if isinstance(resp, dict) and "result" in resp:
+        result = resp["result"]
+        if isinstance(result, dict):
+            print(_json.dumps(result, ensure_ascii=False))
+            return 0
+
+    from iai_mcp.core._query_dispatch import _episodes_recent_dispatch
+    from iai_mcp.hippo import HippoLockHeldError
+    from iai_mcp.store import MemoryStore
+
+    try:
+        store = MemoryStore()
+        result = _episodes_recent_dispatch(store, params)
+    except HippoLockHeldError:
+        print("daemon holds store lock; retry when daemon is idle")
+        return 0
+
+    print(_json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def cmd_curiosity_pending(args: argparse.Namespace) -> int:
+    """Pending curiosity questions queued by the sleep daemon. Same
+    daemon-first / direct-open-fallback shape as cmd_episodes_recent."""
+    import json as _json
+
+    from iai_mcp import cli as _cli
+
+    params: dict = {}
+    if args.session_id:
+        params["session_id"] = args.session_id
+
+    resp = _cli._send_jsonrpc_request("curiosity_pending", params)
+    if isinstance(resp, dict) and "result" in resp:
+        result = resp["result"]
+        if isinstance(result, dict):
+            print(_json.dumps(result, ensure_ascii=False))
+            return 0
+
+    from iai_mcp.core._query_dispatch import _curiosity_pending_dispatch
+    from iai_mcp.hippo import HippoLockHeldError
+    from iai_mcp.store import MemoryStore
+
+    try:
+        store = MemoryStore()
+        result = _curiosity_pending_dispatch(store, params)
+    except HippoLockHeldError:
+        print("daemon holds store lock; retry when daemon is idle")
+        return 0
+
+    print(_json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def cmd_events_query(args: argparse.Namespace) -> int:
+    """User-visible event log (contradictions, trajectory metrics, etc).
+    Same daemon-first / direct-open-fallback shape as cmd_episodes_recent."""
+    import json as _json
+
+    from iai_mcp import cli as _cli
+
+    params: dict = {"kind": args.kind, "limit": args.limit}
+    if args.since:
+        params["since"] = args.since
+    if args.severity:
+        params["severity"] = args.severity
+
+    resp = _cli._send_jsonrpc_request("events_query", params)
+    if isinstance(resp, dict) and "result" in resp:
+        result = resp["result"]
+        if isinstance(result, dict):
+            print(_json.dumps(result, ensure_ascii=False))
+            return 0
+
+    from iai_mcp.core._query_dispatch import _events_query_dispatch
+    from iai_mcp.hippo import HippoLockHeldError
+    from iai_mcp.store import MemoryStore
+
+    try:
+        store = MemoryStore()
+        result = _events_query_dispatch(store, params)
+    except HippoLockHeldError:
+        print("daemon holds store lock; retry when daemon is idle")
+        return 0
+
+    print(_json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def cmd_schema_list(args: argparse.Namespace) -> int:
+    """Induced Tier-0/Tier-1 schemas. Same daemon-first / direct-open-
+    fallback shape as cmd_episodes_recent."""
+    import json as _json
+
+    from iai_mcp import cli as _cli
+
+    params: dict = {"confidence_min": args.confidence_min}
+    if args.domain:
+        params["domain"] = args.domain
+
+    resp = _cli._send_jsonrpc_request("schema_list", params)
+    if isinstance(resp, dict) and "result" in resp:
+        result = resp["result"]
+        if isinstance(result, dict):
+            print(_json.dumps(result, ensure_ascii=False))
+            return 0
+
+    from iai_mcp.core._query_dispatch import _schema_list_dispatch
+    from iai_mcp.hippo import HippoLockHeldError
+    from iai_mcp.store import MemoryStore
+
+    try:
+        store = MemoryStore()
+        result = _schema_list_dispatch(store, params)
+    except HippoLockHeldError:
+        print("daemon holds store lock; retry when daemon is idle")
+        return 0
+
+    print(_json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def cmd_topology(args: argparse.Namespace) -> int:  # noqa: ARG001 -- argparse contract
     from iai_mcp import cli as _cli
 
