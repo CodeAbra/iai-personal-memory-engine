@@ -35,6 +35,13 @@ TOKEN_FILE: Path = _BASE_DIR / ".daemon.token"   # Windows only — auth secret
 
 _TOKEN_BYTES = 32  # 256-bit random token → 64 hex chars on the wire
 
+# The auth token the *current process* generated for its listening server, held
+# in memory for the daemon's whole lifetime. Populated by _generate_token (only
+# the daemon calls that). Lets the daemon re-assert a vanished token file via
+# reassert_token_if_missing() without re-reading it from disk. Stays None in
+# client processes, which must never re-create the daemon's token.
+_CURRENT_TOKEN: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Port file helpers (Windows only)
@@ -105,12 +112,43 @@ def _token_file_path() -> Path:
 
 def _generate_token() -> str:
     """Generate a fresh 32-byte random token and persist it to the token file."""
+    global _CURRENT_TOKEN
     token = secrets.token_hex(_TOKEN_BYTES)
     path = _token_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token, encoding="utf-8")
     _restrict_token_file(path)
+    _CURRENT_TOKEN = token
     return token
+
+
+def reassert_token_if_missing() -> bool:
+    """Re-write the Windows auth-token file from the in-memory token if it has
+    gone missing while the daemon is running.
+
+    The token file is a single point of failure: it is written once at startup,
+    but if it later disappears for any reason (external cleanup, AV quarantine,
+    a stale-file sweep) the TCP port stays up while EVERY new client fails the
+    auth handshake — the daemon looks alive but new sessions and ``daemon
+    status`` all report "not running". The daemon still holds the token in
+    memory, so we can restore the file cheaply. Called from the daemon's
+    periodic tick.
+
+    Returns True iff it just re-created the file. No-op (returns False) on POSIX,
+    in client processes (``_CURRENT_TOKEN is None``), or when the file is present.
+    """
+    if not IS_WINDOWS or _CURRENT_TOKEN is None:
+        return False
+    path = _token_file_path()
+    if path.exists():
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_CURRENT_TOKEN, encoding="utf-8")
+        _restrict_token_file(path)
+    except OSError:
+        return False
+    return True
 
 
 def _read_token() -> str | None:
@@ -121,6 +159,11 @@ def _read_token() -> str | None:
 
 
 def _remove_token_file() -> None:
+    # Clear the in-memory copy first so reassert_token_if_missing() cannot
+    # resurrect a token the daemon is deliberately tearing down (clean shutdown,
+    # in-process restart, tests).
+    global _CURRENT_TOKEN
+    _CURRENT_TOKEN = None
     try:
         _token_file_path().unlink()
     except (FileNotFoundError, OSError):
