@@ -35,12 +35,24 @@ class HeartbeatEntry:
 def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    # NOT os.kill(pid, 0) first: on Windows os.kill rejects signal 0 with
+    # OSError [WinError 87] (invalid parameter) even for a live PID, which made
+    # this scanner (and doctor check (m)) fail against a healthy daemon.
+    # psutil.pid_exists is correct and cross-platform (psutil is a hard dep).
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
     return True
 
 

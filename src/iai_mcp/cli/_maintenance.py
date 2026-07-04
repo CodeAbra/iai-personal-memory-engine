@@ -69,11 +69,21 @@ def _maintenance_compact_preflight_daemon_alive() -> str | None:
     pid = state.get("daemon_pid")
     if not isinstance(pid, int) or pid <= 0:
         return None
+    # NOT os.kill(pid, 0) on Windows: signal 0 raises OSError [WinError 87]
+    # (invalid parameter) even for a live PID, which would make this guard
+    # conclude "no daemon running" and let maintenance proceed against a store
+    # the live daemon still holds. psutil.pid_exists is correct cross-platform;
+    # the psutil block below then confirms the PID is actually the daemon.
     try:
-        _os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return None
-    except OSError:
+        import psutil
+        pid_alive = psutil.pid_exists(pid)
+    except Exception:  # noqa: BLE001 -- fall back to POSIX probe
+        try:
+            _os.kill(pid, 0)
+            pid_alive = True
+        except (ProcessLookupError, PermissionError, OSError):
+            pid_alive = False
+    if not pid_alive:
         return None
     try:
         import psutil

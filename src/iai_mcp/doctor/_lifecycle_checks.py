@@ -65,26 +65,33 @@ def check_a_daemon_alive() -> CheckResult:
             f"daemon_pid={pid!r} is not a valid PID (corrupt state?)",
         )
 
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"PID {pid} in state but no process found",
-        )
-    except PermissionError:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"PID {pid} exists but is not owned by this user",
-        )
-    except OSError as e:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"liveness probe failed: {type(e).__name__}: {e}",
-        )
+    # os.kill(pid, 0) is the POSIX liveness idiom, but on Windows os.kill
+    # rejects signal 0 with OSError [WinError 87] (invalid parameter) even for
+    # a live PID — which reported a healthy, ticking daemon as dead. Skip the
+    # probe there and rely on the psutil refinement below, which both confirms
+    # the PID exists and that it is an iai_mcp.daemon. Mirrors
+    # lifecycle_lock._is_pid_alive.
+    if platform.system() != "Windows":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"PID {pid} in state but no process found",
+            )
+        except PermissionError:
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"PID {pid} exists but is not owned by this user",
+            )
+        except OSError as e:
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"liveness probe failed: {type(e).__name__}: {e}",
+            )
 
     try:
         import psutil
