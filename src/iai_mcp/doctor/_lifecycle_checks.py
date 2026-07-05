@@ -524,47 +524,37 @@ def check_n_hid_idle_source() -> CheckResult:
     detector = IdleDetector()
     status = detector.status()
 
+    def idle_str(none_label: str) -> str:
+        return (
+            f"{status.hid_idle_sec}s"
+            if status.hid_idle_sec is not None
+            else none_label
+        )
+
     signals_str = (
         ",".join(status.available_signals) if status.available_signals else "none"
     )
 
     if "logind" in status.available_signals:
-        idle_str = (
-            f"{status.hid_idle_sec}s"
-            if status.hid_idle_sec is not None
-            else "not idle"
+        detail = f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
+        result_status = "PASS"
+    else:
+        pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
+        detail = (
+            f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
+            f"available: {signals_str}"
         )
-        return CheckResult(
-            name="(n) HID idle source",
-            passed=True,
-            detail=f"logind IdleHint: {idle_str}, available: {signals_str}",
-            status="PASS",
-        )
+        if "HIDIdleTime" in status.available_signals:
+            result_status = "PASS"
+        else:
+            detail = f"{detail}; L6 will fall back to heartbeat-idle only"
+            result_status = "WARN"
 
-    idle_str = (
-        f"{status.hid_idle_sec}s"
-        if status.hid_idle_sec is not None
-        else "unavailable"
-    )
-    pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
-    detail = (
-        f"HIDIdleTime: {idle_str}, pmset: {pmset_str}, available: {signals_str}"
-    )
-
-    if "HIDIdleTime" in status.available_signals:
-        return CheckResult(
-            name="(n) HID idle source",
-            passed=True,
-            detail=detail,
-            status="PASS",
-        )
     return CheckResult(
         name="(n) HID idle source",
         passed=True,
-        detail=(
-            f"{detail}; L6 will fall back to heartbeat-idle only"
-        ),
-        status="WARN",
+        detail=detail,
+        status=result_status,
     )
 
 
