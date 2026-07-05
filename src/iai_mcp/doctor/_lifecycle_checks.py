@@ -524,17 +524,31 @@ def check_n_hid_idle_source() -> CheckResult:
     detector = IdleDetector()
     status = detector.status()
 
-    hid_str = (
+    idle_str = (
         f"{status.hid_idle_sec}s"
         if status.hid_idle_sec is not None
         else "unavailable"
     )
-    pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
     signals_str = (
         ",".join(status.available_signals) if status.available_signals else "none"
     )
+
+    if "logind" in status.available_signals:
+        logind_str = (
+            f"{status.hid_idle_sec}s"
+            if status.hid_idle_sec is not None
+            else "not idle"
+        )
+        return CheckResult(
+            name="(n) HID idle source",
+            passed=True,
+            detail=f"logind IdleHint: {logind_str}, available: {signals_str}",
+            status="PASS",
+        )
+
+    pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
     detail = (
-        f"HIDIdleTime: {hid_str}, pmset: {pmset_str}, available: {signals_str}"
+        f"HIDIdleTime: {idle_str}, pmset: {pmset_str}, available: {signals_str}"
     )
 
     if "HIDIdleTime" in status.available_signals:

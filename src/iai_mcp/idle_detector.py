@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -10,13 +12,23 @@ _IOREG_BIN = "/usr/sbin/ioreg"
 
 _PMSET_BIN = "/usr/bin/pmset"
 
+_BUSCTL_BIN = "/usr/bin/busctl"
+
 _IOREG_TIMEOUT_SEC = 5
 
 _PMSET_TIMEOUT_SEC = 10
 
+_BUSCTL_TIMEOUT_SEC = 5
+
 _PMSET_TAIL_LINES = 200
 
 _HID_IDLE_RE = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
+
+_LOGIND_SESSION_PATH_RE = re.compile(r'"(/org/freedesktop/login1/session/[^"]+)"')
+
+_LOGIND_BOOL_RE = re.compile(r"\bb\s+(true|false)\b")
+
+_LOGIND_UINT64_RE = re.compile(r"\bt\s+(\d+)")
 
 _PMSET_SLEEP_MARKERS = ("System Sleep", "Display is turned off")
 
@@ -117,29 +129,135 @@ class IdleDetector:
         return False
 
 
+    def _logind_session_path(self) -> str | None:
+        try:
+            result = subprocess.run(
+                [
+                    _BUSCTL_BIN, "--system", "call",
+                    "org.freedesktop.login1", "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager", "GetSessionByPID",
+                    "u", str(os.getpid()),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_BUSCTL_TIMEOUT_SEC,
+                check=False,
+            )
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            return None
+        except OSError:
+            return None
+
+        if result.returncode != 0:
+            return None
+        match = _LOGIND_SESSION_PATH_RE.search(result.stdout or "")
+        return match.group(1) if match else None
+
+    def _logind_get_property(self, session_path: str, prop: str) -> str | None:
+        try:
+            result = subprocess.run(
+                [
+                    _BUSCTL_BIN, "--system", "get-property",
+                    "org.freedesktop.login1", session_path,
+                    "org.freedesktop.login1.Session", prop,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_BUSCTL_TIMEOUT_SEC,
+                check=False,
+            )
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            return None
+        except OSError:
+            return None
+
+        if result.returncode != 0:
+            return None
+        return result.stdout or ""
+
+    def _logind_idle_from_session(self, session_path: str) -> int | None:
+        hint_out = self._logind_get_property(session_path, "IdleHint")
+        if hint_out is None:
+            return None
+        hint_match = _LOGIND_BOOL_RE.search(hint_out)
+        if hint_match is None or hint_match.group(1) != "true":
+            return None
+
+        since_out = self._logind_get_property(session_path, "IdleSinceHint")
+        if since_out is None:
+            return None
+        since_match = _LOGIND_UINT64_RE.search(since_out)
+        if since_match is None:
+            return None
+        idle_since_usec = int(since_match.group(1))
+        if idle_since_usec <= 0:
+            return None
+
+        now_usec = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+        return max(0, (now_usec - idle_since_usec) // 1_000_000)
+
+    def logind_idle_time_sec(self) -> int | None:
+        session_path = self._logind_session_path()
+        if session_path is None:
+            return None
+        return self._logind_idle_from_session(session_path)
+
+
+    def os_idle_time_sec(self) -> tuple[int | None, str | None]:
+        """Platform dispatcher for OS-level idle time.
+
+        Senses the current OS and queries whichever idle source it
+        supports, so callers never need their own platform checks. Returns
+        ``(idle_seconds, source_name)``. ``source_name`` is set whenever the
+        underlying source was reachable, even if ``idle_seconds`` is ``None``
+        (session not currently idle) -- this lets callers distinguish
+        "signal available" from "signal unavailable" without knowing which
+        platform they're on.
+        """
+        system = platform.system()
+        if system == "Darwin":
+            idle_sec = self.hid_idle_time_sec()
+            return idle_sec, ("HIDIdleTime" if idle_sec is not None else None)
+        if system == "Linux":
+            session_path = self._logind_session_path()
+            if session_path is None:
+                return None, None
+            return self._logind_idle_from_session(session_path), "logind"
+        return None, None
+
+
     def sleep_eligible(self, heartbeat_idle_30min: bool) -> bool:
         if heartbeat_idle_30min:
             return True
 
-        hid_idle = self.hid_idle_time_sec()
-        if hid_idle is not None and hid_idle >= _HID_IDLE_THRESHOLD_SEC:
+        idle_sec, _source = self.os_idle_time_sec()
+        if idle_sec is not None and idle_sec >= _HID_IDLE_THRESHOLD_SEC:
             return True
 
-        return self.pmset_recent_sleep()
+        if platform.system() == "Darwin":
+            return self.pmset_recent_sleep()
+        return False
 
 
     def status(self) -> IdleStatus:
-        hid_idle = self.hid_idle_time_sec()
-        pmset_seen = self.pmset_recent_sleep()
+        idle_sec, source = self.os_idle_time_sec()
 
         signals: list[str] = []
-        if hid_idle is not None:
-            signals.append("HIDIdleTime")
-        if _pmset_responsive():
-            signals.append("pmset")
+        if source is not None:
+            signals.append(source)
+
+        pmset_seen = False
+        if platform.system() == "Darwin":
+            pmset_seen = self.pmset_recent_sleep()
+            if _pmset_responsive():
+                signals.append("pmset")
 
         return IdleStatus(
-            hid_idle_sec=hid_idle,
+            hid_idle_sec=idle_sec,
             pmset_recent_sleep=pmset_seen,
             available_signals=signals,
         )

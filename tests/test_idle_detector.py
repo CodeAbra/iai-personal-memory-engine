@@ -124,6 +124,8 @@ def test_sleep_eligible_hid_idle_path() -> None:
         stdout=_ioreg_stdout(idle_ns=1900 * 1_000_000_000)
     )
     with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
         "iai_mcp.idle_detector.subprocess.run",
         return_value=fake_ioreg,
     ) as run_mock:
@@ -142,6 +144,8 @@ def test_sleep_eligible_pmset_path() -> None:
         ])
     )
     with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
         "iai_mcp.idle_detector.subprocess.run",
         side_effect=[fake_ioreg, fake_pmset],
     ):
@@ -155,8 +159,21 @@ def test_sleep_eligible_all_false() -> None:
     )
     fake_pmset = _completed_process(stdout="")
     with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
         "iai_mcp.idle_detector.subprocess.run",
         side_effect=[fake_ioreg, fake_pmset],
+    ):
+        result = IdleDetector().sleep_eligible(heartbeat_idle_30min=False)
+    assert result is False
+
+
+def test_sleep_eligible_unknown_platform_has_no_secondary_signal() -> None:
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="FreeBSD"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=AssertionError("must not spawn on an unsupported platform"),
     ):
         result = IdleDetector().sleep_eligible(heartbeat_idle_30min=False)
     assert result is False
@@ -169,6 +186,8 @@ def test_status_for_doctor_row_all_signals_available() -> None:
     fake_pmset_log = _completed_process(stdout="")
     fake_pmset_g = _completed_process(stdout="Now drawing from 'AC Power'\n")
     with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
         "iai_mcp.idle_detector.subprocess.run",
         side_effect=[fake_ioreg, fake_pmset_log, fake_pmset_g],
     ):
@@ -183,12 +202,179 @@ def test_status_for_doctor_row_all_signals_available() -> None:
 
 def test_status_when_signals_missing() -> None:
     with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
         "iai_mcp.idle_detector.subprocess.run",
         side_effect=FileNotFoundError(2, "No such file"),
     ):
         status = IdleDetector().status()
     assert status.hid_idle_sec is None
     assert status.pmset_recent_sleep is False
+    assert status.available_signals == []
+
+
+# ---------------------------------------------------------------------------
+# Linux: systemd-logind IdleHint / IdleSinceHint
+# ---------------------------------------------------------------------------
+
+
+def _busctl_session_path_stdout(path: str = "/org/freedesktop/login1/session/c2") -> str:
+    return f'o "{path}"\n'
+
+
+def _busctl_bool_stdout(value: bool) -> str:
+    return f"b {'true' if value else 'false'}\n"
+
+
+def _busctl_uint64_stdout(value: int) -> str:
+    return f"t {value}\n"
+
+
+def test_logind_session_path_parses_busctl_call_output() -> None:
+    fake = _completed_process(stdout=_busctl_session_path_stdout())
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector()._logind_session_path()
+    assert result == "/org/freedesktop/login1/session/c2"
+
+
+def test_logind_session_path_returns_none_when_busctl_missing() -> None:
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=FileNotFoundError(2, "No such file"),
+    ):
+        result = IdleDetector()._logind_session_path()
+    assert result is None
+
+
+def test_logind_idle_time_sec_returns_none_when_not_idle() -> None:
+    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
+    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_path, fake_hint],
+    ):
+        result = IdleDetector().logind_idle_time_sec()
+    assert result is None
+
+
+def test_logind_idle_time_sec_computes_elapsed_when_idle() -> None:
+    idle_since_usec = int(
+        (datetime.now(timezone.utc) - timedelta(seconds=1800)).timestamp() * 1_000_000
+    )
+    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
+    fake_hint = _completed_process(stdout=_busctl_bool_stdout(True))
+    fake_since = _completed_process(stdout=_busctl_uint64_stdout(idle_since_usec))
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_path, fake_hint, fake_since],
+    ):
+        result = IdleDetector().logind_idle_time_sec()
+    assert result is not None
+    assert 1795 <= result <= 1805
+
+
+def test_logind_idle_time_sec_returns_none_when_session_not_found() -> None:
+    fake = _completed_process(stdout="", returncode=1)
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector().logind_idle_time_sec()
+    assert result is None
+
+
+def test_os_idle_time_sec_dispatches_to_logind_on_linux() -> None:
+    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
+    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_path, fake_hint],
+    ):
+        idle_sec, source = IdleDetector().os_idle_time_sec()
+    assert idle_sec is None
+    assert source == "logind"
+
+
+def test_os_idle_time_sec_dispatches_to_hid_on_darwin() -> None:
+    fake_ioreg = _completed_process(
+        stdout=_ioreg_stdout(idle_ns=100 * 1_000_000_000)
+    )
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run", return_value=fake_ioreg
+    ):
+        idle_sec, source = IdleDetector().os_idle_time_sec()
+    assert idle_sec == 100
+    assert source == "HIDIdleTime"
+
+
+def test_os_idle_time_sec_none_on_unsupported_platform() -> None:
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="FreeBSD"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=AssertionError("must not spawn on an unsupported platform"),
+    ):
+        idle_sec, source = IdleDetector().os_idle_time_sec()
+    assert idle_sec is None
+    assert source is None
+
+
+def test_sleep_eligible_logind_idle_path() -> None:
+    idle_since_usec = int(
+        (datetime.now(timezone.utc) - timedelta(seconds=1900)).timestamp() * 1_000_000
+    )
+    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
+    fake_hint = _completed_process(stdout=_busctl_bool_stdout(True))
+    fake_since = _completed_process(stdout=_busctl_uint64_stdout(idle_since_usec))
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_path, fake_hint, fake_since],
+    ):
+        result = IdleDetector().sleep_eligible(heartbeat_idle_30min=False)
+    assert result is True
+
+
+def test_sleep_eligible_logind_not_idle_has_no_pmset_fallback() -> None:
+    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
+    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_path, fake_hint],
+    ) as run_mock:
+        result = IdleDetector().sleep_eligible(heartbeat_idle_30min=False)
+    assert result is False
+    # Only the logind calls -- no attempt to shell out to pmset on Linux.
+    assert run_mock.call_count == 2
+
+
+def test_status_reports_logind_signal_on_linux() -> None:
+    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
+    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_path, fake_hint],
+    ):
+        status = IdleDetector().status()
+    assert status.available_signals == ["logind"]
+    assert status.pmset_recent_sleep is False
+
+
+def test_status_reports_no_signal_when_logind_unreachable() -> None:
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=FileNotFoundError(2, "No such file"),
+    ):
+        status = IdleDetector().status()
+    assert status.hid_idle_sec is None
     assert status.available_signals == []
 
 
