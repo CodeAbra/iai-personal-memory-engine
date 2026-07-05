@@ -534,21 +534,23 @@ def check_n_hid_idle_source() -> CheckResult:
     signals_str = (
         ",".join(status.available_signals) if status.available_signals else "none"
     )
+    pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
 
     if "logind" in status.available_signals:
         detail = f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
         result_status = "PASS"
-    else:
-        pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
+    elif "HIDIdleTime" in status.available_signals:
         detail = (
             f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
             f"available: {signals_str}"
         )
-        if "HIDIdleTime" in status.available_signals:
-            result_status = "PASS"
-        else:
-            detail = f"{detail}; L6 will fall back to heartbeat-idle only"
-            result_status = "WARN"
+        result_status = "PASS"
+    else:
+        detail = (
+            f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
+            f"available: {signals_str}; L6 will fall back to heartbeat-idle only"
+        )
+        result_status = "WARN"
 
     return CheckResult(
         name="(n) HID idle source",
