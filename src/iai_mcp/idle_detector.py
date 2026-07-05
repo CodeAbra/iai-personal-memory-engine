@@ -147,35 +147,39 @@ class IdleDetector:
         except json.JSONDecodeError:
             return None
 
-    def _logind_session_path(self) -> str | None:
+    def _logind_session_paths(self) -> list[str]:
         # Enumerate sessions rather than resolving "the calling process's own
         # session" (e.g. via GetSessionByPID): the daemon runs as a systemd
         # user service, not attached to any interactive session's cgroup, so
-        # a self-lookup by PID never resolves. Instead, find the caller's
-        # user's own seat-attached (interactive, non-headless) session.
+        # a self-lookup by PID never resolves. Instead, find every one of the
+        # caller's user's seat-attached (interactive, non-headless) sessions
+        # -- there can be more than one on real multi-seat hardware, and
+        # picking just one arbitrarily risks reading the wrong seat's idle
+        # state while another seat is actively in use.
         payload = self._busctl_json(
             "--system", "call",
             "org.freedesktop.login1", "/org/freedesktop/login1",
             "org.freedesktop.login1.Manager", "ListSessions",
         )
         if not isinstance(payload, dict):
-            return None
+            return []
         try:
             entries = payload["data"][0]
         except (KeyError, IndexError, TypeError):
-            return None
+            return []
         if not isinstance(entries, list):
-            return None
+            return []
 
         target_uid = os.getuid()
+        paths: list[str] = []
         for entry in entries:
             try:
                 _session_id, uid, _user, seat, path = entry
             except (ValueError, TypeError):
                 continue
             if uid == target_uid and seat:
-                return path
-        return None
+                paths.append(path)
+        return paths
 
     def _logind_get_property(self, session_path: str, prop: str) -> object | None:
         payload = self._busctl_json(
@@ -199,11 +203,22 @@ class IdleDetector:
         now_usec = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
         return max(0, (now_usec - idle_since_usec) // 1_000_000)
 
-    def logind_idle_time_sec(self) -> int | None:
-        session_path = self._logind_session_path()
-        if session_path is None:
+    def _logind_aggregate_idle(self, session_paths: list[str]) -> int | None:
+        # "Idle" means every seat-attached session is idle -- a single
+        # active seat means the user isn't idle overall, regardless of how
+        # long any other seat has been untouched.
+        if not session_paths:
             return None
-        return self._logind_idle_from_session(session_path)
+        idle_times: list[int] = []
+        for path in session_paths:
+            idle_sec = self._logind_idle_from_session(path)
+            if idle_sec is None:
+                return None
+            idle_times.append(idle_sec)
+        return min(idle_times)
+
+    def logind_idle_time_sec(self) -> int | None:
+        return self._logind_aggregate_idle(self._logind_session_paths())
 
 
     def os_idle_time_sec(self) -> tuple[int | None, str | None]:
@@ -225,10 +240,10 @@ class IdleDetector:
             idle_sec = self.hid_idle_time_sec()
             return idle_sec, ("HIDIdleTime" if idle_sec is not None else None)
         if system == "Linux":
-            session_path = self._logind_session_path()
-            if session_path is None:
+            session_paths = self._logind_session_paths()
+            if not session_paths:
                 return None, None
-            return self._logind_idle_from_session(session_path), "logind"
+            return self._logind_aggregate_idle(session_paths), "logind"
         return None, None
 
 
