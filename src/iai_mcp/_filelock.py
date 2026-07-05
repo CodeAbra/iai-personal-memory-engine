@@ -35,6 +35,13 @@ if platform.system() == "Windows":
     LOCK_NB = 4
     LOCK_UN = 8
 
+    # msvcrt has no shared locks, so LOCK_SH is serviced as an exclusive
+    # byte-range lock (see the module docstring). Callers doing in-place lock
+    # *conversion* need to know this: a "shared" hold here is already exclusive
+    # and cannot be co-held by another process, so escalating a shared lock this
+    # fd already owns is a relabel, not a contended acquire.
+    SHARED_IS_EXCLUSIVE = True
+
     _LOCK_BYTES = 2**30
     # Poll interval when emulating POSIX's block-until-acquired behaviour.
     _BLOCK_POLL_SECONDS = 0.05
@@ -93,8 +100,18 @@ else:
     LOCK_NB = _fcntl.LOCK_NB
     LOCK_UN = _fcntl.LOCK_UN
 
+    # POSIX shared locks are genuinely shared: escalation must still contend.
+    SHARED_IS_EXCLUSIVE = False
+
     def flock(fd: int, operation: int) -> None:
         _fcntl.flock(fd, operation)
 
 
-__all__ = ["flock", "LOCK_EX", "LOCK_NB", "LOCK_SH", "LOCK_UN"]
+__all__ = [
+    "flock",
+    "LOCK_EX",
+    "LOCK_NB",
+    "LOCK_SH",
+    "LOCK_UN",
+    "SHARED_IS_EXCLUSIVE",
+]

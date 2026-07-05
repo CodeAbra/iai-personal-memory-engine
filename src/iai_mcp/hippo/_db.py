@@ -19,7 +19,14 @@ import hnswlib
 import numpy as np
 import pyarrow as pa
 
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, flock
+from iai_mcp._filelock import (
+    LOCK_EX,
+    LOCK_NB,
+    LOCK_SH,
+    LOCK_UN,
+    SHARED_IS_EXCLUSIVE,
+    flock,
+)
 from iai_mcp.crypto import (
     decrypt_field,
     encrypt_field,
@@ -351,10 +358,22 @@ class HippoDB:
             if held is None:
                 return
             base_fd, refcount = held
+            # Downgrade EXCLUSIVE -> SHARED in place. On POSIX fcntl.flock
+            # converts the held lock atomically and never blocks (SHARED is
+            # weaker than the EXCLUSIVE this fd already owns). On Windows msvcrt
+            # has no shared locks and no atomic conversion: LOCK_SH is serviced
+            # as the *same* exclusive byte-range lock this fd already holds, so a
+            # *blocking* flock(LOCK_SH) polls LK_NBLCK forever against our own
+            # range -- wedging the daemon while _PROCESS_LOCKS_GUARD is held,
+            # which the liveness watchdog then force-kills. Use the non-blocking
+            # form and treat "already held" (EWOULDBLOCK) as success: we are
+            # relabelling a lock this fd already owns, so no OS re-acquisition is
+            # needed on either platform.
             try:
-                flock(base_fd, LOCK_SH)
-            except OSError:
-                return
+                flock(base_fd, LOCK_SH | LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    return
             del _PROCESS_LOCKS[self._lock_key]
             _PROCESS_LOCKS_SHARED[self._lock_key] = (base_fd, refcount)
         self._access_mode = AccessMode.SHARED
@@ -391,7 +410,17 @@ class HippoDB:
 
         deadline = time.monotonic() + intent_budget_ms / 1000.0
         acquired = False
-        while time.monotonic() < deadline:
+        # On Windows the shim has no shared locks: a "shared" hold is already an
+        # exclusive msvcrt byte-range lock that no other process can co-hold, so
+        # if this fd already owns it (held is not None) we effectively already
+        # have exclusive access. A real flock(LOCK_EX) here would self-conflict
+        # against our own range and spuriously time out into HippoLockHeldError,
+        # so relabel without touching the OS lock. On POSIX shared locks are
+        # genuinely shared (another reader may hold one), so escalation must
+        # still contend for LOCK_EX below.
+        if SHARED_IS_EXCLUSIVE and held is not None:
+            acquired = True
+        while not acquired and time.monotonic() < deadline:
             try:
                 flock(base_fd, LOCK_EX | LOCK_NB)
                 acquired = True
