@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Callable
 
 from iai_mcp.events import write_event
 from iai_mcp.s5 import detect_drift_anomaly
@@ -17,11 +18,27 @@ async def continuous_audit(
     shutdown: asyncio.Event,
     *,
     interval_sec: float | None = None,
+    initial_delay_sec: float = 0.0,
+    should_run: Callable[[], bool] | None = None,
 ) -> None:
+    if initial_delay_sec > 0:
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=float(initial_delay_sec))
+            return
+        except asyncio.TimeoutError:
+            pass
+
     while not shutdown.is_set():
         effective_interval: float = (
             float(interval_sec) if interval_sec is not None else float(AUDIT_INTERVAL_SEC)
         )
+        if should_run is not None and not should_run():
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=effective_interval)
+                break
+            except asyncio.TimeoutError:
+                continue
+
         try:
             await asyncio.to_thread(detect_drift_anomaly, store, 5)
         except Exception as exc:  # noqa: BLE001 -- daemon must never die

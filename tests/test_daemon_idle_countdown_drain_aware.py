@@ -14,6 +14,7 @@ activity -- and the regression guard that a genuinely idle daemon still sleeps
 
 from __future__ import annotations
 
+import asyncio
 import platform
 import threading
 
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 
 
 # Inputs that, on their own, would push the daemon all the way to SLEEP: well
-# past the sleep threshold, stale RPC, no wrapper heartbeat, sleep-eligible.
+# past the sleep threshold, stale RPC, sleep-eligible.
 # Each test flips exactly one signal to prove it holds the countdown open.
 _SLEEPY = dict(
     scanner_active=False,
@@ -66,6 +67,65 @@ def test_recent_rpc_blocks_advance_toward_sleep():
     assert decision == IDLE_DECISION_ACTIVE
 
 
+def test_active_request_blocks_advance_toward_sleep():
+    from iai_mcp.daemon import IDLE_DECISION_ACTIVE, _idle_countdown_decision
+
+    decision = _idle_countdown_decision(
+        drain_in_progress=False,
+        active_requests=1,
+        **_SLEEPY,
+    )
+
+    assert decision == IDLE_DECISION_ACTIVE
+
+
+def test_mark_sleep_requests_honored_clears_pending_flags():
+    from iai_mcp.daemon import _mark_sleep_requests_honored
+
+    state = {
+        "force_rem_request": {"pending": True, "ts": "2026-01-01T00:00:00+00:00"},
+        "user_sleep_request": {"pending": True, "reason": "manual"},
+        "unrelated": "kept",
+    }
+
+    updated = _mark_sleep_requests_honored(
+        state,
+        force_rem=True,
+        user_sleep=True,
+        honored_at="2026-01-01T00:00:30+00:00",
+    )
+
+    assert updated["force_rem_request"]["pending"] is False
+    assert updated["force_rem_request"]["honored_at"] == "2026-01-01T00:00:30+00:00"
+    assert updated["user_sleep_request"]["pending"] is False
+    assert updated["user_sleep_request"]["honored_at"] == "2026-01-01T00:00:30+00:00"
+    assert updated["unrelated"] == "kept"
+    assert state["force_rem_request"]["pending"] is True
+
+
+def test_clear_sleep_requests_already_honored_only_when_sleeping():
+    from iai_mcp.daemon import _clear_sleep_requests_already_honored
+
+    state = {"force_rem_request": {"pending": True}}
+
+    awake_state, awake_changed = _clear_sleep_requests_already_honored(
+        state,
+        lifecycle_state="WAKE",
+        honored_at="2026-01-01T00:00:30+00:00",
+    )
+    sleep_state, sleep_changed = _clear_sleep_requests_already_honored(
+        state,
+        lifecycle_state="SLEEP",
+        honored_at="2026-01-01T00:00:30+00:00",
+    )
+
+    assert awake_changed is False
+    assert awake_state["force_rem_request"]["pending"] is True
+    assert sleep_changed is True
+    assert sleep_state["force_rem_request"]["pending"] is False
+    assert sleep_state["force_rem_request"]["honored_at"] == "2026-01-01T00:00:30+00:00"
+
+
 def test_truly_idle_still_advances_to_sleep():
     # Regression guard: with NO activity of any kind, a quiet daemon must still
     # reach SLEEP, otherwise crisis re-arming (SLEEP-only) never runs again.
@@ -100,15 +160,100 @@ def test_within_drowsy_window_holds():
     assert decision == IDLE_DECISION_HOLD
 
 
-def test_scanner_active_is_active():
-    from iai_mcp.daemon import IDLE_DECISION_ACTIVE, _idle_countdown_decision
+def test_scanner_active_alone_does_not_block_sleep():
+    from iai_mcp.daemon import IDLE_DECISION_SLEEP, _idle_countdown_decision
 
     inputs = dict(_SLEEPY)
     inputs["scanner_active"] = True
 
     decision = _idle_countdown_decision(drain_in_progress=False, **inputs)
 
-    assert decision == IDLE_DECISION_ACTIVE
+    assert decision == IDLE_DECISION_SLEEP
+
+
+def test_sleep_wakes_on_real_activity():
+    from iai_mcp.daemon import (
+        IDLE_DECISION_ACTIVE,
+        IDLE_DECISION_SLEEP,
+        STATE_SLEEP,
+        _sleep_should_wake_for_activity,
+    )
+
+    assert _sleep_should_wake_for_activity(
+        current_state=STATE_SLEEP,
+        idle_decision=IDLE_DECISION_ACTIVE,
+    )
+    assert _sleep_should_wake_for_activity(
+        current_state=STATE_SLEEP,
+        idle_decision=IDLE_DECISION_SLEEP,
+        sleep_interrupted=True,
+    )
+    assert not _sleep_should_wake_for_activity(
+        current_state=STATE_SLEEP,
+        idle_decision=IDLE_DECISION_SLEEP,
+    )
+    assert not _sleep_should_wake_for_activity(
+        current_state="WAKE",
+        idle_decision=IDLE_DECISION_ACTIVE,
+    )
+
+
+def test_sleep_cycle_hibernates_with_idle_connected_wrapper():
+    from iai_mcp.daemon import _sleep_cycle_still_idle_for_hibernation
+
+    assert _sleep_cycle_still_idle_for_hibernation(
+        drain_in_progress=False,
+        seconds_since_rpc=10_000.0,
+        recent_rpc_window_sec=30.0,
+    )
+
+
+def test_idle_connected_wrapper_sleep_cycle_exits_sleep_state(tmp_path):
+    from iai_mcp.daemon import _sleep_cycle_still_idle_for_hibernation
+    from iai_mcp.lifecycle import LifecycleEvent, LifecycleState, LifecycleStateMachine
+    from iai_mcp.lifecycle_event_log import LifecycleEventLog
+    from iai_mcp.lifecycle_state import default_state, load_state, save_state
+    from iai_mcp.s2_coordinator import S2Coordinator
+
+    state_path = tmp_path / "lifecycle_state.json"
+    record = default_state()
+    record["current_state"] = LifecycleState.SLEEP.value
+    save_state(record, state_path)
+    machine = LifecycleStateMachine(
+        state_path=state_path,
+        event_log=LifecycleEventLog(log_dir=tmp_path / "logs"),
+        coordinator=S2Coordinator(
+            store=None,
+            state_path=state_path,
+            min_interval_sec=0.0,
+        ),
+    )
+
+    still_idle = _sleep_cycle_still_idle_for_hibernation(
+        drain_in_progress=False,
+        seconds_since_rpc=10_000.0,
+        recent_rpc_window_sec=30.0,
+    )
+    asyncio.run(
+        machine.dispatch(LifecycleEvent.SLEEP_CYCLE_DONE, still_idle=still_idle)
+    )
+
+    assert load_state(state_path)["current_state"] == LifecycleState.HIBERNATION.value
+
+
+def test_sleep_cycle_does_not_hibernate_during_real_activity():
+    from iai_mcp.daemon import _sleep_cycle_still_idle_for_hibernation
+
+    assert not _sleep_cycle_still_idle_for_hibernation(
+        drain_in_progress=True,
+        seconds_since_rpc=10_000.0,
+        recent_rpc_window_sec=30.0,
+    )
+    assert not _sleep_cycle_still_idle_for_hibernation(
+        drain_in_progress=False,
+        seconds_since_rpc=5.0,
+        recent_rpc_window_sec=30.0,
+    )
 
 
 # --- capture wiring: the production drain path actually flips the flag --------

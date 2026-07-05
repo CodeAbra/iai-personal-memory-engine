@@ -139,3 +139,32 @@ def test_jsonrpc_method_refreshes_last_activity(short_socket_paths):
         )
 
     asyncio.run(_serve(sock_path, store, _runner))
+
+
+def test_jsonrpc_method_tracks_active_request(short_socket_paths, monkeypatch):
+    sock_path = short_socket_paths
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore()
+
+    async def _runner(srv):
+        async def _slow_dispatch(_method, _params):
+            assert srv.active_requests == 1
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        monkeypatch.setattr(srv, "_dispatch_jsonrpc_method", _slow_dispatch)
+        task = asyncio.create_task(_send_line(
+            sock_path,
+            {"jsonrpc": "2.0", "id": 1, "method": "session_start_payload", "params": {}},
+        ))
+        for _ in range(50):
+            if srv.active_requests == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert srv.active_requests == 1
+        resp = await task
+        assert resp["result"] == {"ok": True}
+        assert srv.active_requests == 0
+
+    asyncio.run(_serve(sock_path, store, _runner))

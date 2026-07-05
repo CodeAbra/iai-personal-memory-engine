@@ -416,7 +416,15 @@ class SleepPipeline:
             else -1
         )
         if last_completed_index >= len(self._STEP_ORDER) - 1:
-            last_completed_index = -1
+            self._clear_progress()
+            return {
+                "completed_steps": list(self._STEP_ORDER),
+                "failed_step": None,
+                "error": None,
+                "duration_sec": round(time.monotonic() - t0, 3),
+                "quarantine_triggered": False,
+                "interrupted": False,
+            }
         resume_step_index = last_completed_index + 1
 
         step_payloads: dict[SleepStep, dict] = {}

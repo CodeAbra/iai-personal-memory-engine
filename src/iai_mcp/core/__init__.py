@@ -38,6 +38,19 @@ _CORE_WARM_LRU: _CoreTTLCache = _CoreTTLCache(maxsize=50, ttl=300)
 _CORE_CASCADE_FIRED_PER_SESSION: set[str] = set()
 
 
+def _recall_stage_profile_enabled() -> bool:
+    return os.getenv("IAI_MCP_RECALL_STAGE_PROFILE", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _recall_stage_slow_threshold_ms() -> float:
+    try:
+        return float(os.getenv("IAI_MCP_RECALL_STAGE_SLOW_MS", "5000"))
+    except ValueError:
+        return 5000.0
+
+
 _profile_state: dict[str, Any] = profile.default_state()
 
 # Knobs a user has explicitly set (via profile_set). These are persisted and
@@ -92,6 +105,18 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
     global _last_injection_embedding, _last_injection_ids, _arousal_state
     if method == "memory_recall":
         _recall_t0 = _time.perf_counter()
+        _recall_stage_t0 = _recall_t0
+        _recall_stage_ms: dict[str, float] = {}
+
+        def _mark_recall_stage(name: str) -> None:
+            nonlocal _recall_stage_t0
+            try:
+                _now = _time.perf_counter()
+                _recall_stage_ms[name] = round((_now - _recall_stage_t0) * 1000, 1)
+                _recall_stage_t0 = _now
+            except Exception as exc:  # noqa: BLE001 -- debug telemetry only
+                logger.debug("recall_stage_measure_failed: %s", exc)
+
         # crisis_mode honest-degrade: when consolidation is stuck (the
         # scheduler is looping a deferred step and cannot advance), the warm
         # recall path serves stale schema-dominated results. Honour the
@@ -146,10 +171,12 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             logger.debug("arousal_budget_init_failed: %s", exc)
             _arousal_budget_tokens = 1500
             _arousal_diag = None
+        _mark_recall_stage("preflight")
 
         _cortex_fallback = False
         _structural_source: str = ""
         records_count = store.db.open_table("records").count_rows()
+        _mark_recall_stage("count_records")
         if records_count == 0:
             cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
             resp = retrieve.recall(
@@ -186,8 +213,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     from iai_mcp.pipeline import K_CANDIDATES
 
                     embedder = embedder_for_store(store)
+                    _mark_recall_stage("embedder")
 
                     assignment, rc, _cached_max_degree, _structural_source = _rgc.load_recall_structural(store)
+                    _mark_recall_stage("load_structural")
 
                     _encode_ms: "float | None" = None
                     _encode_t0 = _time.perf_counter()
@@ -207,9 +236,11 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         except Exception:  # noqa: BLE001
                             pass
                         raise NativeError(f"recall cue encode failed: {_emb_exc}") from _emb_exc
+                    _mark_recall_stage("embed_cue")
 
                     _ann_pairs = store.query_similar(_cue_vec, k=K_CANDIDATES)
                     _candidate_recs: dict = {_r.id: _r for _r, _s in _ann_pairs}
+                    _mark_recall_stage("ann_query")
 
                     _hop1_edges = store.incident_edges(list(_candidate_recs.keys()), top_k=5)
                     _hop1_new_ids = list({
@@ -220,6 +251,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     })
                     if _hop1_new_ids:
                         _candidate_recs.update(store.get_batch(_hop1_new_ids))
+                    _mark_recall_stage("hop1")
 
                     _hop2_edges = store.incident_edges(_hop1_new_ids, top_k=5) if _hop1_new_ids else {}
                     _hop2_new_ids = list({
@@ -230,12 +262,14 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     })
                     if _hop2_new_ids:
                         _candidate_recs.update(store.get_batch(_hop2_new_ids))
+                    _mark_recall_stage("hop2")
 
                     _RC_CAP = 50
                     _rc_cap = (rc or [])[:_RC_CAP]
                     _rc_new_ids = [_rid for _rid in _rc_cap if _rid not in _candidate_recs]
                     if _rc_new_ids:
                         _candidate_recs.update(store.get_batch(_rc_new_ids))
+                    _mark_recall_stage("rich_club_batch")
 
                     graph = MemoryGraph()
                     for _rec in _candidate_recs.values():
@@ -266,6 +300,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                     graph.add_edge(_qid2, _nbr2, weight=_wt2, edge_type=_et2)
                                 except Exception:  # noqa: BLE001 — edge add fail-safe
                                     pass
+                    _mark_recall_stage("build_local_graph")
 
                     try:
                         _all_cand_ids = list(_candidate_recs.keys())
@@ -286,6 +321,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                 graph._max_degree = _local_max
                     except Exception as _gd_exc:  # noqa: BLE001 — degrade gracefully
                         logger.debug("layer1_global_degree_failed: %s", _gd_exc)
+                    _mark_recall_stage("global_degree")
 
                     _tv_outgoing_l1: dict[str, list[str]] = {}
                     _tv_ts_l1: dict = {}
@@ -317,6 +353,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     except Exception as _tv_exc:  # noqa: BLE001 — degrade gracefully
                         logger.debug("layer1_tv_build_failed: %s", _tv_exc)
                         _tv_outgoing_l1, _tv_ts_l1 = {}, {}
+                    _mark_recall_stage("temporal_maps")
 
                     resp = recall_for_response(
                         store=store,
@@ -333,6 +370,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         arousal_state=_arousal_diag,
                         tv_maps=(_tv_outgoing_l1, _tv_ts_l1) if _tv_ts_l1 else None,
                     )
+                    _mark_recall_stage("recall_for_response")
                     resp.ann_path_used = True
                     try:
                         from iai_mcp.events import emit_best_effort, TELEMETRY_RECALL_SOURCE
@@ -351,6 +389,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 except NativeError:
                     raise
                 except Exception as exc:  # noqa: BLE001 -- soft availability fallback
+                    _mark_recall_stage("soft_fallback")
                     logger.warning("recall_pipeline_fallback: %s", exc)
                     try:
                         _update_arousal(_arousal_state, "error")
@@ -381,6 +420,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             "_knobs_applied": knobs_applied,
             "ann_path_used": getattr(resp, "ann_path_used", False),
         }
+        _mark_recall_stage("pack_response")
         if _cortex_fallback:
             response["_source"] = "cortex-fallback"
         if not _cortex_fallback and _structural_source == "cold_degrade":
@@ -464,6 +504,14 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             logger.debug("trajectory_coupling_store_failed: %s", exc)
             _last_injection_embedding = None
             _last_injection_ids = []
+        _mark_recall_stage("post_hooks")
+        try:
+            _total_ms = (_time.perf_counter() - _recall_t0) * 1000.0
+            if _recall_stage_profile_enabled() or _total_ms >= _recall_stage_slow_threshold_ms():
+                _recall_stage_ms["total"] = round(_total_ms, 1)
+                response["_recall_stage_ms"] = dict(_recall_stage_ms)
+        except Exception as exc:  # noqa: BLE001 -- debug telemetry only
+            logger.debug("recall_stage_attach_failed: %s", exc)
         return response
 
     if method == "memory_recall_structural":
@@ -862,7 +910,16 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 total_dynamic_tokens=1000,
             )
             return _payload_to_json(empty)
-        _graph, assignment, rc = retrieve.build_runtime_graph(store)
+        wake_depth = (_profile_state or {}).get("wake_depth", "minimal")
+        if wake_depth not in ("minimal", "standard", "deep"):
+            wake_depth = "minimal"
+        if wake_depth == "minimal":
+            from iai_mcp.community import CommunityAssignment
+
+            assignment = CommunityAssignment()
+            rc = []
+        else:
+            _graph, assignment, rc = retrieve.build_runtime_graph(store)
         payload = assemble_session_start(
             store, assignment, rc,
             session_id=sid,
@@ -870,6 +927,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         )
 
         try:
+            if wake_depth == "minimal":
+                return _payload_to_json(payload)
             from iai_mcp.user_model import (
                 UserModelPrefetcher,
                 load as _user_model_load,

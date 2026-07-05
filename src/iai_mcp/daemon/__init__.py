@@ -285,6 +285,7 @@ def _idle_countdown_decision(
     *,
     scanner_active: bool,
     drain_in_progress: bool,
+    active_requests: int = 0,
     seconds_since_rpc: float,
     idle_elapsed: float,
     sleep_eligible: bool,
@@ -294,8 +295,9 @@ def _idle_countdown_decision(
 ) -> str:
     """Decide what the lifecycle idle countdown should do this tick.
 
-    The wrapper heartbeat (``scanner_active``) is only ONE signal that the
-    daemon is busy. Two others MUST also hold the daemon awake:
+    The wrapper heartbeat (``scanner_active``) is only a presence signal: it
+    says a client wrapper is still connected, not that memory work is happening.
+    Two real-work signals MUST hold the daemon awake:
 
     * ``drain_in_progress`` -- a deferred-capture drain is writing to the store
       right now. The wrappers dir can be empty (heartbeat stale) while a drain
@@ -305,19 +307,89 @@ def _idle_countdown_decision(
       ``last_activity_ts`` (set at request start) may already look stale; the
       ``drain_in_progress`` signal covers that tail.
 
-    When any of these holds we return ``ACTIVE`` so the caller resets the idle
-    countdown. Otherwise the daemon really is idle and we advance toward SLEEP
-    (which escalates to an EXCLUSIVE store lock) / DROWSY exactly as the
-    heartbeat-only logic used to, so a genuinely quiet daemon still settles and
-    crisis re-arming in SLEEP keeps running.
+    When either real-work signal holds we return ``ACTIVE`` so the caller resets
+    the idle countdown. Otherwise the daemon really is idle and we advance
+    toward SLEEP (which escalates to an EXCLUSIVE store lock) / DROWSY exactly
+    as the heartbeat-only logic used to, so a connected-but-idle wrapper no
+    longer blocks consolidation forever.
     """
-    if scanner_active or drain_in_progress or seconds_since_rpc < recent_rpc_window_sec:
+    if (
+        drain_in_progress
+        or active_requests > 0
+        or seconds_since_rpc < recent_rpc_window_sec
+    ):
         return IDLE_DECISION_ACTIVE
     if idle_elapsed >= sleep_heartbeat_idle_sec and sleep_eligible:
         return IDLE_DECISION_SLEEP
     if idle_elapsed >= drowsy_after_sec:
         return IDLE_DECISION_DROWSY
     return IDLE_DECISION_HOLD
+
+
+def _sleep_should_wake_for_activity(
+    *,
+    current_state: str,
+    idle_decision: str,
+    sleep_interrupted: bool = False,
+) -> bool:
+    return (
+        current_state == STATE_SLEEP
+        and (idle_decision == IDLE_DECISION_ACTIVE or sleep_interrupted)
+    )
+
+
+def _mark_sleep_requests_honored(
+    state: dict,
+    *,
+    force_rem: bool,
+    user_sleep: bool,
+    honored_at: str,
+) -> dict:
+    updated = dict(state)
+    if force_rem:
+        req = dict(updated.get("force_rem_request") or {})
+        req["pending"] = False
+        req["honored_at"] = honored_at
+        updated["force_rem_request"] = req
+    if user_sleep:
+        req = dict(updated.get("user_sleep_request") or {})
+        req["pending"] = False
+        req["honored_at"] = honored_at
+        updated["user_sleep_request"] = req
+    return updated
+
+
+def _clear_sleep_requests_already_honored(
+    state: dict,
+    *,
+    lifecycle_state: str,
+    honored_at: str,
+) -> tuple[dict, bool]:
+    force_rem = bool((state.get("force_rem_request") or {}).get("pending"))
+    user_sleep = bool((state.get("user_sleep_request") or {}).get("pending"))
+    if lifecycle_state not in {"SLEEP", "HIBERNATION"} or not (force_rem or user_sleep):
+        return state, False
+    return (
+        _mark_sleep_requests_honored(
+            state,
+            force_rem=force_rem,
+            user_sleep=user_sleep,
+            honored_at=honored_at,
+        ),
+        True,
+    )
+
+
+def _sleep_cycle_still_idle_for_hibernation(
+    *,
+    drain_in_progress: bool,
+    seconds_since_rpc: float,
+    recent_rpc_window_sec: float,
+) -> bool:
+    return (
+        not drain_in_progress
+        and seconds_since_rpc >= recent_rpc_window_sec
+    )
 
 
 def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
@@ -1766,6 +1838,27 @@ async def main() -> int:
                     )
                 except Exception:  # noqa: BLE001 -- telemetry must not block boot
                     pass
+            state, _sleep_req_changed = _clear_sleep_requests_already_honored(
+                state,
+                lifecycle_state=str(_lc_norm.get("current_state") or ""),
+                honored_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if _sleep_req_changed:
+                await _persist(state)
+                log.warning(
+                    "sleep_request_boot_normalized: pending request already honored "
+                    "by lifecycle_state=%s",
+                    _lc_norm.get("current_state"),
+                )
+                try:
+                    emit_best_effort(
+                        store,
+                        "sleep_request_boot_normalized",
+                        {"lifecycle_state": _lc_norm.get("current_state")},
+                        severity="warning",
+                    )
+                except Exception:  # noqa: BLE001 -- telemetry must not block boot
+                    pass
         except (OSError, ValueError) as _lc_exc:
             log.debug("lifecycle boot normalization skipped: %s", _lc_exc)
         _s2_config = _load_s2_config()
@@ -1808,8 +1901,19 @@ async def main() -> int:
                 capture_handler=_capture_handler,
             )
         )
+        def _audit_should_run() -> bool:
+            return _state_machine.current_state not in {
+                _LifecycleState.SLEEP,
+                _LifecycleState.HIBERNATION,
+            }
+
         audit_task = asyncio.create_task(
-            continuous_audit(store, shutdown)
+            continuous_audit(
+                store,
+                shutdown,
+                initial_delay_sec=60 * 60,
+                should_run=_audit_should_run,
+            )
         )
         s4_task = asyncio.create_task(
             _s4_offline_loop(store, shutdown)
@@ -1925,6 +2029,7 @@ async def main() -> int:
                     _idle_decision = _idle_countdown_decision(
                         scanner_active=scanner_active,
                         drain_in_progress=_drain_active,
+                        active_requests=int(getattr(mcp_socket, "active_requests", 0)),
                         seconds_since_rpc=_seconds_since_rpc,
                         idle_elapsed=idle_elapsed,
                         sleep_eligible=sleep_eligible,
@@ -1941,36 +2046,32 @@ async def main() -> int:
                         _force_rem = bool((_ds.get("force_rem_request") or {}).get("pending"))
                         _user_sleep = bool((_ds.get("user_sleep_request") or {}).get("pending"))
                         if _force_rem or _user_sleep:
+                            _force_sleep_state = None
                             try:
-                                await _state_machine.dispatch(
+                                _force_sleep_state = await _state_machine.dispatch(
                                     _LifecycleEvent.FORCE_SLEEP,
                                     reason="force_sleep_request",
                                 )
                             except (S2OscillationConflict, S2OscillationBlocked):
                                 pass
-                            if _state_machine.current_state is _LifecycleState.DROWSY:
+                            if _force_sleep_state is _LifecycleState.DROWSY:
                                 try:
-                                    await _state_machine.dispatch(
+                                    _force_sleep_state = await _state_machine.dispatch(
                                         _LifecycleEvent.FORCE_SLEEP,
                                         reason="force_sleep_drowsy_to_sleep",
                                     )
                                 except (S2OscillationConflict, S2OscillationBlocked):
                                     pass
-                            if _state_machine.current_state is _LifecycleState.SLEEP:
+                            if _force_sleep_state is _LifecycleState.SLEEP:
                                 _now_iso = __import__("datetime").datetime.now(
                                     __import__("datetime").timezone.utc,
                                 ).isoformat()
-                                _ds_upd = dict(_ds)
-                                if _force_rem:
-                                    req = dict(_ds_upd.get("force_rem_request") or {})
-                                    req["pending"] = False
-                                    req["honored_at"] = _now_iso
-                                    _ds_upd["force_rem_request"] = req
-                                if _user_sleep:
-                                    req = dict(_ds_upd.get("user_sleep_request") or {})
-                                    req["pending"] = False
-                                    req["honored_at"] = _now_iso
-                                    _ds_upd["user_sleep_request"] = req
+                                _ds_upd = _mark_sleep_requests_honored(
+                                    _ds,
+                                    force_rem=_force_rem,
+                                    user_sleep=_user_sleep,
+                                    honored_at=_now_iso,
+                                )
                                 from iai_mcp.daemon_state import save_state as _save_ds
                                 await asyncio.to_thread(_save_ds, _ds_upd)
                     except Exception:  # noqa: BLE001 -- FORCE_SLEEP dispatch is best-effort
@@ -1982,15 +2083,13 @@ async def main() -> int:
                     except Exception:  # noqa: BLE001 -- reconcile is best-effort
                         pass
 
-                    if scanner_active:
-                        # _last_active_monotonic was already refreshed above
-                        # (scanner_active -> IDLE_DECISION_ACTIVE); a fresh
-                        # wrapper heartbeat additionally pulls the FSM back to
-                        # WAKE, which RPC/drain activity alone does not.
+                    if _idle_decision == IDLE_DECISION_ACTIVE:
+                        # Real work pulls DROWSY back to WAKE. A fresh wrapper
+                        # heartbeat alone is only presence, not activity.
                         try:
                             await _state_machine.dispatch(
                                 _LifecycleEvent.HEARTBEAT_REFRESH,
-                                reason="heartbeat_refresh_active_wrapper",
+                                reason="real_activity_recent",
                             )
                         except (S2OscillationConflict, S2OscillationBlocked):
                             pass
@@ -2091,7 +2190,7 @@ async def main() -> int:
                             log.debug("daemon_lock_downgrade failed", exc_info=True)
 
                     # Periodic WAKE/DROWSY safety net: if the daemon never reaches
-                    # SLEEP (long-lived Claude sessions keep activity recent), the
+                    # SLEEP (real activity keeps it recent), the
                     # sleep-pipeline cache writer never fires and the precache file
                     # drifts. _maybe_refresh_session_start_cache is a cheap probe
                     # (SQL COUNT + sidecar read), gated by:
@@ -2115,6 +2214,18 @@ async def main() -> int:
                             )
 
                     _prev_lifecycle_state[0] = current
+                    if _sleep_should_wake_for_activity(
+                        current_state=current.value,
+                        idle_decision=_idle_decision,
+                    ):
+                        try:
+                            await _state_machine.dispatch(
+                                _LifecycleEvent.REQUEST_ARRIVED,
+                                reason="wake_on_recent_activity",
+                            )
+                        except (S2OscillationConflict, S2OscillationBlocked):
+                            pass
+                        current = _state_machine.current_state
                     if current is _LifecycleState.SLEEP:
                         def _interrupt_check() -> bool:
                             # Defer the sleep pipeline only on RECENT ACTIVITY, not on
@@ -2127,7 +2238,10 @@ async def main() -> int:
                             elapsed = (
                                 time.monotonic() - mcp_socket.last_activity_ts
                             )
-                            return elapsed < INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC
+                            return (
+                                int(getattr(mcp_socket, "active_requests", 0)) > 0
+                                or elapsed < INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC
+                            )
 
                         try:
                             await asyncio.to_thread(store.db.escalate_to_exclusive)
@@ -2140,17 +2254,16 @@ async def main() -> int:
                         )
 
                         # --- WAKE hook (UNDER LOCK_EX, BEFORE downgrade) ---
-                        # The SLEEP path explicitly passes force_rebuild=True: we
-                        # hold the EXCLUSIVE lock for the whole consolidation
-                        # window, so a runtime-graph rebuild here is the cheapest
-                        # place to absorb the cost — the WAKE refresh paths skip
-                        # the rebuild with reason=runtime_graph_cache_cold instead.
+                        # The SLEEP path writes the session cache only when the
+                        # runtime graph cache is already warm. A cold graph
+                        # rebuild can outlive hibernation and keep native
+                        # centrality workers hot after the daemon should exit.
                         try:
                             await asyncio.to_thread(
                                 _write_session_start_cache,
                                 store,
                                 trigger="sleep_pipeline",
-                                force_rebuild=True,
+                                force_rebuild=False,
                             )
                         except Exception:  # noqa: BLE001 -- precache MUST NOT crash
                             log.debug("lifecycle_tick _write_session_start_cache failed", exc_info=True)
@@ -2194,23 +2307,43 @@ async def main() -> int:
                             log.debug("daemon_lock_downgrade: EX→SH after sleep pipeline")
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_downgrade_post_sleep failed", exc_info=True)
-                        if (
-                            not result.get("interrupted", False)
-                            and result.get("failed_step") is None
+                        if result.get("interrupted", False):
+                            try:
+                                await _state_machine.dispatch(
+                                    _LifecycleEvent.REQUEST_ARRIVED,
+                                    reason="wake_on_sleep_interrupt",
+                                )
+                            except (S2OscillationConflict, S2OscillationBlocked):
+                                pass
+                        elif (
+                            result.get("failed_step") is None
                             and not result.get("quarantine_triggered", False)
                             and len(result.get("completed_steps", [])) >= 5
                         ):
-                            still_idle_now = await asyncio.to_thread(
-                                _heartbeat_scanner.heartbeat_idle_30min,
+                            try:
+                                from iai_mcp.capture import (
+                                    is_drain_in_progress as _drain_q_now,
+                                )
+                                _drain_active_now = bool(
+                                    await asyncio.to_thread(_drain_q_now)
+                                )
+                            except Exception:  # noqa: BLE001 -- hibernation gate MUST NOT crash
+                                _drain_active_now = False
+                            _seconds_since_rpc_now = (
+                                time.monotonic() - mcp_socket.last_activity_ts
+                                if mcp_socket is not None
+                                else float("inf")
                             )
-                            sleep_eligible_now = await asyncio.to_thread(
-                                _idle_detector.sleep_eligible, still_idle_now,
+                            still_idle_now = _sleep_cycle_still_idle_for_hibernation(
+                                drain_in_progress=_drain_active_now,
+                                seconds_since_rpc=_seconds_since_rpc_now,
+                                recent_rpc_window_sec=INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC,
                             )
                             try:
                                 await _state_machine.dispatch(
                                     _LifecycleEvent.SLEEP_CYCLE_DONE,
                                     reason="hibernate_on_sleep_cycle_done",
-                                    still_idle=(still_idle_now and sleep_eligible_now),
+                                    still_idle=still_idle_now,
                                 )
                             except (S2OscillationConflict, S2OscillationBlocked):
                                 pass

@@ -92,6 +92,64 @@ def test_audit_shuts_down_cleanly(monkeypatch):
     asyncio.run(runner())
 
 
+def test_audit_skips_heavy_stages_when_should_run_false(monkeypatch):
+    from iai_mcp import identity_audit
+
+    s5_calls: list = []
+    sigma_calls: list = []
+
+    monkeypatch.setattr(identity_audit, "detect_drift_anomaly", lambda s, w: s5_calls.append(1))
+    monkeypatch.setattr(identity_audit, "compute_and_emit", lambda s: sigma_calls.append(1))
+
+    async def runner():
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(
+            identity_audit.continuous_audit(
+                object(),
+                shutdown,
+                interval_sec=0.02,
+                should_run=lambda: False,
+            )
+        )
+        await asyncio.sleep(0.05)
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(runner())
+
+    assert s5_calls == []
+    assert sigma_calls == []
+
+
+def test_audit_initial_delay_defers_heavy_stages(monkeypatch):
+    from iai_mcp import identity_audit
+
+    s5_calls: list = []
+    sigma_calls: list = []
+
+    monkeypatch.setattr(identity_audit, "detect_drift_anomaly", lambda s, w: s5_calls.append(1))
+    monkeypatch.setattr(identity_audit, "compute_and_emit", lambda s: sigma_calls.append(1))
+
+    async def runner():
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(
+            identity_audit.continuous_audit(
+                object(),
+                shutdown,
+                interval_sec=0.01,
+                initial_delay_sec=60.0,
+            )
+        )
+        await asyncio.sleep(0.03)
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(runner())
+
+    assert s5_calls == []
+    assert sigma_calls == []
+
+
 def test_audit_survives_s5_exception_and_emits_event(monkeypatch):
     from iai_mcp import identity_audit
 

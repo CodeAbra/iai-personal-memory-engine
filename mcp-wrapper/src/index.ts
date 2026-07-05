@@ -19,7 +19,10 @@ import {
   type ContentBlock,
   type SessionPayloadRaw,
 } from "./caching.js";
-import { WrapperLifecycle } from "./lifecycle.js";
+import {
+  shouldWakeDefaultDaemonForToolCall,
+  WrapperLifecycle,
+} from "./lifecycle.js";
 import {
   CONTEXT_EDITING_CONFIG,
   HOT_TOOLS,
@@ -40,6 +43,9 @@ export {
 };
 export type { ContentBlock, SessionPayloadRaw };
 
+interface ToolCallLifecycle {
+  ensureDaemonAlive(opts?: { waitForReachableMs?: number }): Promise<void>;
+}
 
 function toolResult(payload: unknown) {
   const content = [
@@ -57,6 +63,8 @@ function toolResult(payload: unknown) {
 export function buildServer(
   bridge?: PythonCoreBridge,
   spawnFn: typeof spawn = spawn,
+  lifecycle?: ToolCallLifecycle,
+  shouldWakeForToolCall: () => boolean = shouldWakeDefaultDaemonForToolCall,
 ): { server: Server; bridge: PythonCoreBridge } {
   const b = bridge ?? new PythonCoreBridge();
 
@@ -93,6 +101,9 @@ export function buildServer(
       };
     }
     try {
+      if (lifecycle && shouldWakeForToolCall()) {
+        await lifecycle.ensureDaemonAlive({ waitForReachableMs: 7_000 });
+      }
       const result = await handleToolCall(b, name, req.params.arguments ?? {}, spawnFn);
       return toolResult(result);
     } catch (e) {
@@ -124,14 +135,15 @@ export function buildServer(
 }
 
 async function main(): Promise<void> {
-  const { server, bridge: b } = buildServer();
-
   const lifecycle = new WrapperLifecycle();
+  const { server, bridge: b } = buildServer(undefined, spawn, lifecycle);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  void lifecycle.ensureDaemonAlive().catch(() => null);
+  if (shouldWakeDefaultDaemonForToolCall()) {
+    void lifecycle.ensureDaemonAlive().catch(() => null);
+  }
 
   void lifecycle.registerHeartbeat().catch(() => null);
 

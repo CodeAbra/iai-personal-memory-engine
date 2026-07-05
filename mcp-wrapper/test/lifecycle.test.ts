@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { WrapperLifecycle } from "../src/lifecycle.js";
+import {
+  shouldWakeDefaultDaemonForToolCall,
+  WrapperLifecycle,
+} from "../src/lifecycle.js";
 
 async function makeTmp(prefix: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), `iai-mcp-lifecycle-${prefix}-`));
@@ -48,7 +51,6 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
     const tmp = await makeTmp("kickstart");
     try {
       let kickstarts = 0;
-      let signalWritten = false;
       const lifecycle = new WrapperLifecycle({
         socketPath: join(tmp, "daemon.sock"),
         wakeSignalPath: join(tmp, "wake.signal"),
@@ -61,17 +63,8 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
       });
       await lifecycle.ensureDaemonAlive();
       assert.equal(kickstarts, 1, "kickstart must be invoked exactly once on darwin");
-      try {
-        await stat(join(tmp, "wake.signal"));
-        signalWritten = true;
-      } catch {
-        signalWritten = false;
-      }
-      assert.equal(
-        signalWritten,
-        false,
-        "wake.signal must NOT be written on successful kickstart",
-      );
+      const sigStat = await stat(join(tmp, "wake.signal"));
+      assert.ok(sigStat.isFile(), "wake.signal must be written before kickstart");
     } finally {
       await cleanupTmp(tmp);
     }
@@ -103,6 +96,50 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
     }
   });
 
+  it("waits for the socket after a managed kickstart when requested", async () => {
+    const tmp = await makeTmp("wait-ready");
+    try {
+      let probes = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => {
+          probes += 1;
+          return probes >= 3;
+        },
+        spawnKickstart: async () => {},
+      });
+      await lifecycle.ensureDaemonAlive({ waitForReachableMs: 1_000 });
+      assert.ok(probes >= 3, "ensureDaemonAlive must wait for socket readiness");
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
+  it("returns after the readiness timeout when the socket never comes back", async () => {
+    const tmp = await makeTmp("wait-timeout");
+    try {
+      let probes = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => {
+          probes += 1;
+          return false;
+        },
+        spawnKickstart: async () => {},
+      });
+      await lifecycle.ensureDaemonAlive({ waitForReachableMs: 150 });
+      assert.ok(probes >= 2, "ensureDaemonAlive should retry until timeout");
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
   it("on non-macos writes wake.signal and never spawns subprocess", async () => {
     const tmp = await makeTmp("linux");
     try {
@@ -123,6 +160,39 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
       assert.ok(sigStat.isFile(), "wake.signal must exist on non-darwin path");
     } finally {
       await cleanupTmp(tmp);
+    }
+  });
+});
+
+
+describe("shouldWakeDefaultDaemonForToolCall", () => {
+  it("allows managed user daemons only on supported default endpoints", () => {
+    const prevSocket = process.env.IAI_DAEMON_SOCKET_PATH;
+    const prevDisable = process.env.IAI_MCP_DISABLE_DAEMON_AUTOSTART;
+    try {
+      delete process.env.IAI_DAEMON_SOCKET_PATH;
+      delete process.env.IAI_MCP_DISABLE_DAEMON_AUTOSTART;
+      assert.equal(shouldWakeDefaultDaemonForToolCall("darwin"), true);
+      assert.equal(shouldWakeDefaultDaemonForToolCall("win32"), true);
+      assert.equal(shouldWakeDefaultDaemonForToolCall("linux"), false);
+
+      process.env.IAI_DAEMON_SOCKET_PATH = join("tmp", "daemon.sock");
+      assert.equal(shouldWakeDefaultDaemonForToolCall("darwin"), false);
+
+      delete process.env.IAI_DAEMON_SOCKET_PATH;
+      process.env.IAI_MCP_DISABLE_DAEMON_AUTOSTART = "1";
+      assert.equal(shouldWakeDefaultDaemonForToolCall("darwin"), false);
+    } finally {
+      if (prevSocket === undefined) {
+        delete process.env.IAI_DAEMON_SOCKET_PATH;
+      } else {
+        process.env.IAI_DAEMON_SOCKET_PATH = prevSocket;
+      }
+      if (prevDisable === undefined) {
+        delete process.env.IAI_MCP_DISABLE_DAEMON_AUTOSTART;
+      } else {
+        process.env.IAI_MCP_DISABLE_DAEMON_AUTOSTART = prevDisable;
+      }
     }
   });
 });

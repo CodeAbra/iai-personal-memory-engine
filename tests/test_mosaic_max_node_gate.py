@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import time
-
-import pytest
-
-pytestmark = pytest.mark.perf
 from uuid import UUID, uuid4
 
 import numpy as np
+import pytest
 
 from iai_mcp.community import CommunityAssignment, _compute_centroid
 from iai_mcp.pipeline import _community_gate
 from iai_mcp.types import EMBED_DIM
+
+pytestmark = pytest.mark.perf
 
 
 def _unit_axis(i: int, dim: int = EMBED_DIM) -> list[float]:
@@ -249,3 +248,68 @@ def test_max_node_gate_perf_under_5ms_at_n5000():
         f"exceeds 5.0 ms budget at N=5000 members over 100 communities. "
         f"Total {n_runs} runs took {elapsed*1000:.1f} ms."
     )
+
+
+def test_max_node_gate_scans_candidate_embeddings_not_full_assignment():
+    member_ids = [uuid4() for _ in range(1000)]
+    comm_ids = [uuid4() for _ in range(1000)]
+    node_to_community = {
+        member_id: comm_id
+        for member_id, comm_id in zip(member_ids, comm_ids)
+    }
+    assignment = CommunityAssignment(
+        node_to_community=node_to_community,
+        community_centroids={comm_id: _unit_axis(0) for comm_id in comm_ids},
+        modularity=0.0,
+        backend="leiden-test-wide",
+        top_communities=comm_ids[:3],
+        mid_regions={
+            comm_id: [member_id]
+            for member_id, comm_id in zip(member_ids, comm_ids)
+        },
+    )
+    candidate = member_ids[123]
+    out = _community_gate(
+        _unit_axis(4),
+        assignment,
+        top_n=3,
+        member_embeddings={candidate: _unit_axis(4)},
+    )
+
+    assert out == [node_to_community[candidate]]
+
+
+def test_max_node_gate_tolerates_non_finite_embeddings():
+    member_a = uuid4()
+    member_b = uuid4()
+    comm_a = uuid4()
+    comm_b = uuid4()
+    assignment = CommunityAssignment(
+        node_to_community={
+            member_a: comm_a,
+            member_b: comm_b,
+        },
+        community_centroids={
+            comm_a: _unit_axis(0),
+            comm_b: _unit_axis(1),
+        },
+        modularity=0.0,
+        backend="leiden-test-non-finite",
+        top_communities=[comm_a, comm_b],
+        mid_regions={
+            comm_a: [member_a],
+            comm_b: [member_b],
+        },
+    )
+
+    out = _community_gate(
+        [float("nan")] + [0.0] * (EMBED_DIM - 1),
+        assignment,
+        top_n=2,
+        member_embeddings={
+            member_a: np.asarray([float("inf")] + [0.0] * (EMBED_DIM - 1)),
+            member_b: _unit_axis(1),
+        },
+    )
+
+    assert out == sorted([comm_a, comm_b], key=str)

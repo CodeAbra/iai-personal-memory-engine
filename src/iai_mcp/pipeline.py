@@ -221,19 +221,34 @@ def _community_gate_max_node(
             cue_vec.tolist(), assignment, top_n, member_embeddings=None,
         )
 
+    grouped: dict[UUID, list[np.ndarray]] = {}
+    if assignment.node_to_community:
+        for mid, emb in member_embeddings.items():
+            cid = assignment.node_to_community.get(mid)
+            if cid is None:
+                continue
+            if not isinstance(emb, np.ndarray):
+                emb = np.asarray(emb, dtype=np.float32)
+            grouped.setdefault(cid, []).append(emb)
+    else:
+        for cid, members in mid_regions.items():
+            valid: list[np.ndarray] = []
+            for m in members:
+                emb = member_embeddings.get(m)
+                if emb is None:
+                    continue
+                if not isinstance(emb, np.ndarray):
+                    emb = np.asarray(emb, dtype=np.float32)
+                valid.append(emb)
+            if valid:
+                grouped[cid] = valid
+
     cids: list[UUID] = []
     rows: list[np.ndarray] = []
     breaks: list[int] = []
     total = 0
-    for cid, members in mid_regions.items():
-        valid: list[np.ndarray] = []
-        for m in members:
-            emb = member_embeddings.get(m)
-            if emb is None:
-                continue
-            if not isinstance(emb, np.ndarray):
-                emb = np.asarray(emb, dtype=np.float32)
-            valid.append(emb)
+    for cid in sorted(grouped, key=str):
+        valid = grouped[cid]
         if not valid:
             continue
         cids.append(cid)
@@ -244,12 +259,20 @@ def _community_gate_max_node(
     if not rows:
         return []
 
+    cue_vec = np.nan_to_num(cue_vec, nan=0.0, posinf=0.0, neginf=0.0)
     mat = np.stack(rows).astype(np.float32, copy=False)
     mat = np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
     norms = np.linalg.norm(mat, axis=1)
-    norms[norms == 0.0] = 1.0
-    mat = mat / norms[:, None]
-    member_scores = mat @ cue_vec
+    bad_norms = ~np.isfinite(norms) | (norms == 0.0)
+    if np.any(bad_norms):
+        mat[bad_norms] = 0.0
+        norms[bad_norms] = 1.0
+    mat = np.nan_to_num(mat / norms[:, None], nan=0.0, posinf=0.0, neginf=0.0)
+    with np.errstate(all="ignore"):
+        member_scores = mat @ cue_vec
+    member_scores = np.nan_to_num(
+        member_scores, nan=-1.0, posinf=1.0, neginf=-1.0,
+    )
 
     comm_max = np.maximum.reduceat(member_scores, breaks)
 
@@ -541,15 +564,27 @@ def _recall_core(
     pool_ids, pool_embs = _collect_graph_pool(graph, records_cache, store)
     _recall_pool_collection_ms = (time.perf_counter() - _pool_t0) * 1000.0
     cue_vec = np.asarray(cue_emb, dtype=np.float32)
+    cue_vec = np.nan_to_num(cue_vec, nan=0.0, posinf=0.0, neginf=0.0)
     cnorm = float(np.linalg.norm(cue_vec))
-    if cnorm > 0.0:
+    if np.isfinite(cnorm) and cnorm > 0.0:
         cue_vec = cue_vec / cnorm
+    else:
+        cue_vec = np.zeros_like(cue_vec)
     if pool_embs.size:
         pool_embs = np.nan_to_num(pool_embs, nan=0.0, posinf=0.0, neginf=0.0)
         pool_norms = np.linalg.norm(pool_embs, axis=1)
-        pool_norms[pool_norms == 0.0] = 1.0
-        pool_embs = pool_embs / pool_norms[:, None]
-        shared_cos = np.matmul(pool_embs, cue_vec).astype(np.float32)
+        bad_pool_norms = ~np.isfinite(pool_norms) | (pool_norms == 0.0)
+        if np.any(bad_pool_norms):
+            pool_embs[bad_pool_norms] = 0.0
+            pool_norms[bad_pool_norms] = 1.0
+        pool_embs = np.nan_to_num(
+            pool_embs / pool_norms[:, None], nan=0.0, posinf=0.0, neginf=0.0,
+        )
+        with np.errstate(all="ignore"):
+            shared_cos = np.matmul(pool_embs, cue_vec).astype(np.float32)
+        shared_cos = np.nan_to_num(
+            shared_cos, nan=-1.0, posinf=1.0, neginf=-1.0,
+        )
     else:
         shared_cos = np.empty(0, dtype=np.float32)
     if shared_cos.size:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import socket
@@ -10,8 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from iai_mcp._ipc import IS_WINDOWS, cleanup_ipc_address, open_ipc_connection, shutdown_ipc, start_ipc_server
-from iai_mcp.concurrency import SOCKET_PATH, cleanup_stale_socket
+from iai_mcp._ipc import IS_WINDOWS, cleanup_ipc_address, shutdown_ipc, start_ipc_server
+from iai_mcp.concurrency import SOCKET_PATH
 from iai_mcp.core import UnknownMethodError
 
 ERR_DAEMON_INTERNAL = -32001
@@ -101,6 +100,7 @@ class SocketServer:
         )
         self.last_activity_ts: float = time.monotonic()
         self.active_connections: int = 0
+        self.active_requests: int = 0
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self._state = state
 
@@ -208,6 +208,7 @@ class SocketServer:
                 # actively recalling/capturing. Control/status probes never reach
                 # here, so they no longer keep the daemon awake.
                 self.last_activity_ts = time.monotonic()
+                self.active_requests += 1
                 try:
                     result = await self._dispatch_jsonrpc_method(method, params)
                     resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
@@ -241,6 +242,8 @@ class SocketServer:
                         "id": req_id,
                         "error": {"code": ERR_DAEMON_INTERNAL, "message": str(e)},
                     }
+                finally:
+                    self.active_requests = max(0, self.active_requests - 1)
                 writer.write((json.dumps(resp) + "\n").encode("utf-8"))
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):

@@ -65,6 +65,22 @@ export interface WrapperLifecycleOptions {
   refreshIntervalMs?: number;
 }
 
+export interface EnsureDaemonAliveOptions {
+  waitForReachableMs?: number;
+}
+
+export function shouldWakeDefaultDaemonForToolCall(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (process.env.IAI_MCP_DISABLE_DAEMON_AUTOSTART === "1") {
+    return false;
+  }
+  if (process.env.IAI_DAEMON_SOCKET_PATH) {
+    return false;
+  }
+  return platform === "darwin" || platform === "win32";
+}
+
 export class WrapperLifecycle {
   private readonly pid: number;
   private readonly uuid: string;
@@ -93,7 +109,7 @@ export class WrapperLifecycle {
     this.startedAt = isoNow();
   }
 
-  async ensureDaemonAlive(): Promise<void> {
+  async ensureDaemonAlive(opts: EnsureDaemonAliveOptions = {}): Promise<void> {
     let alive = false;
     try {
       alive = await this.socketReachable();
@@ -108,7 +124,12 @@ export class WrapperLifecycle {
     // failure or on Linux (where systemd/scripts own daemon startup).
     if (this.platform === "darwin" || this.platform === "win32") {
       try {
+        await this.writeWakeSignal();
+      } catch {
+      }
+      try {
         await this.spawnKickstart();
+        await this.waitUntilReachable(opts.waitForReachableMs);
         return;
       } catch {
       }
@@ -117,6 +138,7 @@ export class WrapperLifecycle {
       await this.writeWakeSignal();
     } catch {
     }
+    await this.waitUntilReachable(opts.waitForReachableMs);
   }
 
   async registerHeartbeat(): Promise<void> {
@@ -172,11 +194,32 @@ export class WrapperLifecycle {
     await writeFile(tmp, payload, { encoding: "utf-8" });
     await rename(tmp, this.wakeSignalPath);
   }
+
+  private async waitUntilReachable(timeoutMs?: number): Promise<void> {
+    const deadlineMs = timeoutMs ?? 0;
+    if (deadlineMs <= 0) {
+      return;
+    }
+    const deadline = Date.now() + deadlineMs;
+    while (Date.now() < deadline) {
+      try {
+        if (await this.socketReachable()) {
+          return;
+        }
+      } catch {
+      }
+      await sleep(100);
+    }
+  }
 }
 
 
 function isoNow(): string {
   return new Date().toISOString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function defaultSocketReachable(socketPath: string): () => Promise<boolean> {

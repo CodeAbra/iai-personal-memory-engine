@@ -40,7 +40,10 @@ const stderrLines: string[] = [];
 
 function captureStderr(): void {
   process.stderr.write = ((line: string | Uint8Array) => {
-    stderrLines.push(typeof line === "string" ? line : line.toString("utf-8"));
+    const text = typeof line === "string" ? line : line.toString("utf-8");
+    if (text.includes("iai-mcp warning")) {
+      stderrLines.push(text);
+    }
     return true;
   }) as typeof process.stderr.write;
 }

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import tempfile
 import threading
 from pathlib import Path
@@ -198,6 +197,12 @@ def test_memory_recall_socket_concurrency_limit_returns_busy(
     assert busy["result"]["_degraded"] is True
     assert busy["result"]["_reason"] == "recall_busy"
     assert calls == ["slow"]
+
+
+def test_memory_recall_socket_default_concurrency_stays_multi_agent() -> None:
+    from iai_mcp.socket_server import RECALL_CONCURRENCY_DEFAULT
+
+    assert RECALL_CONCURRENCY_DEFAULT == 2
 
 
 def test_session_start_payload_routed(short_socket_paths):

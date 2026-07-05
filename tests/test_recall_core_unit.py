@@ -929,6 +929,26 @@ def test_core_dispatch_ann_assembler_executes_and_returns_ann_path_used(
     )
 
 
+def test_core_dispatch_recall_stage_profile_can_be_forced(tmp_path, monkeypatch):
+    store = _make_store_hermetic(tmp_path, monkeypatch)
+    _insert_recs(store, 5)
+    monkeypatch.setenv("IAI_MCP_RECALL_STAGE_PROFILE", "1")
+
+    from iai_mcp.core import dispatch
+
+    response = dispatch(
+        store=store,
+        method="memory_recall",
+        params={"cue": "rec0", "session_id": "s-stage-profile"},
+    )
+
+    stages = response.get("_recall_stage_ms")
+    assert stages is not None
+    assert stages["ann_query"] >= 0
+    assert stages["recall_for_response"] >= 0
+    assert stages["total"] >= 0
+
+
 def test_core_dispatch_soft_fallback_leaves_ann_path_used_false(
     tmp_path, monkeypatch
 ):

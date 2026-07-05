@@ -171,6 +171,28 @@ def test_session_start_payload_dispatch_with_l0(tmp_path, monkeypatch):
     finally:
         core._profile_state["wake_depth"] = original
 
+
+def test_session_start_payload_minimal_skips_runtime_graph(tmp_path, monkeypatch):
+    import iai_mcp.core as core
+    import iai_mcp.retrieve as retrieve
+
+    original = core._profile_state.get("wake_depth", "minimal")
+    core._profile_state["wake_depth"] = "minimal"
+    monkeypatch.setattr(
+        retrieve,
+        "build_runtime_graph",
+        lambda _store: (_ for _ in ()).throw(AssertionError("runtime graph built")),
+    )
+    try:
+        store = MemoryStore(path=tmp_path)
+        _pinned_record(store, "keeps the store non-empty")
+        result = dispatch(store, "session_start_payload", {})
+    finally:
+        core._profile_state["wake_depth"] = original
+
+    assert result["wake_depth"] == "minimal"
+    assert result["rich_club"] == ""
+
 def test_payload_type_is_session_start_payload(tmp_path):
     store = MemoryStore(path=tmp_path)
     payload = assemble_session_start(store, CommunityAssignment(), [])

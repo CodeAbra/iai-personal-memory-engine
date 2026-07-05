@@ -147,6 +147,33 @@ def test_pipeline_clears_progress_on_success(
     record = load_state(state_path)
     assert record["sleep_cycle_progress"] is None
 
+
+def test_pipeline_completed_progress_does_not_restart_steps(
+    pipeline: SleepPipeline,
+    monkeypatch: pytest.MonkeyPatch,
+    state_path: Path,
+):
+    record = default_state()
+    record["current_state"] = LifecycleState.SLEEP.value
+    record["sleep_cycle_progress"] = {
+        "last_completed_index": len(SleepPipeline._STEP_ORDER) - 1,
+        "attempt": 0,
+        "last_error": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_state(record, state_path)
+
+    calls: list[SleepStep] = []
+    _patch_steps_to_noop(pipeline, monkeypatch, record=calls)
+
+    result = pipeline.run()
+
+    assert calls == []
+    assert result["completed_steps"] == list(SleepPipeline._STEP_ORDER)
+    assert result.get("interrupted", False) is False
+    assert load_state(state_path)["sleep_cycle_progress"] is None
+
+
 def test_pipeline_emits_started_and_completed_events(
     pipeline: SleepPipeline,
     monkeypatch: pytest.MonkeyPatch,
@@ -207,7 +234,7 @@ def test_pipeline_resume_from_step_N(
         SleepStep.RECALL_INDEX_REBUILD,
     ]
 
-def test_pipeline_resume_after_cycle_complete_treated_as_fresh(
+def test_pipeline_resume_after_cycle_complete_treated_as_done(
     pipeline: SleepPipeline,
     monkeypatch: pytest.MonkeyPatch,
     state_path: Path,
@@ -222,23 +249,11 @@ def test_pipeline_resume_after_cycle_complete_treated_as_fresh(
     save_state(record, state_path)
 
     calls = _patch_steps_to_noop(pipeline, monkeypatch)
-    pipeline.run()
+    result = pipeline.run()
 
-    assert calls == [
-        SleepStep.SCHEMA_MINE,
-        SleepStep.KNOB_TUNE,
-        SleepStep.OPTIMIZE_HIPPO,
-        SleepStep.HIPPO_CLEANUP,
-        SleepStep.DREAM_DECAY,
-        SleepStep.ERASURE_AGENT,
-        SleepStep.CLUSTER_REPLAY,
-        SleepStep.RECONSOLIDATION,
-        SleepStep.USER_MODEL_UPDATE,
-        SleepStep.DMN_REFLECTION,
-        SleepStep.CRISIS_RECLUSTER,
-        SleepStep.CLUSTER_SUMMARY,
-        SleepStep.RECALL_INDEX_REBUILD,
-    ]
+    assert calls == []
+    assert result["completed_steps"] == list(SleepPipeline._STEP_ORDER)
+    assert load_state(state_path)["sleep_cycle_progress"] is None
 
 def _patch_step_to_raise(
     pipeline: SleepPipeline,
@@ -646,7 +661,7 @@ def test_is_quarantined_false_for_malformed_until_ts(
     save_state(record, state_path)
     assert pipeline.is_quarantined() is False
 
-def test_pipeline_resume_after_cycle_complete_wraps_to_schema_mine(
+def test_pipeline_resume_after_cycle_complete_does_not_wrap_to_schema_mine(
     pipeline: SleepPipeline,
     monkeypatch: pytest.MonkeyPatch,
     state_path: Path,
@@ -663,7 +678,7 @@ def test_pipeline_resume_after_cycle_complete_wraps_to_schema_mine(
     calls = _patch_steps_to_noop(pipeline, monkeypatch)
     pipeline.run()
 
-    assert calls[0] == SleepStep.SCHEMA_MINE
+    assert calls == []
 
 def test_pipeline_failed_erasure_agent_resumes_at_erasure_agent(
     pipeline: SleepPipeline,

@@ -209,6 +209,9 @@ def test_e_no_double_drain_of_covered_outputs(tmp_path, monkeypatch):
     assert "flush_event_buffer" not in wake_hook_block, (
         "flush_event_buffer is in the wake hook block — double-invocation risk"
     )
+    assert "force_rebuild=False" in wake_hook_block, (
+        "sleep wake-hook must not force a runtime graph rebuild after consolidation"
+    )
 
     for marker in [
         "_write_session_start_cache",
