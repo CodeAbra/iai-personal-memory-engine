@@ -311,71 +311,48 @@ def test_logind_session_paths_returns_empty_when_busctl_missing() -> None:
     assert result == []
 
 
-def test_logind_idle_time_sec_returns_none_when_not_idle() -> None:
-    fake_sessions = _completed_process(
-        stdout=_busctl_list_sessions_json(
-            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
-        )
-    )
+def test_logind_aggregate_idle_returns_none_when_not_idle() -> None:
     fake_hint = _completed_process(stdout=_busctl_property_json("b", False))
-    with patch(
-        "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_sessions, fake_hint],
-    ):
-        result = IdleDetector().logind_idle_time_sec()
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake_hint):
+        result = IdleDetector()._logind_aggregate_idle(
+            ["/org/freedesktop/login1/session/c2"]
+        )
     assert result is None
 
 
-def test_logind_idle_time_sec_computes_elapsed_when_idle() -> None:
+def test_logind_aggregate_idle_computes_elapsed_when_idle() -> None:
     idle_since_usec = int(
         (datetime.now(timezone.utc) - timedelta(seconds=1800)).timestamp() * 1_000_000
     )
-    fake_sessions = _completed_process(
-        stdout=_busctl_list_sessions_json(
-            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
-        )
-    )
     fake_hint = _completed_process(stdout=_busctl_property_json("b", True))
-    fake_since = _completed_process(
-        stdout=_busctl_property_json("t", idle_since_usec)
-    )
+    fake_since = _completed_process(stdout=_busctl_property_json("t", idle_since_usec))
     with patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_sessions, fake_hint, fake_since],
+        side_effect=[fake_hint, fake_since],
     ):
-        result = IdleDetector().logind_idle_time_sec()
+        result = IdleDetector()._logind_aggregate_idle(
+            ["/org/freedesktop/login1/session/c2"]
+        )
     assert result is not None
     assert 1795 <= result <= 1805
 
 
-def test_logind_idle_time_sec_returns_none_when_session_not_found() -> None:
-    fake = _completed_process(stdout="", returncode=1)
-    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
-        result = IdleDetector().logind_idle_time_sec()
+def test_logind_aggregate_idle_returns_none_for_empty_session_list() -> None:
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=AssertionError("must not spawn when there are no sessions"),
+    ):
+        result = IdleDetector()._logind_aggregate_idle([])
     assert result is None
 
 
-def test_logind_idle_time_sec_not_idle_if_any_seat_is_active() -> None:
+def test_logind_aggregate_idle_not_idle_if_any_seat_is_active() -> None:
     # Two seat-attached sessions: seat0 has been idle for a long time, but
     # seat1 is actively in use. Overall must report "not idle" -- a single
     # active seat means the user isn't idle, no matter how long the other
     # seat has sat untouched.
     idle_since_usec = int(
         (datetime.now(timezone.utc) - timedelta(seconds=7200)).timestamp() * 1_000_000
-    )
-    fake_sessions = _completed_process(
-        stdout=_busctl_list_sessions_json(
-            [
-                (
-                    "c2", _OWN_UID, "testuser",
-                    "seat0", "/org/freedesktop/login1/session/c2",
-                ),
-                (
-                    "c4", _OWN_UID, "testuser",
-                    "seat1", "/org/freedesktop/login1/session/c4",
-                ),
-            ]
-        )
     )
     fake_seat0_hint = _completed_process(stdout=_busctl_property_json("b", True))
     fake_seat0_since = _completed_process(
@@ -384,15 +361,18 @@ def test_logind_idle_time_sec_not_idle_if_any_seat_is_active() -> None:
     fake_seat1_hint = _completed_process(stdout=_busctl_property_json("b", False))
     with patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[
-            fake_sessions, fake_seat0_hint, fake_seat0_since, fake_seat1_hint,
-        ],
+        side_effect=[fake_seat0_hint, fake_seat0_since, fake_seat1_hint],
     ):
-        result = IdleDetector().logind_idle_time_sec()
+        result = IdleDetector()._logind_aggregate_idle(
+            [
+                "/org/freedesktop/login1/session/c2",
+                "/org/freedesktop/login1/session/c4",
+            ]
+        )
     assert result is None
 
 
-def test_logind_idle_time_sec_takes_min_across_idle_seats() -> None:
+def test_logind_aggregate_idle_takes_min_across_idle_seats() -> None:
     # Both seats idle, but for different durations -- the aggregate must be
     # the shorter (more conservative) of the two, not the longer.
     seat0_since = int(
@@ -400,20 +380,6 @@ def test_logind_idle_time_sec_takes_min_across_idle_seats() -> None:
     )
     seat1_since = int(
         (datetime.now(timezone.utc) - timedelta(seconds=100)).timestamp() * 1_000_000
-    )
-    fake_sessions = _completed_process(
-        stdout=_busctl_list_sessions_json(
-            [
-                (
-                    "c2", _OWN_UID, "testuser",
-                    "seat0", "/org/freedesktop/login1/session/c2",
-                ),
-                (
-                    "c4", _OWN_UID, "testuser",
-                    "seat1", "/org/freedesktop/login1/session/c4",
-                ),
-            ]
-        )
     )
     fake_seat0_hint = _completed_process(stdout=_busctl_property_json("b", True))
     fake_seat0_since = _completed_process(
@@ -426,12 +392,16 @@ def test_logind_idle_time_sec_takes_min_across_idle_seats() -> None:
     with patch(
         "iai_mcp.idle_detector.subprocess.run",
         side_effect=[
-            fake_sessions,
             fake_seat0_hint, fake_seat0_since,
             fake_seat1_hint, fake_seat1_since,
         ],
     ):
-        result = IdleDetector().logind_idle_time_sec()
+        result = IdleDetector()._logind_aggregate_idle(
+            [
+                "/org/freedesktop/login1/session/c2",
+                "/org/freedesktop/login1/session/c4",
+            ]
+        )
     assert result is not None
     assert 95 <= result <= 105
 

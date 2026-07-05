@@ -217,9 +217,6 @@ class IdleDetector:
             idle_times.append(idle_sec)
         return min(idle_times)
 
-    def logind_idle_time_sec(self) -> int | None:
-        return self._logind_aggregate_idle(self._logind_session_paths())
-
 
     def os_idle_time_sec(self) -> tuple[int | None, str | None]:
         """Platform dispatcher for OS-level idle time.
