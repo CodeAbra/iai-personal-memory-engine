@@ -16,7 +16,7 @@ async def _concurrent_coroutine_completes_under_100ms_body(monkeypatch):
 
     def slow_blocking_stub(store):
         time.sleep(sleep_duration)
-        return (None, sentinel_assignment, [])
+        return (sentinel_assignment, [], 0, "normal")
 
     def fast_cascade_stub(store, assignment, **kwargs):
         return ([], [])
@@ -46,7 +46,7 @@ async def _concurrent_coroutine_completes_under_100ms_body(monkeypatch):
     )
     monkeypatch.setattr(daemon_mod, "_cascade_executor", executor)
 
-    with patch("iai_mcp.retrieve.build_runtime_graph", slow_blocking_stub), \
+    with patch("iai_mcp.runtime_graph_cache.load_recall_structural", slow_blocking_stub), \
          patch("iai_mcp.hippea_cascade.compute_and_fetch_warm", fast_cascade_stub), \
          patch("iai_mcp.daemon_state.load_state", load_state_stub), \
          patch("iai_mcp.daemon_state.save_state", save_state_stub), \
@@ -78,6 +78,6 @@ async def _concurrent_coroutine_completes_under_100ms_body(monkeypatch):
     assert elapsed < 0.1, (
         f"R1 FAIL: event loop pinned for {elapsed:.3f}s while cascade body "
         f"was running. Expected <100ms. Did the "
-        f"`await asyncio.to_thread(retrieve.build_runtime_graph, store)` "
+        f"`await asyncio.to_thread(load_recall_structural, store)` "
         f"wrap land in src/iai_mcp/daemon.py::_hippea_cascade_loop?"
     )

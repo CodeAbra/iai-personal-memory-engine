@@ -23,7 +23,7 @@ async def _at_most_six_cascades_body(monkeypatch):
 
     def counting_stub(store):
         cascade_invocations.append(fake_monotonic())
-        return (None, sentinel_assignment, [])
+        return (sentinel_assignment, [], 0, "normal")
 
     async def fast_cascade_stub(store, assignment, **kwargs):
         return {"communities_selected": 0, "records_warmed": 0}
@@ -50,7 +50,7 @@ async def _at_most_six_cascades_body(monkeypatch):
 
     shutdown = asyncio.Event()
 
-    with patch("iai_mcp.retrieve.build_runtime_graph", counting_stub), \
+    with patch("iai_mcp.runtime_graph_cache.load_recall_structural", counting_stub), \
          patch("iai_mcp.hippea_cascade.run_cascade", fast_cascade_stub), \
          patch("iai_mcp.daemon_state.load_state", load_state_stub), \
          patch("iai_mcp.daemon_state.save_state", save_state_stub), \

@@ -2189,18 +2189,19 @@ async def main() -> int:
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_downgrade failed", exc_info=True)
 
-                    # Periodic WAKE/DROWSY safety net: if the daemon never reaches
-                    # SLEEP (real activity keeps it recent), the
-                    # sleep-pipeline cache writer never fires and the precache file
-                    # drifts. _maybe_refresh_session_start_cache is a cheap probe
+                    # Periodic DROWSY safety net: keep the precache fresh after the
+                    # user goes quiet. Avoid doing this in active WAKE, because a
+                    # changed watermark can fan out into standard SessionStart
+                    # rendering (structural cache load + record reads).
+                    # _maybe_refresh_session_start_cache is a cheap probe
                     # (SQL COUNT + sidecar read), gated by:
                     #   * min-interval (default 60s, IAI_MCP_SESSION_CACHE_REFRESH_MIN_SEC)
                     #   * single-flight lock
                     #   * watermark (records_count + max_vec_label + max_*_at)
                     #   * runtime-graph-cache warm probe (skip if cold)
-                    # so a quiet tick costs one SELECT + one stat() and emits at
+                    # so a no-op tick costs one SELECT + one stat() and emits at
                     # most one _skipped event.
-                    if current in (_LifecycleState.WAKE, _LifecycleState.DROWSY):
+                    if current == _LifecycleState.DROWSY:
                         try:
                             await asyncio.to_thread(
                                 _maybe_refresh_session_start_cache,

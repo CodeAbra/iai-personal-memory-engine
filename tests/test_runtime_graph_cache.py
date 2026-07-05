@@ -570,6 +570,9 @@ def test_hippea_cascade_not_on_fragmentation_path():
     assert "_rebuild_and_save_rgc" not in source, (
         "the hippea cascade must not route through the fragmenting refresh builder"
     )
-    assert "build_runtime_graph" in source, (
-        "the hippea cascade must use the interval-gated recall builder"
+    assert "build_runtime_graph" not in source, (
+        "the hippea cascade must not rebuild the runtime graph on session_open"
+    )
+    assert "load_recall_structural" in source, (
+        "the hippea cascade must use the warm structural cache"
     )

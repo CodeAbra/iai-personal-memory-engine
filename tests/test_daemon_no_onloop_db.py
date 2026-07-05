@@ -633,6 +633,10 @@ def test_cascade_loop_uses_dedicated_executor_end_to_end(tmp_path, monkeypatch):
 
             from unittest.mock import patch
             with (
+                patch(
+                    "iai_mcp.runtime_graph_cache.load_recall_structural",
+                    return_value=(assignment, [], 0, "normal"),
+                ),
                 patch("iai_mcp.daemon_state.load_state", load_state_stub),
                 patch("iai_mcp.daemon_state.save_state", save_state_stub),
                 patch("iai_mcp.daemon.write_event", write_event_stub),

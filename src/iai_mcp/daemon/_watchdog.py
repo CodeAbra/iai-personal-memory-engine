@@ -135,9 +135,9 @@ _daemon_started_monotonic: float | None = None
 async def _hippea_cascade_loop(
     store, shutdown: asyncio.Event, *, _clock=time.monotonic,
 ) -> None:
-    from iai_mcp import retrieve
     from iai_mcp.daemon_state import load_state, save_state
     from iai_mcp.hippea_cascade import _install_warm, compute_and_fetch_warm
+    from iai_mcp import runtime_graph_cache as _rgc
     # late import so the package attribute is re-fetched and a monkeypatch stays visible
     from iai_mcp.daemon import write_event
 
@@ -152,16 +152,20 @@ async def _hippea_cascade_loop(
                 else:
                     try:
                         assignment = None
+                        structural_source = "unknown"
                         try:
-                            _graph, assignment, _rc = await asyncio.to_thread(
-                                retrieve.build_runtime_graph, store,
+                            assignment, _rc, _max_degree, structural_source = await asyncio.to_thread(
+                                _rgc.load_recall_structural, store,
                             )
                         except (OSError, ValueError, RuntimeError) as exc:
-                            log.debug("build_runtime_graph failed in cascade: %s", exc)
+                            log.debug("load_recall_structural failed in cascade: %s", exc)
+                            assignment = None
+                        if structural_source == "cold_degrade":
                             assignment = None
                         stats: dict = {
                             "communities_selected": 0, "records_warmed": 0,
                             "top_communities": [],
+                            "structural_source": structural_source,
                         }
                         if assignment is not None:
                             try:
@@ -178,6 +182,7 @@ async def _hippea_cascade_loop(
                                     "communities_selected": len(top),
                                     "records_warmed": inserted,
                                     "top_communities": [str(c) for c in top],
+                                    "structural_source": structural_source,
                                 }
                             except (OSError, ValueError, RuntimeError) as exc:
                                 log.debug("cascade compute+fetch failed: %s", exc)
@@ -185,6 +190,7 @@ async def _hippea_cascade_loop(
                                     "communities_selected": 0,
                                     "records_warmed": 0,
                                     "top_communities": [],
+                                    "structural_source": structural_source,
                                 }
                         try:
                             await asyncio.to_thread(
@@ -1036,4 +1042,3 @@ def _liveness_watchdog(store, stop_event, sock_path: str | None = None) -> None:
             log.debug("watchdog tick failed", exc_info=True)
             next_interval = WATCHDOG_LIVENESS_POLL_SEC
         stop_event.wait(timeout=next_interval)
-

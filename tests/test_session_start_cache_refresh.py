@@ -1,4 +1,4 @@
-"""Tests for the WAKE-time SessionStart cache refresh path.
+"""Tests for the SessionStart cache refresh path.
 
 Covers the bug where ``_write_session_start_cache`` was only called from the
 SLEEP branch of the lifecycle tick, so a long-lived Claude session (heartbeat
@@ -9,10 +9,10 @@ store kept ingesting records. The fix adds:
     knows what corpus it was built from
   * a cheap probe `_should_refresh_session_start_cache` that compares the live
     watermark to the stored one
-  * `_maybe_refresh_session_start_cache`, a best-effort WAKE refresh that gates
+  * `_maybe_refresh_session_start_cache`, a best-effort refresh that gates
     on min-interval + single-flight + runtime-graph-cache-warm
   * lifecycle-tick hooks that call the refresh after `wake_sequence` (when new
-    records were just embedded) and as a periodic safety net in WAKE/DROWSY
+    records were just embedded) and as a periodic safety net once DROWSY
   * a TTL safety net in the SessionStart shell hook
     (`IAI_MCP_SESSION_CACHE_MAX_AGE_SEC`)
 
@@ -22,6 +22,7 @@ spawn a real daemon.
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import stat
 import subprocess
@@ -745,6 +746,26 @@ def test_maybe_refresh_runs_when_new_records_after_interval(tmp_path, monkeypatc
     # Content may or may not change byte-for-byte depending on payload tail,
     # but the rendered_chars field should match the new file length.
     assert sidecar["rendered_chars"] == len(cache.read_text())
+
+
+def test_periodic_cache_refresh_is_not_wired_in_active_wake():
+    """The periodic safety net must wait for DROWSY.
+
+    A changed watermark can make the refresh compose a standard SessionStart
+    payload, which reads structural cache data and memory records. Running that
+    while the daemon is active reintroduces the CPU/RSS spikes this guard is
+    meant to prevent.
+    """
+    from iai_mcp import daemon as daemon_mod
+
+    source = inspect.getsource(daemon_mod)
+    marker = "# Periodic DROWSY safety net"
+    start = source.find(marker)
+    assert start > 0, "periodic cache refresh marker not found"
+    block = source[start:source.find("_prev_lifecycle_state", start)]
+
+    assert "current == _LifecycleState.DROWSY" in block
+    assert "current in (_LifecycleState.WAKE, _LifecycleState.DROWSY)" not in block
 
 
 # ---------------------------------------------------------------------------
