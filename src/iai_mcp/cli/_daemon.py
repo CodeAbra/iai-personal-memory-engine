@@ -471,24 +471,18 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
         payload = LifecycleLock().read()
         pid = payload["pid"] if payload else None
         if pid is not None and _is_pid_alive(pid):
-            try:
-                os.kill(pid, _signal.SIGINT)
-            except (ProcessLookupError, PermissionError) as exc:
-                logger.debug("SIGINT to daemon pid=%d failed: %s", pid, exc)
-                return 0
-
-            deadline = _time.monotonic() + _stop_escalation_bound()
-            interval = _stop_poll_interval()
-            while _time.monotonic() < deadline:
-                if not _is_pid_alive(pid):
-                    return 0
-                _time.sleep(interval)
-
-            if _is_pid_alive(pid):
-                _sp.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    check=False, capture_output=True,
-                )
+            # taskkill /T terminates the daemon together with any child processes
+            # it spawned (worker interpreters, maturin, etc.) as one tree, so none
+            # is left orphaned and holding the hippo lock. os.kill(pid, SIGINT) is
+            # NOT usable here: on Windows it maps to TerminateProcess against the
+            # parent alone -- it can't reach the children, and because the parent
+            # then dies immediately the old poll loop returned before ever running
+            # the (childless) taskkill escalation. Kill the whole tree at once,
+            # while it is still intact.
+            _sp.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                check=False, capture_output=True,
+            )
     else:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)
         return 1
