@@ -5,7 +5,6 @@ from uuid import uuid4
 
 import numpy as np
 
-from iai_mcp.community import CommunityAssignment
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord

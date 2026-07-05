@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from iai_mcp import concurrency, daemon_state
+from iai_mcp import daemon_state
 from iai_mcp.concurrency import (
     _dispatch_socket_request,
     _validate_socket_message,
@@ -198,6 +198,69 @@ def test_dispatch_status_still_works(tmp_state: Path) -> None:
     assert resp.get("ok") is True
     assert resp.get("state") == "WAKE"
     assert "version" in resp
+
+
+def test_dispatch_status_prefers_canonical_lifecycle_state(
+    tmp_state: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from iai_mcp import lifecycle_state
+
+    canonical_path = tmp_path / "lifecycle_state.json"
+    monkeypatch.setattr(lifecycle_state, "LIFECYCLE_STATE_PATH", canonical_path)
+    lifecycle_state.save_state(
+        {
+            "current_state": "DROWSY",
+            "since_ts": "2026-07-05T08:22:48+00:00",
+            "last_activity_ts": "2026-07-05T08:17:27+00:00",
+            "wrapper_event_seq": 1,
+            "sleep_cycle_progress": None,
+            "quarantine": None,
+            "shadow_run": False,
+            "crisis_mode": False,
+            "crisis_mode_since_ts": None,
+        },
+        canonical_path,
+    )
+
+    state: dict = {"fsm_state": "WAKE"}
+    resp = asyncio.run(
+        _dispatch_socket_request(
+            {"type": "status"},
+            _make_fake_store(),
+            state,
+        )
+    )
+
+    assert resp.get("ok") is True
+    assert resp.get("state") == "DROWSY"
+    assert resp.get("fsm_state") == "DROWSY"
+
+
+def test_dispatch_status_ignores_invalid_canonical_lifecycle_state(
+    tmp_state: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from iai_mcp import lifecycle_state
+
+    canonical_path = tmp_path / "lifecycle_state.json"
+    canonical_path.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(lifecycle_state, "LIFECYCLE_STATE_PATH", canonical_path)
+
+    state: dict = {"fsm_state": "TRANSITIONING"}
+    resp = asyncio.run(
+        _dispatch_socket_request(
+            {"type": "status"},
+            _make_fake_store(),
+            state,
+        )
+    )
+
+    assert resp.get("ok") is True
+    assert resp.get("state") == "TRANSITIONING"
+    assert resp.get("fsm_state") == "TRANSITIONING"
 
 
 class _ThreadedDaemon:

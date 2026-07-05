@@ -92,6 +92,21 @@ async def _dispatch_socket_request(
 
     if req_type == "status":
         fsm_state = state.get("fsm_state", "WAKE")
+        try:
+            from iai_mcp.lifecycle_state import LIFECYCLE_STATE_PATH, LifecycleState
+
+            lifecycle_raw = json.loads(
+                LIFECYCLE_STATE_PATH.read_text(encoding="utf-8")
+            )
+            lifecycle_state = (
+                lifecycle_raw.get("current_state")
+                if isinstance(lifecycle_raw, dict)
+                else None
+            )
+            if lifecycle_state in {item.value for item in LifecycleState}:
+                fsm_state = lifecycle_state
+        except Exception:  # noqa: BLE001 -- status must stay best-effort
+            pass
         started_at = state.get("daemon_started_at")
         uptime_sec: float | None = None
         if started_at:

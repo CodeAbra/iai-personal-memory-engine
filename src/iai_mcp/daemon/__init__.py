@@ -284,8 +284,9 @@ def _idle_countdown_decision(
 ) -> str:
     """Decide what the lifecycle idle countdown should do this tick.
 
-    The wrapper heartbeat (``scanner_active``) is only ONE signal that the
-    daemon is busy. Two others MUST also hold the daemon awake:
+    The wrapper heartbeat (``scanner_active``) is only a presence signal: it
+    says a client wrapper is still connected, not that memory work is happening.
+    Two real-work signals MUST hold the daemon awake:
 
     * ``drain_in_progress`` -- a deferred-capture drain is writing to the store
       right now. The wrappers dir can be empty (heartbeat stale) while a drain
@@ -295,19 +296,43 @@ def _idle_countdown_decision(
       ``last_activity_ts`` (set at request start) may already look stale; the
       ``drain_in_progress`` signal covers that tail.
 
-    When any of these holds we return ``ACTIVE`` so the caller resets the idle
-    countdown. Otherwise the daemon really is idle and we advance toward SLEEP
-    (which escalates to an EXCLUSIVE store lock) / DROWSY exactly as the
-    heartbeat-only logic used to, so a genuinely quiet daemon still settles and
-    crisis re-arming in SLEEP keeps running.
+    When either real-work signal holds we return ``ACTIVE`` so the caller resets
+    the idle countdown. Otherwise the daemon really is idle and we advance
+    toward SLEEP (which escalates to an EXCLUSIVE store lock) / DROWSY exactly
+    as the heartbeat-only logic used to, so a connected-but-idle wrapper no
+    longer blocks consolidation forever.
     """
-    if scanner_active or drain_in_progress or seconds_since_rpc < recent_rpc_window_sec:
+    if drain_in_progress or seconds_since_rpc < recent_rpc_window_sec:
         return IDLE_DECISION_ACTIVE
     if idle_elapsed >= sleep_heartbeat_idle_sec and sleep_eligible:
         return IDLE_DECISION_SLEEP
     if idle_elapsed >= drowsy_after_sec:
         return IDLE_DECISION_DROWSY
     return IDLE_DECISION_HOLD
+
+
+def _sleep_should_wake_for_activity(
+    *,
+    current_state: str,
+    idle_decision: str,
+    sleep_interrupted: bool = False,
+) -> bool:
+    return (
+        current_state == STATE_SLEEP
+        and (idle_decision == IDLE_DECISION_ACTIVE or sleep_interrupted)
+    )
+
+
+def _sleep_cycle_still_idle_for_hibernation(
+    *,
+    drain_in_progress: bool,
+    seconds_since_rpc: float,
+    recent_rpc_window_sec: float,
+) -> bool:
+    return (
+        not drain_in_progress
+        and seconds_since_rpc >= recent_rpc_window_sec
+    )
 
 
 def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
@@ -1972,15 +1997,13 @@ async def main() -> int:
                     except Exception:  # noqa: BLE001 -- reconcile is best-effort
                         pass
 
-                    if scanner_active:
-                        # _last_active_monotonic was already refreshed above
-                        # (scanner_active -> IDLE_DECISION_ACTIVE); a fresh
-                        # wrapper heartbeat additionally pulls the FSM back to
-                        # WAKE, which RPC/drain activity alone does not.
+                    if _idle_decision == IDLE_DECISION_ACTIVE:
+                        # Real work pulls DROWSY back to WAKE. A fresh wrapper
+                        # heartbeat alone is only presence, not activity.
                         try:
                             await _state_machine.dispatch(
                                 _LifecycleEvent.HEARTBEAT_REFRESH,
-                                reason="heartbeat_refresh_active_wrapper",
+                                reason="real_activity_recent",
                             )
                         except (S2OscillationConflict, S2OscillationBlocked):
                             pass
@@ -2081,7 +2104,7 @@ async def main() -> int:
                             log.debug("daemon_lock_downgrade failed", exc_info=True)
 
                     # Periodic WAKE/DROWSY safety net: if the daemon never reaches
-                    # SLEEP (long-lived Claude sessions keep activity recent), the
+                    # SLEEP (real activity keeps it recent), the
                     # sleep-pipeline cache writer never fires and the precache file
                     # drifts. _maybe_refresh_session_start_cache is a cheap probe
                     # (SQL COUNT + sidecar read), gated by:
@@ -2105,6 +2128,18 @@ async def main() -> int:
                             )
 
                     _prev_lifecycle_state[0] = current
+                    if _sleep_should_wake_for_activity(
+                        current_state=current.value,
+                        idle_decision=_idle_decision,
+                    ):
+                        try:
+                            await _state_machine.dispatch(
+                                _LifecycleEvent.REQUEST_ARRIVED,
+                                reason="wake_on_recent_activity",
+                            )
+                        except (S2OscillationConflict, S2OscillationBlocked):
+                            pass
+                        current = _state_machine.current_state
                     if current is _LifecycleState.SLEEP:
                         def _interrupt_check() -> bool:
                             # Defer the sleep pipeline only on RECENT ACTIVITY, not on
@@ -2184,23 +2219,43 @@ async def main() -> int:
                             log.debug("daemon_lock_downgrade: EX→SH after sleep pipeline")
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_downgrade_post_sleep failed", exc_info=True)
-                        if (
-                            not result.get("interrupted", False)
-                            and result.get("failed_step") is None
+                        if result.get("interrupted", False):
+                            try:
+                                await _state_machine.dispatch(
+                                    _LifecycleEvent.REQUEST_ARRIVED,
+                                    reason="wake_on_sleep_interrupt",
+                                )
+                            except (S2OscillationConflict, S2OscillationBlocked):
+                                pass
+                        elif (
+                            result.get("failed_step") is None
                             and not result.get("quarantine_triggered", False)
                             and len(result.get("completed_steps", [])) >= 5
                         ):
-                            still_idle_now = await asyncio.to_thread(
-                                _heartbeat_scanner.heartbeat_idle_30min,
+                            try:
+                                from iai_mcp.capture import (
+                                    is_drain_in_progress as _drain_q_now,
+                                )
+                                _drain_active_now = bool(
+                                    await asyncio.to_thread(_drain_q_now)
+                                )
+                            except Exception:  # noqa: BLE001 -- hibernation gate MUST NOT crash
+                                _drain_active_now = False
+                            _seconds_since_rpc_now = (
+                                time.monotonic() - mcp_socket.last_activity_ts
+                                if mcp_socket is not None
+                                else float("inf")
                             )
-                            sleep_eligible_now = await asyncio.to_thread(
-                                _idle_detector.sleep_eligible, still_idle_now,
+                            still_idle_now = _sleep_cycle_still_idle_for_hibernation(
+                                drain_in_progress=_drain_active_now,
+                                seconds_since_rpc=_seconds_since_rpc_now,
+                                recent_rpc_window_sec=INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC,
                             )
                             try:
                                 await _state_machine.dispatch(
                                     _LifecycleEvent.SLEEP_CYCLE_DONE,
                                     reason="hibernate_on_sleep_cycle_done",
-                                    still_idle=(still_idle_now and sleep_eligible_now),
+                                    still_idle=still_idle_now,
                                 )
                             except (S2OscillationConflict, S2OscillationBlocked):
                                 pass

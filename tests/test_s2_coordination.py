@@ -193,6 +193,32 @@ def test_rapid_oscillation_raises_blocked(captured_events, seeded_state):
         for a in rejected
     )
 
+
+def test_request_wake_bypasses_rapid_oscillation_guard(
+    captured_events, seeded_state
+):
+    coord = _make_coord(seeded_state, min_interval_sec=60.0)
+
+    asyncio.run(
+        coord.transition(
+            LifecycleState.WAKE,
+            LifecycleState.SLEEP,
+            "sleep_on_idle_30min",
+        )
+    )
+    new = asyncio.run(
+        coord.transition(
+            LifecycleState.SLEEP,
+            LifecycleState.WAKE,
+            "wake_on_recent_activity",
+        )
+    )
+
+    assert new == LifecycleState.WAKE
+    assert load_state(seeded_state)["current_state"] == "WAKE"
+    assert captured_events.by_kind("s2_oscillation_blocked") == []
+
+
 def test_dry_run_permits_oscillation_emits_event(
     captured_events, seeded_state
 ):

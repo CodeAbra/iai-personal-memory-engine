@@ -452,3 +452,93 @@ describe("index.ts buildServer CallToolRequest memory_recall — start rejects �
     assert.equal(source, "direct-store", "_source must be 'direct-store' in the response payload");
   });
 });
+
+
+describe("index.ts buildServer CallToolRequest — lifecycle wake", () => {
+  it("runs lifecycle wake before tools/call when the default-daemon gate allows it", async () => {
+    const { buildServer } = await import("../src/index.js");
+    const { spawnFn } = makeMockSpawnFn(DIRECT_RECALL_PAYLOAD);
+    const order: string[] = [];
+
+    const mockBridge = {
+      start: async () => {
+        order.push("start");
+        const err = new Error("daemon_unreachable: socket ECONNREFUSED (code -32002)");
+        (err as any).name = "DaemonUnreachableError";
+        throw err;
+      },
+      call: async () => { throw new Error("never reached"); },
+      disconnect: () => {},
+    } as unknown as PythonCoreBridge;
+    const lifecycle = {
+      ensureDaemonAlive: async (opts?: { waitForReachableMs?: number }) => {
+        order.push(`wake:${opts?.waitForReachableMs ?? 0}`);
+      },
+    };
+
+    const { server } = buildServer(
+      mockBridge,
+      spawnFn as any,
+      lifecycle,
+      () => true,
+    );
+    const handler = ((server as any)._requestHandlers as Map<
+      string,
+      (req: unknown, extra: unknown) => Promise<unknown>
+    >).get("tools/call");
+    assert.ok(handler, "CallToolRequest handler must be registered");
+
+    await handler({
+      method: "tools/call",
+      params: {
+        name: "memory_recall",
+        arguments: { cue: "wake test" },
+      },
+    }, {});
+
+    assert.deepEqual(order, ["wake:7000", "start"]);
+  });
+
+  it("does not run lifecycle wake when the daemon endpoint gate rejects it", async () => {
+    const { buildServer } = await import("../src/index.js");
+    const { spawnFn } = makeMockSpawnFn(DIRECT_RECALL_PAYLOAD);
+    let wakeCalls = 0;
+
+    const mockBridge = {
+      start: async () => {
+        const err = new Error("daemon_unreachable: socket ECONNREFUSED (code -32002)");
+        (err as any).name = "DaemonUnreachableError";
+        throw err;
+      },
+      call: async () => { throw new Error("never reached"); },
+      disconnect: () => {},
+    } as unknown as PythonCoreBridge;
+    const lifecycle = {
+      ensureDaemonAlive: async () => {
+        wakeCalls += 1;
+      },
+    };
+
+    const { server } = buildServer(
+      mockBridge,
+      spawnFn as any,
+      lifecycle,
+      () => false,
+    );
+    const handler = ((server as any)._requestHandlers as Map<
+      string,
+      (req: unknown, extra: unknown) => Promise<unknown>
+    >).get("tools/call");
+    assert.ok(handler, "CallToolRequest handler must be registered");
+
+    await handler({
+      method: "tools/call",
+      params: {
+        name: "memory_recall",
+        arguments: { cue: "no wake test" },
+      },
+    }, {});
+
+    assert.equal(wakeCalls, 0);
+  });
+});

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import socket
@@ -10,8 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from iai_mcp._ipc import IS_WINDOWS, cleanup_ipc_address, open_ipc_connection, shutdown_ipc, start_ipc_server
-from iai_mcp.concurrency import SOCKET_PATH, cleanup_stale_socket
+from iai_mcp._ipc import IS_WINDOWS, cleanup_ipc_address, shutdown_ipc, start_ipc_server
+from iai_mcp.concurrency import SOCKET_PATH
 from iai_mcp.core import UnknownMethodError
 
 ERR_DAEMON_INTERNAL = -32001

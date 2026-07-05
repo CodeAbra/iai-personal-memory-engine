@@ -23,6 +23,17 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _wake_transition_bypasses_oscillation(
+    to_state: LifecycleState,
+    reason: str,
+) -> bool:
+    return to_state is LifecycleState.WAKE and (
+        reason == "request_arrived"
+        or reason == "wake_signal"
+        or reason.startswith("wake_on_")
+    )
+
+
 class S2OscillationConflict(RuntimeError):
 
     actual_state: LifecycleState
@@ -144,7 +155,10 @@ class S2Coordinator:
                     oscillation_first = entry
                     break
 
-            if oscillation_first is not None:
+            if (
+                oscillation_first is not None
+                and not _wake_transition_bypasses_oscillation(to_state, reason)
+            ):
                 second_transition = {
                     "from_state": from_state.value,
                     "to_state": to_state.value,
