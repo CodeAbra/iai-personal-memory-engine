@@ -70,6 +70,12 @@ def _find_transcript_ts(
                     # the hash matches what was actually stored as literal_surface.
                     msg = obj.get("message")
                     msg = msg if isinstance(msg, dict) else obj
+                    # Internal events (e.g. queue-operation) can carry the same
+                    # text as the real user/assistant turn but appear earlier
+                    # in the file; skip them so the real turn's timestamp wins.
+                    role = obj.get("type") or msg.get("role", "")
+                    if role not in {"user", "assistant"}:
+                        continue
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         parts = []
