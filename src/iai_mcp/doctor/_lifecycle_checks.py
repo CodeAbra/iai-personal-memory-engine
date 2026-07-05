@@ -521,36 +521,7 @@ def check_l_sleep_cycle_status() -> CheckResult:
 def check_n_hid_idle_source() -> CheckResult:
     from iai_mcp.idle_detector import IdleDetector
 
-    detector = IdleDetector()
-    status = detector.status()
-
-    def idle_str(none_label: str) -> str:
-        return (
-            f"{status.hid_idle_sec}s"
-            if status.hid_idle_sec is not None
-            else none_label
-        )
-
-    signals_str = (
-        ",".join(status.available_signals) if status.available_signals else "none"
-    )
-    pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
-
-    if "HIDIdleTime" in status.available_signals:
-        detail = (
-            f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
-            f"available: {signals_str}"
-        )
-        result_status = "PASS"
-    elif "logind" in status.available_signals:
-        detail = f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
-        result_status = "PASS"
-    else:
-        detail = (
-            f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
-            f"available: {signals_str}; L6 will fall back to heartbeat-idle only"
-        )
-        result_status = "WARN"
+    detail, result_status = IdleDetector().describe()
 
     return CheckResult(
         name="(n) HID idle source",

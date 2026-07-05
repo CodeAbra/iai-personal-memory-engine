@@ -210,12 +210,15 @@ class IdleDetector:
         """Platform dispatcher for OS-level idle time.
 
         Senses the current OS and queries whichever idle source it
-        supports, so callers never need their own platform checks. Returns
-        ``(idle_seconds, source_name)``. ``source_name`` is set whenever the
-        underlying source was reachable, even if ``idle_seconds`` is ``None``
-        (session not currently idle) -- this lets callers distinguish
-        "signal available" from "signal unavailable" without knowing which
-        platform they're on.
+        supports. Returns ``(idle_seconds, source_name)``. Functional
+        consumers that only need ``idle_seconds`` (e.g. ``sleep_eligible``)
+        are fully platform-agnostic -- they never inspect ``source_name``.
+        ``source_name`` itself is a platform-specific label (``"HIDIdleTime"``,
+        ``"logind"``), set whenever the underlying source was reachable even
+        if ``idle_seconds`` is ``None`` (session not currently idle); it
+        exists for diagnostic/reporting consumers (``status()``,
+        ``describe()``), which is also where any source-name-specific
+        formatting belongs -- not in a caller of this class.
         """
         system = platform.system()
         if system == "Darwin":
@@ -260,6 +263,44 @@ class IdleDetector:
             pmset_recent_sleep=pmset_seen,
             available_signals=signals,
         )
+
+
+    def describe(self) -> tuple[str, str]:
+        """Human-readable ``(detail, status)`` for doctor's idle-source
+        health check. Callers don't need to know which platform-specific
+        backend (HIDIdleTime, logind, ...) is actually in use -- that
+        knowledge stays here, next to the platform dispatch itself.
+        """
+        status = self.status()
+
+        def idle_str(none_label: str) -> str:
+            return (
+                f"{status.hid_idle_sec}s"
+                if status.hid_idle_sec is not None
+                else none_label
+            )
+
+        signals_str = (
+            ",".join(status.available_signals) if status.available_signals else "none"
+        )
+        pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
+
+        if "HIDIdleTime" in status.available_signals:
+            detail = (
+                f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
+                f"available: {signals_str}"
+            )
+            return detail, "PASS"
+        if "logind" in status.available_signals:
+            detail = (
+                f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
+            )
+            return detail, "PASS"
+        detail = (
+            f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
+            f"available: {signals_str}; L6 will fall back to heartbeat-idle only"
+        )
+        return detail, "WARN"
 
 
 def _parse_pmset_timestamp(line: str) -> datetime | None:
