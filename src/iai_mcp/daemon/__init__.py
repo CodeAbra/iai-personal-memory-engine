@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import copy
 import faulthandler
 import json
 import logging
@@ -21,6 +22,15 @@ log = logging.getLogger(__name__)
 from iai_mcp import s4
 from iai_mcp.concurrency import serve_control_socket  # noqa: F401 -- re-exported here for the test suite; the function lives in concurrency.py
 from iai_mcp.daemon_state import load_state, save_state
+
+
+async def _persist(state: dict) -> None:
+    # ponytail: deepcopy runs synchronously in the event-loop thread, so no other
+    # coroutine can mutate `state` mid-copy -> the worker thread never serialises a
+    # dict being changed (fixes "dictionary changed size during iteration"). State is
+    # JSON-serialisable so the copy is cheap; add a shared lock if it ever isn't.
+    snapshot = copy.deepcopy(state)
+    await asyncio.to_thread(save_state, snapshot)
 from iai_mcp.dream import run_rem_cycle
 from iai_mcp.events import (
     CRISIS_MODE_AUTO_EXPIRED,
@@ -244,7 +254,7 @@ async def _retry_capture_queue_drain_if_due(
             pending=bool(result.get("pending")),
             pending_count=result.get("pending_count"),
         )
-        await asyncio.to_thread(save_state, state)
+        await _persist(state)
     except Exception as exc:  # noqa: BLE001 -- tick retry must never crash daemon
         _set_capture_queue_retry_state(state, pending=True)
         log.warning("capture queue retry drain failed: %s", exc, exc_info=True)
@@ -259,7 +269,7 @@ async def _retry_capture_queue_drain_if_due(
         except Exception:  # noqa: BLE001 -- event write inside boundary guard
             log.debug("capture_queue_drain_failed retry event write failed")
         try:
-            await asyncio.to_thread(save_state, state)
+            await _persist(state)
         except (OSError, ValueError) as save_exc:
             log.debug("save_state after capture queue retry failure failed: %s", save_exc)
 
@@ -903,7 +913,7 @@ async def _tick_body(
         )
         if dropped:
             try:
-                await asyncio.to_thread(save_state, state)
+                await _persist(state)
             except (OSError, ValueError) as exc:  # noqa: BLE001 -- state save non-critical
                 log.debug("save_state after prune failed: %s", exc)
             try:
@@ -1030,7 +1040,7 @@ async def _tick_body(
         state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
         state["last_tick_skipped_reason"] = "paused"
         try:
-            await asyncio.to_thread(save_state, state)
+            await _persist(state)
         except (OSError, ValueError) as exc:
             log.debug("save_state (paused) failed: %s", exc)
         return
@@ -1038,7 +1048,7 @@ async def _tick_body(
     if await asyncio.to_thread(_store_is_empty, store):
         state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
         state["last_tick_skipped_reason"] = "empty_store"
-        await asyncio.to_thread(save_state, state)
+        await _persist(state)
         return
 
     now = datetime.now(timezone.utc)
@@ -1064,7 +1074,7 @@ async def _tick_body(
             window = None
         state["quiet_window"] = list(window) if window else None
         state["quiet_window_learned_at"] = now.isoformat()
-        await asyncio.to_thread(save_state, state)
+        await _persist(state)
 
 
     state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
@@ -1073,7 +1083,7 @@ async def _tick_body(
     # observability (last_tick_skipped_reason is only ever set, never reset).
     state["last_tick_skipped_reason"] = None
     try:
-        await asyncio.to_thread(save_state, state)
+        await _persist(state)
     except (OSError, ValueError) as exc:
         log.debug("save_state after tick failed: %s", exc)
 
@@ -1432,7 +1442,7 @@ async def main() -> int:
         global _daemon_started_monotonic
         _daemon_started_monotonic = time.monotonic()
         state["daemon_pid"] = os.getpid()
-        await asyncio.to_thread(save_state, state)
+        await _persist(state)
         write_event(store, "daemon_started", {"state": state["fsm_state"]})
 
         _wake_was_pending = False
@@ -1489,7 +1499,7 @@ async def main() -> int:
                 state, now=datetime.now(timezone.utc),
             )
             if dropped:
-                await asyncio.to_thread(save_state, state)
+                await _persist(state)
                 try:
                     write_event(
                         store,
@@ -1597,7 +1607,7 @@ async def main() -> int:
                             pending=retry_pending,
                             pending_count=pending_count,
                         )
-                        await asyncio.to_thread(save_state, state)
+                        await _persist(state)
                         payload = {
                             "reason": "recent_mcp_activity",
                             "retry_pending": retry_pending,
@@ -1624,12 +1634,12 @@ async def main() -> int:
                         pending=bool(result.get("pending")),
                         pending_count=result.get("pending_count"),
                     )
-                    await asyncio.to_thread(save_state, state)
+                    await _persist(state)
                 except Exception as exc:  # noqa: BLE001 -- never block socket serving
                     _set_capture_queue_retry_state(state, pending=True)
                     log.warning("capture queue drain failed at startup: %s", exc, exc_info=True)
                     try:
-                        await asyncio.to_thread(save_state, state)
+                        await _persist(state)
                     except (OSError, ValueError) as save_exc:
                         log.debug(
                             "save_state after startup capture queue failure failed: %s",
@@ -2286,7 +2296,7 @@ async def main() -> int:
             try:
                 state.pop("daemon_pid", None)
                 state["daemon_stopped_at"] = datetime.now(timezone.utc).isoformat()
-                await asyncio.to_thread(save_state, state)
+                await _persist(state)
             except (OSError, ValueError) as exc:
                 log.debug("final save_state failed: %s", exc)
             try:
