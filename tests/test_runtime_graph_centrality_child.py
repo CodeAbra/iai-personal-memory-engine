@@ -516,15 +516,25 @@ def test_parent_rss_lower_with_centrality_child(store: MemoryStore):
     the detection child to also run in-process (so detection arenas AND the
     betweenness intermediate are reserved in the parent); the isolated arm uses
     the real spawn-context children for both. Each arm subtracts a fresh settled
-    baseline so it only measures the resident growth it itself retains.
+    baseline so it only measures the resident growth it itself retains, and is
+    sampled n_samples times with the minimum taken (see below) so one-sided
+    measurement noise can't invert the comparison.
     """
     import iai_mcp.community as _cm
 
     n_records = 3000
+    # Best-of-N de-noise: settled-RSS noise is one-sided — transient allocations
+    # and allocator arena retention only ever *inflate* the measured resident
+    # delta, never deflate it below what the arm genuinely keeps. So the minimum
+    # delta across repeated identical builds is the cleanest estimate of each
+    # arm's true retained footprint, and comparing the minima removes the
+    # single-sample spikes that made this proof flip intermittently (a ~3MB blip
+    # on a ~65MB delta was enough to invert it on some CI runs).
+    n_samples = 3
 
-    def _build_arm(seed_base: int, in_parent: bool) -> int:
-        s = MemoryStore(path=store.root / f"arm-{seed_base}-{in_parent}")
-        s.root = store.root / f"arm-root-{seed_base}-{in_parent}"
+    def _build_arm(seed_base: int, in_parent: bool, rep: int) -> int:
+        s = MemoryStore(path=store.root / f"arm-{seed_base}-{in_parent}-{rep}")
+        s.root = store.root / f"arm-root-{seed_base}-{in_parent}-{rep}"
         s.root.mkdir(parents=True, exist_ok=True)
         _seed_store(s, n=n_records, seed_base=seed_base)
 
@@ -552,18 +562,26 @@ def test_parent_rss_lower_with_centrality_child(store: MemoryStore):
             settled = _settled_rss_bytes()
         return settled - baseline
 
-    in_parent_delta = _build_arm(seed_base=20_000, in_parent=True)
-    gc.collect()
-    _settled_rss_bytes()
+    def _min_delta(seed_base: int, in_parent: bool) -> int:
+        best: int | None = None
+        for rep in range(n_samples):
+            gc.collect()
+            _settled_rss_bytes()
+            delta = _build_arm(seed_base, in_parent, rep)
+            best = delta if best is None else min(best, delta)
+        assert best is not None
+        return best
 
-    isolated_delta = _build_arm(seed_base=60_000, in_parent=False)
+    in_parent_delta = _min_delta(seed_base=20_000, in_parent=True)
+    isolated_delta = _min_delta(seed_base=60_000, in_parent=False)
 
     print(
         f"\n[centrality-rss] in_parent_delta={in_parent_delta / 1e6:.1f}MB "
-        f"isolated_delta={isolated_delta / 1e6:.1f}MB"
+        f"isolated_delta={isolated_delta / 1e6:.1f}MB (min of {n_samples})"
     )
     assert isolated_delta < in_parent_delta, (
-        f"centrality child isolation did not lower the parent footprint: "
+        f"centrality child isolation did not lower the parent footprint "
+        f"(min of {n_samples}): "
         f"in_parent_delta={in_parent_delta / 1e6:.1f}MB "
         f"isolated_delta={isolated_delta / 1e6:.1f}MB"
     )
