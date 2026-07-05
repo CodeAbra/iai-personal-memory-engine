@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from iai_mcp.idle_detector import IdleDetector, IdleStatus
 
@@ -217,24 +217,63 @@ def test_status_when_signals_missing() -> None:
 # Linux: systemd-logind IdleHint / IdleSinceHint
 # ---------------------------------------------------------------------------
 
-
-def _busctl_session_path_stdout(path: str = "/org/freedesktop/login1/session/c2") -> str:
-    return f'o "{path}"\n'
+_OWN_UID = os.getuid() if hasattr(os, "getuid") else 1000
 
 
-def _busctl_bool_stdout(value: bool) -> str:
-    return f"b {'true' if value else 'false'}\n"
+def _busctl_list_sessions_json(
+    sessions: list[tuple[str, int, str, str, str]],
+) -> str:
+    # Real shape: {"type":"a(susso)","data":[[[id,uid,user,seat,path], ...]]}
+    return json.dumps({"type": "a(susso)", "data": [[list(s) for s in sessions]]})
 
 
-def _busctl_uint64_stdout(value: int) -> str:
-    return f"t {value}\n"
+def _busctl_property_json(type_code: str, value: object) -> str:
+    return json.dumps({"type": type_code, "data": value})
 
 
-def test_logind_session_path_parses_busctl_call_output() -> None:
-    fake = _completed_process(stdout=_busctl_session_path_stdout())
+def test_logind_session_path_picks_own_uid_seat_session() -> None:
+    fake = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
     with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
         result = IdleDetector()._logind_session_path()
     assert result == "/org/freedesktop/login1/session/c2"
+
+
+def test_logind_session_path_skips_other_uids_and_headless_sessions() -> None:
+    # Another user's graphical session and our own headless (no-seat) SSH
+    # session must both be skipped in favor of our own seat-attached one.
+    fake = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [
+                (
+                    "c1", _OWN_UID + 1, "otheruser",
+                    "seat0", "/org/freedesktop/login1/session/c1",
+                ),
+                ("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3"),
+                (
+                    "c2", _OWN_UID, "testuser",
+                    "seat0", "/org/freedesktop/login1/session/c2",
+                ),
+            ]
+        )
+    )
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector()._logind_session_path()
+    assert result == "/org/freedesktop/login1/session/c2"
+
+
+def test_logind_session_path_returns_none_when_no_matching_session() -> None:
+    fake = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c1", _OWN_UID + 1, "otheruser", "seat0", "/org/freedesktop/login1/session/c1")]
+        )
+    )
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector()._logind_session_path()
+    assert result is None
 
 
 def test_logind_session_path_returns_none_when_busctl_missing() -> None:
@@ -247,11 +286,15 @@ def test_logind_session_path_returns_none_when_busctl_missing() -> None:
 
 
 def test_logind_idle_time_sec_returns_none_when_not_idle() -> None:
-    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
-    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", False))
     with patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_path, fake_hint],
+        side_effect=[fake_sessions, fake_hint],
     ):
         result = IdleDetector().logind_idle_time_sec()
     assert result is None
@@ -261,12 +304,18 @@ def test_logind_idle_time_sec_computes_elapsed_when_idle() -> None:
     idle_since_usec = int(
         (datetime.now(timezone.utc) - timedelta(seconds=1800)).timestamp() * 1_000_000
     )
-    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
-    fake_hint = _completed_process(stdout=_busctl_bool_stdout(True))
-    fake_since = _completed_process(stdout=_busctl_uint64_stdout(idle_since_usec))
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", True))
+    fake_since = _completed_process(
+        stdout=_busctl_property_json("t", idle_since_usec)
+    )
     with patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_path, fake_hint, fake_since],
+        side_effect=[fake_sessions, fake_hint, fake_since],
     ):
         result = IdleDetector().logind_idle_time_sec()
     assert result is not None
@@ -281,13 +330,17 @@ def test_logind_idle_time_sec_returns_none_when_session_not_found() -> None:
 
 
 def test_os_idle_time_sec_dispatches_to_logind_on_linux() -> None:
-    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
-    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", False))
     with patch(
         "iai_mcp.idle_detector.platform.system", return_value="Linux"
     ), patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_path, fake_hint],
+        side_effect=[fake_sessions, fake_hint],
     ):
         idle_sec, source = IdleDetector().os_idle_time_sec()
     assert idle_sec is None
@@ -324,27 +377,37 @@ def test_sleep_eligible_logind_idle_path() -> None:
     idle_since_usec = int(
         (datetime.now(timezone.utc) - timedelta(seconds=1900)).timestamp() * 1_000_000
     )
-    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
-    fake_hint = _completed_process(stdout=_busctl_bool_stdout(True))
-    fake_since = _completed_process(stdout=_busctl_uint64_stdout(idle_since_usec))
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", True))
+    fake_since = _completed_process(
+        stdout=_busctl_property_json("t", idle_since_usec)
+    )
     with patch(
         "iai_mcp.idle_detector.platform.system", return_value="Linux"
     ), patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_path, fake_hint, fake_since],
+        side_effect=[fake_sessions, fake_hint, fake_since],
     ):
         result = IdleDetector().sleep_eligible(heartbeat_idle_30min=False)
     assert result is True
 
 
 def test_sleep_eligible_logind_not_idle_has_no_pmset_fallback() -> None:
-    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
-    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", False))
     with patch(
         "iai_mcp.idle_detector.platform.system", return_value="Linux"
     ), patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_path, fake_hint],
+        side_effect=[fake_sessions, fake_hint],
     ) as run_mock:
         result = IdleDetector().sleep_eligible(heartbeat_idle_30min=False)
     assert result is False
@@ -353,13 +416,17 @@ def test_sleep_eligible_logind_not_idle_has_no_pmset_fallback() -> None:
 
 
 def test_status_reports_logind_signal_on_linux() -> None:
-    fake_path = _completed_process(stdout=_busctl_session_path_stdout())
-    fake_hint = _completed_process(stdout=_busctl_bool_stdout(False))
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+        )
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", False))
     with patch(
         "iai_mcp.idle_detector.platform.system", return_value="Linux"
     ), patch(
         "iai_mcp.idle_detector.subprocess.run",
-        side_effect=[fake_path, fake_hint],
+        side_effect=[fake_sessions, fake_hint],
     ):
         status = IdleDetector().status()
     assert status.available_signals == ["logind"]

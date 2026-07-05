@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -23,12 +24,6 @@ _BUSCTL_TIMEOUT_SEC = 5
 _PMSET_TAIL_LINES = 200
 
 _HID_IDLE_RE = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
-
-_LOGIND_SESSION_PATH_RE = re.compile(r'"(/org/freedesktop/login1/session/[^"]+)"')
-
-_LOGIND_BOOL_RE = re.compile(r"\bb\s+(true|false)\b")
-
-_LOGIND_UINT64_RE = re.compile(r"\bt\s+(\d+)")
 
 _PMSET_SLEEP_MARKERS = ("System Sleep", "Display is turned off")
 
@@ -129,72 +124,76 @@ class IdleDetector:
         return False
 
 
+    def _busctl_json(self, *args: str) -> object | None:
+        try:
+            result = subprocess.run(
+                [_BUSCTL_BIN, "--json=short", *args],
+                capture_output=True,
+                text=True,
+                timeout=_BUSCTL_TIMEOUT_SEC,
+                check=False,
+            )
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            return None
+        except OSError:
+            return None
+
+        if result.returncode != 0:
+            return None
+        try:
+            return json.loads(result.stdout or "")
+        except json.JSONDecodeError:
+            return None
+
     def _logind_session_path(self) -> str | None:
+        # Enumerate sessions rather than resolving "the calling process's own
+        # session" (e.g. via GetSessionByPID): the daemon runs as a systemd
+        # user service, not attached to any interactive session's cgroup, so
+        # a self-lookup by PID never resolves. Instead, find the caller's
+        # user's own seat-attached (interactive, non-headless) session.
+        payload = self._busctl_json(
+            "--system", "call",
+            "org.freedesktop.login1", "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager", "ListSessions",
+        )
+        if not isinstance(payload, dict):
+            return None
         try:
-            result = subprocess.run(
-                [
-                    _BUSCTL_BIN, "--system", "call",
-                    "org.freedesktop.login1", "/org/freedesktop/login1",
-                    "org.freedesktop.login1.Manager", "GetSessionByPID",
-                    "u", str(os.getpid()),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=_BUSCTL_TIMEOUT_SEC,
-                check=False,
-            )
-        except FileNotFoundError:
+            entries = payload["data"][0]
+        except (KeyError, IndexError, TypeError):
             return None
-        except subprocess.TimeoutExpired:
-            return None
-        except OSError:
+        if not isinstance(entries, list):
             return None
 
-        if result.returncode != 0:
-            return None
-        match = _LOGIND_SESSION_PATH_RE.search(result.stdout or "")
-        return match.group(1) if match else None
+        target_uid = os.getuid()
+        for entry in entries:
+            try:
+                _session_id, uid, _user, seat, path = entry
+            except (ValueError, TypeError):
+                continue
+            if uid == target_uid and seat:
+                return path
+        return None
 
-    def _logind_get_property(self, session_path: str, prop: str) -> str | None:
-        try:
-            result = subprocess.run(
-                [
-                    _BUSCTL_BIN, "--system", "get-property",
-                    "org.freedesktop.login1", session_path,
-                    "org.freedesktop.login1.Session", prop,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=_BUSCTL_TIMEOUT_SEC,
-                check=False,
-            )
-        except FileNotFoundError:
+    def _logind_get_property(self, session_path: str, prop: str) -> object | None:
+        payload = self._busctl_json(
+            "--system", "get-property",
+            "org.freedesktop.login1", session_path,
+            "org.freedesktop.login1.Session", prop,
+        )
+        if not isinstance(payload, dict):
             return None
-        except subprocess.TimeoutExpired:
-            return None
-        except OSError:
-            return None
-
-        if result.returncode != 0:
-            return None
-        return result.stdout or ""
+        return payload.get("data")
 
     def _logind_idle_from_session(self, session_path: str) -> int | None:
-        hint_out = self._logind_get_property(session_path, "IdleHint")
-        if hint_out is None:
-            return None
-        hint_match = _LOGIND_BOOL_RE.search(hint_out)
-        if hint_match is None or hint_match.group(1) != "true":
+        idle_hint = self._logind_get_property(session_path, "IdleHint")
+        if idle_hint is not True:
             return None
 
-        since_out = self._logind_get_property(session_path, "IdleSinceHint")
-        if since_out is None:
-            return None
-        since_match = _LOGIND_UINT64_RE.search(since_out)
-        if since_match is None:
-            return None
-        idle_since_usec = int(since_match.group(1))
-        if idle_since_usec <= 0:
+        idle_since_usec = self._logind_get_property(session_path, "IdleSinceHint")
+        if not isinstance(idle_since_usec, int) or idle_since_usec <= 0:
             return None
 
         now_usec = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
