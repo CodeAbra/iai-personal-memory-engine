@@ -536,14 +536,14 @@ def check_n_hid_idle_source() -> CheckResult:
     )
     pmset_str = "recent-sleep" if status.pmset_recent_sleep else "clean"
 
-    if "logind" in status.available_signals:
-        detail = f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
-        result_status = "PASS"
-    elif "HIDIdleTime" in status.available_signals:
+    if "HIDIdleTime" in status.available_signals:
         detail = (
             f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
             f"available: {signals_str}"
         )
+        result_status = "PASS"
+    elif "logind" in status.available_signals:
+        detail = f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
         result_status = "PASS"
     else:
         detail = (
