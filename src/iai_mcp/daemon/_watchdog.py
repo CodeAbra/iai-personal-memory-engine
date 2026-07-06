@@ -593,7 +593,14 @@ def _self_kill(reason: str, kind: str) -> None:
     if hasattr(signal, "SIGKILL"):
         os.kill(os.getpid(), signal.SIGKILL)
     else:
-        sys.exit(1)
+        # Windows has no SIGKILL. The watchdog runs in a background thread
+        # (name="iai-liveness-watchdog", daemon=True), so sys.exit() would only
+        # raise SystemExit in *this* thread and leave the wedged daemon process
+        # alive -- and Task Scheduler's IgnoreNew policy then silently refuses to
+        # start a replacement. os._exit() terminates the whole process
+        # immediately from any thread, bypassing interpreter shutdown that could
+        # itself hang on the same wedge we are trying to escape.
+        os._exit(1)
 
 
 def _capture_blackbox(

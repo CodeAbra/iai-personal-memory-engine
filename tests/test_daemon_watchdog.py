@@ -509,6 +509,38 @@ def test_self_kill_direct_breadcrumb_failure_still_kills(tmp_path, monkeypatch):
     assert kill_calls == [(os.getpid(), signal.SIGKILL)]
 
 
+def test_self_kill_uses_os_exit_when_sigkill_unavailable(monkeypatch):
+    """Windows path: with no signal.SIGKILL, _self_kill must terminate the whole
+    process via os._exit -- which works from the background watchdog thread --
+    and must NOT fall back to sys.exit, which only unwinds the calling thread and
+    leaves a wedged daemon alive (Task Scheduler's IgnoreNew policy then refuses
+    to start a replacement). Unlike the SIGKILL tests above, this is NOT gated on
+    the platform: it simulates the no-SIGKILL branch so the Windows path -- which
+    previously had zero coverage, which is how the no-op self-kill shipped -- is
+    exercised on every runner.
+    """
+    import sys as _sys
+
+    # Simulate Windows: the signal module exposes no SIGKILL.
+    monkeypatch.delattr(signal, "SIGKILL", raising=False)
+
+    exit_calls: list[int] = []
+    monkeypatch.setattr(daemon.os, "_exit", lambda code: exit_calls.append(code))
+    monkeypatch.setattr(
+        daemon.os,
+        "kill",
+        lambda *a, **k: pytest.fail("os.kill must not run when SIGKILL is absent"),
+    )
+    monkeypatch.setattr(
+        _sys,
+        "exit",
+        lambda *a, **k: pytest.fail("sys.exit is a no-op from the watchdog thread"),
+    )
+
+    daemon._self_kill("wedge", daemon.DAEMON_WEDGE_KILL)
+    assert exit_calls == [1]
+
+
 def test_probe_returns_false_when_no_socket(tmp_path, monkeypatch):
     sock_path = str(tmp_path / "absent.sock")
     # Isolate the endpoint so the probe can't reach a real daemon on this box.
