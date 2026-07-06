@@ -479,7 +479,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
   topology: {
     name: "topology",
     description:
-      "Snapshot of memory-graph topology: N, C, L, sigma, community_count, regime. Read-only diagnostic; sigma never toggles retrieval.",
+      "Snapshot of memory-graph topology: N, C, L, sigma, community_count, regime, source/as_of/age_s. Read-only diagnostic; sigma never toggles retrieval.",
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
       type: "object",
@@ -487,10 +487,13 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
         N: { type: "integer" },
         C: { type: "number" },
         L: { type: "number" },
-        sigma: { type: "number" },
+        sigma: { type: ["number", "null"] },
         community_count: { type: "integer" },
         rich_club_ratio: { type: "number" },
         regime: { type: "string" },
+        source: { type: "string", enum: ["live", "cached", "insufficient"] },
+        as_of: { type: ["string", "null"] },
+        age_s: { type: ["number", "null"] },
       },
     },
     annotations: {

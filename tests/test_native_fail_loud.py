@@ -134,6 +134,67 @@ def test_topology_passes_cached_structural_results(tmp_path, monkeypatch):
         "rich_club": rich_club,
     }
 
+
+def test_topology_large_store_uses_cached_snapshot(tmp_path, monkeypatch):
+    from iai_mcp import core, retrieve, sigma as sigma_mod
+    from iai_mcp.events import write_event
+
+    store = _make_store(tmp_path)
+    _seed_one_record(store)
+    monkeypatch.setattr(sigma_mod, "TOPOLOGY_INLINE_N_CEIL", 0)
+    monkeypatch.setattr(
+        retrieve,
+        "build_runtime_graph",
+        lambda _store: (_ for _ in ()).throw(
+            AssertionError("topology should use cached snapshot")
+        ),
+    )
+    write_event(
+        store,
+        sigma_mod.SIGMA_OBSERVATION_KIND,
+        {
+            "N": 123,
+            "C": 0.2,
+            "L": 3.0,
+            "sigma": 1.5,
+            "community_count": 4,
+            "rich_club_ratio": 0.1,
+            "regime": "healthy",
+        },
+    )
+
+    result = core.dispatch(store, "topology", {})
+
+    assert result["source"] == "cached"
+    assert result["N"] == 123
+    assert result["sigma"] == 1.5
+    assert result["as_of"]
+    assert result["age_s"] >= 0.0
+
+
+def test_topology_large_store_without_snapshot_is_fast_insufficient(
+    tmp_path, monkeypatch
+):
+    from iai_mcp import core, retrieve, sigma as sigma_mod
+
+    store = _make_store(tmp_path)
+    _seed_one_record(store)
+    monkeypatch.setattr(sigma_mod, "TOPOLOGY_INLINE_N_CEIL", 0)
+    monkeypatch.setattr(
+        retrieve,
+        "build_runtime_graph",
+        lambda _store: (_ for _ in ()).throw(
+            AssertionError("topology should not build large graph without cache")
+        ),
+    )
+
+    result = core.dispatch(store, "topology", {})
+
+    assert result["source"] == "insufficient"
+    assert result["N"] == 1
+    assert result["regime"] == "insufficient_data"
+
+
 def test_recall_cue_encode_failure_emits_store_event_and_raises(
     tmp_path, monkeypatch
 ):

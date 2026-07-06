@@ -116,6 +116,46 @@ def test_topology_fallback_when_socket_none():
     assert "N: 42" in out, f"N line missing in: {out!r}"
     assert "regime: developmental" in out, f"regime line missing in: {out!r}"
 
+
+def test_topology_fallback_large_store_uses_cached_snapshot():
+    from iai_mcp import sigma as sigma_mod
+    from iai_mcp.cli import cmd_topology
+
+    fake_store = MagicMock()
+    fake_store.db.open_table.return_value.count_rows.return_value = 10
+    fake_snap = {
+        "C": 0.2,
+        "L": 3.0,
+        "sigma": 1.5,
+        "community_count": 4,
+        "rich_club_ratio": 0.1,
+        "N": 10,
+        "regime": "healthy",
+        "source": "cached",
+        "as_of": "2026-07-06T00:00:00+00:00",
+        "age_s": 1.0,
+    }
+
+    buf = io.StringIO()
+    with (
+        patch("iai_mcp.cli._send_jsonrpc_request", return_value=None),
+        patch("iai_mcp.store.MemoryStore", return_value=fake_store),
+        patch("iai_mcp.sigma.TOPOLOGY_INLINE_N_CEIL", 1),
+        patch("iai_mcp.sigma.latest_topology_snapshot", return_value=fake_snap),
+        patch(
+            "iai_mcp.retrieve.build_runtime_graph",
+            side_effect=AssertionError("large CLI fallback should use cache"),
+        ),
+        redirect_stdout(buf),
+    ):
+        rc = cmd_topology(_args())
+
+    assert rc == 0
+    out = buf.getvalue()
+    assert "N: 10" in out
+    assert "regime: healthy" in out
+
+
 def test_topology_degrades_on_hippo_lock_held():
     from iai_mcp.cli import cmd_topology
     from iai_mcp.hippo import HippoLockHeldError

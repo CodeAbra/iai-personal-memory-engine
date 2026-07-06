@@ -30,6 +30,7 @@ SIGMA_N_FLOOR: int = 200
 # uncontained. The default is far above the current live store (~4k nodes) so it
 # never trips today; both bounds are env-overridable.
 SIGMA_N_CEIL: int = 20000
+TOPOLOGY_INLINE_N_CEIL: int = 5000
 
 
 def _env_int(name: str, default: int) -> int:
@@ -238,6 +239,66 @@ def compute_sigma(graph: "MemoryGraph", *, seed: int = 42) -> Optional[float]:
     return float(sigma_val)
 
 
+def topology_payload(
+    *,
+    N: int,
+    C: float = 0.0,
+    L: float = 0.0,
+    sigma: Optional[float] = None,
+    community_count: int = 0,
+    rich_club_ratio: float = 0.0,
+    regime: str | None = None,
+    source: str = "live",
+    as_of: str | None = None,
+    age_s: float | None = None,
+) -> dict:
+    return {
+        "C": float(C),
+        "L": float(L),
+        "sigma": None if sigma is None else float(sigma),
+        "community_count": int(community_count),
+        "rich_club_ratio": float(rich_club_ratio),
+        "N": int(N),
+        "regime": regime or classify_regime(int(N), sigma),
+        "source": source,
+        "as_of": as_of,
+        "age_s": age_s,
+    }
+
+
+def latest_topology_snapshot(store: "MemoryStore") -> dict | None:
+    from iai_mcp.events import query_events
+
+    events = []
+    events.extend(query_events(store, kind=SIGMA_OBSERVATION_KIND, limit=1))
+    events.extend(query_events(store, kind=SIGMA_DRIFT_KIND, limit=1))
+    if not events:
+        return None
+    event = max(
+        events,
+        key=lambda ev: ev.get("ts", datetime.min.replace(tzinfo=timezone.utc)),
+    )
+    ts = event.get("ts")
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    data = event.get("data") or {}
+    sigma_val = data.get("sigma")
+    return topology_payload(
+        N=int(data.get("N", 0) or 0),
+        C=float(data.get("C", 0.0) or 0.0),
+        L=float(data.get("L", 0.0) or 0.0),
+        sigma=None if sigma_val is None else float(sigma_val),
+        community_count=int(data.get("community_count", 0) or 0),
+        rich_club_ratio=float(data.get("rich_club_ratio", 0.0) or 0.0),
+        regime=data.get("regime"),
+        source="cached",
+        as_of=ts.isoformat(),
+        age_s=max(0.0, (datetime.now(timezone.utc) - ts).total_seconds()),
+    )
+
+
 def classify_regime(N: int, sigma: Optional[float]) -> str:
     if sigma is None:
         return "insufficient_data"
@@ -268,44 +329,42 @@ def compute_topology_snapshot(graph, *, assignment=None, rich_club=None) -> dict
 
     N = int(graph.node_count())
     if N == 0:
-        return {
-            "C": 0.0,
-            "L": 0.0,
-            "sigma": None,
-            "community_count": 0,
-            "rich_club_ratio": 0.0,
-            "N": 0,
-            "regime": "insufficient_data",
-        }
-
-    indptr, indices, data = graph.to_csr_arrays()
-    n_nodes = len(indptr) - 1
-
-    sub_indptr, sub_indices, sub_data, sub_n = _largest_component_csr(
-        indptr, indices, data, n_nodes
-    )
+        return topology_payload(N=0, regime="insufficient_data")
 
     C = 0.0
-    if sub_n >= 1:
-        try:
-            C = float(
-                lilli_graph.average_clustering(sub_indptr, sub_indices, sub_n)
-            )
-        except (RuntimeError, ValueError):
-            C = 0.0
-
     L = 0.0
-    if sub_n >= 2 and len(sub_indices) > 0:
+    sigma_val = None
+    floor = _env_int("IAI_MCP_SIGMA_N_FLOOR", SIGMA_N_FLOOR)
+    ceil = _env_int("IAI_MCP_SIGMA_N_CEIL", SIGMA_N_CEIL)
+    if floor <= N <= ceil:
         try:
-            L = float(
-                lilli_graph.average_shortest_path_length(
-                    sub_indptr, sub_indices, sub_n
-                )
-            )
+            sigma_val, C, L, _Cr, _Lr = fast_sigma(graph)
+            if isinstance(sigma_val, float) and math.isnan(sigma_val):
+                sigma_val = None
         except (RuntimeError, ValueError):
-            L = 0.0
-
-    sigma_val = compute_sigma(graph)
+            sigma_val, C, L = None, 0.0, 0.0
+    else:
+        indptr, indices, data = graph.to_csr_arrays()
+        n_nodes = len(indptr) - 1
+        sub_indptr, sub_indices, sub_data, sub_n = _largest_component_csr(
+            indptr, indices, data, n_nodes
+        )
+        if sub_n >= 1:
+            try:
+                C = float(
+                    lilli_graph.average_clustering(sub_indptr, sub_indices, sub_n)
+                )
+            except (RuntimeError, ValueError):
+                C = 0.0
+        if sub_n >= 2 and len(sub_indices) > 0:
+            try:
+                L = float(
+                    lilli_graph.average_shortest_path_length(
+                        sub_indptr, sub_indices, sub_n
+                    )
+                )
+            except (RuntimeError, ValueError):
+                L = 0.0
 
     community_count = 0
     rich_club_ratio = 0.0
@@ -339,15 +398,18 @@ def compute_topology_snapshot(graph, *, assignment=None, rich_club=None) -> dict
         pass
 
     regime = classify_regime(N, sigma_val)
-    return {
-        "C": C,
-        "L": L,
-        "sigma": sigma_val,
-        "community_count": community_count,
-        "rich_club_ratio": rich_club_ratio,
-        "N": N,
-        "regime": regime,
-    }
+    return topology_payload(
+        C=C,
+        L=L,
+        sigma=sigma_val,
+        community_count=community_count,
+        rich_club_ratio=rich_club_ratio,
+        N=N,
+        regime=regime,
+        source="live",
+        as_of=datetime.now(timezone.utc).isoformat(),
+        age_s=0.0,
+    )
 
 
 def _bump_hebbian_rate_developmental(store: "MemoryStore", N: int) -> None:

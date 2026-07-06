@@ -81,6 +81,35 @@ def test_topology_snapshot_reuses_supplied_rich_club(monkeypatch):
     assert snap["rich_club_ratio"] == 0.5
 
 
+def test_topology_snapshot_reuses_fast_sigma_c_l(monkeypatch):
+    from types import SimpleNamespace
+
+    from iai_mcp import sigma as sigma_mod
+
+    g = nx.path_graph(4)
+    mg = _nx_graph_to_memory_graph(g)
+    nodes = list(mg.iter_nodes())
+    calls = {"fast_sigma": 0}
+
+    def _fake_fast_sigma(_graph):
+        calls["fast_sigma"] += 1
+        return (2.0, 0.25, 4.0, 0.1, 3.0)
+
+    monkeypatch.setattr(sigma_mod, "SIGMA_N_FLOOR", 1)
+    monkeypatch.setattr(sigma_mod, "fast_sigma", _fake_fast_sigma)
+
+    snap = sigma_mod.compute_topology_snapshot(
+        mg,
+        assignment=SimpleNamespace(community_centroids={"c1": [0.0]}),
+        rich_club=nodes[:1],
+    )
+
+    assert calls["fast_sigma"] == 1
+    assert snap["sigma"] == 2.0
+    assert snap["C"] == 0.25
+    assert snap["L"] == 4.0
+
+
 def test_fast_sigma_small_world_above_one_at_n_250():
     from iai_mcp.sigma import fast_sigma
 

@@ -295,13 +295,28 @@ def cmd_topology(args: argparse.Namespace) -> int:  # noqa: ARG001 -- argparse c
 
     from iai_mcp.hippo import HippoLockHeldError
     from iai_mcp.retrieve import build_runtime_graph
-    from iai_mcp.sigma import compute_topology_snapshot
+    from iai_mcp import sigma as sigma_mod
     from iai_mcp.store import MemoryStore
 
     try:
         store = MemoryStore()
+        records_count = int(store.db.open_table("records").count_rows())
+        inline_ceil = sigma_mod._env_int(
+            "IAI_MCP_TOPOLOGY_INLINE_N_CEIL",
+            sigma_mod.TOPOLOGY_INLINE_N_CEIL,
+        )
+        if records_count > inline_ceil:
+            snap = sigma_mod.latest_topology_snapshot(store)
+            if snap is None:
+                snap = sigma_mod.topology_payload(
+                    N=records_count,
+                    regime="insufficient_data",
+                    source="insufficient",
+                )
+            _render(snap)
+            return 0
         graph, assignment, rich_club = build_runtime_graph(store)
-        snap = compute_topology_snapshot(
+        snap = sigma_mod.compute_topology_snapshot(
             graph, assignment=assignment, rich_club=rich_club
         )
     except HippoLockHeldError:

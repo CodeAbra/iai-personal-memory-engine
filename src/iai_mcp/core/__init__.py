@@ -836,11 +836,22 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
         records_count = store.db.open_table("records").count_rows()
         if records_count == 0:
-            return {
-                "N": 0, "C": 0.0, "L": 0.0, "sigma": None,
-                "community_count": 0, "rich_club_ratio": 0.0,
-                "regime": "insufficient_data",
-            }
+            return sigma_mod.topology_payload(
+                N=0, regime="insufficient_data", source="insufficient"
+            )
+        inline_ceil = sigma_mod._env_int(
+            "IAI_MCP_TOPOLOGY_INLINE_N_CEIL",
+            sigma_mod.TOPOLOGY_INLINE_N_CEIL,
+        )
+        if records_count > inline_ceil:
+            snap = sigma_mod.latest_topology_snapshot(store)
+            if snap is not None:
+                return snap
+            return sigma_mod.topology_payload(
+                N=records_count,
+                regime="insufficient_data",
+                source="insufficient",
+            )
         try:
             graph_bundle = retrieve.build_runtime_graph(store)
             assignment = None
