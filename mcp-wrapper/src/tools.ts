@@ -479,7 +479,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
   topology: {
     name: "topology",
     description:
-      "Snapshot of memory-graph topology: N, C, L, sigma, community_count, regime, source/as_of/age_s. Read-only diagnostic; sigma never toggles retrieval.",
+      "Memory-graph topology snapshot. Returns metrics, regime, and provenance. Read-only; never toggles retrieval.",
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
       type: "object",
