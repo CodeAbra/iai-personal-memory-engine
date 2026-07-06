@@ -78,19 +78,40 @@ def test_topology_fallback_when_socket_none():
         "regime": "developmental",
     }
     fake_graph = MagicMock()
+    fake_assignment = object()
+    fake_rich_club = [object()]
     fake_store = MagicMock()
+    captured: dict = {}
+
+    def _fake_snapshot(graph, *, assignment=None, rich_club=None):
+        captured.update(
+            {
+                "graph": graph,
+                "assignment": assignment,
+                "rich_club": rich_club,
+            }
+        )
+        return fake_snap
 
     buf = io.StringIO()
     with (
         patch("iai_mcp.cli._send_jsonrpc_request", return_value=None),
         patch("iai_mcp.store.MemoryStore", return_value=fake_store),
-        patch("iai_mcp.retrieve.build_runtime_graph", return_value=(fake_graph, None, None)),
-        patch("iai_mcp.sigma.compute_topology_snapshot", return_value=fake_snap),
+        patch(
+            "iai_mcp.retrieve.build_runtime_graph",
+            return_value=(fake_graph, fake_assignment, fake_rich_club),
+        ),
+        patch("iai_mcp.sigma.compute_topology_snapshot", side_effect=_fake_snapshot),
         redirect_stdout(buf),
     ):
         rc = cmd_topology(_args())
 
     assert rc == 0, f"expected rc=0, got {rc}"
+    assert captured == {
+        "graph": fake_graph,
+        "assignment": fake_assignment,
+        "rich_club": fake_rich_club,
+    }
     out = buf.getvalue()
     assert "N: 42" in out, f"N line missing in: {out!r}"
     assert "regime: developmental" in out, f"regime line missing in: {out!r}"

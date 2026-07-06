@@ -300,8 +300,10 @@ def cmd_topology(args: argparse.Namespace) -> int:  # noqa: ARG001 -- argparse c
 
     try:
         store = MemoryStore()
-        graph, _assignment, _rich_club = build_runtime_graph(store)
-        snap = compute_topology_snapshot(graph)
+        graph, assignment, rich_club = build_runtime_graph(store)
+        snap = compute_topology_snapshot(
+            graph, assignment=assignment, rich_club=rich_club
+        )
     except HippoLockHeldError:
         _render({})
         return 0

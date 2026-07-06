@@ -843,8 +843,19 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             }
         try:
             graph_bundle = retrieve.build_runtime_graph(store)
-            graph = graph_bundle[0] if isinstance(graph_bundle, tuple) else graph_bundle
-            return sigma_mod.compute_topology_snapshot(graph)
+            assignment = None
+            rich_club = None
+            if isinstance(graph_bundle, tuple):
+                graph = graph_bundle[0]
+                if len(graph_bundle) > 1:
+                    assignment = graph_bundle[1]
+                if len(graph_bundle) > 2:
+                    rich_club = graph_bundle[2]
+            else:
+                graph = graph_bundle
+            return sigma_mod.compute_topology_snapshot(
+                graph, assignment=assignment, rich_club=rich_club
+            )
         except Exception as exc:
             write_event(
                 store,

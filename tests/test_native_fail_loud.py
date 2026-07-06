@@ -88,6 +88,52 @@ def test_topology_empty_graph_returns_stub_without_raising(tmp_path):
         f"legitimate path; got {rows}"
     )
 
+def test_topology_passes_cached_structural_results(tmp_path, monkeypatch):
+    from iai_mcp import core, retrieve, sigma as sigma_mod
+
+    store = _make_store(tmp_path)
+    _seed_one_record(store)
+
+    graph = object()
+    assignment = object()
+    rich_club = [object()]
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        retrieve,
+        "build_runtime_graph",
+        lambda _store: (graph, assignment, rich_club),
+    )
+
+    def _fake_snapshot(graph_arg, *, assignment=None, rich_club=None):
+        captured.update(
+            {
+                "graph": graph_arg,
+                "assignment": assignment,
+                "rich_club": rich_club,
+            }
+        )
+        return {
+            "N": 1,
+            "C": 0.0,
+            "L": 0.0,
+            "sigma": None,
+            "community_count": 1,
+            "rich_club_ratio": 1.0,
+            "regime": "insufficient_data",
+        }
+
+    monkeypatch.setattr(sigma_mod, "compute_topology_snapshot", _fake_snapshot)
+
+    result = core.dispatch(store, "topology", {})
+
+    assert result["N"] == 1
+    assert captured == {
+        "graph": graph,
+        "assignment": assignment,
+        "rich_club": rich_club,
+    }
+
 def test_recall_cue_encode_failure_emits_store_event_and_raises(
     tmp_path, monkeypatch
 ):

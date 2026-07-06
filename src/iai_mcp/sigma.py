@@ -250,15 +250,13 @@ def classify_regime(N: int, sigma: Optional[float]) -> str:
     return "healthy"
 
 
-def compute_topology_snapshot(graph, *, assignment=None) -> dict:
+def compute_topology_snapshot(graph, *, assignment=None, rich_club=None) -> dict:
     """Topology metrics for `graph`.
 
-    Computes community detection in-process by default. The request-synchronous
-    callers (the `topology` health surface, used by `iai status` and the
-    topology tool, plus operator analytics) rely on this near-instant path and
-    pass no `assignment`. Background callers that have already computed the
-    community assignment off the interactive path may pass it in to skip the
-    in-process recompute.
+    Computes community detection in-process by default only for callers that
+    have not already built the runtime graph. Request-synchronous callers should
+    pass the `assignment` and `rich_club` returned by `build_runtime_graph()` so
+    this health surface does not re-run the expensive structural passes.
     """
     from iai_mcp.graph import MemoryGraph
 
@@ -324,7 +322,16 @@ def compute_topology_snapshot(graph, *, assignment=None) -> dict:
         except (RuntimeError, ValueError, TypeError):
             community_count = 0
         try:
-            rc = rich_club_nodes(graph, percent=0.10)
+            if rich_club is None:
+                centrality = {
+                    node_id: float(graph.get_centrality(node_id))
+                    for node_id in graph.iter_nodes()
+                }
+                rc = rich_club_nodes(
+                    graph, percent=0.10, centrality=centrality
+                )
+            else:
+                rc = rich_club
             rich_club_ratio = (len(rc) / N) if N > 0 else 0.0
         except (RuntimeError, ValueError, TypeError):
             rich_club_ratio = 0.0

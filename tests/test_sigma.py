@@ -31,6 +31,56 @@ def test_compute_sigma_returns_none_below_floor():
     assert compute_sigma(mg) is None
 
 
+def test_topology_snapshot_uses_graph_centrality_payload(monkeypatch):
+    from types import SimpleNamespace
+
+    from iai_mcp.sigma import compute_topology_snapshot
+
+    g = nx.Graph()
+    g.add_edge(0, 1)
+    g.add_edge(1, 2)
+    mg = _nx_graph_to_memory_graph(g)
+    nodes = list(mg.iter_nodes())
+    for i, node_id in enumerate(nodes):
+        mg.set_node_centrality(node_id, float(i))
+
+    def _forbid_exact_centrality():
+        raise AssertionError("topology must not recompute exact centrality")
+
+    monkeypatch.setattr(mg, "centrality", _forbid_exact_centrality)
+    assignment = SimpleNamespace(community_centroids={"c1": [0.0]})
+
+    snap = compute_topology_snapshot(mg, assignment=assignment)
+
+    assert snap["N"] == 3
+    assert snap["community_count"] == 1
+    assert snap["rich_club_ratio"] > 0.0
+
+
+def test_topology_snapshot_reuses_supplied_rich_club(monkeypatch):
+    from types import SimpleNamespace
+
+    from iai_mcp.sigma import compute_topology_snapshot
+
+    g = nx.path_graph(4)
+    mg = _nx_graph_to_memory_graph(g)
+    nodes = list(mg.iter_nodes())
+
+    def _forbid_rich_club(*args, **kwargs):
+        raise AssertionError("topology must reuse supplied rich_club")
+
+    monkeypatch.setattr("iai_mcp.richclub.rich_club_nodes", _forbid_rich_club)
+    assignment = SimpleNamespace(community_centroids={"c1": [0.0]})
+
+    snap = compute_topology_snapshot(
+        mg, assignment=assignment, rich_club=nodes[:2]
+    )
+
+    assert snap["N"] == 4
+    assert snap["community_count"] == 1
+    assert snap["rich_club_ratio"] == 0.5
+
+
 def test_fast_sigma_small_world_above_one_at_n_250():
     from iai_mcp.sigma import fast_sigma
 
