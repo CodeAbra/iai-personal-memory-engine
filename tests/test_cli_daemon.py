@@ -785,6 +785,40 @@ def test_stop_no_sigkill_when_pid_dies_during_wait(
     ), calls
 
 
+def test_stop_windows_taskkills_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows stop must kill the whole daemon process tree so a spawned worker
+    interpreter can't survive holding the hippo lock. It issues
+    taskkill /F /T /PID (tree-kill, while the tree is intact) rather than
+    os.kill(pid, SIGINT) -- which on Windows is a TerminateProcess against the
+    parent alone: that orphans the children and, because the parent dies at once,
+    the old code returned before the (now childless) taskkill escalation ran.
+    """
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    calls, _sig = _patch_stop_collaborators(
+        monkeypatch, pid=7373, alive_sequence=[True],
+    )
+    rc = cli_mod.cmd_daemon_stop(object())
+    assert rc == 0
+
+    end_idx = next(
+        i for i, c in enumerate(calls)
+        if c[0] == "run" and "/End" in c[1]
+    )
+    taskkill_idx = next(
+        i for i, c in enumerate(calls)
+        if c[0] == "run" and c[1][:1] == ["taskkill"]
+    )
+    assert end_idx < taskkill_idx, calls
+    # Must be a TREE kill (/T) of the recorded pid.
+    assert calls[taskkill_idx][1] == [
+        "taskkill", "/F", "/T", "/PID", "7373"
+    ], calls
+    # Must NOT hard-kill via os.kill -- that orphans the child tree on Windows.
+    assert not any(c[0] == "kill" for c in calls), calls
+
+
 def test_stop_lockfile_absent_bootout_only_no_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
