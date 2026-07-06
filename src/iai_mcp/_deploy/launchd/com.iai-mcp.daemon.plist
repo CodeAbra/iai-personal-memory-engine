@@ -34,9 +34,6 @@
     <key>ThrottleInterval</key>
     <integer>5</integer>
 
-    <key>ProcessType</key>
-    <string>Background</string>
-
     <!--
       Belt-and-suspenders FD floor for a socket-serving daemon.
       The daemon also calls setrlimit(RLIMIT_NOFILE) at boot, but setting

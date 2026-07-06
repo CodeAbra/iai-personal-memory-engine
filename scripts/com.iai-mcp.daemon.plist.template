@@ -33,9 +33,6 @@
   <key>ThrottleInterval</key>
   <integer>5</integer>
 
-  <key>ProcessType</key>
-  <string>Background</string>
-
   <!-- FD floor for a socket-serving daemon. -->
   <key>SoftResourceLimits</key>
   <dict>

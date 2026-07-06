@@ -43,12 +43,16 @@ def test_template_has_required_keys() -> None:
         "<true/>",
         "<key>KeepAlive</key>",
         "<key>Crashed</key>",
-        "<key>ProcessType</key>",
         "<key>SoftResourceLimits</key>",
         "IAI_MCP_LAUNCHD_MANAGED",
     ]
     missing = [m for m in required_markers if m not in text]
     assert not missing, f"template missing required markers: {missing}"
+
+def test_template_does_not_run_under_background_policy() -> None:
+    text = TEMPLATE.read_text()
+    assert "<key>ProcessType</key>" not in text
+    assert "<string>Background</string>" not in text
 
 def test_template_has_RunAtLoad_true() -> None:
     text = TEMPLATE.read_text()

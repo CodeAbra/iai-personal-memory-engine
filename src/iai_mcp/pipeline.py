@@ -450,6 +450,7 @@ def _recall_core(
     spread_hops: int = 2,
     cue_intent: str | None = None,
     contradicts_outgoing: dict[str, list[str]] | None = None,
+    cue_embedding: list[float] | None = None,
 ) -> _RecallCoreResult:
     profile_state = profile_state or {}
 
@@ -517,20 +518,23 @@ def _recall_core(
                 budget_used=budget_used_l0,
             )
 
-    try:
-        cue_emb = embedder.embed(cue)
-    except Exception as exc:
-        write_event(
-            store,
-            TELEMETRY_EMBED_NATIVE_FAILURE,
-            {
-                "op_type": "recall_cue",
-                "backend": "rust",
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            },
-        )
-        raise NativeError(f"recall cue encode failed: {exc}") from exc
+    if cue_embedding is None:
+        try:
+            cue_emb = embedder.embed(cue)
+        except Exception as exc:
+            write_event(
+                store,
+                TELEMETRY_EMBED_NATIVE_FAILURE,
+                {
+                    "op_type": "recall_cue",
+                    "backend": "rust",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise NativeError(f"recall cue encode failed: {exc}") from exc
+    else:
+        cue_emb = cue_embedding
 
     records_cache: dict[UUID, "object"] = {}
     try:
@@ -1155,6 +1159,7 @@ def recall_for_response(
     knobs_applied: dict | None = None,
     arousal_state: dict | None = None,
     tv_maps: "tuple[dict, dict] | None" = None,
+    cue_embedding: list[float] | None = None,
 ) -> RecallResponse:
     import time as _time
     global _last_recall_latency_ms
@@ -1193,6 +1198,7 @@ def recall_for_response(
         spread_hops=_s_hops,
         cue_intent=_cue_intent,
         contradicts_outgoing=_tv_outgoing,
+        cue_embedding=cue_embedding,
     )
 
     derive_temporal_validity(

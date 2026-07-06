@@ -201,6 +201,7 @@ def test_launchd_plist_valid_xml_with_required_keys():
     assert "SuccessfulExit" not in keepalive
 
     assert data["ThrottleInterval"] == 5
+    assert "ProcessType" not in data
     assert "StandardOutPath" in data
     assert "StandardErrorPath" in data
     assert "WorkingDirectory" in data

@@ -424,6 +424,39 @@ def test_dispatch_passes_mode_kwarg_to_recall_for_response(tmp_path, monkeypatch
     assert response["cue_mode"] == "verbatim"
 
 
+def test_dispatch_passes_cue_embedding_to_recall_for_response(tmp_path, monkeypatch):
+    from iai_mcp import core
+    from iai_mcp import embed as _embed_mod
+    from iai_mcp import pipeline as _pipeline_mod
+    from iai_mcp.types import RecallResponse
+
+    store, embedder, _cue, _rec = _seed_populated_store(tmp_path)
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+
+    captured: dict = {}
+
+    def fake_recall_for_response(**kwargs):
+        captured.update(kwargs)
+        return RecallResponse(
+            hits=[], anti_hits=[], activation_trace=[], budget_used=0,
+            cue_mode=kwargs.get("mode", "concept"),
+            patterns_observed=[],
+        )
+
+    monkeypatch.setattr(_pipeline_mod, "recall_for_response", fake_recall_for_response)
+
+    cue = "verbatim recall this exact quote"
+    expected_vec = embedder.embed(cue)
+    embedder.set_fixed(cue, expected_vec)
+
+    core.dispatch(
+        store, "memory_recall",
+        {"cue": cue, "session_id": "cue_embedding_capture"},
+    )
+
+    assert captured["cue_embedding"] == expected_vec
+
+
 def test_dispatch_passes_mode_kwarg_to_retrieve_recall(tmp_path, monkeypatch):
     from iai_mcp import core
     from iai_mcp import retrieve as _retrieve_mod

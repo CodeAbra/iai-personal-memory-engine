@@ -369,6 +369,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         knobs_applied=knobs_applied,
                         arousal_state=_arousal_diag,
                         tv_maps=(_tv_outgoing_l1, _tv_ts_l1) if _tv_ts_l1 else None,
+                        cue_embedding=_cue_vec,
                     )
                     _mark_recall_stage("recall_for_response")
                     resp.ann_path_used = True

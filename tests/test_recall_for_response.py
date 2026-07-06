@@ -25,6 +25,12 @@ class _FakeEmbedder:
         return [list(self._vec) for _ in texts]
 
 
+class _ExplodingEmbedder(_FakeEmbedder):
+
+    def embed(self, text: str) -> list[float]:
+        raise AssertionError("cue embedding should be reused, not recomputed")
+
+
 def _make(
     vec: list[float], text: str = "rec", aaak: str = "", tier: str = "episodic",
 ) -> MemoryRecord:
@@ -128,6 +134,22 @@ def test_recall_for_response_returns_recall_response_type(tmp_path) -> None:
     assert isinstance(resp.hints, list)
     assert isinstance(resp.cue_mode, str)
     assert isinstance(resp.patterns_observed, list)
+
+
+def test_recall_for_response_reuses_supplied_cue_embedding(tmp_path) -> None:
+    from iai_mcp.pipeline import recall_for_response
+
+    store, graph, recs = _build_store_and_graph(tmp_path, n=5)
+    assignment = _flat_assignment(recs)
+
+    resp = recall_for_response(
+        store=store, graph=graph, assignment=assignment,
+        rich_club=[], embedder=_ExplodingEmbedder(),
+        cue="test", session_id="s2b",
+        cue_embedding=[1.0] + [0.0] * (EMBED_DIM - 1),
+    )
+
+    assert isinstance(resp, RecallResponse)
 
 
 def test_recall_for_response_packs_under_budget(tmp_path) -> None:
