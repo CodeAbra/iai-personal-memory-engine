@@ -892,6 +892,28 @@ async def _tick_body(
     capture_queue=None,
     capture_handler: Callable[[dict], None] | None = None,
 ) -> None:
+    # Step 0: re-assert the Windows auth-token file if it vanished while the
+    # daemon was running. Cheap stat; no-op on POSIX. Without this a token file
+    # deleted out-of-band silently bricks every new client connection (the port
+    # stays up, so the daemon looks alive) until a manual restart.
+    try:
+        from iai_mcp._ipc import reassert_token_if_missing
+
+        if reassert_token_if_missing():
+            log.warning("auth token file was missing — re-asserted from memory")
+            try:
+                await asyncio.to_thread(
+                    write_event,
+                    store,
+                    "auth_token_reasserted",
+                    {"phase": "tick"},
+                    severity="warning",
+                )
+            except (OSError, RuntimeError) as exc:  # noqa: BLE001 -- event write non-critical
+                log.debug("auth_token_reasserted event write failed: %s", exc)
+    except Exception:  # noqa: BLE001 -- tick step MUST NOT crash
+        log.debug("tick step 0 (reassert auth token) failed", exc_info=True)
+
     try:
         from iai_mcp.daemon_state import (
             FIRST_TURN_PENDING_TTL_SEC_DEFAULT,

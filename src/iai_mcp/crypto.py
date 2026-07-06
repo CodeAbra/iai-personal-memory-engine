@@ -158,7 +158,14 @@ class CryptoKey:
             except OSError:
                 pass
         tmp = final.parent / f"{final.name}.tmp.{os.getpid()}"
-        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        # O_BINARY: on Windows os.open defaults to text mode, which translates
+        # 0x0A bytes in the raw key to 0x0D0A on write and silently corrupts it
+        # (a random 32-byte key almost always contains a 0x0A). No-op on POSIX.
+        fd = os.open(
+            str(tmp),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
         try:
             if hasattr(os, "fchmod"):
                 os.fchmod(fd, 0o600)

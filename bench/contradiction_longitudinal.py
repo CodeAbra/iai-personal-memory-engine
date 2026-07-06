@@ -812,9 +812,9 @@ def write_outputs(
 
     env_with_duration = {**env, "wall_clock_duration_seconds": round(duration_seconds, 2)}
     json_blob = {"env": env_with_duration, "summary": summary}
-    json_path.write_text(json.dumps(json_blob, indent=2, default=str))
+    json_path.write_text(json.dumps(json_blob, indent=2, default=str), encoding="utf-8")
 
-    with csv_path.open("w", newline="") as fh:
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow([
             "probe_id", "seed", "n_slice", "condition", "topic",
@@ -897,7 +897,7 @@ def write_outputs(
         "- **Metric B-contract (s4_contradiction hint OR anti_hits ≥80%)** tests what the system actually promises (REQUIREMENTS.md MEM-08, MCP-01 dual-route). Cosine cannot do either; pipeline either signals contradictions or it doesn't.",
         "",
     ]
-    md_path.write_text("\n".join(lines))
+    md_path.write_text("\n".join(lines), encoding="utf-8")
 
     print(f"[bench] Wrote: {md_path}")
     print(f"[bench] Wrote: {json_path}")

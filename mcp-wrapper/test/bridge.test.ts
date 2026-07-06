@@ -1,7 +1,7 @@
 
 import { describe, it, afterEach } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as net from "node:net";
@@ -97,6 +97,9 @@ afterEach(async () => {
   tmpDirs = [];
   delete process.env.IAI_DAEMON_SOCKET_PATH;
   delete process.env.IAI_MCP_RECONNECT_TEST_DELAY_MS;
+  delete process.env.IAI_DAEMON_TCP_PORT;
+  delete process.env.IAI_DAEMON_TCP_HOST;
+  delete process.env.IAI_DAEMON_TOKEN_PATH;
 });
 
 async function setup(): Promise<{ daemon: MockDaemon; bridge: PythonCoreBridge }> {
@@ -417,5 +420,144 @@ describe("PythonCoreBridge: rapid connection flaps", () => {
     assert.equal(r2.status, "fulfilled");
     assert.equal(r3.status, "fulfilled");
     assert.equal(bridge.isConnected(), true);
+  });
+});
+
+
+// Simulates the Windows daemon's `_make_authenticated_handler`: the first
+// line on every connection must equal `expectedToken`, or the connection is
+// closed immediately with nothing written back — mirroring _ipc.py exactly,
+// including the "silently closed, no error frame" behavior that produced the
+// `daemon_unreachable: socket closed` symptom this test guards against.
+class MockAuthDaemon {
+  private server: net.Server;
+  private connections: net.Socket[] = [];
+  private readonly expectedToken: string;
+  public requestHandler: (req: { id: number; method: string; params: unknown }) => unknown;
+
+  constructor(expectedToken: string) {
+    this.expectedToken = expectedToken;
+    this.requestHandler = (req) => ({ ok: true, method: req.method });
+    this.server = net.createServer((conn) => {
+      this.connections.push(conn);
+      let authenticated = false;
+      let buf = "";
+      conn.on("data", (chunk) => {
+        buf += chunk.toString("utf-8");
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!authenticated) {
+            authenticated = true;
+            if (line !== this.expectedToken) {
+              conn.destroy();
+              return;
+            }
+            continue;
+          }
+          if (!line) continue;
+          try {
+            const req = JSON.parse(line);
+            const result = this.requestHandler(req);
+            conn.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result }) + "\n");
+          } catch (e) {
+            const req = JSON.parse(line);
+            conn.write(
+              JSON.stringify({ jsonrpc: "2.0", id: req.id, error: { code: -32603, message: String(e) } }) + "\n",
+            );
+          }
+        }
+      });
+    });
+  }
+
+  async listen(): Promise<number> {
+    return new Promise((resolve) => {
+      this.server.listen(0, "127.0.0.1", () => {
+        resolve((this.server.address() as net.AddressInfo).port);
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    for (const c of this.connections) { try { c.destroy(); } catch {  } }
+    this.connections = [];
+    return new Promise((resolve) => { this.server.close(() => resolve()); });
+  }
+}
+
+describe("PythonCoreBridge: TCP auth-token handshake (Windows transport)", () => {
+  it("authenticates with the token before any RPC traffic and completes calls normally", async () => {
+    const dir = await makeTmpDir();
+    tmpDirs.push(dir);
+    const tokenPath = join(dir, ".daemon.token");
+    const token = "test-token-abc123";
+    await writeFile(tokenPath, token, "utf-8");
+
+    const daemon = new MockAuthDaemon(token);
+    const port = await daemon.listen();
+
+    process.env.IAI_DAEMON_TCP_PORT = String(port);
+    process.env.IAI_DAEMON_TOKEN_PATH = tokenPath;
+    const bridge = new PythonCoreBridge();
+    bridges.push(bridge);
+
+    await bridge.start();
+    assert.equal(bridge.isConnected(), true);
+
+    const res = await bridge.call<{ echo: string }>("ping");
+    assert.equal(res.method, "ping");
+
+    await daemon.close();
+  });
+
+  it("fails as daemon_unreachable when the token file is missing", async () => {
+    const dir = await makeTmpDir();
+    tmpDirs.push(dir);
+    const missingTokenPath = join(dir, ".daemon.token"); // never written
+
+    const daemon = new MockAuthDaemon("irrelevant-since-no-token-sent");
+    const port = await daemon.listen();
+
+    process.env.IAI_DAEMON_TCP_PORT = String(port);
+    process.env.IAI_DAEMON_TOKEN_PATH = missingTokenPath;
+    const bridge = new PythonCoreBridge();
+    bridges.push(bridge);
+
+    await assert.rejects(
+      () => bridge.start(),
+      (err: Error) => err instanceof DaemonUnreachableError,
+    );
+    assert.equal(bridge.isConnected(), false);
+
+    await daemon.close();
+  });
+
+  it("gets disconnected by the daemon when the token is wrong (pre-fix regression case)", async () => {
+    const dir = await makeTmpDir();
+    tmpDirs.push(dir);
+    const tokenPath = join(dir, ".daemon.token");
+    await writeFile(tokenPath, "wrong-token", "utf-8");
+
+    const daemon = new MockAuthDaemon("actual-expected-token");
+    const port = await daemon.listen();
+
+    process.env.IAI_DAEMON_TCP_PORT = String(port);
+    process.env.IAI_DAEMON_TOKEN_PATH = tokenPath;
+    const bridge = new PythonCoreBridge();
+    bridges.push(bridge);
+
+    // The mismatched-token socket is accepted at the TCP level and only
+    // closed after the daemon reads the (wrong) first line, so start()
+    // itself resolves; the failure shows up as the daemon severing the
+    // connection right after, exactly like the bug this test targets.
+    await bridge.start();
+    await assert.rejects(
+      () => bridge.call("ping"),
+      (err: Error) => err.message.includes("daemon_unreachable"),
+    );
+
+    await daemon.close();
   });
 });

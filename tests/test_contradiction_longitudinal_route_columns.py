@@ -137,7 +137,7 @@ def test_csv_writer_emits_route_and_cue_hash_columns(tmp_path: Path) -> None:
     csv_path = tmp_path / f"contradiction_longitudinal_{run_id}.csv"
     assert csv_path.exists(), f"CSV not written at {csv_path}"
 
-    with csv_path.open(newline="") as fh:
+    with csv_path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         fieldnames = reader.fieldnames or []
         assert "route" in fieldnames, (

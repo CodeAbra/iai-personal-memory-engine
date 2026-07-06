@@ -106,7 +106,7 @@ def _simulate_shim(fake_sys_path: list[str], src_path: str) -> list[str]:
 def test_bench_script_has_shim_before_iai_import(script: str) -> None:
     path = BENCH_DIR / script
     assert path.exists(), f"bench script missing: {path}"
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
 
     src_path_idx: int | None = None
     guard_if_idx: int | None = None
@@ -148,7 +148,7 @@ def test_bench_script_has_shim_before_iai_import(script: str) -> None:
 def test_skip_list_bench_scripts_have_no_shim(script: str) -> None:
     path = BENCH_DIR / script
     assert path.exists(), f"skip-list bench script missing: {path}"
-    src = path.read_text()
+    src = path.read_text(encoding="utf-8")
     assert "_SRC_PATH not in sys.path" not in src, (
         f"{script}: skip-list script unexpectedly carries the shim - "
         f"either drop the shim or move the script to BENCH_SCRIPTS_NEEDING_SHIM"

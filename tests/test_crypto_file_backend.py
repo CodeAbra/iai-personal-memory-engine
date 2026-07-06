@@ -25,6 +25,11 @@ def test_try_file_get_returns_bytes_on_valid_0o600_file(tmp_path: Path) -> None:
     assert len(got) == 32
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid"),
+    reason="POSIX permission-bit ownership check is skipped on Windows "
+    "(crypto._try_file_get guards it behind hasattr(os, 'geteuid'))",
+)
 def test_try_file_get_rejects_world_or_group_bits(tmp_path: Path) -> None:
     from iai_mcp.crypto import CryptoKey, CryptoKeyError
 
@@ -51,6 +56,10 @@ def test_try_file_get_rejects_wrong_length(tmp_path: Path) -> None:
     assert "wrong length" in str(exc_info.value).lower()
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid"),
+    reason="uid ownership check is POSIX-only; os.geteuid() is absent on Windows",
+)
 def test_try_file_get_rejects_foreign_uid(tmp_path: Path, monkeypatch) -> None:
     from iai_mcp.crypto import CryptoKey, CryptoKeyError
 

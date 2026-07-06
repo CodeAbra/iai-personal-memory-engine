@@ -105,6 +105,11 @@ def test_rendered_plist_watchdog_values_match_code_defaults() -> None:
     assert daemon_mod.WATCHDOG_COLD_START_GRACE_SEC == 600.0
 
 
+@pytest.mark.skipif(
+    not hasattr(__import__("os"), "getuid"),
+    reason="launchd gui/<uid> domain target is macOS-only; os.getuid() is "
+    "absent on Windows",
+)
 def test_reenable_emits_bootout_bootstrap_kickstart_in_order(
     fake_state_dir: Path,
     captured_launchctl: list[list[str]],

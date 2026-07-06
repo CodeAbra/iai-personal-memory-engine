@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 import time
-from uuid import uuid4
+from uuid import UUID
 
 import numpy as np
 import pytest
@@ -60,7 +60,11 @@ def _scale_free_community_graph(n: int, seed: int) -> MemoryGraph:
     the seed set must recover. Fully deterministic from ``seed``.
     """
     rng = np.random.default_rng(seed)
-    ids = [uuid4() for _ in range(n)]
+    # Derived from ``rng`` (not ``uuid4()``) so node identity is as reproducible
+    # as the edge structure: with an unseeded uuid4, near-tied scores at the
+    # top-K cutoff could swap which node wins the str(id) tie-break between
+    # runs, making the fidelity gate flaky independent of the algorithm.
+    ids = [UUID(bytes=rng.bytes(16)) for _ in range(n)]
     g = MemoryGraph()
     for uid in ids:
         g.add_node(uid, community_id=None, embedding=[0.0] * 8)

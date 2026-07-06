@@ -65,26 +65,33 @@ def check_a_daemon_alive() -> CheckResult:
             f"daemon_pid={pid!r} is not a valid PID (corrupt state?)",
         )
 
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"PID {pid} in state but no process found",
-        )
-    except PermissionError:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"PID {pid} exists but is not owned by this user",
-        )
-    except OSError as e:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"liveness probe failed: {type(e).__name__}: {e}",
-        )
+    # os.kill(pid, 0) is the POSIX liveness idiom, but on Windows os.kill
+    # rejects signal 0 with OSError [WinError 87] (invalid parameter) even for
+    # a live PID — which reported a healthy, ticking daemon as dead. Skip the
+    # probe there and rely on the psutil refinement below, which both confirms
+    # the PID exists and that it is an iai_mcp.daemon. Mirrors
+    # lifecycle_lock._is_pid_alive.
+    if platform.system() != "Windows":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"PID {pid} in state but no process found",
+            )
+        except PermissionError:
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"PID {pid} exists but is not owned by this user",
+            )
+        except OSError as e:
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"liveness probe failed: {type(e).__name__}: {e}",
+            )
 
     try:
         import psutil
@@ -116,8 +123,12 @@ async def _socket_connect_probe(socket_path: Path, timeout: float) -> str | None
     from iai_mcp._ipc import open_ipc_connection
     try:
         reader, writer = await open_ipc_connection(str(socket_path), timeout=timeout)
-    except FileNotFoundError:
-        return "FileNotFoundError"
+    except FileNotFoundError as e:
+        # Surface the actual message: on Windows open_ipc_connection raises
+        # FileNotFoundError for BOTH a missing port file ("Daemon not running")
+        # and a missing auth token ("Daemon auth token not found") — very
+        # different diagnoses, so don't collapse them to a bare class name.
+        return f"FileNotFoundError: {e}"
     except ConnectionRefusedError:
         return "ConnectionRefusedError"
     except asyncio.TimeoutError:
@@ -137,7 +148,7 @@ def check_b_socket_fresh() -> CheckResult:
     # Windows binds TCP loopback and records the port in a sidecar file — there
     # is no AF_UNIX socket file — so check whichever endpoint actually exists
     # for this platform. (The connect probe below is already cross-platform.)
-    from iai_mcp._ipc import IS_WINDOWS, _port_file_path
+    from iai_mcp._ipc import IS_WINDOWS, _port_file_path, _read_port, _token_file_path
     endpoint = _port_file_path() if IS_WINDOWS else socket_path
     if not endpoint.exists():
         return CheckResult(
@@ -145,6 +156,29 @@ def check_b_socket_fresh() -> CheckResult:
             False,
             f"{endpoint} does not exist",
         )
+
+    # A human-readable label for the actual endpoint. On Windows this is the
+    # loopback host:port, NOT the (nonexistent) .daemon.sock path — reporting
+    # the .sock path here was actively misleading.
+    if IS_WINDOWS:
+        port = _read_port()
+        endpoint_label = f"127.0.0.1:{port}" if port is not None else str(endpoint)
+        # The daemon holds its auth token only in memory and mirrors it to
+        # .daemon.token for clients. If that file goes missing while the daemon
+        # runs, the TCP port stays up but EVERY new client fails the auth
+        # handshake — existing long-lived connections survive, so the daemon
+        # looks alive while new sessions / `daemon status` all report "not
+        # running". Call this out specifically; it is not an unreachable daemon.
+        if not _token_file_path().exists():
+            return CheckResult(
+                "(b) socket file fresh",
+                False,
+                f"{endpoint_label} listening but auth token file "
+                f"{_token_file_path()} is missing — new clients cannot "
+                f"authenticate (restart the daemon to regenerate it)",
+            )
+    else:
+        endpoint_label = str(socket_path)
 
     t0 = time.monotonic()
     try:
@@ -161,12 +195,12 @@ def check_b_socket_fresh() -> CheckResult:
         return CheckResult(
             "(b) socket file fresh",
             False,
-            f"{socket_path} present but unreachable: {err}",
+            f"{endpoint_label} present but unreachable: {err}",
         )
     return CheckResult(
         "(b) socket file fresh",
         True,
-        f"{socket_path} connected in {elapsed_ms} ms",
+        f"{endpoint_label} connected in {elapsed_ms} ms",
     )
 
 

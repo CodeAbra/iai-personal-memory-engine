@@ -27,8 +27,11 @@ def test_archive_moves_bak_file(tmp_path):
 
     archive_dir = state_dir / "archive"
     assert archive_dir.is_dir()
-    archive_mode = stat.S_IMODE(archive_dir.stat().st_mode)
-    assert archive_mode == 0o700, oct(archive_mode)
+    if os.name != "nt":
+        # POSIX mode bits are meaningless on Windows (chmod only toggles the
+        # read-only bit); S_IMODE reports 0o777 there.
+        archive_mode = stat.S_IMODE(archive_dir.stat().st_mode)
+        assert archive_mode == 0o700, oct(archive_mode)
 
     expected_name = "lifecycle_state.json.HIBERNATION-stuck.bak-20260513T120000Z.bak"
     expected = archive_dir / expected_name
