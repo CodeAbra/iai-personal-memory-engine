@@ -1030,8 +1030,14 @@ def _apply_post_rank_pipeline(
                 kind="deferred_curiosity_input",
                 data={
                     "hit_ids": [str(h.record_id) for h in s4_scope_hits[:10]],
+                    # Persist the ranking scores too: the sleep-side curiosity
+                    # drain (CURIOSITY_DRAIN step) needs them to recompute the
+                    # recall-hit entropy that gates fire_curiosity. `turn` lets
+                    # the drain preserve per-session curiosity cooldown ordering.
+                    "scores": [float(h.score) for h in s4_scope_hits[:10]],
                     "cue": cue[:200],
                     "session_id": session_id,
+                    "turn": int(turn),
                 },
                 severity="info",
                 session_id=session_id,

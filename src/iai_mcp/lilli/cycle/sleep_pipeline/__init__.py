@@ -48,6 +48,7 @@ class SleepStep(Enum):
     DMN_REFLECTION = 11
     CLUSTER_SUMMARY = 12
     RECALL_INDEX_REBUILD = 13
+    CURIOSITY_DRAIN = 14
 
 
 class SleepPhase(Enum):
@@ -70,6 +71,7 @@ STEP_PHASE: dict[SleepStep, SleepPhase] = {
     SleepStep.CRISIS_RECLUSTER: SleepPhase.REM,
     SleepStep.CLUSTER_SUMMARY: SleepPhase.REM,
     SleepStep.RECALL_INDEX_REBUILD: SleepPhase.REM,
+    SleepStep.CURIOSITY_DRAIN: SleepPhase.REM,
 }
 
 
@@ -350,6 +352,7 @@ class SleepPipeline:
             SleepStep.CRISIS_RECLUSTER: self._step_crisis_recluster,
             SleepStep.CLUSTER_SUMMARY: self._step_cluster_summary,
             SleepStep.RECALL_INDEX_REBUILD: self._step_recall_index_rebuild,
+            SleepStep.CURIOSITY_DRAIN: self._step_curiosity_drain,
         }
 
 
@@ -366,6 +369,14 @@ class SleepPipeline:
         SleepStep.DMN_REFLECTION,
         SleepStep.CRISIS_RECLUSTER,
         SleepStep.CLUSTER_SUMMARY,
+        # Runs immediately before RECALL_INDEX_REBUILD so the curiosity_bridge
+        # edges fire_curiosity writes are captured by this same cycle's index
+        # rebuild, preserving the invariant that RECALL_INDEX_REBUILD is the
+        # final step. The only step whose _STEP_ORDER index this shifts is
+        # RECALL_INDEX_REBUILD itself (12 -> 13); across the upgrade a resume
+        # record that had completed the old last step re-runs the (idempotent)
+        # rebuild at most once — harmless.
+        SleepStep.CURIOSITY_DRAIN,
         SleepStep.RECALL_INDEX_REBUILD,
     )
 
@@ -548,7 +559,7 @@ class SleepPipeline:
 from iai_mcp.lilli.cycle.sleep_pipeline import (  # noqa: E402
     _schema_mine, _knob_tune, _dream_decay, _erasure, _optimize, _compact,
     _cluster_replay, _reconsolidation, _user_model, _dmn, _crisis,
-    _cluster_summary, _recall_index, _essential_variable,
+    _cluster_summary, _recall_index, _essential_variable, _curiosity_drain,
 )
 
 SleepPipeline._step_schema_mine = _schema_mine.step_schema_mine
@@ -566,6 +577,7 @@ SleepPipeline._step_dmn_reflection = _dmn.step_dmn_reflection
 SleepPipeline._step_crisis_recluster = _crisis.step_crisis_recluster
 SleepPipeline._step_cluster_summary = _cluster_summary.step_cluster_summary
 SleepPipeline._step_recall_index_rebuild = _recall_index.step_recall_index_rebuild
+SleepPipeline._step_curiosity_drain = _curiosity_drain.step_curiosity_drain
 SleepPipeline._run_essential_variable_tracker_hook = _essential_variable.run_essential_variable_tracker_hook
 SleepPipeline._clear_crisis_mode_via_s2_or_fallback = _essential_variable.clear_crisis_mode_via_s2_or_fallback
 SleepPipeline._set_crisis_mode_via_s2_or_fallback = _essential_variable.set_crisis_mode_via_s2_or_fallback

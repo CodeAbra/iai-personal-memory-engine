@@ -113,11 +113,12 @@ def test_r1_step_phase_mapping() -> None:
         SleepStep.CRISIS_RECLUSTER,
         SleepStep.CLUSTER_SUMMARY,
         SleepStep.RECALL_INDEX_REBUILD,
+        SleepStep.CURIOSITY_DRAIN,
     }
 
 def test_r2_step_order_nrem_before_rem() -> None:
     order = SleepPipeline._STEP_ORDER
-    assert len(order) == 13
+    assert len(order) == 14
     assert order[-1] == SleepStep.RECALL_INDEX_REBUILD
 
     nrem_positions = [
@@ -141,6 +142,7 @@ def test_r2_step_order_nrem_before_rem() -> None:
             SleepStep.CRISIS_RECLUSTER,
             SleepStep.CLUSTER_SUMMARY,
             SleepStep.RECALL_INDEX_REBUILD,
+            SleepStep.CURIOSITY_DRAIN,
         )
     ]
     assert max(nrem_positions) < min(rem_positions)
@@ -159,10 +161,12 @@ def test_r2_step_order_nrem_before_rem() -> None:
     assert order.index(SleepStep.DMN_REFLECTION) == (
         order.index(SleepStep.USER_MODEL_UPDATE) + 1
     )
-    assert order.index(SleepStep.CRISIS_RECLUSTER) == len(order) - 3
+    assert order.index(SleepStep.CRISIS_RECLUSTER) == len(order) - 4
     assert SleepStep.CLUSTER_SUMMARY.value == 12
     assert SleepStep.RECALL_INDEX_REBUILD.value == 13
-    assert order[-2] == SleepStep.CLUSTER_SUMMARY
+    assert SleepStep.CURIOSITY_DRAIN.value == 14
+    assert order[-3] == SleepStep.CLUSTER_SUMMARY
+    assert order[-2] == SleepStep.CURIOSITY_DRAIN
     assert order[-1] == SleepStep.RECALL_INDEX_REBUILD
 
 def test_r3_cluster_replay_batches_intra_cluster_edges(

@@ -100,19 +100,20 @@ def test_happy_path_runs_pipeline_and_prints_progress(
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sleep cycle started." in out
-    assert "[1/13] schema_mine" in out
-    assert "[2/13] knob_tune" in out
-    assert "[3/13] optimize_hippo" in out
-    assert "[4/13] hippo_cleanup" in out
-    assert "[5/13] dream_decay" in out
-    assert "[6/13] erasure_agent" in out
-    assert "[7/13] cluster_replay" in out
-    assert "[8/13] reconsolidation" in out
-    assert "[9/13] user_model_update" in out
-    assert "[10/13] dmn_reflection" in out
-    assert "[11/13] crisis_recluster" in out
-    assert "[12/13] cluster_summary" in out
-    assert "[13/13] recall_index_rebuild" in out
+    assert "[1/14] schema_mine" in out
+    assert "[2/14] knob_tune" in out
+    assert "[3/14] optimize_hippo" in out
+    assert "[4/14] hippo_cleanup" in out
+    assert "[5/14] dream_decay" in out
+    assert "[6/14] erasure_agent" in out
+    assert "[7/14] cluster_replay" in out
+    assert "[8/14] reconsolidation" in out
+    assert "[9/14] user_model_update" in out
+    assert "[10/14] dmn_reflection" in out
+    assert "[11/14] crisis_recluster" in out
+    assert "[12/14] cluster_summary" in out
+    assert "[13/14] curiosity_drain" in out
+    assert "[14/14] recall_index_rebuild" in out
     assert "Sleep cycle complete" in out
 
 
@@ -166,7 +167,7 @@ def test_force_runs_pipeline_when_quarantined(
     rc = cmd_maintenance_sleep_cycle(_make_args(force=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[13/13] recall_index_rebuild" in out
+    assert "[14/14] recall_index_rebuild" in out
     assert "Sleep cycle complete" in out
 
     record_after = load_state(LIFECYCLE_STATE_PATH)
@@ -237,9 +238,9 @@ def test_failure_returns_nonzero_with_error_in_stderr(
     rc = cmd_maintenance_sleep_cycle(_make_args())
     assert rc == 1
     captured = capsys.readouterr()
-    assert "[1/13] schema_mine" in captured.out
-    assert "[2/13] knob_tune" in captured.out
-    assert "[3/13] optimize_hippo ... FAILED" in captured.err
+    assert "[1/14] schema_mine" in captured.out
+    assert "[2/14] knob_tune" in captured.out
+    assert "[3/14] optimize_hippo ... FAILED" in captured.err
     assert "synthetic optimize failure" in captured.err
 
 
