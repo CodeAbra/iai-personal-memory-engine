@@ -73,7 +73,16 @@ def induce_schemas_tier0(store: MemoryStore) -> list[SchemaCandidate]:
     candidates: list[SchemaCandidate] = []
     for pair, evidence in pair_counts.items():
         count = len(evidence)
-        confidence = min(1.0, count / 10.0)
+        # Linear confidence proxy anchored to the tier thresholds so both
+        # decision boundaries are mutually satisfiable:
+        #   count == USER_APPROVAL_COOCCURRENCE (3) -> USER_APPROVAL_CONFIDENCE (0.65)
+        #   count == AUTO_INDUCT_COOCCURRENCE   (5) -> AUTO_INDUCT_CONFIDENCE   (0.85)
+        # which fixes slope=0.1, intercept=0.35. The prior `count / 10.0` shared
+        # the slope but dropped the 0.35 intercept, making the
+        # `pending_user_approval` band (3 <= count < 5) unreachable (it required
+        # count/10 >= 0.65, i.e. count >= 6.5) and pushing the auto band from the
+        # documented count >= 5 out to count >= 9.
+        confidence = min(1.0, 0.35 + 0.1 * count)
         pattern = f"tags:{'+'.join(sorted(pair))}"
         if count >= AUTO_INDUCT_COOCCURRENCE and confidence >= AUTO_INDUCT_CONFIDENCE:
             status = "auto"

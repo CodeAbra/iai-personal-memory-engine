@@ -155,7 +155,9 @@ def test_induce_schemas_tier0_byte_identical_to_pre_d26_implementation(
     expected: list[dict] = []
     for pair, evidence in pair_counts.items():
         count = len(evidence)
-        confidence = min(1.0, count / 10.0)
+        # Mirror the corrected production confidence proxy (anchored so the
+        # user-approval and auto tier boundaries are mutually satisfiable).
+        confidence = min(1.0, 0.35 + 0.1 * count)
         if count >= AUTO_INDUCT_COOCCURRENCE and confidence >= AUTO_INDUCT_CONFIDENCE:
             status = "auto"
         elif (

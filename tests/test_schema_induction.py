@@ -92,6 +92,13 @@ def test_induce_schemas_tier0_threshold_lowered_requires_approval(tmp_path):
     match = [c for c in candidates if c.evidence_count == 4]
     auto_hits = [c for c in candidates if c.status == "auto"]
     assert len(auto_hits) == 0
+    # A 4-cooccurrence pair falls in the user-approval band
+    # (USER_APPROVAL_COOCCURRENCE=3 <= count < AUTO_INDUCT_COOCCURRENCE=5) and
+    # must surface as a pending_user_approval candidate, not be silently
+    # dropped. (Regression: the prior count/10.0 confidence proxy made this
+    # band unreachable.)
+    assert len(match) == 1
+    assert match[0].status == "pending_user_approval"
 
 def test_induce_schemas_tier0_discards_below_threshold(tmp_path):
     from iai_mcp.schema import induce_schemas_tier0
