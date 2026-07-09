@@ -201,10 +201,23 @@ def test_sigkill_mid_write_leaves_store_lossless():
 
             _run_consolidation_clean(reopened, tmp_root)
 
+            # Consolidation legitimately mutates the corpus: schema induction
+            # persists a new semantic record whenever a tag co-occurrence clears
+            # the auto-induct threshold, and the K_SEEDS pinned seeds all share
+            # the {seed, lossless-gate} tag pair (count == K_SEEDS == 5 ==
+            # AUTO_INDUCT_COOCCURRENCE). Reconciliation is therefore a property
+            # of the post-consolidation corpus, not the pre-consolidation
+            # snapshot: flush buffered writes and re-read the active count before
+            # comparing it against the index.
+            from iai_mcp.store import flush_record_buffer
+
+            flush_record_buffer(reopened)
+            active_after = _active_count(reopened)
             raw_after = int(reopened.db._hnsw.get_current_count())
-            assert raw_after == active, (
+            assert raw_after == active_after, (
                 f"index not reconciled by consolidation: raw={raw_after} != "
-                f"active={active} (raw at boot was {raw_at_boot})"
+                f"active={active_after} (active at boot was {active}, "
+                f"raw at boot was {raw_at_boot})"
             )
             assert raw_after >= raw_at_boot, "consolidation shrank the index"
             churn_hits = reopened.query_similar(churn_vec, n=5)
