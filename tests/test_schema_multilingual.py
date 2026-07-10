@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import pytest
 
 from iai_mcp.schema import SchemaCandidate, persist_schema
 from iai_mcp.store import MemoryStore

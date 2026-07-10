@@ -115,20 +115,20 @@ def build_markdown(
     summary: dict, csv_name: str, bench_duration_s: float | None = None,
 ) -> str:
     lines = [
-        "# Parity Summary: custom_leiden vs leidenalg",
+        "# Parity Summary: current custom_leiden vs baseline leidenalg",
         "",
-        "**Implementation:** Custom MIT-Licensed Leiden",
+        "**Phase:** 21 — Custom MIT-Licensed Leiden Implementation (M8)",
         "**Bench:** Contradiction-longitudinal Regime 2 "
-        "(`bench/contradiction_longitudinal.py`)",
+        "(`bench/contradiction_longitudinal_claude.py`)",
         f"**CSV:** `{csv_name}`",
-        "**Gate:** Rescue@10 within ±0.02 of baseline (1.000)",
+        "**Gate:** Rescue@10 within ±0.02 of baseline baseline (1.000)",
         f"**Backend measured:** `{summary['backend']}`",
         f"**Attributable recalls (n_recalls):** {summary['n_recalls']}",
         f"**Seeds:** {summary['seeds']}",
         "",
         "## Per-Seed Rescue@10",
         "",
-        "| Seed | leidenalg | custom_leiden | Δ | Within ±0.02? |",
+        "| Seed | baseline (leidenalg) | current (custom_leiden) | Δ | Within ±0.02? |",
         "|------|------------------|----------------------|---|---------------|",
     ]
     for seed_key in sorted(summary["per_seed"].keys()):
@@ -146,7 +146,7 @@ def build_markdown(
         "",
         "## Cross-Seed Mean",
         "",
-        "| | leidenalg | custom_leiden | Δ |",
+        "| | baseline | current | Δ |",
         "|---|------|------|---|",
     ]
     baseline_mean = (
@@ -174,25 +174,25 @@ def build_markdown(
             "",
             "| | Seconds | Δ vs baseline |",
             "|---|---------|-----------|",
-            f"| leidenalg (iteration-3) | {baseline_duration_s:.1f} | — |",
-            f"| custom_leiden (iteration-0) | {bench_duration_s:.1f} | "
+            f"| baseline (leidenalg, iteration-3) | {baseline_duration_s:.1f} | — |",
+            f"| current (custom_leiden, iteration-0) | {bench_duration_s:.1f} | "
             f"{delta_pct:+.1f}% |",
             "",
-            "Wall-time is informational only. Final perf disposition "
-            "is measured AFTER `python-igraph` + `leidenalg` extras are uninstalled. "
-            "The bench above still has those extras installed, "
-            "so C-backed betweenness is active.",
+            "Wall-time is informational only. Final perf disposition for LEIDEN-09 "
+            "is measured AFTER `python-igraph` + `leidenalg` extras are uninstalled "
+            "(GPL removal step). The bench above still has those extras installed, "
+            "so `graph.py:117-126` C-backed betweenness is active.",
             "",
         ]
 
     lines += [
         "## Notes",
         "",
-        "- baseline source: `EFE-AB-SUMMARY.json`",
+        "- baseline baseline source: `bench/results/baseline/iteration-3/EFE-AB-SUMMARY.json`",
         "  (per-seed `efe_shadow_rescue`; cross-seed mean = 1.000).",
-        "- Parity tolerance per Risk row "
+        "- Parity tolerance + Risk row "
         "'Retrieval Rescue@10 regression > 0.02'.",
-        "- The Leiden-replacement is gated on `PARITY_PASS`.",
+        "- GPL removal is GATED on `PARITY_PASS`.",
         "",
     ]
     return "\n".join(lines)

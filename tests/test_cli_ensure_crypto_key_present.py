@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import os
 import stat
-import sys
 
-import pytest
 
 
 def _fresh_store_root(tmp_path, monkeypatch):
@@ -22,8 +19,7 @@ def test_ensure_crypto_key_generates_on_fresh_install(tmp_path, monkeypatch):
     assert path is not None
     assert path.exists()
     assert path.stat().st_size == 32
-    if sys.platform != "win32":
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_ensure_crypto_key_idempotent_when_file_exists(tmp_path, monkeypatch):

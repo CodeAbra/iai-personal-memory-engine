@@ -1,46 +1,49 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
-import sys
-import tempfile
-from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
-
-from iai_mcp._ipc import IS_WINDOWS
-from _socket_test_helpers import bind_fake_daemon_socket
 
 
 @pytest.fixture
 def short_socket_paths(tmp_path, monkeypatch):
     lock_path = tmp_path / ".lock"
-    state_path = tmp_path / ".daemon-state.json"
+    sock_dir = Path(f"/tmp/iai-doc-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = sock_dir / "d.sock"
     store_dir = tmp_path / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
 
     from iai_mcp import cli, daemon_state
 
-    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
-        sock_dir = Path(sock_dir_name)
-        sock_path = sock_dir / "d.sock"
-        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
-        monkeypatch.setenv("IAI_MCP_STORE", str(store_dir))
-        monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-        monkeypatch.setattr(cli, "LOCK_PATH", lock_path)
-        monkeypatch.setattr(cli, "SOCKET_PATH", sock_path)
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+    monkeypatch.setenv("IAI_MCP_STORE", str(store_dir))
+    # The daemon state file is resolved under the active store root
+    # (IAI_MCP_STORE wins over the module-level STATE_PATH). Derive the
+    # fixture's state_path from the same resolver the doctor's checks use, so
+    # a corrupt fixture write lands exactly where load_state() reads it. Keep
+    # STATE_PATH monkeypatched to the same resolved path so it never diverges
+    # if IAI_MCP_STORE is unset by a caller.
+    state_path = daemon_state.daemon_state_path()
+    monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
+    monkeypatch.setattr(cli, "LOCK_PATH", lock_path)
+    monkeypatch.setattr(cli, "SOCKET_PATH", sock_path)
 
+    try:
+        yield lock_path, sock_path, state_path
+    finally:
         try:
-            yield lock_path, sock_path, state_path
-        finally:
-            try:
-                if sock_path.exists():
-                    sock_path.unlink()
-            except OSError:
-                pass
+            if sock_path.exists():
+                sock_path.unlink()
+        except OSError:
+            pass
+        try:
+            sock_dir.rmdir()
+        except OSError:
+            pass
 
 
 def test_clean_environment_yields_check_a_fail_exit_1(short_socket_paths, capsys):
@@ -222,7 +225,9 @@ def test_check_b_passes_against_silent_listening_socket(short_socket_paths):
     if sock_path.exists():
         sock_path.unlink()
 
-    server = bind_fake_daemon_socket(sock_path)
+    server = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(8)
     stop = threading.Event()
     accepted: list = []
 
@@ -267,10 +272,6 @@ def test_check_b_passes_against_silent_listening_socket(short_socket_paths):
         th.join(timeout=1.0)
 
 
-@pytest.mark.skipif(
-    IS_WINDOWS,
-    reason="regular-file-where-a-socket-should-be is an AF_UNIX concept; Windows uses a TCP port file",
-)
 def test_check_b_fails_when_socket_is_regular_file(short_socket_paths):
     _, sock_path, _ = short_socket_paths
     if sock_path.exists():

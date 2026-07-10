@@ -16,13 +16,13 @@ def test_tem_import_guard(tmp_path, monkeypatch):
         result = capture_turn(
             store,
             cue="tem guard test cue",
-            text="tem import guard regression test text phase59 unique content",
+            text="tem import guard regression test text mk59 unique content",
             tier="episodic",
             session_id="sess-tem-guard",
             role="user",
         )
         assert result["status"] == "inserted", (
-            f"REQ-3: store.insert must survive ImportError from iai_mcp.tem "
+            f"store.insert must survive ImportError from iai_mcp.tem "
             f"when the guard is present; got status={result['status']!r} "
             f"reason={result.get('reason')!r}. "
             "The tem import must be wrapped in try/except ImportError: pass."
@@ -39,7 +39,7 @@ def test_capture_turn_inserts_in_clean_env(tmp_path):
     result = capture_turn(
         store,
         cue="clean env smoke test",
-        text="clean env smoke test phrase phase59 unique content abc123",
+        text="clean env smoke test phrase mk59 unique content abc123",
         tier="episodic",
         session_id="sess-clean-env",
         role="user",
@@ -73,6 +73,6 @@ def test_drain_permanent_failed_reingests(tmp_path, monkeypatch):
     records = store.all_records()
     matching = [r for r in records if genuine_text in r.literal_surface]
     assert matching, (
-        f"REQ-3: permanent-failed re-drain must ingest genuine turn into store; "
+        f"permanent-failed re-drain must ingest genuine turn into store; "
         f"'{genuine_text}' not found. drain result: {drained!r}"
     )

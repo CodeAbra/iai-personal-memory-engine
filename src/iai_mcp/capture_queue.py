@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import secrets
 import threading
-
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_UN, flock
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -185,7 +184,7 @@ class CaptureQueue:
 
             try:
                 try:
-                    flock(lock_fd, LOCK_EX | LOCK_NB)
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError as exc:
                     if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                         continue
@@ -212,7 +211,7 @@ class CaptureQueue:
                 ingested += 1
             finally:
                 try:
-                    flock(lock_fd, LOCK_UN)
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
                 os.close(lock_fd)
@@ -301,12 +300,12 @@ class CaptureQueue:
             return
         try:
             try:
-                flock(fd, LOCK_EX)
+                fcntl.flock(fd, fcntl.LOCK_EX)
                 os.write(fd, line.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 try:
-                    flock(fd, LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
         finally:

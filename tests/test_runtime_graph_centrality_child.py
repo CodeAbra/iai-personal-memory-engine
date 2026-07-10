@@ -20,8 +20,12 @@ Three guarantees are pinned here:
 """
 from __future__ import annotations
 
-import gc
+import json
+import os
 import platform
+import subprocess
+import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -380,8 +384,8 @@ def test_centrality_child_failure_serves_last_good_cache(
         loaded = real_try_load(store)
         if loaded is None:
             return None
-        assignment, rich_club, _node_payload, max_degree = loaded
-        return assignment, rich_club, None, max_degree
+        assignment, rich_club, _node_payload, max_degree, node_degrees = loaded
+        return assignment, rich_club, None, max_degree, node_degrees
 
     monkeypatch.setattr(
         runtime_graph_cache, "try_load_cache_results", lambda store: None
@@ -492,15 +496,96 @@ def test_centrality_only_worker_skips_community_detection():
         assert abs(child_map[node_uuid] - ref_val) <= 1e-6
 
 
-def _settled_rss_bytes() -> int:
-    from iai_mcp.lilli.cycle.sleep_pipeline._memory_relief import (
-        _current_rss_bytes,
-        _step_memory_relief,
-    )
+# Worker run by each arm of the parent-RSS isolation proof in its OWN fresh
+# process.  Seeds a store, builds the runtime graph either with the centrality
+# child isolated (the real path) or forced in-parent (detection + exact
+# betweenness resident), then prints the child's own peak RSS taken from
+# getrusage(RUSAGE_SELF).  Each arm in a clean process means the measurement is
+# the resident high-water of that build alone, free of the in-process
+# accumulation and arm-ordering that made an in-parent before/after delta flake.
+_RSS_ARM_WORKER = textwrap.dedent(
+    """
+    import json, resource, sys
+    from datetime import datetime, timezone
+    from uuid import uuid4
 
-    _step_memory_relief("rss-proof")
-    gc.collect()
-    return _current_rss_bytes()
+    import numpy as np
+
+    from iai_mcp import retrieve, runtime_graph_cache
+    import iai_mcp.community as _cm
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.store._buffers import flush_edge_buffer, flush_record_buffer
+    from iai_mcp.types import MemoryRecord
+
+    seed_base = int(sys.argv[1])
+    in_parent = sys.argv[2] == "in_parent"
+    root = sys.argv[3]
+    n_records = int(sys.argv[4])
+
+    s = MemoryStore(path=root + "/store")
+    import pathlib
+    s.root = pathlib.Path(root) / "root"
+    s.root.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    for i in range(n_records):
+        rng = np.random.default_rng(seed_base + i)
+        vec = rng.random(s.embed_dim).astype(np.float32)
+        vec = (vec / np.linalg.norm(vec)).tolist()
+        s.insert(MemoryRecord(
+            id=uuid4(), tier="episodic",
+            literal_surface=f"surface number {seed_base + i} carrying real text",
+            aaak_index="", embedding=vec, community_id=None, centrality=0.0,
+            detail_level=2, pinned=False, stability=0.0, difficulty=0.0,
+            last_reviewed=None, never_decay=False, never_merge=False,
+            provenance=[], created_at=now, updated_at=now,
+            tags=[f"tag{(seed_base + i) % 3}"], language="en",
+        ))
+    flush_record_buffer(s)
+    flush_edge_buffer(s)
+
+    if in_parent:
+        def _local_detect(store, graph, *, with_centrality=False):
+            assignment = _cm.detect_communities(graph, prior=None, prior_mode="seeded")
+            if with_centrality:
+                return assignment, None
+            return assignment
+        retrieve._detect_communities_isolated = _local_detect
+        runtime_graph_cache.compute_centrality_in_child = (
+            lambda graph, **kw: graph.centrality()
+        )
+
+    retrieve.build_runtime_graph(s)
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(json.dumps({"peak_rss_raw": peak}))
+    """
+)
+
+
+def _ru_maxrss_mb(raw: int) -> float:
+    if platform.system() == "Darwin":
+        return raw / (1024 * 1024)
+    return raw / 1024
+
+
+def _run_rss_arm(seed_base: int, in_parent: bool, root: Path, n_records: int) -> float:
+    env = os.environ.copy()
+    env["LILLI_STORAGE_DRIVER"] = "lilli"
+    env["IAI_MCP_CRYPTO_PASSPHRASE"] = "test-passphrase-not-secret"
+    proc = subprocess.run(
+        [
+            sys.executable, "-c", _RSS_ARM_WORKER,
+            str(seed_base),
+            "in_parent" if in_parent else "isolated",
+            str(root),
+            str(n_records),
+        ],
+        capture_output=True, text=True, env=env, timeout=600,
+    )
+    assert proc.returncode == 0, (
+        f"RSS arm subprocess failed (rc={proc.returncode}):\n{proc.stderr}"
+    )
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    return _ru_maxrss_mb(int(payload["peak_rss_raw"]))
 
 
 @pytest.mark.skipif(
@@ -512,58 +597,262 @@ def test_parent_rss_lower_with_centrality_child(store: MemoryStore):
     materially below the in-parent-centrality baseline, proving the betweenness
     intermediate no longer resides in the parent.
 
-    Both arms run on fresh stores seeded identically. The in-parent arm forces
-    the detection child to also run in-process (so detection arenas AND the
-    betweenness intermediate are reserved in the parent); the isolated arm uses
-    the real spawn-context children for both. Each arm subtracts a fresh settled
-    baseline so it only measures the resident growth it itself retains.
+    Each arm runs in its OWN fresh process and reports its own peak RSS
+    (getrusage RUSAGE_SELF). The in-parent arm forces detection AND exact
+    betweenness to run in-process (both resident); the isolated arm uses the
+    real spawn-context children. Comparing two independent clean processes is
+    robust to ambient load and to arm ordering — an in-process before/after
+    delta on a shared runner flaked because the allocator never returned the
+    first arm's pages, inflating the second arm's baseline.
     """
-    import iai_mcp.community as _cm
-
     n_records = 3000
 
-    def _build_arm(seed_base: int, in_parent: bool) -> int:
-        s = MemoryStore(path=store.root / f"arm-{seed_base}-{in_parent}")
-        s.root = store.root / f"arm-root-{seed_base}-{in_parent}"
-        s.root.mkdir(parents=True, exist_ok=True)
-        _seed_store(s, n=n_records, seed_base=seed_base)
-
-        with pytest.MonkeyPatch.context() as mp:
-            if in_parent:
-                # Detection + centrality both run locally, leaving both the
-                # detection arenas and the betweenness intermediate resident.
-                def _local_detect(store, graph, *, with_centrality=False):
-                    assignment = _cm.detect_communities(
-                        graph, prior=None, prior_mode="seeded"
-                    )
-                    if with_centrality:
-                        # Force the in-parent centrality path downstream.
-                        return assignment, None
-                    return assignment
-
-                mp.setattr(retrieve, "_detect_communities_isolated", _local_detect)
-                mp.setattr(
-                    runtime_graph_cache,
-                    "compute_centrality_in_child",
-                    lambda graph, **kw: graph.centrality(),
-                )
-            baseline = _settled_rss_bytes()
-            retrieve.build_runtime_graph(s)
-            settled = _settled_rss_bytes()
-        return settled - baseline
-
-    in_parent_delta = _build_arm(seed_base=20_000, in_parent=True)
-    gc.collect()
-    _settled_rss_bytes()
-
-    isolated_delta = _build_arm(seed_base=60_000, in_parent=False)
+    in_parent_peak = _run_rss_arm(
+        seed_base=20_000, in_parent=True, root=store.root / "in_parent", n_records=n_records
+    )
+    isolated_peak = _run_rss_arm(
+        seed_base=60_000, in_parent=False, root=store.root / "isolated", n_records=n_records
+    )
 
     print(
-        f"\n[centrality-rss] in_parent_delta={in_parent_delta / 1e6:.1f}MB "
-        f"isolated_delta={isolated_delta / 1e6:.1f}MB"
+        f"\n[centrality-rss] in_parent_peak={in_parent_peak:.1f}MB "
+        f"isolated_peak={isolated_peak:.1f}MB"
     )
-    assert isolated_delta < in_parent_delta, (
+    assert isolated_peak < in_parent_peak, (
         f"centrality child isolation did not lower the parent footprint: "
-        f"in_parent_delta={in_parent_delta / 1e6:.1f}MB "
-        f"isolated_delta={isolated_delta / 1e6:.1f}MB"
+        f"in_parent_peak={in_parent_peak:.1f}MB "
+        f"isolated_peak={isolated_peak:.1f}MB"
     )
+
+
+def test_centrality_child_never_opens_store_or_holds_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The build-time centrality child path must never construct a MemoryStore or
+    acquire the store exclusive lock in-parent. Only (uuid, embedding) nodes and
+    (src, dst, weight) edges cross the Pipe; the encryption key never does. This
+    pins the AES fence so a future refactor cannot reintroduce a second store open
+    that trips the exclusive lock and silently zeros centrality on a real corpus.
+
+    The parity check re-affirms the child centrality matches the in-parent map, so
+    the no-open hardening cannot regress correctness.
+    """
+    from iai_mcp.hippo._db import HippoDB
+    from iai_mcp.store import MemoryStore as _MemoryStore
+
+    g = _connected_graph(n=400, seed=31337)
+    in_parent = g.centrality()
+    assert any(v > 0.0 for v in in_parent.values()), (
+        "test topology produced all-zero betweenness — parity check is vacuous"
+    )
+
+    fired = {"store_init": False, "exclusive_lock": False}
+
+    real_store_init = _MemoryStore.__init__
+    real_lock = HippoDB._acquire_exclusive_lock
+
+    def _spy_store_init(self, *args, **kwargs):
+        fired["store_init"] = True
+        return real_store_init(self, *args, **kwargs)
+
+    def _spy_exclusive_lock(self, *args, **kwargs):
+        fired["exclusive_lock"] = True
+        return real_lock(self, *args, **kwargs)
+
+    monkeypatch.setattr(_MemoryStore, "__init__", _spy_store_init)
+    monkeypatch.setattr(HippoDB, "_acquire_exclusive_lock", _spy_exclusive_lock)
+
+    centrality_map = runtime_graph_cache.compute_centrality_in_child(g)
+    assignment, det_centrality = runtime_graph_cache.compute_assignment_in_child(
+        g, prior_mode="seeded", with_centrality=True
+    )
+
+    assert not fired["store_init"], (
+        "the centrality child path constructed a MemoryStore in-parent — the AES "
+        "fence is breached; only Pipe-streamed graph data may drive the child."
+    )
+    assert not fired["exclusive_lock"], (
+        "the centrality child path acquired the store exclusive lock in-parent — a "
+        "second store open on the same dir would trip HippoLockHeldError and zero "
+        "centrality on a real corpus."
+    )
+
+    assert set(centrality_map) == set(in_parent)
+    for node_uuid, ref_val in in_parent.items():
+        assert abs(centrality_map[node_uuid] - ref_val) <= 1e-6
+        assert abs(det_centrality[node_uuid] - ref_val) <= 1e-6
+
+
+def test_centrality_only_worker_accepts_topology_only_nodes_stream():
+    """Centrality computed from a topology-only node stream equals the
+    embedding-carrying result for the same graph.
+
+    The centrality worker receives node ids WITHOUT embedding blobs when the
+    sender emits a topology-only stream; betweenness depends only on graph
+    structure (node ids + edges), so the result must be numerically identical to
+    the embedding-carrying path.
+    """
+    import multiprocessing as mp
+    import threading
+
+    from iai_mcp import runtime_graph_cache_worker
+
+    # Reference: build graph WITH embeddings, compute centrality in-parent.
+    g = _connected_graph(n=150, seed=7171)
+    in_parent = g.centrality()
+    assert any(v > 0.0 for v in in_parent.values()), (
+        "test topology produced all-zero betweenness — parity check is vacuous"
+    )
+
+    parent_conn, child_conn = mp.Pipe(duplex=True)
+    messages: list = []
+
+    def _run():
+        runtime_graph_cache_worker._community_only_worker_entry(child_conn)
+
+    def _drain():
+        while True:
+            try:
+                if not parent_conn.poll(1.0):
+                    if not th.is_alive():
+                        while parent_conn.poll(0.1):
+                            messages.append(parent_conn.recv())
+                        return
+                    continue
+                msg = parent_conn.recv()
+                messages.append(msg)
+                if msg[0] in ("done", "error"):
+                    return
+            except (EOFError, OSError):
+                return
+
+    th = threading.Thread(target=_run, daemon=True)
+    drain_th = threading.Thread(target=_drain, daemon=True)
+    th.start()
+    drain_th.start()
+
+    parent_conn.send(("config", {"centrality_only": True}))
+
+    # Send a TOPOLOGY-ONLY node stream (ids only, no embedding blobs).
+    node_ids = [str(uid) for uid in sorted(g.iter_nodes(), key=lambda u: u.bytes)]
+    parent_conn.send(("nodes_topology", node_ids))
+    parent_conn.send(("nodes_end", None))
+
+    edge_chunk = [
+        (str(s), str(d), float(w)) for s, d, w in g.iter_edges_with_weight()
+    ]
+    parent_conn.send(("edges", edge_chunk))
+    parent_conn.send(("edges_end", None))
+
+    th.join(timeout=60.0)
+    drain_th.join(timeout=10.0)
+    parent_conn.close()
+
+    kinds = {m[0] for m in messages}
+    assert "centrality" in kinds, (
+        f"topology-only stream did not produce centrality; got kinds={kinds!r}"
+    )
+    assert "community_table" not in kinds, (
+        "centrality_only must skip community detection"
+    )
+
+    child_map: dict[UUID, float] = {}
+    for kind, payload in messages:
+        if kind == "centrality":
+            for node_bytes, value in payload:
+                child_map[UUID(bytes=node_bytes)] = float(value)
+
+    assert set(child_map) == set(in_parent), (
+        "topology-only centrality covers a different node set than the in-parent map"
+    )
+    for node_uuid, ref_val in in_parent.items():
+        got = child_map[node_uuid]
+        assert abs(got - ref_val) <= 1e-6, (
+            f"centrality mismatch for {node_uuid}: "
+            f"topology-only child={got} in_parent={ref_val}"
+        )
+
+
+def test_compute_centrality_in_child_propagates_child_error_reason():
+    """A child crash propagates an explicit reason into WorkerCrashedError.
+
+    When the child worker sends an ("error", {...}) envelope before exiting,
+    the parent must raise WorkerCrashedError carrying the child-reported reason
+    or detail, not an opaque BrokenPipeError / generic pipe message.
+    """
+    import multiprocessing as mp
+    import threading
+
+    from iai_mcp import runtime_graph_cache, runtime_graph_cache_worker
+
+    # A graph large enough that the child starts recv-looping before crashing.
+    g = _connected_graph(n=50, seed=8888)
+
+    parent_conn, child_conn = mp.Pipe(duplex=True)
+
+    # Intercept: after the child receives the config + some nodes, inject a known
+    # error envelope and then close. We do this by writing a custom "crasher" that
+    # sends a structured error before dying.
+    def _crasher(conn):
+        """Worker that reads the config, then immediately reports a known error."""
+        try:
+            import sys
+            from iai_mcp import runtime_graph_cache_worker as _w
+
+            # Drain the config envelope.
+            _ = conn.recv()  # ("config", ...)
+            # Send back a structured error before exiting.
+            conn.send(("error", {
+                "reason": "deliberate-test-crash",
+                "detail": "the worker was instructed to fail for this test",
+                "traceback": "no traceback — synthetic crash",
+            }))
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    ctx = mp.get_context("spawn")
+    parent_conn2, child_conn2 = ctx.Pipe(duplex=True)
+
+    # We cannot directly pass a closure to spawn, so we use the real
+    # compute_centrality_in_child but patch the worker module to send the error.
+    # Instead, drive the protocol directly via the community-only drain path.
+    from iai_mcp.runtime_graph_cache import WorkerCrashedError, _drain_community_only_result
+    import time
+
+    # Build a minimal pipe exchange that mimics what the parent drain sees
+    # when the child crashes with a structured error.
+    # duplex=False: Pipe() returns (reader, writer).
+    receiver, sender = mp.Pipe(duplex=False)
+
+    def _send_error():
+        sender.send(("error", {
+            "reason": "deliberate-test-crash",
+            "detail": "synthetic crash for WorkerCrashedError propagation test",
+            "traceback": "no real traceback",
+        }))
+        sender.close()
+
+    t = threading.Thread(target=_send_error, daemon=True)
+    t.start()
+    t.join(timeout=5.0)
+
+    # _drain_community_only_result raises RuntimeError on an ("error", ...) envelope.
+    # The parent must surface the child-reported reason — whether via RuntimeError
+    # or WorkerCrashedError — not just an opaque "BrokenPipe".
+    try:
+        _drain_community_only_result(receiver, timeout=5.0)
+        raise AssertionError(
+            "expected an exception when the child reported an error, but got none"
+        )
+    except (RuntimeError, WorkerCrashedError) as exc:
+        msg = str(exc)
+        assert "deliberate-test-crash" in msg, (
+            f"child-reported reason not surfaced in exception; got: {msg!r}"
+        )
+    finally:
+        receiver.close()

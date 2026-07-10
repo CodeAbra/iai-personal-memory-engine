@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from iai_mcp import concurrency, daemon_state
+from iai_mcp import daemon_state
 from iai_mcp.concurrency import (
     _dispatch_socket_request,
     _validate_socket_message,
@@ -19,13 +19,10 @@ from iai_mcp.concurrency import (
 
 
 @pytest.fixture
-def tmp_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def tmp_socket(tmp_path: Path) -> Path:
     candidate = tmp_path / "d.sock"
     if len(str(candidate)) > 100:
         candidate = Path(tempfile.mkdtemp(prefix="iai-sock-")) / "d.sock"
-    # Per-test endpoint isolation: serve_control_socket + open_ipc_connection
-    # resolve through this (unix socket on POSIX, TCP "<path>.port" on Windows).
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(candidate))
     return candidate
 
 
@@ -259,9 +256,7 @@ class _ThreadedDaemon:
 
 
 async def _send(path: Path, msg: dict, *, timeout: float = 5.0) -> dict:
-    from iai_mcp._ipc import open_ipc_connection
-
-    reader, writer = await open_ipc_connection(timeout=timeout)
+    reader, writer = await asyncio.open_unix_connection(str(path))
     try:
         writer.write((json.dumps(msg) + "\n").encode("utf-8"))
         await writer.drain()

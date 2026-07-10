@@ -126,6 +126,7 @@ def test_tools_list_returns_without_daemon(
         names = {t["name"] for t in tools}
         expected = {
             "memory_recall",
+        "memory_search",
             "memory_recall_structural",
             "memory_reinforce",
             "memory_contradict",
@@ -138,9 +139,10 @@ def test_tools_list_returns_without_daemon(
             "topology",
             "camouflaging_status",
             "episodes_recent",
+            "memory_temporal_recall",
         }
         assert names == expected, (
-            f"tools/list returned {len(names)} tools, expected 13: "
+            f"tools/list returned {len(names)} tools, expected 14: "
             f"missing={expected - names}, extra={names - expected}"
         )
         assert elapsed < 4.0, (

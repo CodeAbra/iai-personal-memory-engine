@@ -5,10 +5,8 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 from uuid import UUID
 
-import psutil
 import pytest
 
 
@@ -79,7 +77,7 @@ def rss_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-rss-passphrase")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "store"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
 
     import keyring.core
@@ -117,41 +115,45 @@ def _seed_store(store, n: int) -> None:
         store.insert(r)
 
 
-def test_old_full_scan_calls_to_batches_each_probe(
+def test_old_full_scan_streams_corpus_each_probe(
     rss_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Baseline contrast: the retired implementation pays one whole-corpus
+    stream on EVERY probe. The streaming substrate has changed transports over
+    time (DataFrame -> to_batches -> keyset pages), so the count instruments
+    the stable seam — the per-probe corpus stream — not any one transport
+    beneath it."""
     from iai_mcp.store import MemoryStore
-    from iai_mcp import hippo as hippo_mod
 
     monkeypatch.setattr(MemoryStore, "find_record_by_tag", _old_find_record_by_tag)
 
-    to_batches_call_count: list[int] = [0]
-    original_to_batches = hippo_mod.HippoQuery.to_batches
+    stream_call_count: list[int] = [0]
+    original_iter = MemoryStore.iter_record_columns
 
-    def counting_to_batches(self, batch_size=1024):
-        to_batches_call_count[0] += 1
-        return original_to_batches(self, batch_size)
+    def counting_iter(self, *args, **kwargs):
+        stream_call_count[0] += 1
+        return original_iter(self, *args, **kwargs)
 
-    monkeypatch.setattr(hippo_mod.HippoQuery, "to_batches", counting_to_batches)
+    monkeypatch.setattr(MemoryStore, "iter_record_columns", counting_iter)
 
     store = _open_store(rss_env)
     try:
         _seed_store(store, _SEED_RECORDS)
 
-        to_batches_call_count[0] = 0
+        stream_call_count[0] = 0
 
         for i in range(_PROBE_TURNS):
             store.find_record_by_tag(f"nonexistent-idem-tag-{i}")
     finally:
         store.close()
 
-    call_count = to_batches_call_count[0]
-    print(f"\n[RED] Old full-scan: to_batches called {call_count} times for {_PROBE_TURNS} probes")
+    call_count = stream_call_count[0]
+    print(f"\n[RED] Old full-scan: corpus streamed {call_count} times for {_PROBE_TURNS} probes")
 
     assert call_count >= _PROBE_TURNS, (
-        f"Expected old full-scan to call to_batches at least {_PROBE_TURNS} times"
-        f" ({_PROBE_TURNS} probes); got {call_count}."
-        " The old implementation must trigger a full materialization per call."
+        f"Expected old full-scan to stream the corpus at least {_PROBE_TURNS}"
+        f" times ({_PROBE_TURNS} probes); got {call_count}."
+        " The old implementation must pay a full corpus stream per call."
     )
 
 

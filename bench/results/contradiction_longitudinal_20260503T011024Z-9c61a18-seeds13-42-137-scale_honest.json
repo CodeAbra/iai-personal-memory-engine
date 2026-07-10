@@ -1,0 +1,250 @@
+{
+  "env": {
+    "cpu_brand": "Apple M2 Max",
+    "cpu_cores_physical": 12,
+    "ram_gb": "64.0",
+    "os": "Darwin",
+    "os_version": "25.3.0",
+    "python_version": "3.12.13",
+    "iai_mcp_git_sha": "9c61a18",
+    "iai_mcp_git_dirty": true,
+    "lance_version": "unknown",
+    "lancedb_version": "0.30.2",
+    "pyarrow_version": "23.0.1",
+    "sentence_transformers_version": "5.4.1",
+    "embedder_model": "bge-small-en-v1.5",
+    "seed_list": [
+      13,
+      42,
+      137
+    ],
+    "iai_mcp_store": "/private/tmp/iai-mcp-bench-claude/store",
+    "wall_clock_start_utc": "2026-05-03T01:10:24.783110+00:00",
+    "scale": "honest",
+    "n_sessions": 1000,
+    "n_probes_pre": 250,
+    "n_probes_post": 250,
+    "n_slices": [
+      0,
+      1
+    ],
+    "k_hits": 10,
+    "a_threshold": 0.98,
+    "candidate_pool_size": 200,
+    "bootstrap_resamples": 10000,
+    "floor_mode": "relaxed",
+    "wall_clock_duration_seconds": 5328.49
+  },
+  "summary": {
+    "per_cell": [
+      {
+        "seed": 13,
+        "n_slice": 0,
+        "n_b_probes": 250,
+        "n_a_probes": 250,
+        "metric_b": {
+          "delta_mrr_point": 0.0,
+          "delta_mrr_ci_lo": 0.0,
+          "delta_mrr_ci_hi": 0.0,
+          "wilcoxon_p": null,
+          "max_rank_regression": 0,
+          "rr_at_1_pipeline": 0.272,
+          "rr_at_1_cosine": 0.272
+        },
+        "metric_b_revised": {
+          "hint_emission_rate": 1.0,
+          "anti_hits_coverage": 0.912,
+          "mean_anti_hits_count": 1.904
+        },
+        "metric_a": {
+          "hit_at_k_pipeline": 1.0,
+          "hit_at_k_cosine": 0.692,
+          "k": 10,
+          "catastrophic_floor_violations": 0
+        }
+      },
+      {
+        "seed": 13,
+        "n_slice": 1,
+        "n_b_probes": 250,
+        "n_a_probes": 250,
+        "metric_b": {
+          "delta_mrr_point": 0.0,
+          "delta_mrr_ci_lo": 0.0,
+          "delta_mrr_ci_hi": 0.0,
+          "wilcoxon_p": null,
+          "max_rank_regression": 0,
+          "rr_at_1_pipeline": 0.272,
+          "rr_at_1_cosine": 0.272
+        },
+        "metric_b_revised": {
+          "hint_emission_rate": 1.0,
+          "anti_hits_coverage": 0.912,
+          "mean_anti_hits_count": 1.904
+        },
+        "metric_a": {
+          "hit_at_k_pipeline": 1.0,
+          "hit_at_k_cosine": 0.692,
+          "k": 10,
+          "catastrophic_floor_violations": 0
+        }
+      },
+      {
+        "seed": 42,
+        "n_slice": 0,
+        "n_b_probes": 250,
+        "n_a_probes": 250,
+        "metric_b": {
+          "delta_mrr_point": 0.0,
+          "delta_mrr_ci_lo": 0.0,
+          "delta_mrr_ci_hi": 0.0,
+          "wilcoxon_p": null,
+          "max_rank_regression": 0,
+          "rr_at_1_pipeline": 0.264,
+          "rr_at_1_cosine": 0.264
+        },
+        "metric_b_revised": {
+          "hint_emission_rate": 1.0,
+          "anti_hits_coverage": 0.892,
+          "mean_anti_hits_count": 2.16
+        },
+        "metric_a": {
+          "hit_at_k_pipeline": 1.0,
+          "hit_at_k_cosine": 0.708,
+          "k": 10,
+          "catastrophic_floor_violations": 0
+        }
+      },
+      {
+        "seed": 42,
+        "n_slice": 1,
+        "n_b_probes": 250,
+        "n_a_probes": 250,
+        "metric_b": {
+          "delta_mrr_point": 0.0,
+          "delta_mrr_ci_lo": 0.0,
+          "delta_mrr_ci_hi": 0.0,
+          "wilcoxon_p": null,
+          "max_rank_regression": 0,
+          "rr_at_1_pipeline": 0.264,
+          "rr_at_1_cosine": 0.264
+        },
+        "metric_b_revised": {
+          "hint_emission_rate": 1.0,
+          "anti_hits_coverage": 0.892,
+          "mean_anti_hits_count": 2.16
+        },
+        "metric_a": {
+          "hit_at_k_pipeline": 1.0,
+          "hit_at_k_cosine": 0.708,
+          "k": 10,
+          "catastrophic_floor_violations": 0
+        }
+      },
+      {
+        "seed": 137,
+        "n_slice": 0,
+        "n_b_probes": 250,
+        "n_a_probes": 250,
+        "metric_b": {
+          "delta_mrr_point": 0.0,
+          "delta_mrr_ci_lo": 0.0,
+          "delta_mrr_ci_hi": 0.0,
+          "wilcoxon_p": null,
+          "max_rank_regression": 0,
+          "rr_at_1_pipeline": 0.292,
+          "rr_at_1_cosine": 0.292
+        },
+        "metric_b_revised": {
+          "hint_emission_rate": 1.0,
+          "anti_hits_coverage": 0.868,
+          "mean_anti_hits_count": 2.2
+        },
+        "metric_a": {
+          "hit_at_k_pipeline": 1.0,
+          "hit_at_k_cosine": 0.74,
+          "k": 10,
+          "catastrophic_floor_violations": 0
+        }
+      },
+      {
+        "seed": 137,
+        "n_slice": 1,
+        "n_b_probes": 250,
+        "n_a_probes": 250,
+        "metric_b": {
+          "delta_mrr_point": 0.0,
+          "delta_mrr_ci_lo": 0.0,
+          "delta_mrr_ci_hi": 0.0,
+          "wilcoxon_p": null,
+          "max_rank_regression": 0,
+          "rr_at_1_pipeline": 0.292,
+          "rr_at_1_cosine": 0.292
+        },
+        "metric_b_revised": {
+          "hint_emission_rate": 1.0,
+          "anti_hits_coverage": 0.868,
+          "mean_anti_hits_count": 2.2
+        },
+        "metric_a": {
+          "hit_at_k_pipeline": 1.0,
+          "hit_at_k_cosine": 0.74,
+          "k": 10,
+          "catastrophic_floor_violations": 0
+        }
+      }
+    ],
+    "cross_seed": {
+      "n_0": {
+        "delta_mrr_mean": 0.0,
+        "delta_mrr_stdev": 0.0,
+        "delta_mrr_min": 0.0,
+        "delta_mrr_max": 0.0,
+        "robust": false
+      },
+      "n_1": {
+        "delta_mrr_mean": 0.0,
+        "delta_mrr_stdev": 0.0,
+        "delta_mrr_min": 0.0,
+        "delta_mrr_max": 0.0,
+        "robust": false
+      }
+    },
+    "gates": {
+      "per_cell": {
+        "seed13_n0": {
+          "gate_a": true,
+          "gate_b_classical": false,
+          "gate_b_contract": true
+        },
+        "seed13_n1": {
+          "gate_a": true,
+          "gate_b_classical": false,
+          "gate_b_contract": true
+        },
+        "seed42_n0": {
+          "gate_a": true,
+          "gate_b_classical": false,
+          "gate_b_contract": true
+        },
+        "seed42_n1": {
+          "gate_a": true,
+          "gate_b_classical": false,
+          "gate_b_contract": true
+        },
+        "seed137_n0": {
+          "gate_a": true,
+          "gate_b_classical": false,
+          "gate_b_contract": true
+        },
+        "seed137_n1": {
+          "gate_a": true,
+          "gate_b_classical": false,
+          "gate_b_contract": true
+        }
+      },
+      "cross_seed_robust": false,
+      "overall_pass": true
+    }
+  }
+}

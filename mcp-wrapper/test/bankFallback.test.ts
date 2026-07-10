@@ -177,3 +177,66 @@ describe("invokeTool memory_recall budget-vs-limit decoupling", () => {
     },
   );
 });
+
+describe("invokeTool memory_search dispatch", () => {
+  it("socket-first: a live bridge serves memory_search directly", async () => {
+    const calls: Array<{ method: string }> = [];
+    const mockBridge = {
+      call: async (method: string) => {
+        calls.push({ method });
+        return { hits: [{ surface: "x" }], frame: "hints" };
+      },
+    } as unknown as PythonCoreBridge;
+
+    const out = (await invokeTool(
+      mockBridge,
+      "memory_search",
+      { query: "HippoDB", k: 4 },
+      (() => { throw new Error("spawn must not be reached"); }) as any,
+    )) as Record<string, unknown>;
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "memory_search");
+    assert.ok(Array.isArray(out["hits"]));
+  });
+
+  it("daemon-down: memory_search falls back to the direct CLI", async () => {
+    const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
+    const mockSpawnFn = (cmd: string, args: ReadonlyArray<string>) => {
+      spawnCalls.push({ cmd, args: [...args] });
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter & { setEncoding: (enc: string) => void };
+        stderr: EventEmitter;
+        kill: () => void;
+      };
+      const stdout = new EventEmitter() as EventEmitter & {
+        setEncoding: (enc: string) => void;
+      };
+      stdout.setEncoding = () => {};
+      proc.stdout = stdout;
+      proc.stderr = new EventEmitter();
+      proc.kill = () => {};
+      setImmediate(() => {
+        stdout.emit("data", JSON.stringify({ hits: [], frame: "hints" }));
+        proc.emit("close", 0);
+      });
+      return proc as unknown as ReturnType<
+        typeof import("node:child_process").spawn
+      >;
+    };
+    const mockBridge = {
+      call: async () => {
+        throw new Error("connect ECONNREFUSED /tmp/.daemon.sock");
+      },
+    } as unknown as PythonCoreBridge;
+
+    const out = (await invokeTool(
+      mockBridge,
+      "memory_search",
+      { query: "HippoDB", k: 4 },
+      mockSpawnFn as any,
+    )) as Record<string, unknown>;
+    assert.equal(spawnCalls.length, 1);
+    assert.equal(spawnCalls[0]!.args[0], "search");
+    assert.equal(out["_source"], "direct-store");
+  });
+});

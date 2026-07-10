@@ -35,7 +35,7 @@ def parity_data() -> dict:
     if not PARITY_JSON_PATH.exists():
         pytest.skip(
             f"Parity JSON not yet produced. Run "
-            f"`PYTHONPATH=src python bench/contradiction_longitudinal.py "
+            f"`PYTHONPATH=src python bench/contradiction_longitudinal_claude.py "
             f"--scale honest --seeds 13 42 137 "
             f"--output-dir bench/results/v7.1/iteration-0/` then the post-process "
             f"pipeline (analyze_efe_ab.py + write contradiction_longitudinal_"
@@ -84,7 +84,8 @@ def test_backend_label_is_leiden_custom(parity_data: dict) -> None:
     assert backend == "leiden-custom", (
         f"Parity bench must run the custom_leiden backend, got: {backend!r}. "
         f"Either community.detect_communities was not wired correctly "
-        f"or the post-process injected the wrong label."
+        f"(parity regression) or the post-process injected the wrong "
+        f"label."
     )
 
 
@@ -98,9 +99,9 @@ def test_per_seed_rescue_within_002_of_baseline(
     delta = abs(measured - baseline)
     assert delta <= PARITY_TOLERANCE, (
         f"PARITY_GATE_FAILED seed={seed_key}: "
-        f"efe_shadow_rescue={measured:.4f} vs baseline={baseline:.4f} "
+        f"efe_shadow_rescue={measured:.4f} vs v7.0 baseline={baseline:.4f} "
         f"(|delta|={delta:.4f} > tolerance={PARITY_TOLERANCE:.4f}). "
-        f"The parity check gates the Leiden-replacement work."
+        f"GPL removal BLOCKED on parity gate green."
     )
 
 
@@ -109,10 +110,10 @@ def test_cross_seed_mean_rescue_within_002(parity_data: dict) -> None:
     delta = abs(measured - V7_0_CROSS_SEED_MEAN_BASELINE)
     assert delta <= PARITY_TOLERANCE, (
         f"PARITY_GATE_FAILED cross_seed: "
-        f"mean Rescue@10={measured:.4f} vs baseline mean="
+        f"mean Rescue@10={measured:.4f} vs v7.0 baseline mean="
         f"{V7_0_CROSS_SEED_MEAN_BASELINE:.4f} "
         f"(|delta|={delta:.4f} > tolerance={PARITY_TOLERANCE:.4f}). "
-        f"The parity check gates the Leiden-replacement work."
+        f"GPL removal BLOCKED on parity gate green."
     )
 
 
@@ -123,7 +124,7 @@ def test_seeds_match_required_three(parity_data: dict) -> None:
     assert seeds_str == expected, (
         f"Seed list mismatch: got {sorted(seeds_str)}, expected "
         f"{sorted(expected)}. Re-run bench with --seeds 13 42 137 for "
-        f"a fair comparison."
+        f"fair v7.0 vs v7.1 comparison."
     )
 
 
@@ -131,6 +132,6 @@ def test_n_recalls_at_least_3000(parity_data: dict) -> None:
     n_recalls = int(parity_data.get("n_recalls", 0))
     assert n_recalls >= 3000, (
         f"Parity bench n_recalls={n_recalls} too small for honest-scale "
-        f"comparison. Baseline was 3000 attributable recalls. "
+        f"comparison. v7.0 baseline was 3000 attributable recalls. "
         f"Re-run with --scale honest."
     )

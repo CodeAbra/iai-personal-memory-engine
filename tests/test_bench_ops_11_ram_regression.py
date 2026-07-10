@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 
 def test_memory_footprint_small_n_under_threshold(tmp_path: Path):

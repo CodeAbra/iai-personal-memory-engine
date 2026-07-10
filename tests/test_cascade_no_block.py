@@ -79,5 +79,5 @@ async def _concurrent_coroutine_completes_under_100ms_body(monkeypatch):
         f"R1 FAIL: event loop pinned for {elapsed:.3f}s while cascade body "
         f"was running. Expected <100ms. Did the "
         f"`await asyncio.to_thread(retrieve.build_runtime_graph, store)` "
-        f"wrap land in src/iai_mcp/daemon.py::_hippea_cascade_loop?"
+        f"wrap land in src/iai_mcp/daemon/_watchdog.py::_hippea_cascade_loop?"
     )

@@ -7,13 +7,11 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
+import zstandard as zstd
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-
-import platform as _platform
-import subprocess as _subprocess
 
 CIPHERTEXT_PREFIX: str = "iai:enc:v1:"
 NONCE_BYTES: int = 12
@@ -21,18 +19,25 @@ KEY_BYTES: int = 32
 PBKDF2_ITERATIONS: int = 600_000
 SERVICE_NAME_DEFAULT: str = "iai-mcp"
 
+# One-byte version tag prefixed to the AEAD plaintext, BEFORE encryption. The
+# version byte rides inside the AEAD envelope so it is authenticated for free
+# and the outer wire format (iai:enc:v1:...) is unchanged. The codec routes on
+# this byte AFTER the AEAD tag validates; legacy 0x00 rows (raw utf-8) decode
+# identically to fresh 0x01 rows (zstd-compressed utf-8) — mixed corpus is the
+# permanent steady-state.
+ENVELOPE_VERSION_UNCOMPRESSED: int = 0x00
+ENVELOPE_VERSION_ZSTD: int = 0x01
+ZSTD_LEVEL: int = 3
 
-def _secure_key_file(path: Path) -> None:
-    """Restrict file permissions to owner-only. On POSIX uses chmod; on Windows uses icacls."""
-    if _platform.system() == "Windows":
-        user = os.environ.get("USERNAME", "")
-        if user:
-            _subprocess.run(
-                ["icacls", str(path), "/inheritance:d", "/grant:r", f"{user}:F"],
-                check=False, capture_output=True,
-            )
-    else:
-        path.chmod(0o600)
+# python-zstandard 0.25 documents that ZstdCompressor / ZstdDecompressor
+# instances are NOT thread-safe (backend_cffi.py:1774, verbatim: "assume
+# instances are not thread safe"). Sharing a single instance across threads
+# corrupts the internal libzstd context state and crashes with SIGBUS under
+# concurrent .compress() callers. Construction is cheap — a single libzstd
+# ZSTD_createCCtx() call (~microseconds with no dict + no custom params) —
+# so each encrypt / decrypt call constructs a fresh instance. The hot path
+# stays lock-free + parallel-safe, and the per-call overhead is well below
+# the AES-256-GCM cost that already dominates the per-field budget.
 
 _DEFAULT_STORE_ROOT: Path = Path.home() / ".iai-mcp"
 _KEY_FILE_NAME: str = ".crypto.key"
@@ -57,9 +62,13 @@ def encrypt_field(
         raise ValueError(f"key must be {KEY_BYTES} bytes (got {len(key)})")
     aesgcm = AESGCM(key)
     nonce = secrets.token_bytes(NONCE_BYTES)
-    ct_with_tag = aesgcm.encrypt(
-        nonce, plaintext.encode("utf-8"), associated_data or None
-    )
+    # Compose envelope: version byte + zstd-compressed utf-8 plaintext. The
+    # AEAD then encrypts the full envelope, so the version byte is part of the
+    # authenticated content.
+    envelope = bytes([ENVELOPE_VERSION_ZSTD]) + zstd.ZstdCompressor(
+        level=ZSTD_LEVEL
+    ).compress(plaintext.encode("utf-8"))
+    ct_with_tag = aesgcm.encrypt(nonce, envelope, associated_data or None)
     payload = nonce + ct_with_tag
     return CIPHERTEXT_PREFIX + base64.b64encode(payload).decode("ascii")
 
@@ -80,9 +89,63 @@ def decrypt_field(
     nonce = payload[:NONCE_BYTES]
     ct_with_tag = payload[NONCE_BYTES:]
     aesgcm = AESGCM(key)
-    plaintext_bytes = aesgcm.decrypt(
-        nonce, ct_with_tag, associated_data or None
-    )
+    # AEAD authenticates the envelope FIRST. Any tamper raises InvalidTag here,
+    # before the codec sees a single byte.
+    envelope = aesgcm.decrypt(nonce, ct_with_tag, associated_data or None)
+    if not envelope:
+        raise ValueError("envelope empty after AEAD validation")
+    # Route on the version byte AFTER AEAD validates and BEFORE utf-8 decode.
+    # Decoding before the route would crash on the binary version byte (or on
+    # the binary compressed body) for fresh 0x01 envelopes.
+    #
+    # Legacy detection is content-validated, not byte-0-heuristic.  Pre-97
+    # rows have no version byte — envelope[0] is the first byte of the user's
+    # verbatim content, which may legally be 0x00 (U+0000) or 0x01 (U+0001).
+    # Trusting byte-0 alone would silently truncate a NUL-leading memory
+    # (ENVELOPE_VERSION_UNCOMPRESSED strip) or permanently corrupt a
+    # SOH-leading memory (spurious zstd.decompress on plain text).
+    #
+    # Disambiguation rules:
+    #   0x01 → genuine zstd frame ONLY when the 4-byte zstd magic
+    #           (\x28\xb5\x2f\xfd) immediately follows; otherwise treat the
+    #           whole envelope as legacy plaintext (SOH-leading user content).
+    #   0x00 → whole-envelope legacy.  The writer NEVER emits a bare 0x00
+    #           envelope (every new write is 0x01), so any on-disk leading
+    #           0x00 byte is legacy NUL-leading user content — never strip it.
+    #   anything else → pre-envelope legacy passthrough (unchanged).
+    _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+    version = envelope[0]
+    body = envelope[1:]
+    if version == ENVELOPE_VERSION_ZSTD:
+        if body[:4] == _ZSTD_MAGIC:
+            # Genuine zstd frame written by this codec.
+            try:
+                plaintext_bytes = zstd.ZstdDecompressor().decompress(body)
+            except zstd.ZstdError as exc:
+                # Surface compressed-body corruption (after AEAD has
+                # authenticated the wire) as a plain ValueError. Call sites
+                # decide policy: records re-raise as HippoIntegrityError
+                # (fail-loud); events absorb it and degrade to "{}"
+                # (fail-soft).
+                raise ValueError(
+                    f"compressed envelope corrupt after AEAD validation: {exc}"
+                ) from exc
+        else:
+            # 0x01 but no zstd magic — legacy content whose first byte
+            # happens to be SOH (U+0001).  Return the whole envelope as
+            # plaintext bytes; do not strip the version byte.
+            plaintext_bytes = envelope
+    elif version == ENVELOPE_VERSION_UNCOMPRESSED:
+        # The writer never emits a bare 0x00 envelope, so any on-disk 0x00
+        # leading byte is legacy NUL-leading user content.  Return the whole
+        # envelope unchanged (do not strip the 0x00).
+        plaintext_bytes = envelope
+    else:
+        # Pre-envelope legacy: rows written before the envelope was introduced
+        # have no version byte — the entire AEAD plaintext is the raw utf-8
+        # payload.  Any byte other than 0x00 / 0x01 is a printable or
+        # high-byte lead char (e.g. 0x7b = `{`).  Use the whole envelope.
+        plaintext_bytes = envelope
     return plaintext_bytes.decode("utf-8")
 
 
@@ -128,13 +191,13 @@ class CryptoKey:
         if not path.exists():
             return None
         st = os.stat(path)
-        if hasattr(os, "geteuid") and st.st_mode & 0o077 != 0:
+        if st.st_mode & 0o077 != 0:
             raise CryptoKeyError(
                 f"crypto key file at {path} has insecure mode "
                 f"0o{st.st_mode & 0o777:03o}; expected 0o600 "
                 f"(run: chmod 0o600 {path})"
             )
-        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+        if st.st_uid != os.geteuid():
             raise CryptoKeyError(
                 f"crypto key file at {path} is owned by uid={st.st_uid}; "
                 f"current process runs as uid={os.geteuid()} (refusing to read)"
@@ -160,18 +223,12 @@ class CryptoKey:
         tmp = final.parent / f"{final.name}.tmp.{os.getpid()}"
         fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
+            os.fchmod(fd, 0o600)
             os.write(fd, key)
             os.fsync(fd)
         finally:
             os.close(fd)
-        if not hasattr(os, "fchmod"):
-            _secure_key_file(tmp)
-        # os.replace (not os.rename): on Windows rename raises if the
-        # destination exists, which it always does during key rotation. POSIX
-        # rename already replaces, so this is behaviour-preserving there.
-        os.replace(str(tmp), str(final))
+        os.rename(str(tmp), str(final))
 
 
     def get_or_create(self) -> bytes:

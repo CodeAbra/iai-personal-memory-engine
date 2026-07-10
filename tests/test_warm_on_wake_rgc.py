@@ -49,7 +49,7 @@ def test_drowsy_rewake_cold_then_rebuild_ready(monkeypatch, tmp_path):
 
     _warm_store_via_rebuild(store)
 
-    _, _, _, src = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src, _ = runtime_graph_cache.load_recall_structural(store)
     assert src in ("overlay", "normal"), (
         f"Warm baseline must be overlay/normal before invalidation; got {src!r}. "
         "Fixture may be too thin — add more records/edges."
@@ -57,7 +57,7 @@ def test_drowsy_rewake_cold_then_rebuild_ready(monkeypatch, tmp_path):
 
     runtime_graph_cache.invalidate(store)
 
-    _, _, _, src_cold = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src_cold, _ = runtime_graph_cache.load_recall_structural(store)
     assert src_cold in ("cold_degrade", "last_good"), (
         f"After invalidate the cache must be cold; got {src_cold!r}."
     )
@@ -88,7 +88,7 @@ def test_drowsy_rewake_cold_then_rebuild_ready(monkeypatch, tmp_path):
         "rebuild_ready must be set after the background rebuild completes."
     )
 
-    _, _, _, src_after = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src_after, _ = runtime_graph_cache.load_recall_structural(store)
     assert src_after in ("overlay", "normal"), (
         f"After DROWSY-edge rebuild, structural_source must be overlay/normal; "
         f"got {src_after!r}."
@@ -103,7 +103,7 @@ def test_wake_hook_rebuilds_cold_cache(monkeypatch, tmp_path):
 
     runtime_graph_cache.invalidate(store)
 
-    _, _, _, src_cold = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src_cold, _ = runtime_graph_cache.load_recall_structural(store)
     assert src_cold in ("cold_degrade", "last_good"), (
         f"After invalidate, cache must be cold; got {src_cold!r}."
     )
@@ -112,7 +112,7 @@ def test_wake_hook_rebuilds_cold_cache(monkeypatch, tmp_path):
 
     _daemon_mod._wake_hook_rebuild_if_cold(store)  # type: ignore[attr-defined]
 
-    _, _, _, src_after = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src_after, _ = runtime_graph_cache.load_recall_structural(store)
     assert src_after in ("overlay", "normal"), (
         f"After wake-hook rebuild-if-cold, structural_source must be overlay/normal; "
         f"got {src_after!r}."
@@ -125,7 +125,7 @@ def test_wake_hook_skips_when_warm(monkeypatch, tmp_path):
 
     _warm_store_via_rebuild(store)
 
-    _, _, _, src_warm = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src_warm, _ = runtime_graph_cache.load_recall_structural(store)
     assert src_warm in ("overlay", "normal"), (
         f"Warm baseline must be overlay/normal; got {src_warm!r}."
     )
@@ -136,7 +136,7 @@ def test_wake_hook_skips_when_warm(monkeypatch, tmp_path):
 
     _daemon_mod._wake_hook_rebuild_if_cold(store)  # type: ignore[attr-defined]
 
-    _, _, _, src_after = runtime_graph_cache.load_recall_structural(store)
+    _, _, _, src_after, _ = runtime_graph_cache.load_recall_structural(store)
     assert src_after in ("overlay", "normal"), (
         f"Cache must remain warm after helper called on warm cache; got {src_after!r}."
     )

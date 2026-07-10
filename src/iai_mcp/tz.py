@@ -33,7 +33,7 @@ def _seed_config(cfg_path: Path, tz_key: str) -> None:
     existing: dict = {}
     if cfg_path.exists():
         try:
-            with open(cfg_path, encoding="utf-8") as f:
+            with open(cfg_path) as f:
                 existing = json.load(f)
             if not isinstance(existing, dict):
                 existing = {}
@@ -44,7 +44,7 @@ def _seed_config(cfg_path: Path, tz_key: str) -> None:
         existing["user"] = {}
     existing["user"]["timezone"] = tz_key
     tmp = cfg_path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open(tmp, "w") as f:
         json.dump(existing, f, indent=2)
     os.replace(tmp, cfg_path)
 
@@ -53,7 +53,7 @@ def load_user_tz() -> ZoneInfo:
     cfg_path = _config_path()
     if cfg_path.exists():
         try:
-            with open(cfg_path, encoding="utf-8") as f:
+            with open(cfg_path) as f:
                 cfg = json.load(f)
         except (json.JSONDecodeError, OSError):
             cfg = None

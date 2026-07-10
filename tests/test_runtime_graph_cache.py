@@ -98,7 +98,7 @@ def test_try_load_round_trip_on_unchanged_store(store):
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None
-    loaded_assignment, loaded_rich_club, _node_payload, _max_degree = loaded
+    loaded_assignment, loaded_rich_club, _node_payload, _max_degree, _node_degrees = loaded
     assert loaded_assignment.backend == assignment.backend
     assert loaded_assignment.modularity == pytest.approx(assignment.modularity)
     assert set(loaded_assignment.top_communities) == set(assignment.top_communities)
@@ -218,6 +218,13 @@ def test_build_runtime_graph_invalidates_on_record_added(store, tmp_path):
         wraps=runtime_graph_cache.compute_assignment_in_child,
     ) as detect_spy:
         retrieve.build_runtime_graph(store)
+        # Stale-while-revalidate: the window-crossing writes invalidate the
+        # warm bundle, the awake call serves the stale bundle immediately,
+        # and the rebuild (with detection) runs on the single-flight
+        # refresher thread — join it before asserting.
+        refresher = getattr(store, "_graph_refresh_thread", None)
+        if refresher is not None:
+            refresher.join(timeout=120)
         assert detect_spy.call_count == 1, (
             "community detection should have fired after a window-crossing "
             "insert."
@@ -381,7 +388,7 @@ def test_save_then_try_load_preserves_surface_byte_for_byte(store):
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None
-    _, _, payload, max_deg = loaded
+    _, _, payload, max_deg, _nd = loaded
     assert payload is not None
     assert payload[str(rid)]["surface"] == surface
     assert payload[str(rid)]["centrality"] == pytest.approx(0.42)
@@ -413,13 +420,13 @@ def test_v2_plaintext_lazy_migrates_to_v3(store):
         "max_degree": 1,
         "saved_at": "2026-04-29T00:00:00Z",
     }
-    if len(legacy_data["key"]) >= 5:
-        legacy_data["key"][4] = runtime_graph_cache.LEGACY_CACHE_VERSION_PLAINTEXT
+    if len(legacy_data["key"]) >= 6:
+        legacy_data["key"][5] = runtime_graph_cache.LEGACY_CACHE_VERSION_PLAINTEXT
     path.write_text(json.dumps(legacy_data), encoding="utf-8")
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None
-    _, _, payload, _ = loaded
+    _, _, payload, _, _nd = loaded
     assert payload is not None
     assert payload[str(rid)]["surface"] == "legacy_plain_canary"
 
@@ -533,7 +540,7 @@ def test_rebuild_force_overrides_warm_clean_gate(tmp_path, _reset_rgc_state):
 
 def _structural_snapshot(store) -> tuple:
     rgc = runtime_graph_cache
-    assignment, rich_club, _max_degree, src = rgc.load_recall_structural(store)
+    assignment, rich_club, _max_degree, src, _node_degrees = rgc.load_recall_structural(store)
     ntc = getattr(assignment, "node_to_community", {})
     # Community UUIDs are minted per detection; compare the partition (grouping)
     # plus the rich-club node set — the observable recall surface.

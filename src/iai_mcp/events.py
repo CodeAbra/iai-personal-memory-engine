@@ -41,6 +41,7 @@ TELEMETRY_RGC_WORKER_CRASH: str = "rgc_worker_crash"
 # Emitted from save() when the encoded snapshot exceeds 80% of MAX_CACHE_BYTES;
 # rate-limited to one event per generation window.
 TELEMETRY_RGC_SNAPSHOT_NEAR_LIMIT: str = "rgc_snapshot_near_limit"
+TELEMETRY_EMBED_NONFINITE: str = "embed_nonfinite_rejected"
 
 _event_buffer: dict[int, list[dict]] = {}
 

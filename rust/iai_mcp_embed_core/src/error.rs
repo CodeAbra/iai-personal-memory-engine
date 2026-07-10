@@ -21,4 +21,7 @@ pub enum EmbedError {
 
     #[error("config error: {0}")]
     Config(String),
+
+    #[error("thread pool error: {0}")]
+    Pool(String),
 }

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 
 def test_hash_component_deterministic():
@@ -41,7 +40,7 @@ def test_build_delta_first_session_returns_full_payload():
 
 
 def test_build_delta_unchanged_is_empty():
-    from iai_mcp.delta import build_delta, hash_component
+    from iai_mcp.delta import build_delta
 
     payload = {
         "l0": "identity",

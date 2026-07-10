@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 from pathlib import Path
 
@@ -12,13 +13,29 @@ pytestmark = pytest.mark.skipif(
     reason="POSIX paths + atomic rename",
 )
 
+# The large-N cap tests seed thousands of events with UNIQUE tags and drain
+# them; each drained event runs an unindexed tag lookup. On the in-tree storage
+# engine that lookup is an O(N) table scan walked in Python (the native sqlite3
+# backend answers it in C), so over a growing table the drain is O(N^2) and the
+# large-N variants are too slow for the default correctness gate. They are
+# marked slow ONLY on the engine backend: on the native backend they run in the
+# default gate (fast), and on the engine backend they run under --runslow. The
+# drain logic itself is correct on both — its assertions are unchanged, and the
+# small-file cap test below stays in the default gate on both backends.
+_ENGINE_BACKEND = os.environ.get("LILLI_STORAGE_DRIVER") == "lilli"
+
+
+def _slow_on_lilli(fn):
+    """Mark a test slow only on the in-tree engine backend; no-op otherwise."""
+    return pytest.mark.slow(fn) if _ENGINE_BACKEND else fn
+
 
 @pytest.fixture
 def fast_drain_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-cap-pass")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "hippo"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
     import keyring.core
     keyring.core._keyring_backend = None
 
@@ -61,6 +78,7 @@ def _store():
     return MemoryStore()
 
 
+@_slow_on_lilli
 def test_partial_drain_at_5000(fast_drain_env):
     from iai_mcp.capture import MAX_DRAIN_EVENTS_PER_RUN, drain_deferred_captures
 
@@ -80,6 +98,7 @@ def test_partial_drain_at_5000(fast_drain_env):
     assert len(lines) == 1 + 1000, f"header + 1000 unprocessed events; got {len(lines)} lines"
 
 
+@_slow_on_lilli
 def test_second_pass_drains_remainder(fast_drain_env):
     from iai_mcp.capture import drain_deferred_captures
 
@@ -111,6 +130,7 @@ def test_cap_does_not_apply_to_small_files(fast_drain_env):
     assert list(deferred.glob("*.partial.jsonl")) == []
 
 
+@_slow_on_lilli
 def test_partial_file_has_valid_header(fast_drain_env):
     from iai_mcp.capture import drain_deferred_captures
 

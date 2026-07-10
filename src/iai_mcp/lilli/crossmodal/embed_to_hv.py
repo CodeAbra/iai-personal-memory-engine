@@ -31,6 +31,14 @@ def from_embedding(emb: list[float]) -> bytes:
         )
     if not np.all(np.isfinite(arr)):
         raise ValueError("from_embedding: embedding contains non-finite values")
+    # Projection always runs on numpy, in BOTH backends. `emb @ P` dispatches to
+    # the platform BLAS sgemv, which is memory-bandwidth-bound and already at the
+    # physical ceiling — a scalar native matmul is slower AND it is the bit-parity
+    # reference. So this is the deliberate hybrid exception: the hot-path ops
+    # (similarity/hamming, majority-vote bundle) route to the native backend under
+    # IAI_MCP_HD_BACKEND=rust, but projection stays on numpy regardless. The native
+    # projection kernel is kept (and proven byte-identical on 100 frozen
+    # embeddings) but production projection is never routed through it.
     projected = arr @ P
     bits = (projected >= 0).astype(np.uint8)
     return np.packbits(bits).tobytes()

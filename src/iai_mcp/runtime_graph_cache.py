@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import sys
 import threading
 from datetime import datetime, timezone
@@ -25,21 +24,17 @@ from iai_mcp.types import SCHEMA_VERSION_CURRENT
 
 preload_ready: threading.Event = threading.Event()
 
+# Guards lazy installation of each store's structural-decode single-flight
+# lock (see load_recall_structural), so two racing threads never install two
+# different locks on the same store instance.
+_STRUCTURAL_DECODE_LOCK_GUARD = threading.Lock()
+
 rebuild_ready: threading.Event = threading.Event()
 
 
-CACHE_VERSION: str = "62-02-v5"
+CACHE_VERSION: str = "62-02-v6"
 
-# Cache-key staleness bucket. The key buckets on records//WINDOW and
-# edges//WINDOW; try_load requires an exact key match. With WINDOW=10 a normal
-# day of capture (+~150 records, +~1300 edges) crossed ~130 buckets, so the
-# on-disk graph cache MISSED on essentially every WAKE and the full community
-# detection (mosaic) was recomputed each time -- the WAKE CPU storm. Edges churn
-# fastest, so they are the binding term. WINDOW=250 keeps the cache valid across
-# a normal day so most WAKEs are cheap cache HITs; the independent age/dirty fuse
-# in consult_overlay (25h / dirty>50) remains the real freshness backstop, and
-# the cache-miss single-flight rebuild gate keeps the rare genuine miss bounded.
-_STALENESS_WINDOW: int = 250
+_STALENESS_WINDOW: int = 10
 LEGACY_CACHE_VERSION_PLAINTEXT: str = "06-02-v1"
 
 _CACHE_AAD: bytes = b"runtime-graph-cache:v3"
@@ -113,16 +108,6 @@ _WORKER_TIMEOUT_FIRST_BASE_S: float = 120.0
 _WORKER_TIMEOUT_PER_1K_NODES_S: float = 35.0
 _WORKER_TIMEOUT_MAX_S: float = 3600.0
 _first_spawn_seen: bool = False
-
-# Windows `multiprocessing` spawn is broken for the RGC worker: the spawn child
-# launches under the venv's *base* interpreter (`sys._base_executable`, e.g.
-# `...\Python312\pythonw.exe`) rather than the venv interpreter, re-imports the
-# heavy `iai_mcp.daemon` module, and hangs well past the watchdog timeout —
-# killing it took the parent daemon down with it. `ctx.set_executable(...)` does
-# not override the base-interpreter selection (verified empirically). On Windows
-# we therefore run the worker in an in-process daemon thread (`_ThreadWorkerHandle`)
-# instead of spawning; POSIX keeps the spawned subprocess unchanged.
-_IS_WINDOWS: bool = platform.system() == "Windows"
 
 
 _STREAM_CHUNK: int = 2000
@@ -198,69 +183,6 @@ def _terminate_worker(process) -> None:
         pass
 
 
-class _ThreadWorkerHandle:
-    """In-process stand-in for a spawned worker `Process`, used on Windows.
-
-    Runs `_worker_entry` in a daemon thread of the current process and exposes
-    the subset of the `multiprocessing.Process` API the rebuild path touches
-    (`start`, `is_alive`, `join`, `exitcode`, `terminate`, `kill`), so the
-    surrounding spawn/drain logic is reused verbatim. See the `_IS_WINDOWS`
-    note above for why spawn cannot be used here.
-
-    Trade-off: the worker no longer runs in a separate address space, so the
-    fat per-rebuild allocations live in the daemon heap until they fall out of
-    scope and are GC'd, rather than being reclaimed by process exit. The
-    rebuild is a periodic sleep-time operation, not a hot path, so this is an
-    acceptable cost for correctness. The AES-key isolation the subprocess gave
-    is moot in-process anyway; the worker module still never imports the
-    storage/crypto surface, so no key is reachable through it.
-    """
-
-    def __init__(self, target, conn) -> None:
-        self._target = target
-        self._conn = conn
-        self._exitcode: int | None = None
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        try:
-            self._target(self._conn)
-            self._exitcode = 0
-        except SystemExit as exc:
-            # The worker calls sys.exit(1) on its error path; map that to a
-            # non-zero exitcode so the parent's crash check fires as it would
-            # for a subprocess.
-            self._exitcode = exc.code if isinstance(exc.code, int) else 1
-        except BaseException:  # noqa: BLE001 -- mirror a non-zero subprocess exit
-            self._exitcode = 1
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def is_alive(self) -> bool:
-        return self._thread.is_alive()
-
-    def join(self, timeout: float | None = None) -> None:
-        self._thread.join(timeout)
-
-    @property
-    def exitcode(self) -> int | None:
-        # Mirror Process.exitcode: None while the worker is still running.
-        if self._thread.is_alive():
-            return None
-        return self._exitcode
-
-    def terminate(self) -> None:
-        # A Python thread cannot be force-killed. On the normal path the worker
-        # unwinds when the parent closes its pipe end (EOFError); on a genuine
-        # compute hang the daemon thread is left to finish in the background
-        # (daemon=True, so it never blocks interpreter shutdown).
-        pass
-
-    def kill(self) -> None:
-        pass
-
-
 def _drain_worker_result(parent_conn, timeout: float) -> dict:
     """Drain the chunked compact result envelope into a parent-side dict.
 
@@ -280,8 +202,10 @@ def _drain_worker_result(parent_conn, timeout: float) -> dict:
     backend: str | None = None
     top_communities: list = []
     mid_regions: dict = {}
+    modularity: float = 0.0
     rich_club: list = []
     max_degree: int = 0
+    node_degrees: dict = {}
     done = False
 
     while not done:
@@ -318,10 +242,19 @@ def _drain_worker_result(parent_conn, timeout: float) -> dict:
                 mid_regions[UUID(bytes=comm_bytes)] = [
                     UUID(bytes=mb) for mb in member_bytes_list
                 ]
+        elif kind == "modularity":
+            modularity = float(payload)
         elif kind == "rich_club":
             rich_club = [UUID(bytes=b) for b in payload]
         elif kind == "max_degree":
             max_degree = int(payload)
+        elif kind == "node_degrees":
+            # Payload: [(node_uuid_bytes, int_degree), ...]
+            for node_bytes, deg_val in payload:
+                try:
+                    node_degrees[UUID(bytes=node_bytes)] = int(deg_val)
+                except (ValueError, TypeError):
+                    pass
         elif kind == "done":
             done = True
         elif kind == "error":
@@ -339,8 +272,10 @@ def _drain_worker_result(parent_conn, timeout: float) -> dict:
         "backend": backend if backend is not None else "flat",
         "top_communities": top_communities,
         "mid_regions": mid_regions,
+        "modularity": modularity,
         "rich_club": rich_club,
         "max_degree": max_degree,
+        "node_degrees": node_degrees,
     }
 
 
@@ -367,6 +302,7 @@ def _drain_community_only_result(parent_conn, timeout: float) -> dict:
     backend: str | None = None
     top_communities: list = []
     mid_regions: dict = {}
+    modularity: float = 0.0
     centrality: dict = {}
     done = False
 
@@ -404,6 +340,8 @@ def _drain_community_only_result(parent_conn, timeout: float) -> dict:
                 mid_regions[UUID(bytes=comm_bytes)] = [
                     UUID(bytes=mb) for mb in member_bytes_list
                 ]
+        elif kind == "modularity":
+            modularity = float(payload)
         elif kind == "centrality":
             for node_bytes, value in payload:
                 centrality[UUID(bytes=node_bytes)] = float(value)
@@ -424,6 +362,7 @@ def _drain_community_only_result(parent_conn, timeout: float) -> dict:
         "backend": backend if backend is not None else "flat",
         "top_communities": top_communities,
         "mid_regions": mid_regions,
+        "modularity": modularity,
         "centrality": centrality,
     }
 
@@ -449,6 +388,39 @@ def _stream_graph_to_child(parent_conn, graph) -> None:
             node_chunk = []
     if node_chunk:
         parent_conn.send(("nodes", node_chunk))
+    parent_conn.send(("nodes_end", None))
+
+    edge_chunk: list = []
+    for src, dst, weight in sorted(
+        graph.iter_edges_with_weight(),
+        key=lambda e: (e[0].bytes, e[1].bytes),
+    ):
+        edge_chunk.append((str(src), str(dst), float(weight)))
+        if len(edge_chunk) >= _STREAM_CHUNK:
+            parent_conn.send(("edges", edge_chunk))
+            edge_chunk = []
+    if edge_chunk:
+        parent_conn.send(("edges", edge_chunk))
+    parent_conn.send(("edges_end", None))
+
+
+def _stream_topology_to_child(parent_conn, graph) -> None:
+    """Ship only node ids and edges to the child — no embedding blobs.
+
+    Betweenness centrality depends on graph topology (node ids + edges) only;
+    embedding vectors are not needed and not sent. Transmitting less data over
+    the Pipe is safe: the AES fence is preserved because no key or store handle
+    crosses the boundary, and the child builds nodes with empty embeddings that
+    are sufficient for the centrality computation.
+    """
+    node_chunk: list = []
+    for uid in sorted(graph.iter_nodes(), key=lambda u: u.bytes):
+        node_chunk.append(str(uid))
+        if len(node_chunk) >= _STREAM_CHUNK:
+            parent_conn.send(("nodes_topology", node_chunk))
+            node_chunk = []
+    if node_chunk:
+        parent_conn.send(("nodes_topology", node_chunk))
     parent_conn.send(("nodes_end", None))
 
     edge_chunk: list = []
@@ -515,26 +487,29 @@ def compute_assignment_in_child(
     child_conn.close()
 
     try:
-        parent_conn.send((
-            "config",
-            {"prior_mode": prior_mode, "with_centrality": bool(with_centrality)},
-        ))
-        _stream_graph_to_child(parent_conn, graph)
+        try:
+            parent_conn.send((
+                "config",
+                {"prior_mode": prior_mode, "with_centrality": bool(with_centrality)},
+            ))
+            _stream_graph_to_child(parent_conn, graph)
 
-        result = _drain_community_only_result(parent_conn, timeout=timeout)
+            result = _drain_community_only_result(parent_conn, timeout=timeout)
 
-        process.join(timeout=5.0)
-        if process.exitcode != 0:
-            raise WorkerCrashedError(
-                f"worker exited with code {process.exitcode}"
-            )
+            process.join(timeout=5.0)
+            if process.exitcode != 0:
+                raise WorkerCrashedError(
+                    f"worker exited with code {process.exitcode}"
+                )
+        except (EOFError, BrokenPipeError, ConnectionError) as exc:
+            raise WorkerCrashedError(f"worker pipe failed: {exc!r}") from exc
 
         _first_spawn_seen = True
 
         assignment = CommunityAssignment(
             node_to_community=result["node_to_community"],
             community_centroids=result["community_centroids"],
-            modularity=0.0,
+            modularity=float(result.get("modularity", 0.0)),
             backend=result["backend"],
             top_communities=result["top_communities"],
             mid_regions=result["mid_regions"],
@@ -587,16 +562,21 @@ def compute_centrality_in_child(
     child_conn.close()
 
     try:
-        parent_conn.send(("config", {"centrality_only": True}))
-        _stream_graph_to_child(parent_conn, graph)
+        try:
+            parent_conn.send(("config", {"centrality_only": True}))
+            # Centrality depends only on topology; send node ids and edges
+            # without embedding blobs to reduce pipe traffic.
+            _stream_topology_to_child(parent_conn, graph)
 
-        result = _drain_community_only_result(parent_conn, timeout=timeout)
+            result = _drain_community_only_result(parent_conn, timeout=timeout)
 
-        process.join(timeout=5.0)
-        if process.exitcode != 0:
-            raise WorkerCrashedError(
-                f"worker exited with code {process.exitcode}"
-            )
+            process.join(timeout=5.0)
+            if process.exitcode != 0:
+                raise WorkerCrashedError(
+                    f"worker exited with code {process.exitcode}"
+                )
+        except (EOFError, BrokenPipeError, ConnectionError) as exc:
+            raise WorkerCrashedError(f"worker pipe failed: {exc!r}") from exc
 
         _first_spawn_seen = True
         return result.get("centrality", {})
@@ -632,27 +612,79 @@ def _cache_encryption_key(store: Any) -> bytes:
         except (OSError, ValueError, RuntimeError):
             pass
     user_id = getattr(store, "user_id", "default") or "default"
-    return CryptoKey(user_id=user_id).get_or_create()
+    root = getattr(store, "root", None)
+    if root is None:
+        raise RuntimeError(
+            "cannot resolve a cache encryption key: the store provides no store root "
+            "and no direct key source (_crypto_key / _key()); at least one is required "
+            "so the key is bound to the correct store context (no store root)"
+        )
+    return CryptoKey(user_id=user_id, store_root=Path(root)).get_or_create()
 
 
 def _cache_key(store: Any) -> tuple:
-    try:
-        records_count = int(store.active_records_count())
-    except (OSError, ValueError, KeyError, AttributeError):
+    # Attempt to read the three counts directly from the store-level corpus-count
+    # cache (CorpusCountCache) WITHOUT going through the store count methods.  When
+    # the cache is warm (all three keys present) this avoids three method calls and
+    # any per-call overhead, so a read-only recall burst that calls _cache_key
+    # multiple times pays one SQL COUNT on the first miss and O(1) dict reads on
+    # every subsequent call.  The store methods remain the authoritative fallback:
+    # a cache miss (cold start, or right after a write-invalidation) falls through
+    # to the normal store.active_records_count() / etc. path, which re-fills the
+    # cache as a side-effect so the next call is served from it.
+    _cc = getattr(store, "_corpus_count_cache", None)
+    if _cc is not None:
         try:
-            records_count = int(store.db.open_table("records").count_rows())
+            _cached_active = _cc.get("active")
+            _cached_edges = _cc.get("edges")
+            _cached_pending = _cc.get("pending")
+        except Exception:  # noqa: BLE001 -- cache access must never break key derivation
+            _cached_active = _cached_edges = _cached_pending = None
+    else:
+        _cached_active = _cached_edges = _cached_pending = None
+
+    if _cached_active is not None:
+        records_count = int(_cached_active)
+    else:
+        try:
+            records_count = int(store.active_records_count())
         except (OSError, ValueError, KeyError, AttributeError):
-            records_count = -1
-    try:
-        edges_count = int(store.db.open_table("edges").count_rows())
-    except (OSError, ValueError, KeyError, AttributeError):
-        edges_count = -1
+            try:
+                records_count = int(store.db.open_table("records").count_rows())
+            except (OSError, ValueError, KeyError, AttributeError):
+                records_count = -1
+
+    if _cached_edges is not None:
+        edges_count = int(_cached_edges)
+    else:
+        try:
+            edges_count = int(store.edges_count())
+        except (OSError, ValueError, KeyError, AttributeError):
+            try:
+                edges_count = int(store.db.open_table("edges").count_rows())
+            except (OSError, ValueError, KeyError, AttributeError):
+                edges_count = -1
+
+    # Raw pending count, NOT bucketed: a re-embed flips a row from pending to
+    # embedded, dropping the count by one. Dividing by the staleness window
+    # would re-absorb that single flip and keep serving the pre-re-embed graph,
+    # which omits the now-embedded row. The raw count makes the flip change the
+    # key so the warm build re-streams the corpus including the embedded row.
+    if _cached_pending is not None:
+        pending_count = int(_cached_pending)
+    else:
+        try:
+            pending_count = int(store.pending_records_count())
+        except (OSError, ValueError, KeyError, AttributeError):
+            pending_count = -1
+
     embed_dim = int(getattr(store, "embed_dim", 0))
     rc_window = records_count // _STALENESS_WINDOW if records_count >= 0 else records_count
     ec_window = edges_count // _STALENESS_WINDOW if edges_count >= 0 else edges_count
     return (
         rc_window,
         ec_window,
+        pending_count,
         SCHEMA_VERSION_CURRENT,
         embed_dim,
         CACHE_VERSION,
@@ -711,14 +743,14 @@ def consult_overlay(store: Any) -> "tuple | _OverlayBypass":
         return _OverlayBypass("parity_mismatch")
 
     saved_key = tuple(data.get("key", []))
-    if len(saved_key) < 5:
+    if len(saved_key) < 6:
         return _OverlayBypass("parity_mismatch")
     current_parity = _parity_components(store)
-    if saved_key[2] != current_parity[0]:
+    if saved_key[3] != current_parity[0]:
         return _OverlayBypass("parity_mismatch")
-    if saved_key[3] != current_parity[1]:
+    if saved_key[4] != current_parity[1]:
         return _OverlayBypass("parity_mismatch")
-    if saved_key[4] != current_parity[2]:
+    if saved_key[5] != current_parity[2]:
         return _OverlayBypass("parity_mismatch")
 
     snapshot_generation = data.get("generation", 0)
@@ -752,6 +784,16 @@ def consult_overlay(store: Any) -> "tuple | _OverlayBypass":
     if not _check_snapshot_invariants(data):
         return _OverlayBypass("invariant_failure")
 
+    # Decode memo keyed on snapshot file identity: the freshness fuse and the
+    # invariant checks above run on EVERY call (cheap once the decrypt is
+    # memoized), but the UUID-heavy decode is a pure function of file content
+    # and must not be re-run per recall for a file that has not changed.
+    identity = _cache_file_identity(store)
+    if identity is not None:
+        decode_memo = getattr(store, "_decoded_overlay_pair_memo", None)
+        if decode_memo is not None and decode_memo[0] == identity:
+            return decode_memo[1]
+
     try:
         assignment = _decode_assignment(data["assignment"])
         rich_club = _decode_rich_club(data.get("rich_club"))
@@ -759,6 +801,11 @@ def consult_overlay(store: Any) -> "tuple | _OverlayBypass":
         logger.debug("runtime_graph_cache overlay decode failed: %s", exc)
         return _OverlayBypass("invariant_failure")
 
+    if identity is not None:
+        try:
+            store._decoded_overlay_pair_memo = (identity, (assignment, rich_club))
+        except (AttributeError, TypeError):
+            pass
     return assignment, rich_club
 
 
@@ -1014,6 +1061,16 @@ def try_load(store: Any) -> tuple | None:
             max_degree = int(data.get("max_degree", 0) or 0)
         except (TypeError, ValueError):
             max_degree = 0
+        # Per-node degree map: {UUID: int}.  Absent in older cache formats —
+        # callers must handle an empty dict gracefully (cold-cache degrade).
+        node_degrees_raw = data.get("node_degrees")
+        node_degrees: dict[UUID, int] = {}
+        if isinstance(node_degrees_raw, dict):
+            for k, v in node_degrees_raw.items():
+                try:
+                    node_degrees[UUID(k)] = int(v)
+                except (ValueError, TypeError):
+                    pass
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.debug("runtime_graph_cache decode failed: %s", exc)
         return None
@@ -1027,10 +1084,22 @@ def try_load(store: Any) -> tuple | None:
         except (OSError, ValueError) as exc:
             logger.debug("runtime_graph_cache legacy re-save failed: %s", exc)
 
-    return assignment, rich_club, node_payload, max_degree
+    return assignment, rich_club, node_payload, max_degree, node_degrees
 
 
 def _load_and_decrypt_cache(store: Any) -> "dict | None":
+    # File-identity memo: the read + AES decrypt + JSON parse below is a pure
+    # function of the file's content, and EVERY structural branch (the overlay
+    # freshness probe, try_load, last_good, the max_degree re-read) calls this
+    # per recall — without the memo a warm recall pays the full decrypt of a
+    # multi-hundred-KB snapshot several times per dispatch. The save path
+    # replaces the file atomically, so `(mtime_ns, size)` is an exact key.
+    identity = _cache_file_identity(store)
+    if identity is not None:
+        memo = getattr(store, "_decrypted_cache_memo", None)
+        if memo is not None and memo[0] == identity:
+            return memo[1]
+
     path = _cache_path(store)
     if not path.exists():
         return None
@@ -1057,6 +1126,11 @@ def _load_and_decrypt_cache(store: Any) -> "dict | None":
         return None
     if not isinstance(data, dict):
         return None
+    if identity is not None:
+        try:
+            store._decrypted_cache_memo = (identity, data)
+        except (AttributeError, TypeError):
+            pass
     return data
 
 
@@ -1106,21 +1180,64 @@ def try_load_cache_results(store: Any) -> "tuple[dict[UUID, float], int] | None"
     return centrality_map, int(payload_record_count_raw)
 
 
+def _cache_file_identity(store: Any) -> "tuple[int, int] | None":
+    """The on-disk cache file's `(mtime_ns, size)` identity, or None when
+    absent/unstattable. The save path replaces the file atomically (tmp +
+    rename), so a changed identity is the staleness signal for any decode
+    memo keyed on it."""
+    try:
+        st = _cache_path(store).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def load_last_good_structural(store: Any) -> "tuple | None":
+    # File-identity memo + per-store single-flight: the decrypt + JSON +
+    # assignment decode below is a few hundred milliseconds of pure-Python
+    # work, and this loader is the fallback every recall takes while corpus
+    # counts drift between cache saves (a write burst) — without the memo a
+    # concurrent recall burst pays one full decode PER RECALL. The decode is
+    # a pure function of the cache file's content (the parity gate below is
+    # process-constant), so `(mtime_ns, size)` identity is an exact key.
+    identity = _cache_file_identity(store)
+    if identity is not None:
+        memo = getattr(store, "_last_good_structural_memo", None)
+        if memo is not None and memo[0] == identity:
+            return memo[1]
+
+    with _STRUCTURAL_DECODE_LOCK_GUARD:
+        decode_lock = getattr(store, "_structural_decode_lock", None)
+        if decode_lock is None:
+            decode_lock = threading.Lock()
+            store._structural_decode_lock = decode_lock
+    with decode_lock:
+        identity = _cache_file_identity(store)
+        if identity is not None:
+            memo = getattr(store, "_last_good_structural_memo", None)
+            if memo is not None and memo[0] == identity:
+                return memo[1]
+        result = _load_last_good_structural_uncached(store)
+        if identity is not None:
+            store._last_good_structural_memo = (identity, result)
+        return result
+
+
+def _load_last_good_structural_uncached(store: Any) -> "tuple | None":
     data = _load_and_decrypt_cache(store)
     if data is None:
         return None
     if data.get("cache_version") != CACHE_VERSION:
         return None
     saved_key = tuple(data.get("key", []))
-    if len(saved_key) < 5:
+    if len(saved_key) < 6:
         return None
     current_parity = _parity_components(store)
-    if saved_key[2] != current_parity[0]:
+    if saved_key[3] != current_parity[0]:
         return None
-    if saved_key[3] != current_parity[1]:
+    if saved_key[4] != current_parity[1]:
         return None
-    if saved_key[4] != current_parity[2]:
+    if saved_key[5] != current_parity[2]:
         return None
     try:
         assignment = _decode_assignment(data["assignment"])
@@ -1154,14 +1271,14 @@ def load_last_good_centrality(store: Any) -> "dict[UUID, float] | None":
     if data.get("cache_version") != CACHE_VERSION:
         return None
     saved_key = tuple(data.get("key", []))
-    if len(saved_key) < 5:
+    if len(saved_key) < 6:
         return None
     current_parity = _parity_components(store)
-    if saved_key[2] != current_parity[0]:
+    if saved_key[3] != current_parity[0]:
         return None
-    if saved_key[3] != current_parity[1]:
+    if saved_key[4] != current_parity[1]:
         return None
-    if saved_key[4] != current_parity[2]:
+    if saved_key[5] != current_parity[2]:
         return None
     centrality_raw = data.get("centrality")
     if not isinstance(centrality_raw, dict) or not centrality_raw:
@@ -1185,29 +1302,104 @@ def load_recall_structural(store: Any) -> "tuple":
     if get_current_generation() == 0:
         load_current_generation_from_snapshot(store)
     try:
+        # The overlay freshness/parity gates run on every call (cheap: the
+        # snapshot decrypt and the UUID-heavy decode are both memoized by
+        # file identity at their own layers), so no gate is ever bypassed.
         overlay_result = consult_overlay(store)
         if not isinstance(overlay_result, _OverlayBypass):
             ov_assignment, ov_rich_club = overlay_result
-            data = _load_and_decrypt_cache(store)
-            ov_max_degree = 0
-            if data is not None:
-                try:
-                    ov_max_degree = int(data.get("max_degree", 0) or 0)
-                except (TypeError, ValueError):
-                    ov_max_degree = 0
-            return ov_assignment, ov_rich_club, ov_max_degree, "overlay"
+            # (max_degree, node_degrees) decode memo — pure function of file
+            # content like the assignment decode; the node_degrees loop alone
+            # constructs one UUID per corpus record on every call otherwise.
+            nd_identity = _cache_file_identity(store)
+            nd_memo = getattr(store, "_decoded_degrees_memo", None)
+            if nd_identity is not None and nd_memo is not None and nd_memo[0] == nd_identity:
+                ov_max_degree, ov_node_degrees = nd_memo[1]
+            else:
+                data = _load_and_decrypt_cache(store)
+                ov_max_degree = 0
+                ov_node_degrees = {}
+                if data is not None:
+                    try:
+                        ov_max_degree = int(data.get("max_degree", 0) or 0)
+                    except (TypeError, ValueError):
+                        ov_max_degree = 0
+                    nd_raw = data.get("node_degrees")
+                    if isinstance(nd_raw, dict):
+                        for k, v in nd_raw.items():
+                            try:
+                                ov_node_degrees[UUID(k)] = int(v)
+                            except (ValueError, TypeError):
+                                pass
+                if nd_identity is not None:
+                    store._decoded_degrees_memo = (
+                        nd_identity, (ov_max_degree, ov_node_degrees),
+                    )
+            return ov_assignment, ov_rich_club, ov_max_degree, "overlay", ov_node_degrees
     except Exception:  # noqa: BLE001 -- overlay errors must never break recall
         pass
 
-    cached = try_load(store)
-    if cached is not None:
-        assignment, rich_club, _node_payload, max_degree = cached
-        return assignment, rich_club, int(max_degree or 0), "normal"
+    # --- In-process decoded-assignment memo -----------------------------------
+    # The structural-graph assignment (_decode_assignment) is expensive: it
+    # constructs UUID objects for every node_to_community / community_centroids /
+    # top_communities / mid_regions entry — the majority of the per-recall UUID
+    # construction overhead (~0.275 s/recall on the profiled store).  The decoded
+    # tuple is keyed on the cache FILE identity: the decode is a pure function
+    # of file content, and count-based keys churn under ambient cycle writes,
+    # re-decoding identical content on every recall.  This introduces no
+    # effective staleness beyond the existing policy — when try_load rejects a
+    # count-drifted cache the flow serves last_good, which decodes the SAME
+    # file with no count gate at all, so the served content is identical
+    # either way and only the redundant decode is skipped.
+    #
+    # The memo is stored as a store-instance attribute so two distinct open
+    # stores never share a decoded assignment.
+    current_key = _cache_file_identity(store)
+    existing_memo: "tuple | None" = getattr(store, "_decoded_structural_memo", None)
+    if current_key is not None and existing_memo is not None:
+        memo_key, memo_decoded = existing_memo
+        if memo_key == current_key:
+            # Cache hit: return the previously decoded tuple without re-reading
+            # or re-decoding the on-disk cache.  The rich_club, max_degree, and
+            # node_degrees fields are included so the full return tuple is correct.
+            return memo_decoded
+
+    # Single-flight the miss-path decode: a burst of concurrent recalls right
+    # after a write (the write changed the counts, so every one of them misses
+    # the memo simultaneously) must run the expensive decode ONCE — the losers
+    # wait on the lock, then take the winner's freshly-stored memo on the
+    # double-check instead of each burning a whole decode on the GIL. The lock
+    # is per-store (stored lazily on the store instance; setdefault-style via
+    # a module lock so two threads never install different locks).
+    with _STRUCTURAL_DECODE_LOCK_GUARD:
+        decode_lock = getattr(store, "_structural_decode_lock", None)
+        if decode_lock is None:
+            decode_lock = threading.Lock()
+            store._structural_decode_lock = decode_lock
+    with decode_lock:
+        # Double-check: a peer may have decoded and memoized while this caller
+        # waited. Re-derive the key too — the peer's decode is only reusable
+        # for the SAME file content this caller would decode.
+        existing_memo = getattr(store, "_decoded_structural_memo", None)
+        current_key = _cache_file_identity(store)
+        if current_key is not None and existing_memo is not None:
+            memo_key, memo_decoded = existing_memo
+            if memo_key == current_key:
+                return memo_decoded
+
+        cached = try_load(store)
+        if cached is not None:
+            assignment, rich_club, _node_payload, max_degree, node_degrees = cached
+            decoded_tuple = (assignment, rich_club, int(max_degree or 0), "normal", node_degrees)
+            # Keyed on file identity: only a rewritten cache file re-decodes.
+            if current_key is not None:
+                store._decoded_structural_memo = (current_key, decoded_tuple)
+            return decoded_tuple
 
     last_good = load_last_good_structural(store)
     if last_good is not None:
         assignment, rich_club = last_good
-        return assignment, rich_club, 0, "last_good"
+        return assignment, rich_club, 0, "last_good", {}
 
     empty_assignment = CommunityAssignment(
         node_to_community={},
@@ -1217,7 +1409,7 @@ def load_recall_structural(store: Any) -> "tuple":
         top_communities=[],
         mid_regions={},
     )
-    return empty_assignment, [], 0, "cold_degrade"
+    return empty_assignment, [], 0, "cold_degrade", {}
 
 
 _rebuild_timestamp_override: str = ""
@@ -1269,6 +1461,7 @@ def save(
     rich_club: Any,
     node_payload: "dict[str, dict] | None" = None,
     max_degree: int = 0,
+    node_degrees: "dict | None" = None,
 ) -> bool:
     path = _cache_path(store)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -1302,6 +1495,18 @@ def save(
             centrality_map[str(k)] = node_centrality
         payload_record_count = len(encoded_node_payload)
 
+    # Serialize per-node degree map — compact (one int per node) so it is kept
+    # through the size-cap shedding that may drop node_payload.  Stored as a
+    # flat {str(node_id): int} map; an absent or empty map degrades gracefully
+    # at load time (callers fall back to the bounded-traversal count).
+    serialized_node_degrees: dict[str, int] = {}
+    if node_degrees:
+        for nid, deg in node_degrees.items():
+            try:
+                serialized_node_degrees[str(nid)] = int(deg)
+            except (TypeError, ValueError):
+                pass
+
     data = {
         "cache_version": CACHE_VERSION,
         "key": list(_cache_key(store)),
@@ -1315,6 +1520,9 @@ def save(
         "centrality": centrality_map,
         "payload_record_count": int(payload_record_count),
         "max_degree": int(max_degree or 0),
+        # Per-node true hebbian degree map (node_id -> int).  Enables bounded
+        # traversal fan-out without clamping the ranking degree numerator.
+        "node_degrees": serialized_node_degrees,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "generation": int(get_current_generation()),
         "rebuild_timestamp": _rebuild_timestamp_override or "",
@@ -1376,6 +1584,7 @@ def save_with_generation(
     rich_club: Any,
     node_payload: "dict[str, dict] | None" = None,
     max_degree: int = 0,
+    node_degrees: "dict | None" = None,
 ) -> bool:
     new_gen = advance_generation()
     reset_dirty_counter()
@@ -1383,7 +1592,11 @@ def save_with_generation(
     global _rebuild_timestamp_override  # noqa: PLW0603
     with _GEN_LOCK:
         _rebuild_timestamp_override = ts_iso
-    result = save(store, assignment, rich_club, node_payload=node_payload, max_degree=max_degree)
+    result = save(
+        store, assignment, rich_club,
+        node_payload=node_payload, max_degree=max_degree,
+        node_degrees=node_degrees,
+    )
     with _GEN_LOCK:
         _rebuild_timestamp_override = ""
     return result
@@ -1408,6 +1621,16 @@ def invalidate_at_root(root: Any) -> None:
 
 
 def invalidate(store: Any) -> None:
+    # Explicit invalidation is a demand for a FRESH build: drop the in-process
+    # warm bundle too, so the next build_runtime_graph rebuilds inline instead
+    # of serving the stale bundle while refreshing behind it (the
+    # stale-while-revalidate path is reserved for ambient churn, where no
+    # caller asked for freshness).
+    try:
+        if hasattr(store, "_warm_graph_bundle"):
+            store._warm_graph_bundle = None
+    except (AttributeError, TypeError):
+        pass
     invalidate_at_root(getattr(store, "root", None) or Path.cwd())
 
 
@@ -1461,27 +1684,20 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
         except Exception:  # noqa: BLE001
             est_node_count = 0
 
-        # Start the worker. On POSIX we spawn a subprocess (spawn-context, not
-        # fork, so the child re-imports cleanly on macOS and Linux) and close
-        # the parent's copy of the child end so we don't hold half a pipe alive
-        # on crash detection. On Windows spawn is broken for this worker (see
-        # `_IS_WINDOWS`), so we run it in an in-process daemon thread and keep
-        # child_conn open — the in-process worker owns that same Connection.
+        # Spawn the worker. Spawn-context (not fork) so the child re-imports
+        # cleanly on macOS and Linux; the child closes its end after start so
+        # the parent does not hold a half-of-pipe alive on crash detection.
         first_spawn_flag = not _first_spawn_seen
         timeout_s = _resolve_timeout(est_node_count)
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe(duplex=True)
-        if _IS_WINDOWS:
-            process = _ThreadWorkerHandle(_worker_entry_indirection, child_conn)
-            process.start()
-        else:
-            process = ctx.Process(
-                target=_worker_entry_indirection,
-                args=(child_conn,),
-                daemon=True,
-            )
-            process.start()
-            child_conn.close()
+        process = ctx.Process(
+            target=_worker_entry_indirection,
+            args=(child_conn,),
+            daemon=True,
+        )
+        process.start()
+        child_conn.close()
 
         db_path = store.db._hippo_dir / "brain.sqlite3"
         ro_conn = None
@@ -1520,7 +1736,7 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
             assignment = CommunityAssignment(
                 node_to_community=result["node_to_community"],
                 community_centroids=result["community_centroids"],
-                modularity=0.0,
+                modularity=float(result.get("modularity", 0.0)),
                 backend=result["backend"],
                 top_communities=result["top_communities"],
                 mid_regions=result["mid_regions"],
@@ -1528,9 +1744,11 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
             )
             rich_club = result["rich_club"]
             max_degree = int(result["max_degree"])
+            node_degrees = result.get("node_degrees", {})
 
             saved = save_with_generation(
-                store, assignment, rich_club, max_degree=max_degree
+                store, assignment, rich_club, max_degree=max_degree,
+                node_degrees=node_degrees,
             )
 
             duration_s = time.perf_counter() - t0

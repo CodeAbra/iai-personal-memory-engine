@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 
 def test_continuous_audit_never_calls_optimize_hippo_storage(monkeypatch):

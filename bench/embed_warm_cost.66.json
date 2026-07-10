@@ -1,0 +1,136 @@
+{
+  "generated_at_utc": "2026-06-04T05:23:01.542453+00:00",
+  "platform": "Darwin arm64",
+  "python": "/path/to/.venv/bin/python",
+  "n_warm": 5,
+  "construction": {
+    "samples": [
+      {
+        "sample": 0,
+        "label": "cold_attempt",
+        "construction_only_ms": 194.732,
+        "first_encode_ms": 11.996,
+        "import_plus_construction_ms": 237.622,
+        "subprocess_wall_ms": 273.9653749158606
+      },
+      {
+        "sample": 1,
+        "label": "warm_1",
+        "construction_only_ms": 29.011,
+        "first_encode_ms": 11.299,
+        "import_plus_construction_ms": 64.756,
+        "subprocess_wall_ms": 101.60966601688415
+      },
+      {
+        "sample": 2,
+        "label": "warm_2",
+        "construction_only_ms": 26.907,
+        "first_encode_ms": 11.168,
+        "import_plus_construction_ms": 62.248,
+        "subprocess_wall_ms": 99.2092089727521
+      },
+      {
+        "sample": 3,
+        "label": "warm_3",
+        "construction_only_ms": 25.792,
+        "first_encode_ms": 11.192,
+        "import_plus_construction_ms": 60.855,
+        "subprocess_wall_ms": 97.21837507095188
+      },
+      {
+        "sample": 4,
+        "label": "warm_4",
+        "construction_only_ms": 25.855,
+        "first_encode_ms": 10.991,
+        "import_plus_construction_ms": 60.588,
+        "subprocess_wall_ms": 96.70183400157839
+      }
+    ],
+    "cold_attempt_construction_ms": 194.732,
+    "cold_attempt_first_encode_ms": 11.996,
+    "cold_attempt_subprocess_wall_ms": 273.9653749158606,
+    "warm_construction_median_ms": 26.381,
+    "warm_first_encode_median_ms": 11.18,
+    "warm_construction_samples_ms": [
+      29.011,
+      26.907,
+      25.792,
+      25.855
+    ],
+    "warm_first_encode_samples_ms": [
+      11.299,
+      11.168,
+      11.192,
+      10.991
+    ],
+    "warm_subprocess_wall_median_ms": 98.21379202185199
+  },
+  "encode": {
+    "text": "what does alice remember about her daily routine",
+    "n_prime_discarded": 1,
+    "n_measured": 50,
+    "samples_ms": [
+      10.3713,
+      10.2506,
+      10.5517,
+      10.3984,
+      10.828,
+      10.5126,
+      10.4832,
+      10.6068,
+      10.4976,
+      10.8472,
+      10.9949,
+      10.5132,
+      10.2036,
+      10.5755,
+      10.3228,
+      10.4154,
+      10.5725,
+      10.2788,
+      10.577,
+      10.6833,
+      10.4063,
+      10.6208,
+      10.5957,
+      10.6003,
+      10.5554,
+      10.4316,
+      10.5247,
+      10.5377,
+      10.8789,
+      10.7617,
+      10.6523,
+      10.6932,
+      10.818,
+      10.3684,
+      10.6191,
+      10.2057,
+      10.5905,
+      10.5054,
+      10.1801,
+      10.1675,
+      10.2612,
+      10.5964,
+      10.4332,
+      10.6766,
+      10.4301,
+      10.3812,
+      10.9175,
+      10.6387,
+      10.6668,
+      10.7233
+    ],
+    "median_ms": 10.553550000000001,
+    "p95_ms": 10.864635,
+    "p99_ms": 10.956973999999999
+  },
+  "rss": {
+    "rss_post_construct_mb": 290.3,
+    "rss_post_encode_mb": 290.3,
+    "rss_post_construct_raw": 304447488,
+    "rss_post_encode_raw": 304447488,
+    "unit_is_bytes_macos": true
+  },
+  "cold_page_cache_note": "NOTE: 'cold_attempt' is NOT a true cold-disk sample \u2014 macOS page cache was NOT purged (no sudo). Model is likely already cached from daemon/tests. Documented cold figure: ~8s."
+}

@@ -330,6 +330,7 @@ def _persist_tier1_schemas(
     persisted = 0
     candidates: list = []
     try:
+        from iai_mcp.lilli.cycle.schema import build_pattern_keeper_map
         from iai_mcp.schema import (
             induce_schemas_tier1,
             persist_schema,
@@ -339,9 +340,13 @@ def _persist_tier1_schemas(
             store, budget=budget, rate=rate,
             llm_enabled=llm_enabled,
         )
+        # One keeper scan for the whole candidate loop — per-candidate corpus
+        # rescans starve every other store consumer for the induction run.
+        keeper_map = build_pattern_keeper_map(store) if candidates else {}
         for cand in candidates:
             if cand.status == "auto":
-                persist_schema(store, cand)
+                kid = persist_schema(store, cand, keeper_map=keeper_map)
+                keeper_map.setdefault(f"pattern:{cand.pattern}", kid)
                 persisted += 1
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         write_event(

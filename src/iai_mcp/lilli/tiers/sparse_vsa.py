@@ -6,6 +6,7 @@ from typing import Sequence
 
 import numpy as np
 
+from iai_mcp.lilli.core import hd_backend as backend
 from iai_mcp.lilli.core.seed import seed_from_str
 
 
@@ -17,6 +18,7 @@ SPARSE_K: int = 20
 
 SPARSE_ROLE_SEED_PREFIX: str = "lilli-sparse-role"
 SPARSE_FILLER_SEED_PREFIX: str = "lilli-sparse-filler"
+SPARSE_PAD_SEED_PREFIX: str = "sparse-pad"
 
 TIER_INFO: dict = {
     "backend": "sparse_vsa",
@@ -59,27 +61,37 @@ def unpack_indices(packed: bytes) -> list[int]:
     return [v for v in values if v != _SENTINEL]
 
 
+_SPLITMIX64_MASK: int = 0xFFFF_FFFF_FFFF_FFFF
+_SPLITMIX64_GAMMA: int = 0x9E37_79B9_7F4A_7C15
+_SPLITMIX64_MIX1: int = 0xBF58_476D_1CE4_E5B9
+_SPLITMIX64_MIX2: int = 0x94D0_49BB_1331_11EB
+
+
 def _pad_to_k(indices: list[int], seed_a: list[int], seed_b: list[int]) -> list[int]:
     existing = set(indices)
-    needed = SPARSE_K - len(existing)
-    if needed <= 0:
+    if len(existing) >= SPARSE_K:
         return sorted(existing)[:SPARSE_K]
 
-    a_int = hash(tuple(seed_a)) & 0xFFFF_FFFF_FFFF_FFFF
-    b_int = hash(tuple(seed_b)) & 0xFFFF_FFFF_FFFF_FFFF
-    xor_seed = a_int ^ b_int
-    rng = np.random.default_rng(xor_seed)
+    # Backfill seed is derived from the sorted operand lists via the shared
+    # SHA256 head, so the pad path is process-stable (independent of any
+    # per-process hash randomisation) and reproducible across implementations.
+    operand_repr = f"{sorted(seed_a)}|{sorted(seed_b)}"
+    state = seed_from_str(SPARSE_PAD_SEED_PREFIX, operand_repr)
 
-    candidates = list(range(LILLI_SPARSE_DIM))
-    rng.shuffle(candidates)
-    for c in candidates:
-        if len(existing) >= SPARSE_K:
-            break
-        existing.add(c)
+    while len(existing) < SPARSE_K:
+        # SplitMix64 step over the seed stream proposes candidate indices.
+        state = (state + _SPLITMIX64_GAMMA) & _SPLITMIX64_MASK
+        z = state
+        z = ((z ^ (z >> 30)) * _SPLITMIX64_MIX1) & _SPLITMIX64_MASK
+        z = ((z ^ (z >> 27)) * _SPLITMIX64_MIX2) & _SPLITMIX64_MASK
+        z ^= z >> 31
+        existing.add(z % LILLI_SPARSE_DIM)
     return sorted(existing)[:SPARSE_K]
 
 
 def bind(a: list[int], b: list[int]) -> list[int]:
+    if backend.use_rust():
+        return list(backend.native().sparse_bind(list(a), list(b)))
     merged = sorted(set(a) | set(b))
     if len(merged) >= SPARSE_K:
         return merged[:SPARSE_K]
@@ -87,6 +99,8 @@ def bind(a: list[int], b: list[int]) -> list[int]:
 
 
 def unbind(bound: list[int], key: list[int]) -> list[int]:
+    if backend.use_rust():
+        return list(backend.native().sparse_unbind(list(bound), list(key)))
     remainder = sorted(set(bound) - set(key))
     if len(remainder) >= SPARSE_K:
         return remainder[:SPARSE_K]
@@ -94,6 +108,8 @@ def unbind(bound: list[int], key: list[int]) -> list[int]:
 
 
 def bundle(hvs: list[list[int]]) -> list[int]:
+    if backend.use_rust():
+        return list(backend.native().sparse_bundle([list(hv) for hv in hvs]))
     if not hvs:
         return []
     counts: Counter = Counter()
@@ -105,10 +121,14 @@ def bundle(hvs: list[list[int]]) -> list[int]:
 
 
 def permute(hv: list[int], shift: int) -> list[int]:
+    if backend.use_rust():
+        return list(backend.native().sparse_permute(list(hv), shift))
     return sorted((i + shift) % LILLI_SPARSE_DIM for i in hv)
 
 
 def similarity(a: list[int], b: list[int]) -> float:
+    if backend.use_rust():
+        return float(backend.native().sparse_similarity(list(a), list(b)))
     sa, sb = set(a), set(b)
     union_size = len(sa | sb)
     if union_size == 0:

@@ -7,7 +7,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _PerfEmbedder:
 
     DIM = EMBED_DIM
@@ -28,7 +27,6 @@ class _PerfEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
-
 
 def _make_rec(vec: list[float], text: str, tags: list[str]) -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -54,7 +52,6 @@ def _make_rec(vec: list[float], text: str, tags: list[str]) -> MemoryRecord:
         language="en",
     )
 
-
 def _seed_store(path, n: int = 100, seed: int = 0):
     from iai_mcp.pipeline import recall_for_response  # noqa: F401
     from iai_mcp.retrieve import build_runtime_graph
@@ -73,7 +70,6 @@ def _seed_store(path, n: int = 100, seed: int = 0):
         store.insert(rec)
     graph, assignment, rich_club = build_runtime_graph(store)
     return store, embedder, graph, assignment, rich_club
-
 
 @pytest.mark.perf
 def test_recall_for_response_p95_under_threshold(tmp_path):
@@ -111,11 +107,10 @@ def test_recall_for_response_p95_under_threshold(tmp_path):
     latencies.sort()
     p95 = latencies[int(len(latencies) * 0.95)] if len(latencies) > 1 else latencies[-1]
     assert p95 < 150.0, (
-        f"perf regression: p95={p95:.2f}ms > 150ms at N=100 "
+        f"D-SPEED regression: p95={p95:.2f}ms > 150ms at N=100 "
         f"(target <100ms strict, 150ms CI-generous). "
         f"All latencies: {[f'{x:.1f}' for x in latencies]}"
     )
-
 
 def test_recall_for_response_single_provenance_batch_call(tmp_path, monkeypatch):
     from iai_mcp.pipeline import recall_for_response
@@ -180,7 +175,6 @@ def test_recall_for_response_single_provenance_batch_call(tmp_path, monkeypatch)
         f"got {len(batch_calls)} calls"
     )
 
-
 def test_recall_for_response_mem05_provenance_preserved(tmp_path):
     from iai_mcp.pipeline import recall_for_response
     from iai_mcp.provenance_buffer import flush_deferred_provenance
@@ -212,7 +206,6 @@ def test_recall_for_response_mem05_provenance_preserved(tmp_path):
             f"record {h.record_id} has {len(matching)} provenance entries "
             f"for session '{session}'; expected exactly 1. prov={rec.provenance}"
         )
-
 
 def test_recall_for_response_on_read_check_uses_batch_variant(tmp_path, monkeypatch):
     from iai_mcp import s4

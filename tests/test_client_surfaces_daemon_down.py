@@ -64,7 +64,7 @@ def test_cmd_capture_daemon_down_writes_direct_to_store(
     rc = cmd_capture(args)
 
     assert rc == 0, (
-        f"cmd_capture with daemon down must return 0 (success), got {rc}; "
+        f"H2 cmd_capture with daemon down must return 0 (success), got {rc}; "
         "the direct-write fallback is not yet wired"
     )
 
@@ -75,7 +75,7 @@ def test_cmd_capture_daemon_down_writes_direct_to_store(
         records = store.all_records()
         surfaces = [r.literal_surface or "" for r in records]
         assert any("h2 capture probe text" in s for s in surfaces), (
-            "captured turn not found in the tmp Hippo store after daemon-down cmd_capture"
+            "H2: captured turn not found in the tmp Hippo store after daemon-down cmd_capture"
         )
     finally:
         store.close()
@@ -97,12 +97,12 @@ def test_cmd_last_daemon_down_returns_store_backed(
     rc = cmd_last(args)
 
     assert rc == 0, (
-        f"cmd_last with daemon down must return 0, got {rc}"
+        f"H2 cmd_last with daemon down must return 0, got {rc}"
     )
 
     captured = capsys.readouterr()
     assert drained_text in captured.out, (
-        f"drained store turn not in cmd_last stdout;\n"
+        f"H2: drained store turn not in cmd_last stdout;\n"
         f"stdout={captured.out!r}\n"
         "The live-layer fallback cannot see drained turns — must hit the store."
     )
@@ -124,12 +124,11 @@ def test_cmd_recall_daemon_down_returns_store_backed_degraded(
 
     monkeypatch.setattr(_embed_mod, "embedder_for_store", _no_construct_funnel)
 
-    import subprocess as _subprocess_mod
     import iai_mcp.iai_cli as _iai_cli_mod
 
     def _no_bank_subprocess(*args, **kwargs):
         raise AssertionError(
-            "cmd_recall must use the direct store degraded path, "
+            "H2 cmd_recall must use the direct store degraded path, "
             "not the bank-recall subprocess"
         )
 
@@ -141,12 +140,12 @@ def test_cmd_recall_daemon_down_returns_store_backed_degraded(
     rc = cmd_recall(args)
 
     assert rc == 0, (
-        f"cmd_recall with daemon down must return 0 (store-backed degraded), got {rc}"
+        f"H2 cmd_recall with daemon down must return 0 (store-backed degraded), got {rc}"
     )
 
     captured = capsys.readouterr()
     assert drained_text in captured.out, (
-        f"drained store turn not in cmd_recall stdout;\n"
+        f"H2: drained store turn not in cmd_recall stdout;\n"
         f"stdout={captured.out!r}\n"
         "The bank-recall subprocess cannot see this turn — must be store-backed."
     )

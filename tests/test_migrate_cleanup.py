@@ -69,7 +69,7 @@ def test_semantic_pruned_tier_constant_and_enum_membership():
     from iai_mcp.types import SEMANTIC_PRUNED_TIER, TIER_ENUM
 
     assert SEMANTIC_PRUNED_TIER == "semantic_pruned", (
-        "the constant value must be 'semantic_pruned' (used as a soft-delete "
+        "The constant value must be 'semantic_pruned' (used as a soft-delete "
         "sentinel by cleanup_schema_duplicates)."
     )
     assert SEMANTIC_PRUNED_TIER in TIER_ENUM, (
@@ -204,8 +204,8 @@ def test_cleanup_apply_creates_snapshot_directory_before_writes(tmp_path):
     snap = Path(summary["snapshot_dir"])
     assert snap.exists() and snap.is_dir()
     assert snap.parent == Path(store.root)
-    assert snap.name.startswith("lancedb-pre-cleanup-")
-    suffix = snap.name[len("lancedb-pre-cleanup-"):]
+    assert snap.name.startswith("hippo-pre-cleanup-")
+    suffix = snap.name[len("hippo-pre-cleanup-"):]
     assert len(suffix) == 16 and suffix.endswith("Z")
 
     snap_entries = {p.name for p in snap.iterdir()}

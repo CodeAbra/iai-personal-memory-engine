@@ -225,8 +225,7 @@ def append_recent_record(
             0o600,
         )
         try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
+            os.fchmod(fd, 0o600)
             os.write(fd, line)
             os.fsync(fd)
         finally:

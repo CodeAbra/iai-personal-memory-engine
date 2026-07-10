@@ -17,8 +17,6 @@ if _SRC_PATH not in sys.path:
 if _ROOT_PATH not in sys.path:
     sys.path.insert(0, _ROOT_PATH)
 
-from iai_mcp.community import CommunityAssignment
-from iai_mcp.graph import MemoryGraph
 from iai_mcp.pipeline import recall_for_response
 from iai_mcp.retrieve import build_runtime_graph
 from iai_mcp.store import MemoryStore, flush_edge_buffer, flush_record_buffer
@@ -299,7 +297,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ref_mempalace_p95_ms",
         type=float, default=None,
         help=(
-            "Comparative reference p95 (ms) — IAI must be <= this to "
+            "OPS-10 comparative reference p95 (ms) — IAI must be <= this to "
             "pass the gate."
         ),
     )
@@ -308,7 +306,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ref_claude_mem_p95_ms",
         type=float, default=None,
         help=(
-            "Comparative reference p95 (ms) — IAI must be <= this to "
+            "OPS-10 comparative reference p95 (ms) — IAI must be <= this to "
             "pass the gate."
         ),
     )

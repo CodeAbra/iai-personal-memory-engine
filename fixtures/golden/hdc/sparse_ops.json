@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "sparse_ops",
+  "payload": null,
+  "sha256": "3280abdf7401f9c3db45a49363489d50e766a2beecbad7abc060561ef4d07a88",
+  "shape": [
+    13,
+    40
+  ],
+  "source": "src/iai_mcp/lilli/tiers/sparse_vsa.py packed op table (a,b,c = role_hv of roles[0:3]; fillers = filler_hv of samples[0:6]): rows[0:4]=bind[(a,b),(a,b),(a,c),(b,c)]; rows[4:7]=unbind(union(a,b,c), key) for key in (a,b,c); rows[7:10]=bundle([a,b,c,fillers][:n]) for n in (2,4,6); rows[10:13]=permute(a, shift) for shift in (1,17,2047). All inputs stay at/above SPARSE_K \u2014 the _pad_to_k path is never taken.",
+  "subsystem": "hdc"
+}

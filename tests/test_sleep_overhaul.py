@@ -45,6 +45,11 @@ def _isolate_iai_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "IAI_MCP_CRISIS_DROP_QUARTILE",
         "IAI_MCP_CLUSTER_REPLAY_INITIAL_WEIGHT",
         "IAI_MCP_SLEEP_OVERHAUL_DRY_RUN",
+        "IAI_MCP_AVG_DEGREE_FLOOR",
+        "IAI_MCP_GIANT_COMPONENT_FRACTION_FLOOR",
+        "IAI_MCP_EV_MIN_NODES",
+        "IAI_MCP_EV_ARM_AFTER_N",
+        "IAI_MCP_EV_DISARM_AFTER_N",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -228,11 +233,14 @@ def test_r3_cluster_replay_batches_intra_cluster_edges(
     assert body["max_pairs_per_cluster_applied"] == 0
     assert MAX_PAIRS_PER_CLUSTER == 100
 
-def test_r4_essential_variable_tracker_detects_rich_club_breach() -> None:
+def test_r4_essential_variable_tracker_reports_floor_breaches_and_clears_below_min_scale() -> None:
     class _Cfg:
         rich_club_ratio_floor = 0.05
         community_count_ceiling_ratio = 0.9
         edge_density_floor = 0.001
+        avg_degree_floor = 2.0
+        giant_component_fraction_floor = 0.5
+        ev_min_nodes = 100
 
     tracker = EssentialVariableTracker(_Cfg())
 
@@ -241,12 +249,16 @@ def test_r4_essential_variable_tracker_detects_rich_club_breach() -> None:
         community_count=500,
         edge_density=0.01,
         total_nodes=1000,
+        avg_degree=4.0,
+        giant_component_fraction=0.9,
     )
     breaches = tracker.check(breach_snapshot)
     assert set(breaches.keys()) == {
         "rich_club_ratio",
         "community_count",
         "edge_density",
+        "avg_degree",
+        "giant_component_fraction",
     }
     rc = breaches["rich_club_ratio"]
     assert isinstance(rc, BreachInfo)
@@ -255,12 +267,16 @@ def test_r4_essential_variable_tracker_detects_rich_club_breach() -> None:
     assert rc.threshold == pytest.approx(0.05)
     assert breaches["community_count"] is None
     assert breaches["edge_density"] is None
+    assert breaches["avg_degree"] is None
+    assert breaches["giant_component_fraction"] is None
 
     healthy = TopologySnapshot(
         rich_club_ratio=0.5,
         community_count=10,
         edge_density=0.5,
         total_nodes=1000,
+        avg_degree=4.0,
+        giant_component_fraction=0.9,
     )
     healthy_result = tracker.check(healthy)
     assert all(v is None for v in healthy_result.values())
@@ -270,6 +286,8 @@ def test_r4_essential_variable_tracker_detects_rich_club_breach() -> None:
         community_count=0,
         edge_density=0.0,
         total_nodes=0,
+        avg_degree=0.0,
+        giant_component_fraction=0.0,
     )
     empty_result = tracker.check(empty)
     assert all(v is None for v in empty_result.values())
@@ -350,6 +368,11 @@ def test_r5_crisis_recluster_conditional_on_crisis_mode(
         ("IAI_MCP_CRISIS_DROP_QUARTILE", "1.0"),
         ("IAI_MCP_CLUSTER_REPLAY_INITIAL_WEIGHT", "5.0"),
         ("IAI_MCP_SLEEP_OVERHAUL_DRY_RUN", "maybe"),
+        ("IAI_MCP_AVG_DEGREE_FLOOR", "not_a_float"),
+        ("IAI_MCP_GIANT_COMPONENT_FRACTION_FLOOR", "1.1"),
+        ("IAI_MCP_EV_MIN_NODES", "0"),
+        ("IAI_MCP_EV_ARM_AFTER_N", "101"),
+        ("IAI_MCP_EV_DISARM_AFTER_N", "0"),
     ],
 )
 def test_r6_env_var_fail_loud_naming(
@@ -371,6 +394,10 @@ def test_r7_dry_run_no_mutation_all_three_paths(
     monkeypatch.setenv("IAI_MCP_SLEEP_OVERHAUL_DRY_RUN", "true")
     monkeypatch.setenv("IAI_MCP_CLUSTER_WINDOW_SEC", "300")
     monkeypatch.setenv("IAI_MCP_CRISIS_DROP_QUARTILE", "0.25")
+    # This fixture only seeds 4 records; the tracker's default ev_min_nodes=100
+    # guard would otherwise report all-clear vacuously and the breach/dry-run
+    # event-path assertions below would pass on nothing.
+    monkeypatch.setenv("IAI_MCP_EV_MIN_NODES", "1")
 
     store = _make_store(tmp_path)
     embed_dim = store._embed_dim
@@ -422,6 +449,11 @@ def test_r7_dry_run_no_mutation_all_three_paths(
     except Exception:
         pass
     events2 = query_events(store, kind="essential_variable_breach", limit=10)
+    assert events2, (
+        "the forced rich_club floor must actually drive a breach through "
+        "the dry-run event path (ev_min_nodes=1 keeps this fixture's 4 "
+        "records from vacuously passing the min-scale guard)"
+    )
     for e in events2:
         body2 = e["data"]
         assert body2["dry_run_mode"] is True

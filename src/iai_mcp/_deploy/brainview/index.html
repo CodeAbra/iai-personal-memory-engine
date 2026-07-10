@@ -1,0 +1,1662 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IAI — cybernetic brain</title>
+<style>
+  :root {
+    --void: #07050f; --text: #eaf4f8; --dim: #8fa1b3; --faint: #7d8da3;
+    --epi: #8fe7ff; --sem: #e79bff; --pro: #a9ffd0; --pin: #ffd166; --alarm: #ff6b7d;
+    --hair: rgba(186, 220, 240, .14);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--void); color: var(--text); overflow: hidden;
+    font: 300 13px/1.55 "Avenir Next", Futura, "Helvetica Neue", system-ui, sans-serif; }
+  .mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; }
+  #space { position: fixed; inset: 0; }
+  .gauge { text-align: right; margin-bottom: 8px; }
+  .gauge .gl { font-size: 9px; letter-spacing: .12em; color: var(--faint);
+    text-transform: uppercase; }
+  .gauge .gv { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums;
+    margin-left: 8px; }
+  .gauge .gbar { height: 2px; margin-top: 3px; background: rgba(186,220,240,.10); position: relative; }
+  .gauge .gbar > i { position: absolute; right: 0; top: 0; height: 100%;
+    background: var(--epi); }
+  #reach-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+    background: rgba(255,107,125,.14); color: #ffd0d6; text-align: center;
+    padding: 7px; font-size: 12px; letter-spacing: .04em;
+    border-bottom: 1px solid rgba(255,107,125,.3); }
+  body.resting #vitals, body.resting #economy { opacity: .55;
+    transition: opacity .4s; }
+  body.resting #vitals::after { content: " · resting"; }
+  body.consolidating #daemon { color: var(--sem); }
+  body.consolidating #daemon::after { content: " · tidying up"; font-size: 9px; }
+  :focus-visible { outline: 2px solid var(--epi); outline-offset: 2px; border-radius: 3px; }
+  .lg:not(.lg-tier) { cursor: default; }
+  .ev, .eco { cursor: default; }
+    .grain { position: fixed; inset: 0; pointer-events: none; z-index: 9; opacity: .35;
+    background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,.13) 3px 4px); }
+
+  /* frameless floating chrome */
+  #spine { position: fixed; left: 26px; top: 26px; bottom: 26px; z-index: 20;
+    display: flex; flex-direction: column; align-items: center; gap: 18px; width: 20px; }
+  #spine .word { writing-mode: vertical-rl; font-weight: 200; font-size: 15px;
+    letter-spacing: .52em; color: var(--text); white-space: nowrap; }
+  #spine .word b { font-weight: 500; color: var(--epi); }
+  #spine .dotline { flex: 1; width: 1px;
+    background: linear-gradient(180deg, transparent, var(--hair), transparent); }
+  #spine .sig { writing-mode: vertical-rl; font-size: 9px; letter-spacing: .5em;
+    color: var(--faint); text-transform: uppercase; }
+
+  #vitals { position: fixed; top: 26px; right: 34px; z-index: 20; display: flex; gap: 34px;
+    text-align: right; }
+  .stat b { display: block; font-weight: 200; font-size: 30px; line-height: 1.05;
+    color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+  .stat span { font-size: 8.5px; letter-spacing: .34em; text-transform: uppercase; color: var(--faint); }
+  .stat.hot b { color: var(--epi); }
+  .stat.fade b { color: var(--pin); }
+
+  #findbox { position: fixed; top: 30px; left: 84px; z-index: 22; width: min(330px, 36vw); }
+  #find { width: 100%; background: transparent; border: none;
+    border-bottom: 1px solid var(--hair); color: var(--text); padding: 6px 2px 8px;
+    outline: none; font: 300 14px "Avenir Next", Futura, system-ui, sans-serif;
+    letter-spacing: .04em; transition: border-color .25s; }
+  #find::placeholder { color: var(--faint); }
+  #find:focus { border-bottom-color: var(--epi); }
+  #results { margin-top: 10px; display: none; flex-direction: column;
+    max-height: 46vh; overflow: auto; }
+  .hit { padding: 8px 2px; cursor: pointer; display: flex; gap: 10px; align-items: baseline;
+    border-bottom: 1px solid rgba(186,220,240,.06); }
+  .hit:hover .sn { color: var(--epi); }
+  .hit i { width: 6px; height: 6px; border-radius: 50%; flex: none; align-self: center; }
+  .hit .sn { color: var(--dim); font-size: 12.5px; overflow: hidden; white-space: nowrap;
+    text-overflow: ellipsis; transition: color .15s; }
+  .hit .cos { margin-left: auto; color: var(--faint); font-size: 10px; flex: none; }
+
+  #rail { position: fixed; right: 34px; top: 118px; z-index: 15; width: 218px;
+    display: flex; flex-direction: column; gap: 26px; text-align: right;
+    max-height: calc(100vh - 290px); overflow-y: auto; overflow-x: hidden;
+    scrollbar-width: thin; scrollbar-color: rgba(120, 140, 170, .25) transparent; }
+  #rail::-webkit-scrollbar { width: 3px; background: transparent; }
+  #rail::-webkit-scrollbar-track { background: transparent; }
+  #rail::-webkit-scrollbar-thumb { background: rgba(120, 140, 170, .25); border-radius: 2px; }
+  .burger { position: fixed; top: 28px; z-index: 26; width: 38px; height: 38px;
+    display: none; align-items: center; justify-content: center;
+    background: var(--panel, rgba(10,14,22,.92)); border: 1px solid var(--line, #263140);
+    border-radius: 9px; color: var(--dim); font-size: 16px; cursor: pointer;
+    user-select: none; }
+  .burger:hover { color: var(--fg, #dbe4f0); }
+  #burger-l { left: 20px; }
+  #burger-r { right: 20px; }
+  #rail h6 { font-size: 8.5px; letter-spacing: .34em; color: var(--faint);
+    text-transform: uppercase; font-weight: 400; margin-bottom: 10px; }
+  #daemon { font-size: 10px; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--pro); margin-bottom: 10px; }
+  #daemon.down { color: var(--faint); }
+  #daemon i { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor; margin-left: 8px; vertical-align: 1px;
+    animation: beat 2.4s ease-in-out infinite; }
+  #daemon.down i { animation: none; }
+  @keyframes beat { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  .verb { display: block; width: 100%; text-align: right; background: none; border: none;
+    color: var(--dim); font: 300 13px "Avenir Next", Futura, system-ui, sans-serif;
+    letter-spacing: .1em; padding: 5px 0; cursor: pointer; transition: color .15s; }
+  .verb:hover:not(:disabled) { color: var(--epi); }
+  .verb:disabled { color: var(--faint); cursor: default; }
+  .verb small { color: var(--faint); font-size: 10px; margin-right: 8px; }
+  .eco { font-size: 11px; color: var(--dim); padding: 2px 0; letter-spacing: .04em; }
+  .eco b { color: var(--epi); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .eco.save b { color: var(--pro); }
+  .eco small { color: var(--faint); }
+  .ev { font-size: 10.5px; color: var(--faint); padding: 2.5px 0; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; animation: evin .5s ease; }
+  .ev b { color: var(--dim); font-weight: 400; }
+  .ev.warning b { color: var(--pin); }
+  .ev.error b { color: var(--alarm); }
+  @keyframes evin { from { transform: translateX(14px); opacity: 0; } }
+
+  #explorer { position: fixed; left: 84px; top: 108px; bottom: 120px; z-index: 14;
+    width: 252px; overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-width: none; padding-right: 8px; }
+  #explorer::-webkit-scrollbar { display: none; }
+  #explorer h6 { font-size: 8.5px; letter-spacing: .34em; color: var(--faint);
+    text-transform: uppercase; font-weight: 400; margin: 18px 0 6px;
+    cursor: pointer; user-select: none; }
+  #explorer h6:first-child { margin-top: 0; }
+  #explorer h6:hover { color: var(--dim); }
+  #explorer h6 .tri { display: inline-block; margin-right: 7px;
+    transition: transform .15s; }
+  #explorer h6.closed .tri { transform: rotate(-90deg); }
+  #explorer h6.closed + .fold { display: none; }
+  .fold {}
+  .fitem { display: flex; align-items: baseline; gap: 8px; padding: 3.5px 2px;
+    cursor: pointer; color: var(--dim); font-size: 12px; letter-spacing: .03em; }
+  .fitem:hover { color: var(--text); }
+  .fitem.active { color: var(--epi); }
+  .fitem .fn { margin-left: auto; color: var(--faint); font-size: 10px;
+    font-variant-numeric: tabular-nums; flex: none; }
+  .fitem .lbl { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #contents { margin-top: 12px; border-top: 1px solid var(--hair); padding-top: 8px;
+    display: none; }
+  #contents .back { color: var(--faint); font-size: 10px; letter-spacing: .2em;
+    text-transform: uppercase; cursor: pointer; padding-bottom: 6px; display: block; }
+  #contents .back:hover { color: var(--epi); }
+  body.panel-open #explorer { display: none; }
+  #panel { position: fixed; left: 84px; top: 108px; z-index: 21; width: 350px;
+    background: rgba(9, 7, 18, .93); backdrop-filter: blur(7px);
+    border-radius: 10px; padding: 16px 18px; box-shadow: 0 10px 50px rgba(0,0,0,.55);
+    display: none; padding: 4px 0 0; }
+  #panel::before { content: ""; position: absolute; left: -18px; top: 0; bottom: 0;
+    width: 1px; background: linear-gradient(180deg, var(--epi), transparent); }
+  #panel .tier { font-size: 9px; letter-spacing: .4em; text-transform: uppercase; color: var(--sem); }
+  #panel .fadewarn { color: var(--pin); font-size: 10.5px; letter-spacing: .06em; margin-top: 8px; }
+  #panel .surface { margin: 12px 0; font-size: 14.5px; font-weight: 300; line-height: 1.65;
+    max-height: 170px; overflow: auto; word-break: break-word;
+    text-shadow: 0 0 24px rgba(143,231,255,.25); }
+  #panel .meta { color: var(--faint); font-size: 10px; letter-spacing: .06em; margin-bottom: 14px; }
+  #panel .tag { display: inline-block; margin: 0 10px 6px 0; font-size: 9.5px;
+    letter-spacing: .14em; color: var(--dim); text-transform: uppercase; }
+  #panel .tag::before { content: "· "; color: var(--faint); }
+  #panel .actions { display: flex; gap: 26px; }
+  #panel .actions button { background: none; border: none; padding: 4px 0; cursor: pointer;
+    font: 300 12.5px "Avenir Next", Futura, system-ui, sans-serif; letter-spacing: .08em; }
+  #btn-pin { color: var(--pin); } #btn-pin:hover { text-shadow: 0 0 14px var(--pin); }
+  #btn-copy { color: var(--dim); } #btn-copy:hover { color: var(--epi); }
+  #btn-forget { color: var(--pin); } #btn-forget:hover:not(:disabled) { text-shadow: 0 0 14px var(--pin); }
+  #btn-rescue { color: var(--pro); display: none; } #btn-rescue:hover { text-shadow: 0 0 14px var(--pro); }
+  #panel button:disabled { color: var(--faint); cursor: default; }
+  #panel .close { position: absolute; top: 0; right: 0; color: var(--faint);
+    background: none; border: none; cursor: pointer; font-size: 14px; }
+
+  #dropzone { position: fixed; left: 50%; transform: translateX(-50%); bottom: 26px; z-index: 20;
+    padding: 12px 34px; text-align: center; cursor: pointer; border-radius: 999px;
+    border: 1px dashed rgba(186,220,240,.30); transition: all .25s; }
+  #dropzone:hover, #dropzone.drag { border-color: var(--epi);
+    box-shadow: 0 0 40px rgba(143,231,255,.14); }
+  #dropzone .big { font-size: 13px; letter-spacing: .05em; color: var(--dim); }
+  #dropzone .big b { color: var(--text); font-weight: 400; }
+  #dropzone .sub { color: var(--faint); font-size: 9.5px; margin-top: 2px; letter-spacing: .22em;
+    text-transform: uppercase; }
+  #dropzone.busy { border-style: solid; cursor: progress; }
+  #dropzone.busy .big { color: var(--epi); animation: beat 1.2s infinite; }
+  #report { position: fixed; left: 50%; transform: translateX(-50%); bottom: 100px; z-index: 21;
+    display: none; gap: 30px; }
+  #report .chip { font-size: 11px; color: var(--dim); letter-spacing: .08em; }
+  #report .chip b { display: block; text-align: center; font-weight: 200; font-size: 22px;
+    color: var(--epi); font-variant-numeric: tabular-nums; }
+
+  #eegbox { position: fixed; left: 84px; bottom: 30px; z-index: 15; }
+  #eegbox h6 { font-size: 8.5px; letter-spacing: .34em; color: var(--faint);
+    text-transform: uppercase; font-weight: 400; margin-bottom: 6px; }
+  #eegbox h6 b { color: var(--pro); font-weight: 400; margin-left: 16px; }
+
+  #legend { position: fixed; right: 34px; bottom: 30px; z-index: 15; display: flex;
+    flex-direction: column; gap: 5px; align-items: flex-end; }
+  .lg { display: flex; align-items: center; gap: 9px; color: var(--faint);
+    font-size: 9px; letter-spacing: .26em; text-transform: uppercase; }
+  .lg i { width: 6px; height: 6px; border-radius: 50%; }
+  .lg-tier { cursor: pointer; transition: color .15s; }
+  .lg-tier b { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .lg-tier.focused { color: var(--text); }
+  .lg-tier.focused b { color: var(--epi); }
+
+  #toast { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 30;
+    color: var(--epi); font-size: 13px; letter-spacing: .06em; display: none;
+    text-shadow: 0 0 20px rgba(143,231,255,.6); }
+  #tip { position: fixed; z-index: 28; pointer-events: none; display: none;
+    max-width: 300px; padding: 8px 12px; background: rgba(10, 14, 28, .92);
+    border-left: 2px solid var(--epi); font-size: 12px; line-height: 1.5;
+    color: var(--text); backdrop-filter: blur(6px); }
+  #tip .t-tier { font-size: 8.5px; letter-spacing: .3em; text-transform: uppercase;
+    color: var(--sem); display: block; margin-bottom: 2px; }
+  #tip .t-hint { color: var(--pin); font-size: 10px; display: block; margin-top: 3px; }
+  #hint { position: fixed; left: 50%; transform: translateX(-50%); bottom: 88px; z-index: 19;
+    color: var(--faint); font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
+    transition: opacity .6s; }
+  /* responsive: keep the frameless chrome from colliding on small viewports */
+  /* Tiered narrow layout: whatever stops fitting folds behind a burger and
+     slides out as a drawer — nothing ever overlaps. */
+  @media (max-width: 1240px) {
+    #burger-l { display: flex; }
+    #spine { display: none; }
+    #explorer { left: 0; top: 0; bottom: 0; width: min(300px, 84vw); max-height: none;
+      padding: 74px 18px 18px 22px; z-index: 24; margin: 0;
+      background: rgba(9, 13, 20, .97); border-right: 1px solid var(--line, #263140);
+      box-shadow: 14px 0 40px rgba(0,0,0,.45);
+      transform: translateX(-105%); transition: transform .22s ease; }
+    body.menu-l #explorer { transform: none; }
+    body.menu-l::before { content: ""; position: fixed; inset: 0;
+      background: rgba(4, 6, 10, .45); z-index: 23; }
+    #findbox { left: 70px; width: min(280px, 32vw); }
+    #eegbox { left: 20px; width: 200px; }
+    #eegbox canvas { width: 100%; height: 40px; }
+    #panel { width: min(320px, 42vw); }
+    #vitals { gap: 20px; }
+    .stat b { font-size: 24px; }
+  }
+  @media (max-width: 1000px) {
+    #burger-r { display: flex; }
+    #rail { right: 0; top: 0; width: min(260px, 80vw); max-height: none; bottom: 0;
+      padding: 74px 20px 20px 20px; z-index: 24; margin: 0;
+      background: rgba(9, 13, 20, .97); border-left: 1px solid var(--line, #263140);
+      box-shadow: -14px 0 40px rgba(0,0,0,.45);
+      transform: translateX(105%); transition: transform .22s ease; }
+    body.menu-r #rail { transform: none; }
+    body.menu-r::before { content: ""; position: fixed; inset: 0;
+      background: rgba(4, 6, 10, .45); z-index: 23; }
+    #eegbox { display: none; }
+    #legend { display: none; }
+    #vitals { right: 70px; gap: 16px; }
+    #vitals .stat:nth-child(n+4) { display: none; }
+  }
+  @media (max-width: 820px) {
+    #spine { display: none; }
+    #findbox { left: 70px; width: min(240px, 40vw); }
+    #panel { left: 20px; width: min(90vw, 360px); }
+    #dropzone { bottom: 16px; padding: 9px 18px; }
+    #hint { font-size: 9px; padding: 0 14px; text-align: center; }
+    #vitals .stat:nth-child(n+3) { display: none; }
+  }
+  @media (max-height: 700px) {
+    #eegbox { display: none; }
+    #legend { display: none; }
+    #dropzone { bottom: 14px; padding: 8px 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ev, #daemon i, #dropzone.busy .big { animation: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="space"></canvas>
+<div class="grain"></div>
+
+<div id="spine">
+  <div class="word"><b>IAI</b> — the brain that remembers you</div>
+  <div class="dotline"></div>
+  <div class="sig" id="lifecycle">…</div>
+</div>
+
+<button id="burger-l" class="burger" title="memories" aria-label="open memory folders">☰</button>
+<button id="burger-r" class="burger" title="system" aria-label="open system panel">♥</button>
+<div id="findbox">
+  <input id="find" placeholder="find a memory…" autocomplete="off" spellcheck="false">
+  <div id="results"></div>
+</div>
+
+<div id="vitals"></div>
+
+<div id="explorer">
+  <div id="foldtree"></div>
+  <div id="contents"></div>
+</div>
+
+<div id="rail">
+  <div>
+    <h6>Controls</h6>
+    <div id="daemon">subconscious<i></i></div>
+    <button class="verb" id="btn-consolidate"><small>❋</small>sort memories now</button>
+    <button class="verb" id="btn-sleep"><small>◑</small>let it rest</button>
+    <button class="verb" id="btn-wake"><small>◉</small>wake</button>
+    <button class="verb" id="btn-power"><small>⏻</small>wake the subconscious</button>
+    <button class="verb" id="btn-stop" style="display:none"><small>◌</small>rest the subconscious</button>
+  </div>
+  <div>
+    <h6>Working for you</h6>
+    <div id="economy" style="text-align:right"></div>
+  </div>
+  <div>
+    <h6 title="How healthy the memory is right now">Health</h6>
+    <div id="homeostat"></div>
+  </div>
+  <div>
+    <h6>Live activity</h6>
+    <div id="feed"></div>
+  </div>
+</div>
+
+<div id="panel">
+  <button class="close" aria-label="close" onclick="closePanel()">✕</button>
+  <div class="tier" id="p-tier"></div>
+  <div class="fadewarn" id="p-fade"></div>
+  <div class="surface" id="p-surface"></div>
+  <div id="p-tags"></div>
+  <div class="meta mono" id="p-meta"></div>
+  <div class="actions">
+    <button id="btn-pin">☆ pin</button>
+    <button id="btn-copy">⧉ copy</button>
+    <button id="btn-forget">⌛ let it fade</button>
+    <button id="btn-rescue">✚ cancel fading</button>
+  </div>
+</div>
+
+<div id="report"></div>
+<div id="dropzone">
+  <input type="file" id="file" accept=".txt,.md,.csv,.pdf" hidden>
+  <div class="big">drop a file — <b>the brain will study it</b></div>
+  <div class="sub">txt · md · csv · pdf — woven in, never duplicated</div>
+</div>
+
+<div id="eegbox"><h6>Activity <b id="hz">0/min</b> <b id="scope-peak" class="mono"></b></h6><canvas id="eeg" width="300" height="40"></canvas></div>
+
+<div id="legend">
+  <div class="lg lg-tier" data-tier="episodic"><i style="background:#8fe7ff"></i>moments <b id="lg-n-episodic"></b></div>
+  <div class="lg lg-tier" data-tier="semantic"><i style="background:#e79bff"></i>knowledge <b id="lg-n-semantic"></b></div>
+  <div class="lg lg-tier" data-tier="procedural"><i style="background:#a9ffd0"></i>skills <b id="lg-n-procedural"></b></div>
+  <div class="lg"><i style="border:1px solid #ffd166;border-radius:50%"></i>pinned</div>
+  <div class="lg"><i style="background:#4a5668"></i>being forgotten</div>
+</div>
+<div id="toast"></div>
+<div id="tip"></div>
+<div id="hint">grab &amp; spin freely · scroll to zoom · double-click to reset · click a memory or a folder · drop a file to teach</div>
+
+<script>
+"use strict";
+/* A living organ rendered as a volumetric stipple field: the anatomy emerges
+   from tissue density and cortical striations, not from an outline. Pseudo-3D
+   parallax and a slow breath give it body; memories are luminous cells on the
+   substrate; the busier the corpus, the more life inside. */
+const canvas = document.getElementById("space");
+const ctx = canvas.getContext("2d");
+const panel = document.getElementById("panel");
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+/* ---------- anatomy ---------- */
+const OUTLINE = [
+  [.115,.560],[.085,.455],[.105,.340],[.165,.235],[.255,.150],[.370,.092],
+  [.500,.068],[.630,.072],[.745,.105],[.840,.170],[.905,.265],[.930,.375],
+  [.918,.470],[.872,.545],[.905,.590],[.902,.665],[.855,.735],[.775,.768],
+  [.700,.752],[.652,.700],[.610,.720],[.540,.716],[.455,.700],[.360,.678],
+  [.255,.648],[.165,.610]
+];
+const HIPPO = { cx: .46, cy: .46, rx: .175, ry: .115, rot: -0.25 };
+const CEREB = { cx: .775, cy: .675, rx: .105, ry: .078, rot: 0.1 };
+let bx = 0, by = 0, bs = 1;
+function layoutBrain() {
+  bs = Math.min(W * 0.62, H * 0.94);
+  bx = W * 0.5 - 0.50 * bs;
+  by = H * 0.52 - 0.42 * bs;
+}
+function inPoly(x, y) {
+  let inside = false;
+  for (let i = 0, j = OUTLINE.length - 1; i < OUTLINE.length; j = i++) {
+    const [xi, yi] = OUTLINE[i], [xj, yj] = OUTLINE[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+function inEllipse(x, y, e) {
+  const c = Math.cos(e.rot), s = Math.sin(e.rot);
+  const dx = x - e.cx, dy = y - e.cy;
+  const u = (dx * c + dy * s) / e.rx, v = (-dx * s + dy * c) / e.ry;
+  return u * u + v * v <= 1;
+}
+function edgeDist(x, y) {
+  let best = 1e9;
+  for (let i = 0, j = OUTLINE.length - 1; i < OUTLINE.length; j = i++) {
+    const [xi, yi] = OUTLINE[i], [xj, yj] = OUTLINE[j];
+    const dx = xj - xi, dy = yj - yi;
+    const t = Math.max(0, Math.min(1, ((x - xi) * dx + (y - yi) * dy) / (dx * dx + dy * dy)));
+    const px = xi + t * dx - x, py = yi + t * dy - y;
+    best = Math.min(best, px * px + py * py);
+  }
+  return Math.sqrt(best);
+}
+function hash32(str, seed) {
+  let h = 2166136261 ^ seed;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) / 4294967296;
+}
+
+/* ---------- volumetric tissue (stipple field) ---------- */
+let tissue = [];
+function foldField(x, y) {
+  // gyri wrap the form: angularly-warped concentric bands around the organ's
+  // center, like cortical folds following the mantle's curvature
+  const dx = x - 0.50, dy = (y - 0.40) * 1.25;
+  const r = Math.hypot(dx, dy);
+  const th = Math.atan2(dy, dx);
+  return Math.sin(r * 42 + 2.4 * Math.sin(th * 3.2 + r * 9) + 1.1 * Math.sin(th * 7 - r * 5));
+}
+function buildTissue() {
+  tissue = [];
+  const target = 9000;
+  let guard = 0;
+  while (tissue.length < target && guard++ < target * 22) {
+    const x = .07 + Math.random() * .90, y = .04 + Math.random() * .76;
+    if (!inPoly(x, y)) continue;
+    const ed = edgeDist(x, y);
+    const fold = foldField(x, y);
+    const inCore = inEllipse(x, y, HIPPO), inCb = inEllipse(x, y, CEREB);
+    let w = 0.14;
+    if (ed < 0.085) w += 0.6 * (1 - ed / 0.085);             // cortical mantle
+    if (Math.abs(fold) > 0.45) w += 1.1 * (Math.abs(fold) - 0.45) / 0.55; // striations
+    if (inCore) w += 0.35 * (0.6 + 0.4 * Math.random());     // hippocampal density
+    if (inCb) w += 0.55;                                      // cerebellum
+    if (Math.random() > w) continue;
+    // hue: violet mantle -> cyan core
+    const coreT = inCore ? 1 : Math.max(0, 1 - Math.hypot(x - HIPPO.cx, y - HIPPO.cy) / .42);
+    const zm = zmax(x, y);
+    const mantle = ed < 0.085;
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    tissue.push({
+      x, y,
+      // the mantle hugs the surface shell; interior tissue fills the volume
+      z3: mantle ? sign * zm * (0.72 + 0.28 * Math.random())
+                 : (2 * Math.random() - 1) * zm * 0.92,
+      a: .22 + Math.random() * .55 * (0.5 + w * .8),
+      hue: inCb ? 150 : 265 - coreT * 75,   // cerebellum green, mantle violet, core cyan
+      ph: Math.random() * 7,
+      big: Math.random() < .10,
+    });
+  }
+}
+function brainPath() {
+  ctx.beginPath();
+  const first = projPt(OUTLINE[0]);
+  ctx.moveTo(first[0], first[1]);
+  for (let i = 1; i <= OUTLINE.length; i++) {
+    const prev = projPt(OUTLINE[(i - 1) % OUTLINE.length]);
+    const cur = projPt(OUTLINE[i % OUTLINE.length]);
+    ctx.quadraticCurveTo(prev[0], prev[1], (prev[0] + cur[0]) / 2, (prev[1] + cur[1]) / 2);
+  }
+  ctx.closePath();
+}
+let _projNow = 0;
+function projPt(p) { return proj(p[0], p[1], 0, _projNow); }
+
+/* a real volume: free trackball rotation + perspective + breath; zoom/pan on top */
+const VIEW = { k: 1, ox: 0, oy: 0 };
+// Orientation is a 3x3 matrix (row-major), not Euler angles: it tumbles freely
+// in any direction with no gimbal lock and no pitch clamp. vx/vy carry the last
+// drag step (screen px/frame) so a flick keeps spinning.
+const ROT = { m: [1,0,0, 0,1,0, 0,0,1], vx: 0, vy: 0 };
+const PERSP = 1.9;
+const ROT_SPEED = 0.0062;
+function rotMul(a, b) {                 // a·b, row-major 3x3
+  const r = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+    r[i*3+j] = a[i*3]*b[j] + a[i*3+1]*b[3+j] + a[i*3+2]*b[6+j];
+  return r;
+}
+function rotOrtho(m) {                  // re-orthonormalize: kills accumulated drift
+  let x = [m[0],m[1],m[2]], y = [m[3],m[4],m[5]];
+  const nx = Math.hypot(x[0],x[1],x[2]) || 1; x = [x[0]/nx,x[1]/nx,x[2]/nx];
+  const d = y[0]*x[0]+y[1]*x[1]+y[2]*x[2]; y = [y[0]-d*x[0],y[1]-d*x[1],y[2]-d*x[2]];
+  const ny = Math.hypot(y[0],y[1],y[2]) || 1; y = [y[0]/ny,y[1]/ny,y[2]/ny];
+  const z = [x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]];
+  return [x[0],x[1],x[2], y[0],y[1],y[2], z[0],z[1],z[2]];
+}
+// Tumble by a screen-space drag: left-multiply camera-space rotations so the
+// surface always follows the cursor, no matter how the brain is already turned.
+function tumble(ax, ay) {
+  const cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay);
+  const Rx = [1,0,0, 0,cx,-sx, 0,sx,cx];
+  const Ry = [cy,0,sy, 0,1,0, -sy,0,cy];
+  ROT.m = rotOrtho(rotMul(rotMul(Ry, Rx), ROT.m));
+}
+function zmax(x, y) {
+  // half-thickness of the organ at (x,y): full in the middle, tapering to
+  // the outline — the silhouette revolved into a volume
+  const ed = edgeDist(x, y);
+  return 0.34 * Math.sqrt(Math.min(Math.max(ed, 0), 0.18) / 0.18);
+}
+function proj(x, y, z3, now) {
+  const breath = REDUCED ? 1 : 1 + 0.008 * Math.sin(now / 2400);
+  const dx = x - 0.5, dy = y - 0.42, dz = z3 || 0;
+  const m = ROT.m;
+  const rx = m[0]*dx + m[1]*dy + m[2]*dz;
+  const ry = m[3]*dx + m[4]*dy + m[5]*dz;
+  const rz = m[6]*dx + m[7]*dy + m[8]*dz;
+  const sc = PERSP / (PERSP + rz);
+  const X0 = bx + (0.5 + rx * sc * breath) * bs;
+  const Y0 = by + (0.42 + ry * sc * breath) * bs;
+  return [(X0 - W / 2) * VIEW.k + W / 2 + VIEW.ox,
+          (Y0 - H / 2) * VIEW.k + H / 2 + VIEW.oy, sc, rz];
+}
+function depthFade(sc) {
+  return Math.max(0.16, Math.min(1, 0.35 + (sc - 0.85) * 2.6));
+}
+function frontality() {
+  // how face-on the view is: 1 when the depth axis is unrotated, →0 edge-on
+  return Math.abs(ROT.m[8]);
+}
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const factor = Math.exp(-e.deltaY * 0.0016);
+  const k2 = Math.min(7, Math.max(0.5, VIEW.k * factor));
+  const f = k2 / VIEW.k;
+  // keep the point under the cursor fixed while zooming
+  const cxs = e.clientX - W / 2, cys = e.clientY - H / 2;
+  VIEW.ox = cxs - (cxs - VIEW.ox) * f;
+  VIEW.oy = cys - (cys - VIEW.oy) * f;
+  VIEW.k = k2;
+  dismissHint(false);
+}, { passive: false });
+let panDrag = null;
+canvas.style.cursor = "grab";
+canvas.addEventListener("mousedown", e => {
+  panDrag = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY,
+              ox: VIEW.ox, oy: VIEW.oy, moved: false,
+              pan: e.shiftKey || e.button === 1 };
+  ROT.vx = 0; ROT.vy = 0;                       // grab kills any leftover spin
+  canvas.style.cursor = "grabbing";
+});
+window.addEventListener("mouseup", () => { panDrag = null; canvas.style.cursor = "grab"; });
+canvas.addEventListener("dblclick", e => {
+  if (!pick(e.clientX, e.clientY)) {
+    VIEW.k = 1; VIEW.ox = 0; VIEW.oy = 0;
+    ROT.m = [1,0,0, 0,1,0, 0,0,1]; ROT.vx = 0; ROT.vy = 0;
+  }
+});
+
+/* ---------- luminous sprites (cheap, soft glow) ---------- */
+function makeSprite(color, size) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  grad.addColorStop(0, "rgba(255,255,255,.95)");
+  grad.addColorStop(0.25, color);
+  grad.addColorStop(1, "transparent");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  return c;
+}
+function makeCrisp(color, size) {
+  // Tight core, almost no halo: a dense layer (the cortex band) must read
+  // as a dotted outline — overlapping soft halos add up into a glowing wall.
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  grad.addColorStop(0, "rgba(255,255,255,.95)");
+  grad.addColorStop(0.4, color);
+  grad.addColorStop(0.72, "rgba(231,155,255,.12)");
+  grad.addColorStop(1, "transparent");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  return c;
+}
+const SPRITE = {
+  episodic: makeSprite("rgba(143,231,255,.85)", 64),
+  semantic: makeCrisp("rgba(231,155,255,.9)", 32),
+  procedural: makeSprite("rgba(169,255,208,.85)", 64),
+  pulse: makeSprite("rgba(230,250,255,.95)", 32),
+  contra: makeSprite("rgba(255,107,125,.9)", 32),
+};
+
+/* ---------- state ---------- */
+const TIER_COLOR = { episodic: "#8fe7ff", semantic: "#e79bff", procedural: "#a9ffd0" };
+const nodes = [], nodeById = new Map();
+let edges = [], pulses = [], flashes = [];
+let selected = null, hover = null, crosshair = null;
+let monoFocus = null;  // monotropism: the single deep tunnel — node + its direct edges
+let eegBuf = new Array(150).fill(0), eegEnergy = 0.15;
+
+async function j(url, opts) { const r = await fetch(url, opts); return r.json(); }
+// The ONE escaper every innerHTML sink routes user/derived content through —
+// per-sink inline replaces depend on every future sink remembering to add one.
+function esc(s) {
+  return String(s ?? "").replace(/[<>&"']/g, c => (
+    { "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+function localTime(ts) {
+  try { return new Date(ts).toLocaleTimeString([], { hour12: false }); }
+  catch (e) { return (ts || "").slice(11, 19); }
+}
+function localDate(ts) {
+  if (!ts) return "?";
+  try {
+    const d = new Date(ts);
+    return d.toLocaleDateString([], { month: "short", day: "numeric" }) +
+           " " + d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" });
+  } catch (e) { return String(ts).slice(0, 16); }
+}
+
+function regionSample(n) {
+  for (let k = 0; k < 60; k++) {
+    const u = hash32(n.id, 11 + k * 7), v = hash32(n.id, 29 + k * 13);
+    let x, y, ok = false;
+    if (n.tier === "procedural") {
+      const a = u * Math.PI * 2, r = Math.sqrt(v);
+      x = CEREB.cx + Math.cos(a) * CEREB.rx * r;
+      y = CEREB.cy + Math.sin(a) * CEREB.ry * r;
+      ok = inPoly(x, y);
+    } else if (n.tier === "semantic") {
+      x = .09 + u * .84; y = .06 + v * .70;
+      ok = inPoly(x, y) && edgeDist(x, y) < .055 && !inEllipse(x, y, CEREB);
+    } else {
+      const a = u * Math.PI * 2, r = Math.sqrt(v);
+      const c = Math.cos(HIPPO.rot), s = Math.sin(HIPPO.rot);
+      const ex = Math.cos(a) * HIPPO.rx * r, ey = Math.sin(a) * HIPPO.ry * r;
+      x = HIPPO.cx + ex * c - ey * s; y = HIPPO.cy + ex * s + ey * c;
+      ok = inPoly(x, y);
+    }
+    if (ok) return [x, y];
+  }
+  return [HIPPO.cx, HIPPO.cy];
+}
+function place(n) {
+  const [x, y] = regionSample(n);
+  n.nx = x; n.ny = y;
+  const zm = zmax(x, y), h = hash32(n.id, 3), sgn = hash32(n.id, 17) < 0.5 ? -1 : 1;
+  if (n.tier === "semantic") n.z3 = sgn * zm * (0.82 + 0.18 * h);      // cortex shell
+  else if (n.tier === "procedural") n.z3 = (2 * h - 1) * zm * 0.5;     // cerebellum body
+  else n.z3 = (2 * h - 1) * zm * 0.55;                                  // deep structures
+}
+
+function rankSizer(ns) {
+  // Size is a RELATIVE channel and a hub is an OUTLIER: a value shared by
+  // a whole class of nodes (default 0.0s, a flat 0.5 tier, any level with
+  // >5% of the corpus) earns the base size — only genuinely rare high
+  // values grow. Works untouched from a fresh store to a recomputed one.
+  const live = ns.filter(n => !n.ghost);
+  const freq = new Map();
+  for (const n of live) {
+    const v = Math.max(n.centrality || 0, 0);
+    freq.set(v, (freq.get(v) || 0) + 1);
+  }
+  const cs = live.map(n => Math.max(n.centrality || 0, 0)).sort((a, b) => a - b);
+  const N = cs.length;
+  return (c) => {
+    const v = Math.max(c || 0, 0);
+    if (!N || (freq.get(v) || 0) / N > 0.05) return 3.2;
+    let a = 0, b = N;
+    while (a < b) { const m = (a + b) >> 1; if (cs[m] <= v) a = m + 1; else b = m; }
+    const p = a / N;
+    return 2.4 + p * p * 6.4;
+  };
+}
+
+function mergeGraph(g) {
+  const sizeOf = rankSizer(g.nodes);
+  const keep = new Set();
+  for (const n of g.nodes) {
+    keep.add(n.id);
+    let node = nodeById.get(n.id);
+    if (!node) {
+      node = { born: performance.now() };
+      nodeById.set(n.id, node); nodes.push(node);
+      Object.assign(node, n); place(node);
+      if (!n.ghost) flashes.push({ nx: node.nx, ny: node.ny, t0: performance.now(), col: TIER_COLOR[n.tier] });
+    } else Object.assign(node, n);
+    node.r = sizeOf(n.centrality);
+  }
+  for (let i = nodes.length - 1; i >= 0; i--)
+    if (!keep.has(nodes[i].id) && !nodes[i].fromSearch) {
+      nodeById.delete(nodes[i].id); nodes.splice(i, 1);
+    }
+  edges = g.edges.filter(e => nodeById.has(e.src) && nodeById.has(e.dst))
+                 .map(e => ({ ...e, a: nodeById.get(e.src), b: nodeById.get(e.dst) }));
+}
+function ctrlPt(ax, ay, bxp, byp, ida, idb) {
+  const mx = (ax + bxp) / 2, my = (ay + byp) / 2;
+  const dx = bxp - ax, dy = byp - ay;
+  const len = Math.sqrt(dx * dx + dy * dy) + 0.01;
+  const side = hash32(ida + idb, 5) - 0.5;
+  const bow = side * Math.min(len * 0.5, bs * 0.10);
+  return [mx - dy / len * bow, my + dx / len * bow];
+}
+function spawnPulse(burst) {
+  if (!edges.length || REDUCED) return;
+  const cap = Math.min(70, 10 + Math.floor(edges.length / 3));
+  const n = burst ? 9 : 1;
+  for (let i = 0; i < n && pulses.length < cap; i++) {
+    const e = edges[(Math.random() * edges.length) | 0];
+    pulses.push({ e, t: 0, sp: 0.004 + Math.random() * 0.008, back: Math.random() < .5 });
+  }
+}
+
+/* ---------- drawing ---------- */
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  layoutBrain(); buildTissue();
+  for (const n of nodes) place(n);
+}
+window.addEventListener("resize", resize);
+
+function draw(now) {
+  ctx.clearRect(0, 0, W, H);
+  _projNow = now;
+
+  // the organ's body: an unclipped glow (the silhouette is only honest
+  // face-on; rotated, the point cloud itself carries the form)
+  const F = frontality();
+  const [hx, hy] = proj(HIPPO.cx, HIPPO.cy, 0, now);
+  let g = ctx.createRadialGradient(hx, hy, 10, hx, hy, bs * .52 * VIEW.k);
+  g.addColorStop(0, "rgba(38,52,96,.38)");
+  g.addColorStop(.5, "rgba(26,28,62,.20)");
+  g.addColorStop(1, "transparent");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  g = ctx.createRadialGradient(hx, hy, 4, hx, hy, bs * .24 * VIEW.k);
+  g.addColorStop(0, "rgba(143,231,255,.10)");
+  g.addColorStop(1, "transparent");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // rim light only near the frontal pose where the silhouette is true
+  if (F > 0.55) {
+    ctx.globalAlpha = (F - 0.55) / 0.45;
+    brainPath();
+    ctx.strokeStyle = "rgba(150,200,255,.055)"; ctx.lineWidth = 16; ctx.stroke();
+    brainPath();
+    ctx.strokeStyle = "rgba(170,220,255,.16)"; ctx.lineWidth = 3.2; ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // instrument: one arc scale, left side (asymmetric, not a grid)
+  ctx.strokeStyle = "rgba(186,220,240,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(hx, hy, bs * .56, Math.PI * .72, Math.PI * 1.28); ctx.stroke();
+  for (let i = 0; i <= 10; i++) {
+    const a = Math.PI * (.72 + .056 * i);
+    const r1 = bs * .56, r2 = r1 + (i % 5 === 0 ? 10 : 5);
+    ctx.beginPath();
+    ctx.moveTo(hx + Math.cos(a) * r1, hy + Math.sin(a) * r1);
+    ctx.lineTo(hx + Math.cos(a) * r2, hy + Math.sin(a) * r2);
+    ctx.stroke();
+  }
+
+  // volumetric tissue (grain scales gently with zoom)
+  const grain = Math.min(VIEW.k, 2.4);
+  for (const p of tissue) {
+    const [x, y, sc] = proj(p.x, p.y, p.z3, now);
+    if (x < -8 || x > W + 8 || y < -8 || y > H + 8) continue;
+    const tw = REDUCED ? .7 : .55 + .45 * Math.sin(now / 1400 + p.ph);
+    const a = p.a * tw * depthFade(sc);
+    const gsz = grain * (0.55 + 0.45 * sc);
+    if (p.big) {
+      ctx.fillStyle = `hsla(${p.hue}, 85%, 80%, ${a * .95})`;
+      ctx.fillRect(x, y, 2.2 * gsz, 2.2 * gsz);
+    } else {
+      ctx.fillStyle = `hsla(${p.hue}, 75%, 74%, ${a})`;
+      ctx.fillRect(x, y, 1.5 * gsz, 1.5 * gsz);
+    }
+  }
+
+  // project all memory cells once; edges reuse, cells draw far-to-near
+  for (const a of nodes) {
+    const pr = proj(a.nx, a.ny, a.z3 || 0, now);
+    a._x = pr[0]; a._y = pr[1]; a._s = pr[2]; a._d = pr[3];
+  }
+
+  // synapses: whisper-quiet unless carrying a pulse or touching selection
+  for (const e of edges) {
+    if (e.a.ghost || e.b.ghost) continue;
+    const ax = e.a._x, ay = e.a._y, bxp = e.b._x, byp = e.b._y;
+    if (ax === undefined || bxp === undefined) continue;
+    const c = ctrlPt(ax, ay, bxp, byp, e.a.id, e.b.id);
+    // monotropism: only the tunnel's own synapses carry current; the rest go dark
+    const inTunnel = !monoFocus || (monoFocus.has(e.a.id) && monoFocus.has(e.b.id));
+    if (monoFocus && !inTunnel) continue;
+    ctx.globalAlpha = Math.min(depthFade(e.a._s), depthFade(e.b._s));
+    const active = e.a === selected || e.b === selected || e.a === hover || e.b === hover
+                   || (monoFocus && inTunnel);
+    if (e.type === "contradicts") {
+      ctx.strokeStyle = `rgba(255,107,125,${active ? .7 : .30})`;
+      ctx.lineWidth = 1.1; ctx.setLineDash([3, 6]);
+    } else if (e.type === "schema_instance_of") {
+      ctx.strokeStyle = `rgba(231,155,255,${active ? .30 : .035})`;
+      ctx.lineWidth = .6; ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = `rgba(143,231,255,${active ? .45 : .06})`;
+      ctx.lineWidth = active ? 1.2 : .8; ctx.setLineDash([]);
+    }
+    ctx.beginPath(); ctx.moveTo(ax, ay);
+    ctx.quadraticCurveTo(c[0], c[1], bxp, byp); ctx.stroke();
+    e._c = c; e._a = [ax, ay]; e._b = [bxp, byp];
+  }
+  ctx.globalAlpha = 1;
+  ctx.setLineDash([]);
+
+  // action potentials
+  for (let i = pulses.length - 1; i >= 0; i--) {
+    const p = pulses[i]; p.t += p.sp;
+    if (p.t >= 1 || !p.e._c) { pulses.splice(i, 1); continue; }
+    const t = p.back ? 1 - p.t : p.t;
+    const [ax, ay] = p.e._a, [bxp, byp] = p.e._b, c = p.e._c;
+    const it = 1 - t;
+    const x = it * it * ax + 2 * it * t * c[0] + t * t * bxp;
+    const y = it * it * ay + 2 * it * t * c[1] + t * t * byp;
+    const contra = p.e.type === "contradicts";
+    const spr = contra ? SPRITE.contra : SPRITE.pulse;
+    ctx.globalAlpha = .9;
+    ctx.drawImage(spr, x - 7, y - 7, 14, 14);
+    ctx.globalAlpha = 1;
+  }
+
+  // memory cells: painter's order, deepest first
+  const zorder = nodes.slice().sort((n1, n2) => (n2._d || 0) - (n1._d || 0));
+  for (const a of zorder) {
+    const x = a._x, y = a._y;
+    const dfade = depthFade(a._s || 1);
+    const age = (now - a.born) / 1000;
+    const spawn = age < 1.4 ? (1.4 - age) / 1.4 : 0;
+
+    if (a.ghost) {
+      const gr = Math.max(a.r * Math.sqrt(VIEW.k), 2.6);
+      a._r = gr;
+      const fl = REDUCED ? .5 : .3 + .3 * Math.sin(now / 130 + x);
+      ctx.strokeStyle = `rgba(122,139,160,${fl})`; ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.arc(x, y, gr, 0, 7); ctx.stroke();
+      ctx.setLineDash([]);
+      if (!REDUCED && Math.random() < .05) {
+        ctx.fillStyle = "rgba(122,139,160,.5)";
+        ctx.fillRect(x + (Math.random() - .5) * 8, y - Math.random() * 14, 1, 1);
+      }
+      continue;
+    }
+
+    const tw = REDUCED ? 1 : 0.86 + 0.14 * Math.sin(now / 800 + x * 0.11);
+    const hintFl = a.hinted && !REDUCED ? .55 + .45 * Math.sin(now / 220 + y) : 1;
+    const r = Math.max(a.r * Math.sqrt(VIEW.k) * tw * (a._s || 1) + spawn * 10, 1.4);
+    a._r = r;
+    const spr = SPRITE[a.tier] || SPRITE.episodic;
+    const S = a.tier === "semantic" ? r * 2.7 : r * 5.2;
+    let focusDim = tierFocus && a.tier !== tierFocus ? 0.10 : 1;
+    if (folderFocus) focusDim = folderFocus.has(a.id) ? 1 : 0.08;
+    if (monoFocus) focusDim = monoFocus.has(a.id) ? 1 : 0.04;
+    ctx.globalAlpha = (a === selected || a === hover ? 1 : .88) * hintFl * focusDim * dfade;
+    ctx.drawImage(spr, x - S / 2, y - S / 2, S, S);
+    ctx.globalAlpha = 1;
+    if (a.hinted) {
+      ctx.strokeStyle = "rgba(255,209,102,.75)"; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
+      ctx.beginPath(); ctx.arc(x, y, r + 6, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (a.pinned) {
+      ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(x, y, r + 5, 0, 7); ctx.stroke();
+    }
+    if (a === selected) {
+      ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x, y, r + 9 + Math.sin(now / 200) * 2, 0, 7); ctx.stroke();
+    }
+  }
+
+  // captions: the map stays readable — hubs are always named, everything
+  // else earns a name as you zoom in (semantic zoom)
+  const labelBudget = VIEW.k < 1.25 ? 10 : VIEW.k < 2 ? 26 : VIEW.k < 3.2 ? 70 : 999;
+  const byImportance = nodes.filter(n => !n.ghost && (n._s || 1) > 0.97
+                                      && n._x >= 0 && n._x <= W && n._y >= 0 && n._y <= H)
+                            .sort((a, b) => (b._r || 0) - (a._r || 0));
+  ctx.font = "300 10.5px 'Avenir Next', Futura, system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  const taken = [];
+  const usedText = new Set();
+  let labeled = 0;
+  for (const a of byImportance) {
+    if (labeled >= labelBudget) break;
+    if (a === hover || a === selected) continue;
+    const sig = (a.surface || "").slice(0, 32);
+    if (usedText.has(sig)) continue;
+    usedText.add(sig);
+    const lx = a._x + (a._r || 3) + 7, ly = a._y;
+    if (taken.some(([tx, ty]) => Math.abs(tx - lx) < 130 && Math.abs(ty - ly) < 13)) continue;
+    taken.push([lx, ly]);
+    ctx.fillStyle = "rgba(190, 214, 230, .52)";
+    ctx.fillText(snippet(a.surface, VIEW.k >= 2 ? 44 : 26), lx, ly);
+    labeled++;
+  }
+
+  if (!nodes.length && graphLoaded) {
+    ctx.font = "200 22px 'Avenir Next', Futura, system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.fillStyle = "rgba(190,214,230,.65)";
+    const [ex, ey] = proj(.5, .40, .5, now);
+    ctx.fillText("the brain is empty", ex, ey - 14);
+    ctx.font = "300 12px 'Avenir Next', Futura, system-ui, sans-serif";
+    ctx.fillStyle = "rgba(143,231,255,.55)";
+    ctx.fillText("drop a file below — it will study, weave, and remember", ex, ey + 16);
+    ctx.textAlign = "start";
+  }
+
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const f = flashes[i], t = (now - f.t0) / 900;
+    if (t >= 1) { flashes.splice(i, 1); continue; }
+    const [x, y] = proj(f.nx, f.ny, .5, now);
+    ctx.strokeStyle = f.col; ctx.globalAlpha = (1 - t) * .8; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(x, y, 6 + t * 46, 0, 7); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  if (crosshair) {
+    const t = (now - crosshair.t0) / 1200;
+    if (t >= 1) crosshair = null;
+    else {
+      const n = crosshair.n, rr = 40 * (1 - t) + 12;
+      ctx.strokeStyle = `rgba(255,255,255,${.9 - t * .7})`; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(n._x, n._y, rr, 0, 7); ctx.stroke();
+      for (const a of [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2]) {
+        ctx.beginPath();
+        ctx.moveTo(n._x + Math.cos(a) * (rr + 6), n._y + Math.sin(a) * (rr + 6));
+        ctx.lineTo(n._x + Math.cos(a) * (rr - 4), n._y + Math.sin(a) * (rr - 4));
+        ctx.stroke();
+      }
+    }
+  }
+
+  drawEEG(now);
+}
+
+const eegCanvas = document.getElementById("eeg");
+const ectx = eegCanvas.getContext("2d");
+// Oscilloscope of the REAL signal (HIPPEA: raw, precise, unsmoothed). The
+// trace is driven by actual activity — action potentials riding real edges
+// plus the live event rate — not a decorative sine. Crisp 1px line, exact
+// graticule, no glow that would blur the reading.
+let eegPeak = 0;
+function drawEEG(now) {
+  // sample = real action potentials this frame + a decaying event impulse
+  eegEnergy = Math.max(0, eegEnergy * 0.94);
+  const sample = Math.min(1, pulses.length / 24 + eegEnergy);
+  eegBuf.push(sample);
+  if (eegBuf.length > 150) eegBuf.shift();
+  eegPeak = Math.max(sample, eegPeak * 0.98);
+  const w = eegCanvas.width, h = eegCanvas.height;
+  ectx.clearRect(0, 0, w, h);
+  // graticule: precise divisions, faint
+  ectx.strokeStyle = "rgba(169,255,208,.10)"; ectx.lineWidth = 1;
+  ectx.beginPath();
+  for (let gx = 0; gx <= w; gx += w / 6) { ectx.moveTo(gx, 0); ectx.lineTo(gx, h); }
+  ectx.moveTo(0, h - 1); ectx.lineTo(w, h - 1); ectx.stroke();
+  // trace: sharp, baseline at the bottom (a rate meter, not a bipolar wave)
+  ectx.strokeStyle = "rgba(169,255,208,.9)"; ectx.lineWidth = 1;
+  ectx.beginPath();
+  eegBuf.forEach((sv, i) => {
+    const x = (i / 150) * w, y = h - 1 - sv * (h - 3);
+    i ? ectx.lineTo(x, y) : ectx.moveTo(x, y);
+  });
+  ectx.stroke();
+  // peak-hold tick — an exact instrument readout
+  const py = h - 1 - eegPeak * (h - 3);
+  ectx.strokeStyle = "rgba(143,231,255,.6)";
+  ectx.beginPath(); ectx.moveTo(0, py); ectx.lineTo(w, py); ectx.stroke();
+  const pk = document.getElementById("scope-peak");
+  if (pk) pk.textContent = eegPeak > 0.02 ? "peak " + (eegPeak * 100 | 0) + "%" : "";
+}
+
+let lastInteract = performance.now();
+for (const ev of ["pointermove", "pointerdown", "wheel", "keydown", "touchstart"])
+  addEventListener(ev, () => { lastInteract = performance.now(); }, { passive: true });
+
+function loop(now) {
+  if (document.hidden) { setTimeout(() => requestAnimationFrame(loop), 900); return; }
+  // Watching without touching the mouse is a real mode: ambient stays a
+  // smooth ~30fps (half the cost of active), near-zero only when hidden.
+  const idle = now - lastInteract > 6000;
+  if (!REDUCED) {
+    // inertia always decays (no stale leftover velocity kicking on re-activation)
+    if (!panDrag) {
+      if (Math.abs(ROT.vx) > 0.01 || Math.abs(ROT.vy) > 0.01) {
+        tumble(ROT.vy * ROT_SPEED, ROT.vx * ROT_SPEED);  // flick keeps spinning
+        ROT.vx *= 0.90; ROT.vy *= 0.90;
+      } else if (idle) {
+        tumble(0, 0.0022);                                // slow turntable while idle
+      }
+    }
+  }
+  const rate = idle ? 0.04 : Math.min(0.5, 0.06 + edges.length / 350);
+  if (!REDUCED && Math.random() < rate) spawnPulse(false);
+  draw(now);
+  if (idle) setTimeout(() => requestAnimationFrame(loop), 33);
+  else requestAnimationFrame(loop);
+}
+
+/* ---------- interaction ---------- */
+const tip = document.getElementById("tip");
+function snippet(text, n) {
+  const clean = (text || "").replace(/[#*`>|_~\[\]]+/g, " ").replace(/\s+/g, " ").trim();
+  return clean.length > n ? clean.slice(0, n - 1) + "…" : clean;
+}
+function dismissHint(persist) {
+  const h = document.getElementById("hint");
+  if (h && h.style.opacity !== "0") {
+    h.style.opacity = "0";
+    setTimeout(() => { if (h.parentNode) h.style.display = "none"; }, 800);
+    if (persist) { try { localStorage.setItem("iai-hint-done", "1"); } catch (e) {} }
+  }
+}
+if ((() => { try { return localStorage.getItem("iai-hint-done"); } catch (e) { return null; } })())
+  document.getElementById("hint").remove();
+
+canvas.addEventListener("mousemove", ev => {
+  if (panDrag) {
+    const dx = ev.clientX - panDrag.x, dy = ev.clientY - panDrag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) panDrag.moved = true;
+    if (panDrag.moved && !panDrag.pan) {
+      const ix = ev.clientX - panDrag.lx, iy = ev.clientY - panDrag.ly;  // step since last frame
+      tumble(iy * ROT_SPEED, ix * ROT_SPEED);
+      ROT.vx = ix; ROT.vy = iy;                    // carry velocity for the flick
+      panDrag.lx = ev.clientX; panDrag.ly = ev.clientY;
+      canvas.style.cursor = "grabbing";
+      tip.style.display = "none";
+      return;
+    } else if (panDrag.moved) {
+      VIEW.ox = panDrag.ox + dx; VIEW.oy = panDrag.oy + dy;
+      canvas.style.cursor = "grabbing";
+      tip.style.display = "none";
+      return;
+    }
+  }
+  hover = pick(ev.clientX, ev.clientY);
+  canvas.style.cursor = hover ? "pointer" : "grab";
+  if (hover) {
+    tip.innerHTML =
+      `<span class="t-tier">${esc(hover.tier)}${hover.pinned ? " · pinned" : ""}</span>` +
+      esc(snippet(hover.surface, 120)) +
+      (hover.ghost ? `<span class="t-hint">dissolving — click to rescue</span>`
+       : hover.hinted ? `<span class="t-hint">fading — click to rescue</span>` : "");
+    tip.style.display = "block";
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    tip.style.left = Math.min(ev.clientX + 16, W - tw - 12) + "px";
+    tip.style.top = Math.min(ev.clientY + 14, H - th - 12) + "px";
+  } else tip.style.display = "none";
+});
+canvas.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+canvas.addEventListener("click", ev => {
+  if (panDrag && panDrag.moved) return;
+  dismissHint();
+  selected = pick(ev.clientX, ev.clientY);
+  if (selected) { enterTunnel(selected); showPanel(selected); }
+  else { closePanel(); }
+});
+function pick(x, y) {
+  let best = null, bd = 1e9;
+  for (const a of nodes) {
+    if (a._x === undefined) continue;
+    const d = (a._x - x) ** 2 + (a._y - y) ** 2;
+    if (d < Math.max((a._r || a.r) + 8, 13) ** 2 && d < bd) { bd = d; best = a; }
+  }
+  return best;
+}
+function showPanel(n) {
+  const TIER_PLAIN = { episodic: "moment", semantic: "knowledge", procedural: "skill" };
+  document.getElementById("p-tier").textContent =
+    (TIER_PLAIN[n.tier] || n.tier) + (n.pinned ? " · pinned" : "");
+  document.getElementById("p-fade").textContent =
+    n.ghost ? "◍ dissolving — erased for good after the retention window"
+    : n.hinted ? "◔ fading — queued for forgetting by your hint" : "";
+  document.getElementById("p-surface").textContent = n.surface || "(empty)";
+  document.getElementById("p-meta").textContent =
+    localDate(n.created_at) +
+    (n.last_reviewed ? " · reviewed " + localDate(n.last_reviewed) : "") +
+    "";
+  document.getElementById("p-tags").innerHTML =
+    (n.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join("");
+  const pBtn = document.getElementById("btn-pin");
+  pBtn.textContent = n.pinned ? "★ unpin" : "☆ pin";
+  pBtn.onclick = async () => {
+    const r = await j("/api/pin", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: n.id, on: !n.pinned }) });
+    if (r.status === "pinned" || r.status === "unpinned") {
+      n.pinned = r.status === "pinned";
+      toast(n.pinned ? "pinned — protected from being forgotten"
+                     : "unpinned — can be forgotten again");
+      showPanel(n);
+    } else toast(humanStatus(r));
+  };
+  const cBtn = document.getElementById("btn-copy");
+  cBtn.onclick = async () => {
+    let text = n.surface || "";
+    try {
+      const full = await j("/api/surface", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: n.id }) });
+      if (full.surface) text = full.surface;
+    } catch (e) { /* fall back to the visible excerpt */ }
+    try { await navigator.clipboard.writeText(text); toast("copied"); }
+    catch (e) { toast("copy blocked by the browser"); }
+  };
+  const fBtn = document.getElementById("btn-forget");
+  const rBtn = document.getElementById("btn-rescue");
+  const fading = n.ghost || n.hinted;
+  fBtn.style.display = fading ? "none" : "block";
+  rBtn.style.display = fading ? "block" : "none";
+  fBtn.disabled = n.pinned;
+  fBtn.textContent = n.pinned ? "⛔ pinned" : "⌛ let it fade";
+  fBtn.onclick = async () => {
+    fBtn.disabled = true;
+    const r = await j("/api/forget", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: n.id }) });
+    toast(r.status === "queued_for_forgetting"
+      ? "hinted — the sleep cycle will let it fade" : (r.reason || r.status));
+    fBtn.disabled = false;
+    n.hinted = true; showPanel(n); refreshGraph();
+  };
+  rBtn.onclick = async () => {
+    rBtn.disabled = true;
+    const r = await j("/api/rescue", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: n.id }) });
+    toast(r.status === "rescued" ? "rescued — this memory stays" : humanStatus(r));
+    rBtn.disabled = false;
+    n.hinted = false; n.ghost = false; showPanel(n); refreshGraph();
+  };
+  panel.style.display = "block";
+  document.body.classList.add("panel-open");
+}
+function enterTunnel(node) {
+  // monotropism: attention is a single deep channel. The focused memory and
+  // everything one synapse away form the tunnel; the rest of the brain
+  // recedes hard — not a gentle dim, a collapse to a faint substrate.
+  const t = new Set([node.id]);
+  for (const e of edges) {
+    if (e.a.id === node.id) t.add(e.b.id);
+    else if (e.b.id === node.id) t.add(e.a.id);
+  }
+  monoFocus = t;
+}
+function closePanel() {
+  panel.style.display = "none";
+  document.body.classList.remove("panel-open");
+  selected = null;
+  monoFocus = null;
+}
+const STATUS_COPY = {
+  memory_busy: "the brain is mid-thought — try again in a moment",
+  daemon_down: "the subconscious is away — memory still works",
+  error: "that didn't go through",
+  forbidden: "blocked for safety",
+};
+function humanStatus(r) {
+  if (!r || typeof r !== "object") return "done";
+  if (STATUS_COPY[r.status]) return STATUS_COPY[r.status];
+  // never surface a raw internal reason string to the user
+  return STATUS_COPY.error;
+}
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3200);
+}
+
+/* ---------- find a memory ---------- */
+const findInput = document.getElementById("find");
+const resultsBox = document.getElementById("results");
+let findTimer = null;
+findInput.addEventListener("input", () => {
+  clearTimeout(findTimer);
+  const q = findInput.value.trim();
+  if (!q) { resultsBox.style.display = "none"; return; }
+  findTimer = setTimeout(() => runFind(q), 320);
+});
+let lastHits = [];
+findInput.addEventListener("keydown", e => {
+  if (e.key === "Enter" && lastHits.length) focusMemory(lastHits[0]);
+  if (e.key === "Escape") { resultsBox.style.display = "none"; findInput.blur(); }
+});
+// Narrow-layout drawers: the burgers slide the folder explorer (left) and the
+// system rail (right) in and out; opening one closes the other. The brain
+// canvas, Escape, and picking a folder all put the drawer away.
+const burgerL = document.getElementById("burger-l");
+const burgerR = document.getElementById("burger-r");
+function closeDrawers() {
+  document.body.classList.remove("menu-l", "menu-r");
+}
+burgerL.addEventListener("click", () => {
+  document.body.classList.remove("menu-r");
+  document.body.classList.toggle("menu-l");
+});
+burgerR.addEventListener("click", () => {
+  document.body.classList.remove("menu-l");
+  document.body.classList.toggle("menu-r");
+});
+canvas.addEventListener("pointerdown", closeDrawers);
+document.body.addEventListener("pointerdown", e => {
+  // a tap on the scrim (the body itself) puts the drawer away
+  if (e.target === document.body) closeDrawers();
+});
+window.addEventListener("resize", () => {
+  // growing past a drawer tier restores the inline layout; a stale open
+  // class must not leave a scrim or drawer state behind
+  if (innerWidth > 1240) document.body.classList.remove("menu-l");
+  if (innerWidth > 1000) document.body.classList.remove("menu-r");
+});
+
+// "/" focuses search from anywhere; Escape backs out of the open overlay
+window.addEventListener("keydown", e => {
+  if (e.key === "/" && document.activeElement !== findInput) {
+    e.preventDefault(); findInput.focus();
+  } else if (e.key === "Escape") {
+    if (document.body.classList.contains("menu-l") || document.body.classList.contains("menu-r")) closeDrawers();
+    else if (document.body.classList.contains("panel-open")) closePanel();
+    else if (typeof activeFolder !== "undefined" && activeFolder) closeFolder();
+    else if (resultsBox.style.display !== "none") resultsBox.style.display = "none";
+  }
+});
+document.addEventListener("click", e => {
+  if (!document.getElementById("findbox").contains(e.target))
+    resultsBox.style.display = "none";
+});
+async function runFind(q) {
+  try {
+    const res = await j("/api/search", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q }) });
+    const hits = res.hits || [];
+    lastHits = hits;
+    resultsBox.innerHTML = hits.length ? hits.map((h, i) =>
+      `<div class="hit" data-i="${i}">
+         <i style="background:${TIER_COLOR[h.tier] || "#8fa1b3"}"></i>
+         <span class="sn">${esc(h.surface || "")}</span>
+         <span class="cos mono">${(h.cos * 100 | 0)}% match</span></div>`
+    ).join("") : `<div class="hit"><span class="sn">nothing found</span></div>`;
+    resultsBox.style.display = "flex";
+    resultsBox.querySelectorAll(".hit[data-i]").forEach(el => {
+      el.tabIndex = 0; el.setAttribute("role", "button");
+      const go = () => focusMemory(hits[+el.dataset.i]);
+      el.onclick = go;
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+    });
+  } catch (e) { /* navigation is best-effort */ }
+}
+function focusMemory(h) {
+  let node = nodeById.get(h.id);
+  if (!node) {
+    node = { born: performance.now(), fromSearch: true };
+    nodeById.set(h.id, node); nodes.push(node);
+    Object.assign(node, h); place(node);
+    node.r = 3.4;  // search hits: neutral size, selection ring carries the emphasis
+  } else Object.assign(node, h);
+  selected = node;
+  crosshair = { n: node, t0: performance.now() };
+  enterTunnel(node);
+  showPanel(node);
+  resultsBox.style.display = "none";
+}
+
+/* ---------- memory explorer (folders) ---------- */
+const foldTree = document.getElementById("foldtree");
+const contentsBox = document.getElementById("contents");
+let folderFocus = null;   // Set of ids spotlighted on the canvas
+let activeFolder = null;  // "kind/key" of the open folder
+
+const SECTION_META = [
+  ["time", "when"],
+  ["topics", "topics — self-organized"],
+  ["teachings", "teachings"],
+  ["sessions", "conversations"],
+  ["special", "special"],
+];
+
+async function refreshFolders() {
+  try {
+    const res = await j("/api/browse");
+    const f = res.folders;
+    if (!f) return;
+    foldTree.innerHTML = SECTION_META.map(([sec, title]) => {
+      const items = (f[sec] || []).filter(it => it.n > 0);
+      if (!items.length) return "";
+      const rows = items.map(it =>
+        `<div class="fitem" data-kind="${sec === "time" ? "time"
+             : sec === "topics" ? "topic"
+             : sec === "teachings" ? "teaching"
+             : sec === "sessions" ? "session" : "special"}"
+             data-key="${esc(it.key)}">
+           <span class="lbl">${esc(it.label)}</span>
+           <span class="fn">${it.n.toLocaleString("en-US")}</span></div>`
+      ).join("");
+      return `<h6 data-sec="${sec}"><span class="tri">▾</span>${title}</h6>
+              <div class="fold">${rows}</div>`;
+    }).join("");
+    for (const h of foldTree.querySelectorAll("h6"))
+      h.onclick = () => h.classList.toggle("closed");
+    for (const el of foldTree.querySelectorAll(".fitem")) {
+      el.tabIndex = 0; el.setAttribute("role", "button");
+      const go = () => openFolder(el.dataset.kind, el.dataset.key, el);
+      el.onclick = go;
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+    }
+  } catch (e) { /* explorer is navigation, best-effort */ }
+}
+
+async function openFolder(kind, key, el) {
+  const id = kind + "/" + key;
+  if (activeFolder === id) { closeFolder(); return; }
+  activeFolder = id;
+  for (const e2 of foldTree.querySelectorAll(".fitem"))
+    e2.classList.toggle("active", e2 === el);
+  try {
+    const res = await j("/api/browse", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder: { kind, key }, limit: 80 }) });
+    const items = res.items || [];
+    folderFocus = new Set(items.map(it => it.id));
+    contentsBox.innerHTML =
+      `<span class="back">◂ all memories</span>` +
+      (items.length ? items.map((it, i) =>
+        `<div class="hit" data-i="${i}">
+           <i style="background:${TIER_COLOR[it.tier] || "#8fa1b3"}"></i>
+           <span class="sn">${esc(it.surface || "")}</span>
+         </div>`).join("")
+       : `<div class="hit"><span class="sn">empty</span></div>`);
+    contentsBox.style.display = "block";
+    contentsBox.querySelector(".back").onclick = closeFolder;
+    contentsBox.querySelectorAll(".hit[data-i]").forEach(h => {
+      h.onclick = () => focusMemory(items[+h.dataset.i]);
+    });
+    lastInteract = performance.now();
+  } catch (e) { /* best-effort */ }
+}
+
+function closeFolder() {
+  activeFolder = null;
+  folderFocus = null;
+  contentsBox.style.display = "none";
+  contentsBox.innerHTML = "";
+  for (const e2 of foldTree.querySelectorAll(".fitem"))
+    e2.classList.remove("active");
+}
+refreshFolders();
+setInterval(refreshFolders, 90000);
+
+/* ---------- tier focus (legend click) ---------- */
+let tierFocus = null;
+for (const el of document.querySelectorAll(".lg-tier")) {
+  el.tabIndex = 0; el.setAttribute("role", "button");
+  const toggle = () => {
+    tierFocus = tierFocus === el.dataset.tier ? null : el.dataset.tier;
+    for (const e2 of document.querySelectorAll(".lg-tier"))
+      e2.classList.toggle("focused", e2.dataset.tier === tierFocus);
+    lastInteract = performance.now();
+  };
+  el.addEventListener("click", toggle);
+  el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+}
+
+/* ---------- autonomic ---------- */
+let daemonUp = false;
+async function daemonAction(action, label) {
+  const r = await j("/api/daemon", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }) });
+  if (r.status === "ok") toast(label);
+  else if (r.status === "daemon_down") toast("the subconscious is away — memory works without it");
+  else toast(humanStatus(r));
+  refreshOverview();
+}
+document.getElementById("btn-consolidate").onclick = async () => {
+  document.body.classList.add("consolidating");
+  try {
+    const r = await daemonAction("consolidate",
+      "queued — it'll catch up as soon as the brain gets a quiet moment");
+    if (r && r.status !== "ok") toast(humanStatus(r));
+  } finally {
+    // force is fire-and-forget: the real sort runs at the next lull. Show the
+    // 'tidying up' hint briefly, then let the live Health/activity reflect it.
+    setTimeout(() => document.body.classList.remove("consolidating"), 6000);
+  }
+};
+document.getElementById("btn-sleep").onclick = () => daemonAction("sleep", "sleep initiated");
+document.getElementById("btn-wake").onclick = () => daemonAction("wake", "wake signal sent");
+document.getElementById("btn-power").onclick = () => {
+  const restart = daemonUp;
+  daemonAction(restart ? "restart" : "start",
+    restart ? "subconscious restarting — back in ~20s" : "subconscious waking — up in ~20s");
+  setTimeout(refreshOverview, 4000);
+};
+document.getElementById("btn-stop").onclick = () => {
+  daemonAction("stop", "subconscious at rest — memory keeps working without it");
+  setTimeout(refreshOverview, 2500);
+};
+
+/* ---------- teaching: files only ---------- */
+const drop = document.getElementById("dropzone");
+const fileInput = document.getElementById("file");
+drop.addEventListener("click", () => !drop.classList.contains("busy") && fileInput.click());
+fileInput.addEventListener("change", () => fileInput.files[0] && teach(fileInput.files[0]));
+["dragover", "dragenter"].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add("drag");
+}));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.remove("drag");
+}));
+drop.addEventListener("drop", e => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) teach(f);
+});
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+let teachAbort = null;
+async function teach(file) {
+  if (drop.classList.contains("busy")) return;
+  if (file.size > 25 * 1024 * 1024) { toast("file too large (max 25 MB)"); return; }
+  drop.classList.add("busy");
+  const big = drop.querySelector(".big"), sub = drop.querySelector(".sub");
+  const big0 = big.innerHTML, sub0 = sub.textContent;
+  // live elapsed clock so "working" is never mistaken for "hung"; a cancel
+  // affordance aborts the request (the studying itself is idempotent).
+  const t0 = performance.now();
+  teachAbort = new AbortController();
+  const tick = setInterval(() => {
+    const secs = ((performance.now() - t0) / 1000).toFixed(0);
+    big.textContent = "studying " + file.name + " — " + secs + "s";
+    sub.innerHTML = "weaving into memory · <a href=\"#\" id=\"teach-cancel\">cancel</a>";
+    const cx = document.getElementById("teach-cancel");
+    if (cx) cx.onclick = (e) => { e.preventDefault(); if (teachAbort) teachAbort.abort(); };
+  }, 250);
+  try {
+    const b64 = await new Promise((res, rej) => {
+      const rd = new FileReader();
+      rd.onload = () => res(rd.result.split(",", 2)[1]);
+      rd.onerror = rej;
+      rd.readAsDataURL(file);
+    });
+    const resp = await fetch("/api/teach", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, content_b64: b64 }),
+      signal: teachAbort.signal });
+    const r = await resp.json();
+    if (r.status === "studied") {
+      showReport(r);
+      eegEnergy = 1; spawnPulse(true);
+      toast("studied — woven into the brain");
+      refreshFolders && refreshFolders().then(() => {
+        if (r.doc_tag && typeof openFolder === "function") {
+          const el = foldTree.querySelector(`.fitem[data-key="${r.doc_tag}"]`);
+          openFolder("teaching", r.doc_tag, el || undefined);
+        }
+      });
+    } else toast(humanStatus(r) || "study failed");
+  } catch (e) {
+    toast(e && e.name === "AbortError"
+      ? "cancelled — the brain kept what it already wove"
+      : "study failed");
+  } finally {
+    clearInterval(tick);
+    teachAbort = null;
+    big.innerHTML = big0; sub.innerHTML = sub0;
+    drop.classList.remove("busy");
+    fileInput.value = "";
+    refreshGraph(); refreshOverview();
+  }
+}
+function showReport(r) {
+  const el = document.getElementById("report");
+  el.innerHTML =
+    `<span class="chip"><b>${r.inserted}</b>new</span>` +
+    `<span class="chip"><b>${r.reinforced}</b>strengthened</span>` +
+    `<span class="chip"><b>${r.edges_formed}</b>connections</span>` +
+    `<span class="chip"><b>${r.contradictions_resolved || 0}</b>contradictions resolved</span>` +
+    `<span class="chip"><b>${r.schemas_induced}</b>patterns</span>` +
+    `<span class="chip"><b>${(r.recall_verified === r.recall_tested && r.recall_tested > 0) ? "✓" : (r.recall_verified || 0)}</b>recall verified</span>`;
+  el.style.display = "flex";
+  clearTimeout(el._h); el._h = setTimeout(() => el.style.display = "none", 12000);
+}
+
+/* ---------- data refresh ---------- */
+let overviewFails = 0;
+async function refreshOverview() {
+  try {
+    const o = await j("/api/overview");
+    overviewFails = 0;
+    setReachBanner(false);
+    document.body.classList.toggle("resting", !!o.stale);
+    document.getElementById("lifecycle").textContent = o.lifecycle;
+    const c = o.counts;
+    document.getElementById("vitals").innerHTML =
+      `<div class="stat hot"><b>${c.episodic}</b><span>moments</span></div>` +
+      `<div class="stat"><b>${c.semantic}</b><span>knowledge</span></div>` +
+      `<div class="stat"><b>${c.procedural}</b><span>skills</span></div>` +
+      `<div class="stat"><b>${c.edges}</b><span>connections</span></div>` +
+      `<div class="stat fade"><b>${c.tombstoned}</b><span>forgetting</span></div>`;
+    for (const t of ["episodic", "semantic", "procedural"]) {
+      const el = document.getElementById("lg-n-" + t);
+      if (el) el.textContent = (c[t] ?? 0).toLocaleString("en-US");
+    }
+    renderHomeostat(c);
+    const d = document.getElementById("daemon");
+    d.classList.toggle("down", !o.daemon_up);
+    const MOOD = { SLEEP: "dreaming", WAKE: "awake", DROWSY: "drowsy",
+                   HIBERNATION: "deep sleep" };
+    const mood = MOOD[String(o.lifecycle || "").toUpperCase()]
+                 || String(o.lifecycle || "").toLowerCase();
+    d.innerHTML = (o.daemon_up ? "subconscious · " + mood
+                               : "subconscious · away") + "<i></i>";
+    daemonUp = !!o.daemon_up;
+    document.getElementById("btn-power").innerHTML =
+      daemonUp ? "<small>⟳</small>restart the subconscious" : "<small>⏻</small>wake the subconscious";
+    document.getElementById("btn-stop").style.display = daemonUp ? "" : "none";
+  } catch (e) {
+    if (++overviewFails >= 3) setReachBanner(true);  // booting vs. dead
+  }
+}
+function setReachBanner(show) {
+  let b = document.getElementById("reach-banner");
+  if (show && !b) {
+    b = document.createElement("div");
+    b.id = "reach-banner";
+    b.textContent = "can't reach the brain — is the server running?";
+    document.body.appendChild(b);
+  } else if (!show && b) { b.remove(); }
+}
+function renderHomeostat(c) {
+  const live = (c.episodic || 0) + (c.semantic || 0) + (c.procedural || 0);
+  const total = live + (c.tombstoned || 0);
+  const consolidation = live ? (c.semantic || 0) / live : 0;   // experience -> knowledge
+  const connectivity = live ? (c.edges || 0) / live : 0;        // synapses per neuron
+  const pruning = total ? (c.tombstoned || 0) / total : 0;      // forgetting fraction
+  const rows = [
+    ["turned into knowledge", consolidation, (consolidation * 100).toFixed(1) + "%"],
+    ["how connected", Math.min(connectivity / 3, 1), connectivity.toFixed(2) + "×"],
+    ["cleaned up", pruning, (pruning * 100).toFixed(1) + "%"],
+  ];
+  document.getElementById("homeostat").innerHTML = rows.map(([lbl, frac, val]) =>
+    `<div class="gauge"><span class="gl">${lbl}</span><span class="gv mono">${val}</span>` +
+    `<div class="gbar"><i style="width:${Math.max(2, Math.min(100, frac * 100)).toFixed(0)}%"></i></div></div>`
+  ).join("");
+}
+async function refreshEconomy() {
+  try {
+    const e = await j("/api/economy");
+    document.getElementById("economy").innerHTML =
+      `<div class="eco"><b>${e.packs_served}</b> memories handed to your AI</div>` +
+      `<div class="eco"><b>${e.tokens_injected_est.toLocaleString("en-US")}</b> words given for free</div>` +
+      `<div class="eco"><b>${e.agent_searches}</b> times it had to search <small>(~${e.avg_search_tokens_est} tok)</small></div>` +
+      `<div class="eco save"><b>~${e.tokens_saved_lower_est.toLocaleString("en-US")}</b> words saved <small>(lower bound)</small></div>`;
+  } catch (err) { /* observability card, keep last */ }
+}
+
+let lastEventKey = "", evTimes = [];
+const EVENT_WORDS = {
+  daemon_started: "woke up",
+  daemon_stopped: "went to rest",
+  daemon_yielded: "stepped aside for you",
+  daemon_tick_skipped: "resting",
+  daemon_cpu_overload: "thinking hard",
+  hippo_boot_health: "self-check",
+  system_health_report: "self-check",
+  llm_health: "checking its helper",
+  hippo_compacted: "saved space",
+  sleep_cycle_complete: "finished tidying up",
+  rem_cycle_started: "started dreaming",
+  rem_cycle_completed: "finished a dream",
+  rem_cycle_error: "a dream hiccup",
+  schema_reinforced: "learned a pattern",
+  schema_mined: "found a pattern",
+  schema_induction_run: "finding patterns",
+  schema_bypass_pass: "sorting memories",
+  pattern_separation_pass: "sorting memories",
+  cls_consolidation_run: "turning moments into knowledge",
+  hippea_cascade_completed: "tidied a memory",
+  essential_variable_breach: "checking its balance",
+  sigma_observation: "measuring itself",
+  lance_buffer_flush: "saving",
+  events_buffer_flush_wake: "saving",
+  foresight_pack_built: "prepared a hint",
+  recall_dispatched: "remembered something",
+  retrieval_used: "remembered something",
+  recall_source: "found a memory",
+  forget_hint: "letting a memory fade",
+  forget_rescue: "rescued a memory",
+  erasure_optimize_drops: "cleared old memories",
+  erasure_agent_pass: "clearing old memories",
+  orphan_edge_sweep: "cleaned up loose ends",
+  cluster_replay_pass: "grouping related memories",
+  cluster_summary: "grouped related memories",
+  reconsolidation: "revisited a memory",
+  reconsolidation_pass: "revisiting memories",
+  user_model_update: "learned about you",
+  user_model_aggregate_pass: "learning about you",
+  dmn_reflection: "daydreaming",
+  pask_teachback_pass: "double-checking what it learned",
+  session_started: "a session began",
+  deferred_drain_startup: "caught up on new memories",
+  deferred_drain_wake: "caught up on new memories",
+  active_live_drain_wake: "caught up on new memories",
+  deferred_captures_quarantined: "set aside a tricky memory",
+  drain_rss_soft_cap: "pacing itself",
+  rgc_snapshot_near_limit: "pacing itself",
+};
+function humanEvent(kind) {
+  const k = String(kind || "").toLowerCase();
+  if (EVENT_WORDS[k]) return EVENT_WORDS[k];
+  // fall back: strip internal prefixes, drop trailing states, spaces not _
+  let w = k.replace(/^(daemon|hippo|hippea|sleep|mcp|s\d)_/g, "")
+           .replace(/_(started|completed|complete|pass|wake|update|flush)$/g, "")
+           .replace(/_/g, " ").trim();
+  return w || "working";
+}
+async function refreshEvents() {
+  try {
+    const evs = await j("/api/events?limit=7");
+    const key = evs.length ? evs[0].kind + evs[0].ts : "";
+    if (key && key !== lastEventKey && lastEventKey) {
+      eegEnergy = Math.min(1, eegEnergy + .5); spawnPulse(true);
+      evTimes.push(Date.now());
+    }
+    lastEventKey = key;
+    evTimes = evTimes.filter(t => Date.now() - t < 60000);
+    document.getElementById("hz").textContent = evTimes.length + "/min";
+    document.getElementById("feed").innerHTML = evs.map(e =>
+      `<div class="ev ${esc(e.severity)}"><b>${esc(humanEvent(e.kind))}</b> ${esc(localTime(e.ts))}</div>`
+    ).join("");
+  } catch (e) { /* cosmetic feed */ }
+}
+let graphLoaded = false;
+async function refreshGraph() {
+  try {
+    mergeGraph(await j("/api/graph?limit=400"));
+    graphLoaded = true;
+  } catch (e) { /* retry next tick */ }
+}
+
+resize();
+refreshOverview(); refreshEvents(); refreshGraph(); refreshEconomy();
+setInterval(refreshOverview, 5000);
+setInterval(refreshEvents, 5000);
+setInterval(refreshGraph, 20000);
+setInterval(refreshEconomy, 15000);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

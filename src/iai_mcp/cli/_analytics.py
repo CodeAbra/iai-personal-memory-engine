@@ -225,15 +225,77 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_migrate_to_lilli(args: argparse.Namespace) -> int:
+    """Copy a SQLite Hippo store verbatim into a fresh lilli store, then verify.
+
+    Writes only to the explicit --dst root and NEVER swaps the live store.  The
+    migrator opens the source read-only; the verifier confirms byte-equality
+    across per-table counts, ciphertext/decrypt parity, recall, and temporal
+    recall.  Returns non-zero on any RED dimension so the operator never proceeds
+    to a cutover on a failed verify.
+    """
+    import sys as _sys
+    from pathlib import Path
+
+    from iai_mcp.crypto import CryptoKey
+    from iai_mcp.migrate import migrate_sqlite_to_lilli, verify_store_equality
+
+    src = str(getattr(args, "src"))
+    dst = str(getattr(args, "dst"))
+    batch = int(getattr(args, "batch", 500))
+    prune_before = getattr(args, "prune_telemetry_before", None)
+    verbose = bool(getattr(args, "verbose", False))
+
+    src_root = Path(src).resolve().parent.parent
+
+    report = migrate_sqlite_to_lilli(
+        src, dst, batch=batch, prune_telemetry_before=prune_before
+    )
+    print(
+        f"copied {sum(report.rows_copied.values())} rows "
+        f"({', '.join(f'{t}={n}' for t, n in report.rows_copied.items())}) "
+        f"in {report.elapsed_sec:.1f}s; peak RSS {report.peak_rss_mb:.0f} MB; "
+        f"max vec_label {report.max_vec_label}"
+    )
+
+    key = CryptoKey(store_root=src_root).get_or_create()
+    rep = verify_store_equality(src, dst, key, src_root=src_root)
+    for name, dim in rep.dimensions.items():
+        status = "ok" if dim.ok else "FAIL"
+        if not dim.ok or verbose:
+            print(f"  [{status}] {name}: {dim.reason}")
+    if rep.ok:
+        print("verify: GREEN -- all dimensions match")
+        return 0
+    print("verify: RED -- store equality NOT proven; do NOT cut over", file=_sys.stderr)
+    return 1
+
+
 def cmd_deferred_unlock_dead_pids(args: argparse.Namespace) -> int:
     """Unlock `.processing-<pid>.jsonl` files in the deferred-captures dir whose owner
     PID is dead or differs from the live daemon's PID. Renames each back to `.jsonl`
     so the next drain tick claims it. Idempotent; collision-safe."""
     import json as _json
+    import sys as _sys
+
     from iai_mcp.migrate import migrate_unlock_dead_pid_processing_files
+    from iai_mcp.migrate._dead_pid_unlock import _read_live_daemon_pid
 
     dry_run = bool(getattr(args, "dry_run", False))
+    force = bool(getattr(args, "force", False))
     emit_json = bool(getattr(args, "json", False))
+
+    if not dry_run and not force:
+        live_pid = _read_live_daemon_pid()
+        if live_pid is not None:
+            print(
+                f"a live daemon is running (pid {live_pid}); stop it first "
+                f"(`iai-mcp daemon stop`) to avoid racing the drain, or pass --force "
+                f"if you understand the risk. Use --dry-run to preview safely.",
+                file=_sys.stderr,
+            )
+            return 2
+
     result = migrate_unlock_dead_pid_processing_files(dry_run=dry_run)
     if emit_json:
         print(_json.dumps(result, indent=2, sort_keys=True))

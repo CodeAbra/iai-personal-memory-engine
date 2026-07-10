@@ -3,9 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-import pytest
 
-from iai_mcp.types import EMBED_DIM
 
 def _insert_raw_edge(
     store, src: str, dst: str, edge_type: str, weight: float, days_old: int,

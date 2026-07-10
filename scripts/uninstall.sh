@@ -2,12 +2,12 @@
 # scripts/uninstall.sh — LaunchAgent + daemon teardown.
 #
 # Usage:
-# bash scripts/uninstall.sh # remove LaunchAgent + kill daemon
-# bash scripts/uninstall.sh --purge-state # also remove ~/.iai-mcp/.daemon.sock,
-# #.daemon-state.json,.lock
-# bash scripts/uninstall.sh --purge-data # also remove ~/.iai-mcp/lancedb +
-# # runtime_graph_cache.json
-# # DESTRUCTIVE — wipes user's brain.
+#   bash scripts/uninstall.sh                  # remove LaunchAgent + kill daemon
+#   bash scripts/uninstall.sh --purge-state    # also remove ~/.iai-mcp/.daemon.sock,
+#                                              #             .daemon-state.json, .lock
+#   bash scripts/uninstall.sh --purge-data     # also remove ~/.iai-mcp/lancedb +
+#                                              #             runtime_graph_cache.json
+#                                              # DESTRUCTIVE — wipes user's brain.
 #
 # Idempotent: safe to re-run. Always exits 0 (best-effort).
 # DRY_RUN=1 env skips real launchctl + kill + rm calls (used by tests).

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import math
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,17 +9,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from iai_mcp.daemon import PatSepConfig, _load_patsep_config
 from iai_mcp.events import query_events
 from iai_mcp.store import (
-    EDGE_TYPES,
     EDGES_TABLE,
     RECORDS_TABLE,
     GateAction,
     MemoryStore,
 )
 from iai_mcp.types import MemoryRecord
-
 
 EMBED_DIM = 4
 REFERENCE_EMBEDDING: list[float] = [1.0, 0.0, 0.0, 0.0]
@@ -31,7 +27,6 @@ LINK_WEIGHT_DEFAULT: float = 0.10
 _UUID_REGEX: re.Pattern[str] = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-
 
 def _make_embedding_at_cosine(
     cos_target: float, embed_dim: int = EMBED_DIM,
@@ -46,7 +41,6 @@ def _make_embedding_at_cosine(
         )
     residual = math.sqrt(max(0.0, 1.0 - cos_target * cos_target))
     return [cos_target, residual] + [0.0] * (embed_dim - 2)
-
 
 def _make_record(
     *,
@@ -79,7 +73,6 @@ def _make_record(
     base.update(overrides)
     return MemoryRecord(**base)
 
-
 def _make_store(tmp_path: Path) -> MemoryStore:
     return MemoryStore(
         path=str(tmp_path / "iai-mcp"),
@@ -87,14 +80,11 @@ def _make_store(tmp_path: Path) -> MemoryStore:
         read_consistency_interval=timedelta(seconds=0),
     )
 
-
 def _gate_body_source() -> str:
     return inspect.getsource(MemoryStore.pattern_separation_gate)
 
-
 def _insert_body_source() -> str:
     return inspect.getsource(MemoryStore.insert)
-
 
 @pytest.fixture(autouse=True)
 def _reset_patsep_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -110,16 +100,13 @@ def _reset_patsep_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("IAI_MCP_EMBED_MODEL", raising=False)
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai-mcp"))
 
-
 @pytest.fixture
 def fresh_store(tmp_path: Path) -> MemoryStore:
     return _make_store(tmp_path)
 
-
 def _events_in_insert_order(store: MemoryStore) -> list[dict]:
     events = query_events(store, kind="pattern_separation_pass", limit=1000)
     return list(reversed(events))
-
 
 def test_near_duplicate_cohort_collapses_to_reinforce(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
@@ -186,7 +173,6 @@ def test_near_duplicate_cohort_collapses_to_reinforce(
         assert body["dry_run_mode"] is False, body
         assert body["near_dup_cos"] is not None and body["near_dup_cos"] >= 0.99, body
 
-
 def test_link_seeding_creates_pattern_separation_seed_edge(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,7 +224,6 @@ def test_link_seeding_creates_pattern_separation_seed_edge(
     assert body_b["edges_seeded"] == 1, body_b
     assert body_b["near_dup_hit_id"] is None, body_b
 
-
 def test_independent_insert_no_edge_seeded(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -273,7 +258,6 @@ def test_independent_insert_no_edge_seeded(
     assert body_c["action"] == "insert", body_c
     assert body_c["edges_seeded"] == 0, body_c
     assert body_c["near_dup_hit_id"] is None, body_c
-
 
 def test_dry_run_preserves_regular_insert(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
@@ -330,7 +314,6 @@ def test_dry_run_preserves_regular_insert(
         )
         assert body["near_dup_cos"] is not None and body["near_dup_cos"] >= 0.99, body
 
-
 def test_event_body_shape_and_field_types(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -365,6 +348,8 @@ def test_event_body_shape_and_field_types(
         "threshold_near_dup",
         "threshold_link",
         "dry_run_mode",
+        "ann_prefilter_cos",
+        "exact_confirm_cos",
     }
 
     for idx, ev in enumerate(events):
@@ -393,6 +378,10 @@ def test_event_body_shape_and_field_types(
         assert abs(body["threshold_link"] - 0.70) < 1e-9, body
         assert isinstance(body["dry_run_mode"], bool), body
         assert body["dry_run_mode"] is False, body
+        if body["ann_prefilter_cos"] is not None:
+            assert isinstance(body["ann_prefilter_cos"], float), body
+        if body["exact_confirm_cos"] is not None:
+            assert isinstance(body["exact_confirm_cos"], float), body
 
     a_body = events[0]["data"]
     assert a_body["action"] == "insert", a_body
@@ -413,7 +402,6 @@ def test_event_body_shape_and_field_types(
     assert c_body["action"] == "insert", c_body
     assert c_body["edges_seeded"] == 0, c_body
     assert c_body["near_dup_hit_id"] is None, c_body
-
 
 def test_gate_does_not_mutate_record_embedding(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,

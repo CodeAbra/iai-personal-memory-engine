@@ -1,26 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 from contextlib import redirect_stdout
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
-from iai_mcp._ipc import IS_WINDOWS
 from iai_mcp.cli import _send_jsonrpc_request
-
-# This module asserts *which unix-socket path* the client routes to by spying on
-# asyncio.open_unix_connection — a POSIX-only mechanism (Windows routes over TCP
-# loopback via a port file, and open_unix_connection doesn't exist there). The
-# equivalent Windows endpoint routing/isolation is covered by the _ipc
-# port-file tests and the IAI_DAEMON_SOCKET_PATH isolation in PR #6.
-pytestmark = pytest.mark.skipif(
-    IS_WINDOWS,
-    reason="POSIX unix-socket-path routing hermeticity; Windows routes via TCP port file (covered elsewhere)",
-)
 
 def _capture_stdout(fn) -> tuple[str, int]:
     buf = io.StringIO()
@@ -163,8 +149,7 @@ class TestSendSocketRequestOverride:
         assert result is None
 
     def test_socket_request_default_without_override(self, monkeypatch):
-        from iai_mcp._ipc import SOCKET_PATH
-        from iai_mcp.cli import _send_socket_request
+        from iai_mcp.cli import SOCKET_PATH, _send_socket_request
 
         monkeypatch.delenv("IAI_DAEMON_SOCKET_PATH", raising=False)
 

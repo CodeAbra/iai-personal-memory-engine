@@ -3,9 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 TOOLS_TS = Path(__file__).resolve().parent.parent / "mcp-wrapper" / "src" / "tools.ts"
-
 
 def _tok(text: str) -> int:
     try:
@@ -15,13 +13,11 @@ def _tok(text: str) -> int:
     except ImportError:
         return max(1, len(text) // 4) if text else 0
 
-
 _DESC_BLOCK_RE = re.compile(
     r"description:\s*"
     r'"((?:[^"\\]|\\.)*)"',
     re.MULTILINE,
 )
-
 
 def _extract_top_level_descriptions() -> list[tuple[str, str]]:
     text = TOOLS_TS.read_text()
@@ -50,13 +46,11 @@ def _extract_top_level_descriptions() -> list[tuple[str, str]]:
         out.append((tool_name, desc))
     return out
 
-
 def test_tool_count_unchanged_at_12():
     descs = _extract_top_level_descriptions()
-    assert len(descs) == 13, (
-        f"expected 13 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
+    assert len(descs) == 15, (
+        f"expected 15 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
     )
-
 
 def test_each_tool_description_le_30_tokens():
     descs = _extract_top_level_descriptions()
@@ -66,15 +60,16 @@ def test_each_tool_description_le_30_tokens():
         if n > 30:
             offenders.append((name, n, desc[:80]))
     assert not offenders, (
-        "Some descriptions exceed 30 tokens:\n"
+        "TOK-15 violation: some descriptions exceed 30 tokens:\n"
         + "\n".join(f"  {n}: {t} tok -- {d!r}" for n, t, d in offenders)
     )
 
-
 def test_total_tool_descriptions_le_330_tokens():
+    # Total budget tracks N_tools * avg target (~25 tok/tool); per-tool ceiling
+    # stays at 30 (enforced by the sibling test). Adjust both when N_tools changes.
     descs = _extract_top_level_descriptions()
     total = sum(_tok(d) for _, d in descs)
-    assert total <= 330, (
-        f"Total description budget {total} tok > 330\n"
+    assert total <= 360, (
+        f"total description budget {total} tok > 360\n"
         + "\n".join(f"  {n}: {_tok(d)} tok" for n, d in descs)
     )

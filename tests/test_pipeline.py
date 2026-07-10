@@ -305,7 +305,6 @@ def test_pick_seeds_ranks_by_blended_score(tmp_path) -> None:
     assert list(seed_indices) == [1]
 
 def test_pipeline_core_dispatch_integration(tmp_path, monkeypatch) -> None:
-    import iai_mcp.pipeline as pipeline_mod
     from iai_mcp.core import dispatch
 
     store = MemoryStore(path=tmp_path)

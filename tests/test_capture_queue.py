@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN
-from iai_mcp._filelock import flock as _flock
 import os
 import threading
-import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from iai_mcp.capture_queue import (
-    DEFAULT_MAX_SIZE,
     SCHEMA_VERSION,
     CaptureQueue,
     CaptureQueueSchemaError,
@@ -172,7 +168,7 @@ def test_idempotent_ingest_lock_skipped(tmp_path):
     lock_a = tmp_path / f"pending-{ulid_a}.lock"
     fd = os.open(str(lock_a), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        _flock(fd, LOCK_EX | LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
         seen: list[str] = []
 
@@ -187,7 +183,7 @@ def test_idempotent_ingest_lock_skipped(tmp_path):
         assert not (tmp_path / f"pending-{ulid_c}.json").exists()
     finally:
         try:
-            _flock(fd, LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:
             pass
         os.close(fd)

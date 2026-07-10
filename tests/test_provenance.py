@@ -159,7 +159,6 @@ def test_append_provenance_batch_equivalence_with_single(tmp_path):
     store_a = MemoryStore(path=path_a)
     store_b = MemoryStore(path=path_b)
     import copy
-    from uuid import uuid4
     base_records = [_make(text=f"r{i}") for i in range(3)]
     for r in base_records:
         store_a.insert(r)
@@ -178,7 +177,7 @@ def test_append_provenance_batch_equivalence_with_single(tmp_path):
         assert prov_a == prov_b, f"provenance diverged for {r.id}: {prov_a} vs {prov_b}"
 
 def test_append_provenance_batch_scan_count(tmp_path, monkeypatch):
-    from iai_mcp.store import MemoryStore as _MS, RECORDS_TABLE
+    from iai_mcp.store import RECORDS_TABLE
 
     store = MemoryStore(path=tmp_path)
     recs = [_make(text=f"r{i}") for i in range(5)]
@@ -234,4 +233,8 @@ def test_append_provenance_batch_scan_count(tmp_path, monkeypatch):
     batch_scans = counter[0]
 
     assert single_scans == 5, f"append_provenance (single) did {single_scans} records-table scans; expected 5"
-    assert batch_scans == 1, f"append_provenance_batch did {batch_scans} scans; expected 1 (N+1 collapse)"
+    # The batch path resolves the rows it needs with a single targeted
+    # ``WHERE id IN (...)`` query rather than materializing the whole records
+    # table, so it issues no full to_pandas scan at all (stronger than the
+    # earlier single-scan N+1 collapse).
+    assert batch_scans == 0, f"append_provenance_batch did {batch_scans} full scans; expected 0 (targeted IN-query)"

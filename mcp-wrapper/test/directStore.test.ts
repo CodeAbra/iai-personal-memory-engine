@@ -102,7 +102,7 @@ describe("invokeTool episodes_recent daemon-down (call rejects)", () => {
 });
 
 
-describe("handleToolCall episodes_recent — bridge.start rejects", () => {
+describe("handleToolCall episodes_recent — bridge.start rejects (C2-H1)", () => {
   it("routes to direct-store CLI when bridge.start() rejects with daemon-unreachable error", async () => {
     const { spawnFn, calls } = makeMockSpawnFn(DIRECT_RECENCY_PAYLOAD);
 
@@ -130,7 +130,7 @@ describe("handleToolCall episodes_recent — bridge.start rejects", () => {
 });
 
 
-describe("handleToolCall — warm invokeTool error propagates", () => {
+describe("handleToolCall — warm invokeTool error propagates (C3-H3)", () => {
   it("rejects with the warm error and never spawns direct-store or bank-recall", async () => {
     const { spawnFn: neverSpawn, wasCalled } = makeNeverCalledSpawnFn();
 
@@ -157,7 +157,7 @@ describe("handleToolCall — warm invokeTool error propagates", () => {
 });
 
 
-describe("index.ts buildServer CallToolRequest — start rejects → direct-store", () => {
+describe("index.ts buildServer CallToolRequest — start rejects → direct-store (C3-H1/CL4-H2)", () => {
   it("routes episodes_recent to direct-store via the factory-registered handler (mandatory real test)", async () => {
     const { buildServer } = await import("../src/index.js");
 
@@ -247,7 +247,7 @@ describe("invokeTool memory_capture daemon-down (call rejects) → direct-store 
 });
 
 
-describe("handleToolCall memory_capture — bridge.start rejects → direct write", () => {
+describe("handleToolCall memory_capture — bridge.start rejects (C2-H1) → direct write", () => {
   it("routes to direct-write CLI when bridge.start() rejects with daemon-unreachable error", async () => {
     const { spawnFn, calls } = makeMockSpawnFn(DIRECT_WRITE_PAYLOAD);
 
@@ -275,7 +275,7 @@ describe("handleToolCall memory_capture — bridge.start rejects → direct writ
 });
 
 
-describe("index.ts buildServer CallToolRequest memory_capture — start rejects → direct-store write", () => {
+describe("index.ts buildServer CallToolRequest memory_capture — start rejects → direct-store write (C3-H1)", () => {
   it("routes memory_capture to direct-write via the factory-registered handler (mandatory real test)", async () => {
     const { buildServer } = await import("../src/index.js");
 
@@ -373,7 +373,7 @@ describe("invokeTool memory_recall daemon-down (call rejects) → direct-store r
 });
 
 
-describe("handleToolCall memory_recall — bridge.start rejects → direct-store recall", () => {
+describe("handleToolCall memory_recall — bridge.start rejects (C2-H1) → direct-store recall", () => {
   it("routes to direct-recall CLI when bridge.start() rejects", async () => {
     const { spawnFn, calls } = makeMockSpawnFn(DIRECT_RECALL_PAYLOAD);
 
@@ -401,7 +401,7 @@ describe("handleToolCall memory_recall — bridge.start rejects → direct-store
 });
 
 
-describe("index.ts buildServer CallToolRequest memory_recall — start rejects → direct-store", () => {
+describe("index.ts buildServer CallToolRequest memory_recall — start rejects → direct-store (C3-H1/CL4-H2)", () => {
   it("routes memory_recall to direct-store via the factory-registered handler (mandatory real test)", async () => {
     const { buildServer } = await import("../src/index.js");
 

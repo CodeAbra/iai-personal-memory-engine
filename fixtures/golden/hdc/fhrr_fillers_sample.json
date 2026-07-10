@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_codebooks.py",
+  "name": "fhrr_fillers_sample",
+  "payload": null,
+  "sha256": "14bed1511b07cdb75d8b2dbe71292ea8b56203c594a2ca1c4bdb57e3a84f88af",
+  "shape": [
+    510,
+    10000
+  ],
+  "source": "src/iai_mcp/lilli/tiers/fhrr.py filler_hv(s) over sample_strings.json",
+  "subsystem": "hdc"
+}

@@ -4,7 +4,6 @@ import json
 import subprocess
 from unittest import mock
 
-import pytest
 
 from bench.total_session_cost import (
     _SCRIPT,

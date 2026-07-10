@@ -30,6 +30,7 @@ def write_turn_direct(
     source_uuid: str | None = None,
 ) -> dict[str, Any]:
     from iai_mcp.capture import _idem_tag, MIN_CAPTURE_LEN, MAX_CAPTURE_LEN, TIER_ENUM
+    from iai_mcp.crypto import CryptoKey
     from iai_mcp.hippo import AccessMode, HippoDB
 
     root = Path(store_root) if store_root is not None else _resolve_store_root()
@@ -50,7 +51,21 @@ def write_turn_direct(
 
     idem_t = _idem_tag(session_id, role, ts_norm, text, source_uuid=source_uuid)
 
-    db = HippoDB(root, access_mode=AccessMode.SHARED)
+    # Thread the SAME at-rest key provider the normal write path uses (see
+    # MemoryStore.__init__). Only a lazy callable crosses into the engine —
+    # never the key bytes — so _encrypt_for_uuid encrypts literal_surface /
+    # provenance at rest exactly like the daemon path. Without this, the
+    # provider defaults to None and every encrypt call no-ops to plaintext.
+    _crypto_key_wrapper = CryptoKey(user_id="default", store_root=root)
+
+    def _key_provider() -> bytes:
+        return _crypto_key_wrapper.get_or_create()
+
+    db = HippoDB(
+        root,
+        crypto_key_provider=_key_provider,
+        access_mode=AccessMode.SHARED,
+    )
     try:
         existing_id = _find_record_by_tag_direct(db, idem_t)
         if existing_id is not None:
@@ -116,18 +131,19 @@ def _find_record_by_tag_direct(db: Any, tag: str) -> str | None:
 
 
 def _try_get_embedding_fast(text: str, cue: str) -> list[float] | None:
-    from iai_mcp._ipc import IS_WINDOWS, make_sync_ipc_socket, send_sync_auth_token
-    # On POSIX only proceed when IAI_DAEMON_SOCKET_PATH is explicitly set
-    if not IS_WINDOWS and not os.environ.get("IAI_DAEMON_SOCKET_PATH"):
+    socket_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
+    if socket_path:
+        try:
+            import socket as _socket
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.settimeout(0.1)
+            s.connect(socket_path)
+            s.close()
+        except (OSError, ConnectionRefusedError, FileNotFoundError):
+            return None
+    else:
         return None
-    try:
-        s, addr = make_sync_ipc_socket()
-        s.settimeout(0.1)
-        s.connect(addr)
-        send_sync_auth_token(s)
-        s.close()
-    except (OSError, ConnectionRefusedError, FileNotFoundError):
-        return None
+
     return None
 
 
@@ -143,6 +159,12 @@ def _insert_row_with_embedding(
     embedding: list[float],
 ) -> None:
     blob = struct.pack(f"<{len(embedding)}f", *embedding)
+    # Encrypt the confidential columns at rest with the same uuid-derived
+    # associated data the deferred-embed path (insert_pending_row) uses, so an
+    # eager-embedded direct write is indistinguishable from the daemon path on
+    # disk. No-op when no key provider is configured.
+    literal_surface = db._encrypt_for_uuid(record_id, literal_surface)
+    provenance_json = db._encrypt_for_uuid(record_id, provenance_json)
     with db._conn_lock:
         db._conn.execute(
             "INSERT INTO records"
@@ -151,9 +173,9 @@ def _insert_row_with_embedding(
             "  community_id, detail_level, centrality, stability, difficulty,"
             "  pinned, never_decay, never_merge, s5_trust_score,"
             "  schema_version, language,"
-            "  hv_tier, structure_hv_payload)"
+            "  hv_tier, structure_hv_payload, live)"
             " VALUES (?, ?, ?, '', ?, 0, ?, ?, ?, ?, '', 1, 0.0, 0.0, 0.0,"
-            "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'')",
+            "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'', 1)",
             (
                 record_id,
                 tier,
@@ -193,7 +215,7 @@ def _write_sidecar(root: Path, record_id: str, embedding: list[float], db: Any) 
 
     try:
         npy_tmp.write_bytes(blob)
-        json_tmp.write_text(json.dumps({"uuid": record_id, "vec_label": vec_label}), encoding="utf-8")
+        json_tmp.write_text(json.dumps({"uuid": record_id, "vec_label": vec_label}))
         os.replace(npy_tmp, npy_final)
         os.replace(json_tmp, json_final)
     except OSError as exc:
@@ -205,24 +227,3 @@ def _write_sidecar(root: Path, record_id: str, embedding: list[float], db: Any) 
                 pass
 
 
-def simulate_daemon_reembed(
-    store_root: Path | str,
-    *,
-    text_fragment: str,
-    embedding: list[float],
-) -> None:
-    import sqlite3 as _sqlite3
-    root = Path(store_root)
-    db_path = root / "hippo" / "brain.sqlite3"
-    blob = struct.pack(f"<{len(embedding)}f", *embedding)
-    conn = _sqlite3.connect(str(db_path))
-    conn.row_factory = _sqlite3.Row
-    try:
-        conn.execute(
-            "UPDATE records SET embedding = ?, embedding_pending = 0"
-            " WHERE literal_surface LIKE ?",
-            (blob, f"%{text_fragment}%"),
-        )
-        conn.commit()
-    finally:
-        conn.close()

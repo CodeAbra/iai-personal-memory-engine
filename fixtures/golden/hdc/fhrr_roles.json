@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_codebooks.py",
+  "name": "fhrr_roles",
+  "payload": null,
+  "sha256": "7b43294d6bdb40f3c0475a2416aef38a0f1dd0a79fe3e8693e218ae653867f84",
+  "shape": [
+    18,
+    10000
+  ],
+  "source": "src/iai_mcp/lilli/tiers/fhrr.py role_hv(role)",
+  "subsystem": "hdc"
+}

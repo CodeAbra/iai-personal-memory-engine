@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 TRAILER = "[... payload truncated to fit Claude Code 10000-char limit ...]"
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -76,7 +76,7 @@ def test_identity_tier_with_clean_text_proceeds_to_voting(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
-    good = _identity_record(text="User is Alice Chen, software engineer")
+    good = _identity_record(text="User is Alice Anderson, music producer")
     ok, reason = check_identity_anchor_on_write(store, good, profile_state={})
     assert ok is True
 
@@ -87,7 +87,7 @@ def test_identity_tier_direct_without_consensus_still_rejected(tmp_path):
 
     store = MemoryStore(path=tmp_path)
     good = _identity_record(
-        text="User is Alice, software engineer",
+        text="User is Alice, creative producer",
         tags=["identity"],
     )
     ok, reason = check_identity_anchor_on_write(store, good, profile_state={})
@@ -106,7 +106,7 @@ def test_identity_tier_cross_language_warning(tmp_path):
     store.insert(anchor_en)
 
     rus = _identity_record(
-        text="Пользователь - морской биолог",
+        text="Пользователь - креативный продюсер",
         language="ru",
     )
     ok, _reason = check_identity_anchor_on_write(store, rus, profile_state={})
@@ -126,7 +126,7 @@ def test_identity_tier_monolingual_commit(tmp_path):
     anchor.pinned = True
     store.insert(anchor)
 
-    update = _identity_record(text="User role: software engineer", language="en")
+    update = _identity_record(text="User role: LA producer", language="en")
     ok, _reason = check_identity_anchor_on_write(store, update, profile_state={})
     assert ok is True
     events = query_events(store, kind="identity_cross_lingual_warning", limit=5)

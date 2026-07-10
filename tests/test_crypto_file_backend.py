@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-
 import os
 import secrets
 import stat
@@ -105,8 +103,7 @@ def test_try_file_set_writes_atomic_with_0o600(tmp_path: Path) -> None:
     assert key_path.exists()
     assert key_path.read_bytes() == payload
     mode = stat.S_IMODE(os.stat(key_path).st_mode)
-    if sys.platform != "win32":
-        assert mode == 0o600
+    assert mode == 0o600
 
     leftover_tmps = list(tmp_path.glob(".crypto.key.tmp.*"))
     assert leftover_tmps == [], f"leaked tmp files: {leftover_tmps}"
@@ -177,8 +174,7 @@ def test_cmd_crypto_migrate_to_file_happy_path(
     key_path = tmp_path / ".crypto.key"
     assert key_path.exists()
     mode = stat.S_IMODE(os.stat(key_path).st_mode)
-    if sys.platform != "win32":
-        assert mode == 0o600
+    assert mode == 0o600
     assert key_path.read_bytes() == keyring_key, (
         "file contents must equal the round-tripped keyring key bytes"
     )

@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import numpy as np
 import pytest

@@ -11,7 +11,6 @@ from iai_mcp.pipeline import _find_anti_hits
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryHit, MemoryRecord
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -26,11 +25,9 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(path=tmp_path / "hippo")
-
+    return MemoryStore(path=tmp_path / "lancedb")
 
 def _make_record(rid: UUID, surface: str = "topic") -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -56,7 +53,6 @@ def _make_record(rid: UUID, surface: str = "topic") -> MemoryRecord:
         language="en",
     )
 
-
 def _add_edge_row(
     store: MemoryStore,
     *,
@@ -74,7 +70,6 @@ def _add_edge_row(
         "updated_at": datetime.now(timezone.utc),
     }])
 
-
 def _make_hit(rid: UUID, surface: str = "primary topic") -> MemoryHit:
     return MemoryHit(
         record_id=rid,
@@ -83,7 +78,6 @@ def _make_hit(rid: UUID, surface: str = "primary topic") -> MemoryHit:
         literal_surface=surface,
         adjacent_suggestions=[],
     )
-
 
 def test_malformed_dst_does_not_crash_and_valid_anti_surfaces(store, caplog):
     rid_hit = uuid4()
@@ -115,7 +109,6 @@ def test_malformed_dst_does_not_crash_and_valid_anti_surfaces(store, caplog):
         for r in caplog.records
     ), f"expected log line; got {[r.getMessage() for r in caplog.records]}"
 
-
 def test_malformed_src_filtered_at_upstream_step(store, caplog):
     rid_hit = uuid4()
     rid_anti = uuid4()
@@ -144,7 +137,6 @@ def test_malformed_src_filtered_at_upstream_step(store, caplog):
         "anti_hits_skip_malformed_lid" in r.getMessage()
         for r in caplog.records
     ), "upstream filter must remove bad rows before the inner UUID(lid) call"
-
 
 def test_no_contradicts_edges_returns_empty_clean(store):
     rid_hit = uuid4()

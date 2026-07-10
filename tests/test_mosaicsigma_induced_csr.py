@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 
 def test_build_csr_from_edge_lists_round_trip() -> None:

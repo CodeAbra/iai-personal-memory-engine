@@ -85,16 +85,10 @@ def cleanup_schema_duplicates(
 
     if apply and (keepers or duplicates):
         iai_root = Path(store_path) if store_path is not None else Path(store.root)
-        src_lancedb = iai_root / "lancedb"
         src_hippo = iai_root / "hippo"
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        snap = iai_root / f"lancedb-pre-cleanup-{ts}"
-        if src_lancedb.exists():
-            snapshot_source = src_lancedb
-        elif src_hippo.exists():
-            snapshot_source = src_hippo
-        else:
-            snapshot_source = iai_root
+        snap = iai_root / f"hippo-pre-cleanup-{ts}"
+        snapshot_source = src_hippo if src_hippo.exists() else iai_root
         shutil.copytree(snapshot_source, snap)
         snapshot_dir = str(snap)
 

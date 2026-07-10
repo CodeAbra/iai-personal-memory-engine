@@ -1,0 +1,14 @@
+{
+  "byte_order": "le",
+  "dtype": "f64",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "fhrr_ops_sims",
+  "payload": null,
+  "sha256": "f3919ca3894bf0755c7b33fdf1351c8fe63982c3f92489ac13f15c08b5ab5c7b",
+  "shape": [
+    9
+  ],
+  "source": "src/iai_mcp/lilli/tiers/fhrr.py similarity over consecutive fhrr_ops bind rows for i in range(9)",
+  "subsystem": "hdc"
+}

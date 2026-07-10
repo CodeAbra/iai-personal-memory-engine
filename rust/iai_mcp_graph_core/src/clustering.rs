@@ -1,16 +1,16 @@
-//! LOCAL average clustering coefficient.
+//! LOCAL Watts-Strogatz average clustering coefficient.
 //!
 //! Per-node formula:
 //!
 //! ```text
-//! c(v) = 2 * T(v) / (d(v) * (d(v) - 1)) for d(v) >= 2
-//! c(v) = 0 for d(v) < 2
+//!     c(v) = 2 * T(v) / (d(v) * (d(v) - 1))    for d(v) >= 2
+//!     c(v) = 0                                  for d(v) <  2
 //! ```
 //!
 //! Average over all nodes (arithmetic mean):
 //!
 //! ```text
-//! C_avg = (1 / n_nodes) * sum_v c(v)
+//!     C_avg = (1 / n_nodes) * sum_v c(v)
 //! ```
 //!
 //! Triangle enumeration draws on the per-node form of the Schank-Wagner
@@ -24,7 +24,7 @@
 //!
 //! Does NOT delegate to the global transitivity coefficient from
 //! `rustworkx-core` (`3 * triangles / connected_triples`). That is a
-//! distinct quantity from the LOCAL clustering coefficient.
+//! distinct quantity from the Watts-Strogatz LOCAL clustering coefficient.
 //! Substituting one for the other would silently shift sigma values on
 //! every non-regular graph (= every real graph). A CI grep guard
 //! enforces this invariant in `test_global_transitivity_not_used_in_source`
@@ -32,7 +32,7 @@
 //! transitivity submodule never appears in this crate's source tree.
 //!
 //! The PyO3 entry point copies the input CSR slices to owned `Vec`s
-//! BEFORE entering `py.allow_threads(...)` so the compute kernel
+//! BEFORE entering `py.allow_threads(|| ...)` so the compute kernel
 //! holds no Python-bound borrows -- releasing the GIL during the kernel
 //! lets the daemon's status handler and other async tasks remain
 //! responsive on multi-second computations over N=10^4 graphs.
@@ -144,7 +144,7 @@ fn compute_average_clustering(indptr: &[i64], indices: &[i64], n_nodes: usize) -
     total / (n_nodes as f64)
 }
 
-/// LOCAL average clustering coefficient -- PyO3 entry.
+/// LOCAL Watts-Strogatz average clustering coefficient -- PyO3 entry.
 ///
 /// ```python
 /// from iai_mcp_native import graph

@@ -6,6 +6,11 @@ recursive-include rust/iai_mcp_graph_core/src *
 # Type stubs for the native extension — staged beside the compiled .so at wheel time
 include rust/iai_mcp_native/iai_mcp_native/*.pyi
 include rust/iai_mcp_native/iai_mcp_native/py.typed
+# Flat stubs beside where an editable-install flat extension resolves
+include src/iai_mcp_native.pyi
+include src/embed.pyi
+include src/graph.pyi
+include src/py.typed
 
 # Deploy files: launchd plist, systemd unit, hook scripts
 recursive-include src/iai_mcp/_deploy *
@@ -17,8 +22,3 @@ include mcp-wrapper/package-lock.json
 include mcp-wrapper/tsconfig.json
 prune mcp-wrapper/node_modules
 prune mcp-wrapper/dist
-# Flat stubs beside where an editable-install flat extension resolves
-include src/iai_mcp_native.pyi
-include src/embed.pyi
-include src/graph.pyi
-include src/py.typed

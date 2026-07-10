@@ -12,7 +12,6 @@ from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _FakeEmbedder:
 
     DIM = EMBED_DIM
@@ -25,7 +24,6 @@ class _FakeEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [list(self._vec) for _ in texts]
-
 
 def _make(
     vec: list[float], text: str = "rec", aaak: str = "", tier: str = "episodic",
@@ -53,12 +51,11 @@ def _make(
         language="en",
     )
 
-
 def _build_store_and_graph(
     tmp_path, n: int, gold_indices: list[int] | None = None,
     semantic_indices: list[int] | None = None,
 ) -> tuple[MemoryStore, MemoryGraph, list[MemoryRecord]]:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs: list[MemoryRecord] = []
     semantic_set = set(semantic_indices or [])
     for i in range(n):
@@ -83,7 +80,6 @@ def _build_store_and_graph(
         })
     return store, graph, recs
 
-
 def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
     cid = uuid4()
     centroid = [1.0] + [0.0] * (EMBED_DIM - 1)
@@ -96,7 +92,6 @@ def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
         mid_regions={cid: [r.id for r in recs]},
     )
 
-
 def _degenerate_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
     centroids = {uuid4(): list(rec.embedding) for rec in recs}
     cids = list(centroids.keys())
@@ -108,7 +103,6 @@ def _degenerate_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
         top_communities=cids[:3],
         mid_regions={cids[i]: [recs[i].id] for i in range(len(recs))},
     )
-
 
 def _matmul_with_counter(counter: dict[str, int]):
     orig = np.matmul
@@ -130,7 +124,6 @@ def _matmul_with_counter(counter: dict[str, int]):
 
     return wrapped
 
-
 def test_recall_core_runs_one_cosine_pass(tmp_path, monkeypatch):
     from iai_mcp.pipeline import _recall_core
 
@@ -148,11 +141,10 @@ def test_recall_core_runs_one_cosine_pass(tmp_path, monkeypatch):
     )
 
     assert counter["count"] == 1, (
-        f"cue-vs-large-pool matmul fired "
+        f"Single-pass violation: cue-vs-large-pool matmul fired "
         f"{counter['count']} times; expected exactly 1 (the shared "
         "cosine pass at the top of _recall_core)."
     )
-
 
 def test_recall_core_gate_is_diagnostic_not_filter(tmp_path):
     from iai_mcp.pipeline import _recall_core
@@ -172,12 +164,11 @@ def test_recall_core_gate_is_diagnostic_not_filter(tmp_path):
     assert len(result.scored_hits) >= 1
     assert result.scored_hits[0].record_id == recs[5].id
 
-
 def test_recall_core_K_CANDIDATES_covers_rank_199(tmp_path):
     from iai_mcp.pipeline import K_CANDIDATES, _recall_core
 
     n = 250
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs: list[MemoryRecord] = []
     for i in range(n):
         vec = [0.0] * EMBED_DIM
@@ -218,7 +209,6 @@ def test_recall_core_K_CANDIDATES_covers_rank_199(tmp_path):
     found_ids = {h.record_id for h in result.scored_hits}
     assert gold.id in found_ids
 
-
 def test_recall_core_passes_shared_cos_to_pick_seeds(tmp_path, monkeypatch):
     import iai_mcp.pipeline as pipeline_mod
     from iai_mcp.pipeline import _recall_core
@@ -248,7 +238,6 @@ def test_recall_core_passes_shared_cos_to_pick_seeds(tmp_path, monkeypatch):
     assert isinstance(captured["centrality_arr"], np.ndarray)
     assert captured["candidate_indices"].dtype.kind in {"i", "u"}
 
-
 def test_recall_core_reachable_includes_cosine_top_k(tmp_path):
     from iai_mcp.pipeline import _recall_core
 
@@ -266,11 +255,10 @@ def test_recall_core_reachable_includes_cosine_top_k(tmp_path):
 
     found = {h.record_id for h in result.scored_hits}
     assert recs[17].id in found, (
-        "gold record reachable via cosine top-K but "
+        "Reachability violation: gold record reachable via cosine top-K but "
         "not surfaced in scored_hits (graph 2-hop spread alone cannot "
         "be the source of truth)."
     )
-
 
 def test_recall_core_stage5_does_not_recompute_cosine(tmp_path, monkeypatch):
     from iai_mcp.pipeline import _recall_core
@@ -293,7 +281,6 @@ def test_recall_core_stage5_does_not_recompute_cosine(tmp_path, monkeypatch):
         f"total count = {counter['count']} (expected 1 for the shared pass)."
     )
 
-
 def test_recall_core_scored_hits_sorted_descending(tmp_path):
     from iai_mcp.pipeline import _recall_core
 
@@ -312,7 +299,6 @@ def test_recall_core_scored_hits_sorted_descending(tmp_path):
         f"scored_hits is not sorted descending: {scores}"
     )
 
-
 def test_recall_core_l0_fastpath_inside_core(tmp_path, monkeypatch):
     import iai_mcp.gate as gate_mod
     from iai_mcp.pipeline import _recall_core
@@ -323,7 +309,7 @@ def test_recall_core_l0_fastpath_inside_core(tmp_path, monkeypatch):
         lambda cue: (True, "test L0 reason"),
     )
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     l0_uuid = UUID("00000000-0000-0000-0000-000000000001")
     now = datetime.now(timezone.utc)
     l0_rec = MemoryRecord(
@@ -365,7 +351,6 @@ def test_recall_core_l0_fastpath_inside_core(tmp_path, monkeypatch):
     assert any(h.get("kind") == "retrieval_skipped" for h in result.hints)
     assert result.budget_used > 0
 
-
 def test_recall_core_verbatim_mode_filters_to_episodic(tmp_path):
     from iai_mcp.pipeline import _recall_core
 
@@ -387,7 +372,6 @@ def test_recall_core_verbatim_mode_filters_to_episodic(tmp_path):
         assert rec.tier == "episodic"
     assert result.hints == []
     assert result.patterns_observed == []
-
 
 def test_recall_core_verbatim_filter_at_post_stage4_location(
     tmp_path, monkeypatch,
@@ -429,10 +413,9 @@ def test_recall_core_verbatim_filter_at_post_stage4_location(
     )
     assert recs[0].id not in post, (
         "verbatim filter must REMOVE semantic record between Stage 4 "
-        "(union) and Stage 5 (rank); the canonical pipeline "
+        "(union) and Stage 5 (rank); the canonical pipeline.py:831 "
         "location is preserved"
     )
-
 
 def test_recall_core_profile_modulation_applied(tmp_path):
     from iai_mcp.pipeline import _recall_core
@@ -462,7 +445,6 @@ def test_recall_core_profile_modulation_applied(tmp_path):
     assert len(result_active.scored_hits) == len(result_none.scored_hits)
     assert result_active.cue_mode == "concept"
 
-
 def test_recall_core_post_rank_artifacts_populated(tmp_path):
     from iai_mcp.pipeline import _RecallCoreResult, _recall_core
 
@@ -485,7 +467,6 @@ def test_recall_core_post_rank_artifacts_populated(tmp_path):
     assert isinstance(result.cue_mode, str)
     assert isinstance(result.budget_used, int)
 
-
 def test_pick_seeds_new_signature_returns_indices() -> None:
     from iai_mcp.pipeline import _pick_seeds
 
@@ -501,7 +482,6 @@ def test_pick_seeds_new_signature_returns_indices() -> None:
     assert out.dtype.kind in {"i", "u"}
     assert list(out) == [1, 4, 2]
 
-
 def test_pick_seeds_blends_cosine_and_centrality() -> None:
     from iai_mcp.pipeline import _pick_seeds
 
@@ -511,9 +491,7 @@ def test_pick_seeds_blends_cosine_and_centrality() -> None:
     out = _pick_seeds(candidate_indices, shared_cos, centrality_arr, n=1)
     assert list(out) == [1]
 
-
 def test_pick_seeds_does_no_store_io(monkeypatch) -> None:
-    import iai_mcp.pipeline as pipeline_mod
     from iai_mcp.pipeline import _pick_seeds
 
     dot_calls: dict[str, int] = {"count": 0}
@@ -530,7 +508,6 @@ def test_pick_seeds_does_no_store_io(monkeypatch) -> None:
     _ = _pick_seeds(candidate_indices, shared_cos, centrality_arr, n=2)
     assert dot_calls["count"] == 0
 
-
 def test_pick_seeds_empty_candidates_returns_empty() -> None:
     from iai_mcp.pipeline import _pick_seeds
 
@@ -542,7 +519,6 @@ def test_pick_seeds_empty_candidates_returns_empty() -> None:
     assert out.size == 0
     assert out.dtype == candidate_indices.dtype
 
-
 def test_pick_seeds_old_signature_raises() -> None:
     from iai_mcp.pipeline import _pick_seeds
 
@@ -552,14 +528,12 @@ def test_pick_seeds_old_signature_raises() -> None:
             None, None, {}, 3, None,
         )
 
-
 def _make_store_hermetic(tmp_path, monkeypatch) -> MemoryStore:
     store_root = tmp_path / "store"
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "daemon.sock"))
     return MemoryStore(path=store_root)
-
 
 def _insert_recs(store: MemoryStore, n: int, start: int = 0) -> list[MemoryRecord]:
     recs = []
@@ -574,11 +548,9 @@ def _insert_recs(store: MemoryStore, n: int, start: int = 0) -> list[MemoryRecor
         recs.append(rec)
     return recs
 
-
 def test_warm_recall_does_not_call_build_runtime_graph(tmp_path, monkeypatch):
     import iai_mcp.retrieve as retrieve_mod
     from iai_mcp.pipeline import recall_for_response
-    from iai_mcp.community import CommunityAssignment
 
     store = _make_store_hermetic(tmp_path, monkeypatch)
     recs = _insert_recs(store, 5)
@@ -604,7 +576,6 @@ def test_warm_recall_does_not_call_build_runtime_graph(tmp_path, monkeypatch):
         cue="rec0", session_id="s-cc-d-1",
     )
     assert resp is not None, "recall_for_response must return a response"
-
 
 def test_warm_recall_does_not_call_detect_communities_or_rich_club_nodes(
     tmp_path, monkeypatch
@@ -641,7 +612,6 @@ def test_warm_recall_does_not_call_detect_communities_or_rich_club_nodes(
         cue="rec0", session_id="s-cc-d-2",
     )
     assert resp is not None
-
 
 def test_bounded_2hop_spread_reaches_two_hops(tmp_path, monkeypatch):
     store = _make_store_hermetic(tmp_path, monkeypatch)
@@ -699,7 +669,6 @@ def test_bounded_2hop_spread_reaches_two_hops(tmp_path, monkeypatch):
     )
     assert rec_hop1.id in candidate_recs
 
-
 def test_load_recall_structural_case2_returns_nonempty(tmp_path, monkeypatch):
     import iai_mcp.runtime_graph_cache as rgc
 
@@ -715,27 +684,25 @@ def test_load_recall_structural_case2_returns_nonempty(tmp_path, monkeypatch):
 
     result = rgc.load_last_good_structural(store)
     assert result is not None, (
-        "case-2: load_last_good_structural must return last-good "
+        "CC2-H3 case-2: load_last_good_structural must return last-good "
         "assignment on a count-only drift (NOT empty bias)."
     )
     lga, lgrc = result
     assert len(lga.node_to_community) > 0, "last-good assignment must be non-empty"
     assert recs[0].id in lgrc
 
-
 def test_load_recall_structural_case3_labelled(tmp_path, monkeypatch):
     import iai_mcp.runtime_graph_cache as rgc
 
     store = _make_store_hermetic(tmp_path, monkeypatch)
-    a, rc, max_deg, src = rgc.load_recall_structural(store)
+    a, rc, max_deg, src, _node_degrees = rgc.load_recall_structural(store)
     assert src == "cold_degrade", (
-        "case-3: a truly-cold store must return structural_source "
+        "CC2-H3 case-3: a truly-cold store must return structural_source "
         "'cold_degrade', not a silent empty bias."
     )
     assert len(a.node_to_community) == 0
     assert rc == []
     assert max_deg == 0
-
 
 def test_preload_ready_flag_exists_and_is_event():
     import threading
@@ -745,7 +712,6 @@ def test_preload_ready_flag_exists_and_is_event():
         "runtime_graph_cache.preload_ready must be a threading.Event "
         "so core.py can import and read it without importing daemon.py."
     )
-
 
 def test_uncapped_contradicts_ts_by_id(tmp_path, monkeypatch):
     store = _make_store_hermetic(tmp_path, monkeypatch)
@@ -776,7 +742,6 @@ def test_uncapped_contradicts_ts_by_id(tmp_path, monkeypatch):
     assert len(capped_nbrs) <= 5, "Capped top_k=5 should return at most 5"
     assert uncapped_nbrs >= capped_nbrs, "UNCAPPED must be a superset of capped"
 
-
 def test_find_anti_hits_does_not_call_edges_to_pandas(tmp_path, monkeypatch):
     store = _make_store_hermetic(tmp_path, monkeypatch)
     recs = _insert_recs(store, 5)
@@ -786,7 +751,6 @@ def test_find_anti_hits_does_not_call_edges_to_pandas(tmp_path, monkeypatch):
     def _no_to_pandas(*a, **kw):
         raise RuntimeError("edges.to_pandas() must NOT be called on anti-hits path")
 
-    import iai_mcp.hippo as hippo_mod
     orig_open = store.db.open_table
 
     def _spy_open(name, *a, **kw):
@@ -811,7 +775,6 @@ def test_find_anti_hits_does_not_call_edges_to_pandas(tmp_path, monkeypatch):
 
     result = _find_anti_hits(hits, store, graph, k=3)
     assert isinstance(result, list)
-
 
 def test_stage14_profile_modulates_chunked_not_large_batch(tmp_path, monkeypatch):
     store = _make_store_hermetic(tmp_path, monkeypatch)
@@ -861,15 +824,12 @@ def test_stage14_profile_modulates_chunked_not_large_batch(tmp_path, monkeypatch
             f"edges.to_pandas() scan on the recall hot path."
         )
 
-
 def test_ann_path_used_field_on_recall_response():
     from iai_mcp.types import RecallResponse
-    from iai_mcp.types import MemoryHit
 
     resp = RecallResponse(hits=[], anti_hits=[], activation_trace=[], budget_used=0)
     assert hasattr(resp, "ann_path_used")
     assert resp.ann_path_used is False
-
 
 def test_ann_path_used_settable():
     from iai_mcp.types import RecallResponse
@@ -877,7 +837,6 @@ def test_ann_path_used_settable():
     resp = RecallResponse(hits=[], anti_hits=[], activation_trace=[], budget_used=0)
     resp.ann_path_used = True
     assert resp.ann_path_used is True
-
 
 def test_ann_path_used_serialized_in_core_response_dict(tmp_path, monkeypatch):
     from iai_mcp.types import RecallResponse
@@ -891,7 +850,6 @@ def test_ann_path_used_serialized_in_core_response_dict(tmp_path, monkeypatch):
     )
     assert getattr(resp_true, "ann_path_used", False) is True
     assert getattr(resp_false, "ann_path_used", False) is False
-
 
 def test_core_dispatch_ann_assembler_executes_and_returns_ann_path_used(
     tmp_path, monkeypatch
@@ -927,7 +885,6 @@ def test_core_dispatch_ann_assembler_executes_and_returns_ann_path_used(
         f"Expected ann_path_used=True in core.dispatch response; got: "
         f"{response.get('ann_path_used')!r}"
     )
-
 
 def test_core_dispatch_soft_fallback_leaves_ann_path_used_false(
     tmp_path, monkeypatch

@@ -1,0 +1,5 @@
+# Tauri's dependency tree needs a newer rustc than the PyO3 core pin at the
+# repo root; this nested pin applies to the desktop crate only.
+[toolchain]
+channel = "1.94"
+profile = "minimal"

@@ -29,7 +29,7 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    s = MemoryStore(path=tmp_path / "hippo")
+    s = MemoryStore(path=tmp_path / "lancedb")
     s.root = tmp_path
     return s
 
@@ -144,7 +144,7 @@ def test_B5_cold_start_restores_node_payload_from_cache(store):
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None, "cache must be loadable"
-    _assignment, _rich_club, node_payload, _max_degree = loaded
+    _assignment, _rich_club, node_payload, _max_degree, _node_degrees = loaded
     assert node_payload is not None, "cache is missing node_payload blob"
     assert str(rec.id) in node_payload
 
@@ -176,6 +176,6 @@ def test_B6_cache_version_bump_invalidates_old_cache(store):
             f,
         )
 
-    assert runtime_graph_cache.CACHE_VERSION == "62-02-v5"
+    assert runtime_graph_cache.CACHE_VERSION == "62-02-v6"
 
     assert runtime_graph_cache.try_load(store) is None

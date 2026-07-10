@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import array
+import os
 import sqlite3
 import struct
 import time
@@ -7,7 +9,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pytest
+
+from tests._store_raw import open_store_raw
+
+
+_LILLI_DRIVER = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli"
+
 
 
 def _make_episodic_record(text: str = "generic user turn"):
@@ -116,7 +125,6 @@ def test_integrity_rebuild_triggers_mid_run(hermetic_store: Path) -> None:
     from iai_mcp.hippo import HippoDB
     from iai_mcp.types import EMBED_DIM
 
-    import numpy as np
 
     hippo = HippoDB(hermetic_store)
     try:
@@ -174,12 +182,14 @@ def test_daemon_down_write_deferred_embedding_slo(hermetic_store: Path) -> None:
     )
 
     db_path = hermetic_store / "hippo" / "brain.sqlite3"
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        # literal_surface is AES-256-GCM encrypted at rest, so a plaintext LIKE
+        # never matches — select the single deferred row by its pending flag.
         row = conn.execute(
             "SELECT embedding, embedding_pending FROM records "
-            "WHERE literal_surface LIKE '%deferred embedding probe%' "
+            "WHERE COALESCE(embedding_pending, 0) = 1 "
             "AND tombstoned_at IS NULL"
         ).fetchone()
         assert row is not None, "deferred-embedding row not found in SQLite"
@@ -207,20 +217,30 @@ def test_daemon_down_write_deferred_embedding_slo(hermetic_store: Path) -> None:
         "pending row not recency-recallable immediately (recency is embedding-independent)"
     )
 
-    from iai_mcp.direct_write import simulate_daemon_reembed  # type: ignore[import]
     import numpy as np
 
     rng = np.random.RandomState(seed=99)
     real_embedding = rng.randn(EMBED_DIM).tolist()
-    simulate_daemon_reembed(hermetic_store, text_fragment="deferred embedding probe", embedding=real_embedding)
+    # literal_surface is encrypted at rest, so simulate the daemon's re-embed by
+    # targeting the deferred row via its pending flag instead of a plaintext LIKE.
+    reembed_blob = struct.pack(f"<{EMBED_DIM}f", *real_embedding)
+    conn_re = open_store_raw(db_path)
+    try:
+        conn_re.execute(
+            "UPDATE records SET embedding = ?, embedding_pending = 0 "
+            "WHERE COALESCE(embedding_pending, 0) = 1 AND tombstoned_at IS NULL",
+            (reembed_blob,),
+        )
+        conn_re.commit()
+    finally:
+        conn_re.close()
 
-    conn2 = sqlite3.connect(str(db_path))
+    conn2 = open_store_raw(db_path)
     conn2.row_factory = sqlite3.Row
     try:
         row2 = conn2.execute(
             "SELECT embedding, embedding_pending FROM records "
-            "WHERE literal_surface LIKE '%deferred embedding probe%' "
-            "AND tombstoned_at IS NULL"
+            "WHERE tombstoned_at IS NULL ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
         assert row2 is not None
         blob2 = row2["embedding"]
@@ -254,7 +274,7 @@ def test_boot_with_pending_row_no_crash_no_churn(hermetic_store: Path) -> None:
     zero_blob = _zero_vector_blob(EMBED_DIM)
     now = datetime.now(timezone.utc).isoformat()
 
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     conn.row_factory = sqlite3.Row
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
@@ -267,8 +287,8 @@ def test_boot_with_pending_row_no_crash_no_churn(hermetic_store: Path) -> None:
         conn.execute(
             "INSERT INTO records "
             "(id, tier, literal_surface, aaak_index, embedding, embedding_pending, "
-            " created_at, updated_at, hv_tier, structure_hv_payload) "
-            "VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'bsc', x'')",
+            " created_at, updated_at, hv_tier, structure_hv_payload, live) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'bsc', x'', 1)",
             (pending_id, "episodic", "pending row text", "", zero_blob, now, now),
         )
         conn.commit()
@@ -287,7 +307,7 @@ def test_boot_with_pending_row_no_crash_no_churn(hermetic_store: Path) -> None:
         non_pending_count = non_pending_count_row[0]
 
         assert active_label_count == non_pending_count, (
-            f"label churn bug: active_label_count={active_label_count} != "
+            f"churn bug: active_label_count={active_label_count} != "
             f"non_pending_count={non_pending_count}; pending rows must be excluded "
             "from the ANN label map to prevent perpetual rebuild"
         )
@@ -299,7 +319,7 @@ def test_boot_with_pending_row_no_crash_no_churn(hermetic_store: Path) -> None:
             "pending row must be recency-recallable immediately (embedding-independent)"
         )
 
-        from iai_mcp.direct_write import simulate_daemon_reembed  # type: ignore[import]
+        from tests._store_raw import simulate_daemon_reembed  # type: ignore[import]
         rng = np.random.RandomState(seed=77)
         real_vec = rng.randn(EMBED_DIM).tolist()
         simulate_daemon_reembed(hermetic_store, text_fragment="pending row", embedding=real_vec)
@@ -313,9 +333,18 @@ def test_boot_with_pending_row_no_crash_no_churn(hermetic_store: Path) -> None:
         hippo.close()
 
 
+@pytest.mark.skipif(
+    _LILLI_DRIVER,
+    reason=(
+        "fabricates a pre-migration store shape with CREATE TABLE ... AS SELECT "
+        "(clone-minus-column) + DROP TABLE + RENAME — a stdlib-sqlite migration "
+        "mechanism. CTAS is outside the lilli engine's supported grammar by "
+        "design; the production V4->V5 reconcile uses ALTER TABLE ADD COLUMN "
+        "(exercised driver-independently by test_boot_with_pending_row_no_crash_no_churn "
+        "and _reconcile_columns)."
+    ),
+)
 def test_pre_migration_store_opens_and_reconciles(hermetic_store: Path) -> None:
-    from iai_mcp.types import EMBED_DIM
-    import numpy as np
 
     from iai_mcp.store import MemoryStore, flush_record_buffer
 
@@ -338,7 +367,7 @@ def test_pre_migration_store_opens_and_reconciles(hermetic_store: Path) -> None:
         " FROM records"
     )
     db_path = hermetic_store / "hippo" / "brain.sqlite3"
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
         if "embedding_pending" in cols:
@@ -373,3 +402,79 @@ def test_pre_migration_store_opens_and_reconciles(hermetic_store: Path) -> None:
         raise
     else:
         hippo.close()
+
+
+# ---------------------------------------------------------------------------
+# seam-hardening: typed memoryview decode contract
+# ---------------------------------------------------------------------------
+
+def _make_strided_memoryview() -> "memoryview":
+    """Non-contiguous strided memoryview simulating a hypothetical future
+    projected-scan result with itemsize > 1 and non-unit stride.
+    cast('B') raises TypeError on non-contiguous views, which is the
+    loud failure the seam hardening must produce instead of silent mis-decode."""
+    arr = np.arange(768, dtype=np.float32)
+    # Stride-2 slice: 384 elements, stride 8 bytes (non-contiguous)
+    strided = arr[::2]
+    assert not strided.flags["C_CONTIGUOUS"]
+    mv = memoryview(strided)
+    assert mv.itemsize == 4
+    return mv
+
+
+def test_decode_embedding_strided_memoryview_raises():
+    """A strided/non-contiguous memoryview must raise loudly at _decode_embedding
+    rather than silently mis-decoding. Covers the _table.py seam hardening."""
+    from iai_mcp.hippo._table import _decode_embedding
+
+    mv = _make_strided_memoryview()
+    with pytest.raises((TypeError, ValueError)):
+        _decode_embedding(mv)
+
+
+def test_decode_raw_row_strided_memoryview_raises():
+    """A strided/non-contiguous memoryview must raise loudly at _decode_raw_row
+    rather than silently mis-decoding. Covers the _store.py seam hardening.
+    np.frombuffer raises BufferError on non-contiguous views."""
+    from iai_mcp.store._store import MemoryStore
+
+    mv = _make_strided_memoryview()
+    with pytest.raises((TypeError, ValueError, BufferError)):
+        MemoryStore._decode_raw_row({"embedding": mv})
+
+
+def test_decode_embedding_normal_bytes_roundtrip():
+    """Normal format-'B' path decodes to exactly 384 float32 — zero regression."""
+    from iai_mcp.hippo._table import _decode_embedding
+
+    rng = np.random.RandomState(seed=7)
+    vec = rng.randn(384).astype(np.float32)
+    blob = vec.tobytes()
+
+    # bytes path
+    result_bytes = _decode_embedding(blob)
+    assert len(result_bytes) == 384
+    np.testing.assert_array_equal(np.array(result_bytes, dtype=np.float32), vec)
+
+    # bytearray path
+    result_ba = _decode_embedding(bytearray(blob))
+    assert result_ba == result_bytes
+
+    # memoryview format-'B' path (the real engine path)
+    result_mv = _decode_embedding(memoryview(blob))
+    assert result_mv == result_bytes
+
+
+def test_decode_raw_row_normal_bytes_roundtrip():
+    """Normal bytes/bytearray/format-'B' memoryview path decodes to 384 floats — no regression."""
+    from iai_mcp.store._store import MemoryStore
+
+    rng = np.random.RandomState(seed=13)
+    vec = rng.randn(384).astype(np.float32)
+    blob = vec.tobytes()
+
+    for raw in (blob, bytearray(blob), memoryview(blob)):
+        row = MemoryStore._decode_raw_row({"embedding": raw, "other": "x"})
+        assert len(row["embedding"]) == 384
+        np.testing.assert_array_equal(np.array(row["embedding"], dtype=np.float32), vec)
+        assert row["other"] == "x"

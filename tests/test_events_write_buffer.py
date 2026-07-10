@@ -15,7 +15,7 @@ def _clear_buffer(store) -> None:
     events._last_flush_at.pop(id(store), None)
 
 
-def test_write_event_buffered_does_not_write_to_store(tmp_path):
+def test_write_event_buffered_does_not_write_to_lancedb(tmp_path):
     from iai_mcp import events
     from iai_mcp.events import write_event
     from iai_mcp.store import EVENTS_TABLE, MemoryStore
@@ -32,7 +32,7 @@ def test_write_event_buffered_does_not_write_to_store(tmp_path):
         tbl = store.db.open_table(EVENTS_TABLE)
         n_after = len(tbl.to_pandas())
         assert n_after == n_before, (
-            f"buffered=True wrote to the store: {n_before} -> {n_after}"
+            f"buffered=True wrote to LanceDB: {n_before} -> {n_after}"
         )
 
         assert len(events._event_buffer.get(id(store), [])) == 1

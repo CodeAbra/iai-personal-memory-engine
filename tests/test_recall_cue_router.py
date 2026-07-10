@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-
 def test_module_exposes_compiled_trigger_lists():
     from iai_mcp.cue_router import EN_TRIGGERS, RU_TRIGGERS
 
@@ -15,7 +14,6 @@ def test_module_exposes_compiled_trigger_lists():
     for label, pat in RU_TRIGGERS:
         assert isinstance(label, str) and label, "RU trigger label must be non-empty str"
         assert hasattr(pat, "search"), f"RU trigger pattern for {label!r} must be compiled regex"
-
 
 def test_module_exposes_historical_trigger_lists():
     from iai_mcp.cue_router import EN_HISTORICAL_TRIGGERS, RU_HISTORICAL_TRIGGERS
@@ -33,7 +31,6 @@ def test_module_exposes_historical_trigger_lists():
         assert isinstance(label, str) and label.startswith("historical-ru-")
         assert hasattr(pat, "search")
 
-
 @pytest.mark.parametrize(
     "cue",
     [
@@ -49,7 +46,6 @@ def test_classify_cue_en_verbatim_positives(cue):
     assert mode == "verbatim", f"cue {cue!r} should classify as verbatim, got {mode!r}"
     assert pattern is not None, f"cue {cue!r} should report a triggered_pattern label"
 
-
 def test_classify_cue_en_quoted_phrase():
     from iai_mcp.cue_router import _classify_cue
 
@@ -58,7 +54,6 @@ def test_classify_cue_en_quoted_phrase():
     assert pattern in ("quoted-phrase", "word-marker"), (
         f"expected quoted-phrase or word-marker label, got {pattern!r}"
     )
-
 
 @pytest.mark.parametrize(
     "cue",
@@ -78,7 +73,6 @@ def test_classify_cue_ru_verbatim_positives(cue):
         f"expected ru-start-* label for cue {cue!r}, got {pattern!r}"
     )
 
-
 def test_classify_cue_ru_european_quote_marker():
     from iai_mcp.cue_router import _classify_cue
 
@@ -86,14 +80,13 @@ def test_classify_cue_ru_european_quote_marker():
     assert mode == "verbatim"
     assert pattern == "european-quote"
 
-
 @pytest.mark.parametrize(
     "cue",
     [
         "tell me about schema dedup",
         "how does the rank stage work",
         "community structure of the live store",
-        "каков статус релиза",
+        "каков статус Phase 6",
         "sleep daemon REM cycle behaviour",
         "что нового в проекте",
     ],
@@ -104,7 +97,6 @@ def test_classify_cue_concept_negatives(cue):
     mode, _intent, pattern = _classify_cue(cue)
     assert mode == "concept", f"cue {cue!r} should classify as concept, got {mode!r}"
     assert pattern is None, f"cue {cue!r} should not have a triggered_pattern, got {pattern!r}"
-
 
 def test_classify_cue_triggered_pattern_label_non_none_for_verbatim():
     from iai_mcp.cue_router import _classify_cue
@@ -130,14 +122,12 @@ def test_classify_cue_triggered_pattern_label_non_none_for_verbatim():
         assert mode == "concept", f"{cue!r} -> mode {mode!r}"
         assert pattern is None, f"{cue!r} -> pattern {pattern!r}"
 
-
 def test_classify_cue_case_insensitive_en():
     from iai_mcp.cue_router import _classify_cue
 
     for cue in ("VERBATIM what did I say", "EXACT phrase", "Quote me on this"):
         mode, _intent, _pat = _classify_cue(cue)
         assert mode == "verbatim", f"case-insensitive match failed for {cue!r}"
-
 
 def test_classify_cue_ru_patterns_anchored_at_start():
     from iai_mcp.cue_router import _classify_cue
@@ -151,7 +141,6 @@ def test_classify_cue_ru_patterns_anchored_at_start():
     assert mode_start == "verbatim"
     assert pattern_start == "ru-start-найди-дословно"
 
-
 def test_classify_cue_empty_string_returns_concept():
     from iai_mcp.cue_router import _classify_cue
 
@@ -159,7 +148,6 @@ def test_classify_cue_empty_string_returns_concept():
     assert mode == "concept"
     assert intent is None
     assert pattern is None
-
 
 def test_classify_cue_bench_failing_cue_routes_historical_verbatim():
     from iai_mcp.cue_router import _classify_cue
@@ -170,7 +158,6 @@ def test_classify_cue_bench_failing_cue_routes_historical_verbatim():
         f"bench cue should be historical_verbatim, got {intent!r}"
     )
     assert label == "word-marker", f"expected word-marker label, got {label!r}"
-
 
 @pytest.mark.parametrize(
     "cue",
@@ -192,7 +179,6 @@ def test_classify_cue_en_historical_markers(cue):
         f"cue {cue!r} should have intent=historical_verbatim, got {intent!r}"
     )
 
-
 @pytest.mark.parametrize(
     "cue",
     [
@@ -212,7 +198,6 @@ def test_classify_cue_ru_historical_markers(cue):
         f"cue {cue!r} should have intent=historical_verbatim, got {intent!r}"
     )
 
-
 @pytest.mark.parametrize(
     "cue",
     [
@@ -231,7 +216,6 @@ def test_classify_cue_neutral_no_historical_intent(cue):
         f"cue {cue!r} should NOT have historical_verbatim intent, got {intent!r}"
     )
 
-
 def test_classify_cue_historical_intent_orthogonal_to_mode():
     from iai_mcp.cue_router import _classify_cue
 
@@ -239,7 +223,6 @@ def test_classify_cue_historical_intent_orthogonal_to_mode():
     assert intent == "historical_verbatim", (
         f"historical intent should be orthogonal to mode; got mode={mode!r} intent={intent!r}"
     )
-
 
 def test_classify_cue_ru_historical_uses_word_boundary_not_anchor():
     from iai_mcp.cue_router import _classify_cue
@@ -249,14 +232,11 @@ def test_classify_cue_ru_historical_uses_word_boundary_not_anchor():
         f"mid-cue RU historical marker should fire intent; got {intent!r}"
     )
 
-
-from datetime import datetime, timezone  # noqa: E402 -- co-located fixtures
+from datetime import datetime, timezone  # noqa: E402  -- co-located fixtures
 from uuid import uuid4  # noqa: E402
 
-import numpy as np  # noqa: E402
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord  # noqa: E402
-
 
 class _DispatchEmbedder:
 
@@ -282,7 +262,6 @@ class _DispatchEmbedder:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -297,11 +276,10 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 def _seed_populated_store(tmp_path):
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _DispatchEmbedder()
 
     cue_text = "verbatim quote about migration snapshot"
@@ -334,7 +312,6 @@ def _seed_populated_store(tmp_path):
 
     return store, embedder, cue_text, rec
 
-
 def test_dispatch_routes_verbatim_cue_to_verbatim_mode(tmp_path, monkeypatch):
     from iai_mcp import core
     from iai_mcp import embed as _embed_mod
@@ -351,7 +328,6 @@ def test_dispatch_routes_verbatim_cue_to_verbatim_mode(tmp_path, monkeypatch):
     )
     assert "patterns_observed" in response, "patterns_observed must be in response"
     assert isinstance(response["patterns_observed"], list)
-
 
 def test_dispatch_routes_concept_cue_to_concept_mode(tmp_path, monkeypatch):
     from iai_mcp import core
@@ -372,12 +348,11 @@ def test_dispatch_routes_concept_cue_to_concept_mode(tmp_path, monkeypatch):
     )
     assert "patterns_observed" in response
 
-
 def test_dispatch_empty_store_fallback_honours_classified_mode(tmp_path):
     from iai_mcp import core
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     response = core.dispatch(
         store, "memory_recall",
         {"cue": "verbatim quote please", "session_id": "fallback",
@@ -387,7 +362,6 @@ def test_dispatch_empty_store_fallback_honours_classified_mode(tmp_path):
         f"verbatim cue should classify even on the fallback (empty-store) path, "
         f"got {response['cue_mode']!r}"
     )
-
 
 def test_dispatch_passes_mode_kwarg_to_recall_for_response(tmp_path, monkeypatch):
     from iai_mcp import core
@@ -423,14 +397,13 @@ def test_dispatch_passes_mode_kwarg_to_recall_for_response(tmp_path, monkeypatch
     )
     assert response["cue_mode"] == "verbatim"
 
-
 def test_dispatch_passes_mode_kwarg_to_retrieve_recall(tmp_path, monkeypatch):
     from iai_mcp import core
     from iai_mcp import retrieve as _retrieve_mod
     from iai_mcp.store import MemoryStore
     from iai_mcp.types import RecallResponse
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
 
     captured: dict = {}
 

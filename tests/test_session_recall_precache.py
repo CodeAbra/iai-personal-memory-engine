@@ -157,11 +157,10 @@ def test_cache_file_mode_is_owner_only(tmp_path, monkeypatch):
     daemon_mod._write_session_start_cache(store, cache_path=cache_path)
 
     assert cache_path.exists(), "cache file was not created"
-    if sys.platform != "win32":
-        assert oct(stat.S_IMODE(cache_path.stat().st_mode)) == "0o600", (
-            f"cache file mode is not 0o600; got "
-            f"{oct(stat.S_IMODE(cache_path.stat().st_mode))}"
-        )
+    assert oct(stat.S_IMODE(cache_path.stat().st_mode)) == "0o600", (
+        f"cache file mode is not 0o600; got "
+        f"{oct(stat.S_IMODE(cache_path.stat().st_mode))}"
+    )
 
 def test_precache_does_not_compress_payload(tmp_path, monkeypatch):
     from iai_mcp import daemon as daemon_mod
@@ -259,11 +258,6 @@ def test_hook_falls_back_when_cache_absent(tmp_path):
     )
 
 def test_hook_serves_stale_cache(tmp_path):
-    """Legacy behaviour (serve cache regardless of age) is now opt-in via
-    ``IAI_MCP_SESSION_CACHE_MAX_AGE_SEC=0``. The default is 12h, so an operator
-    who wants the old contract must disable the TTL explicitly. The age cap
-    matters because a daemon that's down for days would otherwise re-inject
-    a multi-day-old precache into every new session."""
     assert HOOK_PATH.exists(), f"hook script missing: {HOOK_PATH}"
     home = tmp_path / "home"
     home.mkdir()
@@ -280,7 +274,7 @@ def test_hook_serves_stale_cache(tmp_path):
     _make_stub_cli(stub_dir, "#!/usr/bin/env bash\necho CLI_SHOULD_NOT_BE_CALLED\nexit 0\n")
     (home / ".iai-mcp" / ".cli-path").write_text(str(stub_dir / "iai-mcp"))
 
-    proc = _run_hook(home, extra_env={"IAI_MCP_SESSION_CACHE_MAX_AGE_SEC": "0"})
+    proc = _run_hook(home)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == cache_content, (
         f"hook did not return cache verbatim. stdout={proc.stdout!r}"

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from iai_mcp.lilli.ops.continual import add_pair, empty_hv, update_role
 from iai_mcp.lilli.ops.consolidation import consolidate
 from iai_mcp.lilli.ops.decay import DECAY_GRACE_DAYS, decay_structure_edge, temporal_decay
-from iai_mcp.lilli.tiers import bsc, fhrr, sparse_vsa
+from iai_mcp.lilli.tiers import bsc, sparse_vsa
 from iai_mcp.lilli.core.similarity import hamming
 
 def test_continual_empty_hv_default_D():

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-import pytest
 
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord

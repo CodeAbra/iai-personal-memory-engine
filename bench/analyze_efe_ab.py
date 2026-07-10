@@ -126,7 +126,7 @@ def _build_markdown(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "EFE A/B ship-gate analyzer. Reads a "
+            "Ship-gate analyzer. Reads a "
             "contradiction_longitudinal_*.csv and emits EFE-AB-SUMMARY.{json,md} "
             "next to it. Exit 0 = ship gate hit, 1 = miss, 2 = setup error."
         ),

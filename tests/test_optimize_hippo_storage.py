@@ -153,3 +153,120 @@ def test_optimize_lance_storage_deprecation_alias(tmp_path: Path) -> None:
     assert isinstance(result, dict)
     for table in ("records", "edges", "events"):
         assert table in result
+
+
+def test_optimize_with_absent_standby_does_not_taint_future_cycles(
+    tmp_path: Path,
+) -> None:
+    """When db._hnsw_standby is None at the moment OPTIMIZE_HIPPO runs,
+    the standby-absent fallback in _rebuild_hnsw_in_child writes the loaded
+    index into db._hnsw. Subsequent _rebuild_index_from_sqlite cycles must
+    not raise the hnswlib RuntimeError on add_items(replace_deleted=True)."""
+    from iai_mcp.maintenance import optimize_hippo_storage
+
+    store = _make_store(tmp_path)
+    tbl = store.db.open_table("records")
+    tbl.add([_random_row() for _ in range(8)])
+
+    # Force the standby-absent path.
+    store.db._hnsw_standby = None
+
+    report = optimize_hippo_storage(store)
+    assert "error" not in report["records"], report["records"].get("error")
+
+    # Re-allocate the standby and exercise the swap-then-rebuild cycle.
+    from iai_mcp.hippo import HNSW_INITIAL_CAPACITY
+    store.db._allocate_standby_index(HNSW_INITIAL_CAPACITY)
+
+    # The next two rebuilds drive the swap chain that historically
+    # surfaced the missing-flag RuntimeError.
+    store.db._rebuild_index_from_sqlite()
+    store.db._rebuild_index_from_sqlite()  # this one used to raise
+
+
+def test_repeated_optimize_does_not_taint_standby_buffer(
+    tmp_path: Path,
+) -> None:
+    """The primary crash path: OPTIMIZE_HIPPO loads a fresh index via
+    load_index into new_standby, swaps into db._hnsw, and the OLD active
+    becomes db._hnsw_standby. The NEXT _rebuild_index_from_sqlite operates
+    on db._hnsw_standby; the swap after that places the no-flag-loaded
+    index back into db._hnsw_standby. The third rebuild attempts
+    mark_deleted + add_items(replace_deleted=True) and raises before fix."""
+    from iai_mcp.maintenance import optimize_hippo_storage
+
+    store = _make_store(tmp_path)
+    tbl = store.db.open_table("records")
+    tbl.add([_random_row() for _ in range(8)])
+
+    # Two consolidation cycles + interleaved sqlite rebuilds drive the
+    # full swap chain that surfaces the latent crash.
+    for _ in range(3):
+        report = optimize_hippo_storage(store)
+        assert "error" not in report["records"], report["records"].get("error")
+        store.db._rebuild_index_from_sqlite()
+
+def test_consolidation_intent_set_during_vacuum_and_cleared_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The VACUUM window must be covered by the .consolidation-pending flag —
+    it is what makes clients refuse a new SHARED open and the watchdog cascade
+    defer its heavy read (Pitfall 6)."""
+    from iai_mcp.maintenance import optimize_hippo_storage
+
+    store = _make_store(tmp_path)
+    intent_flag = store.db._hippo_dir / ".consolidation-pending"
+    real_conn = store.db._conn
+    seen: dict[str, bool] = {}
+
+    class _FlagProbeProxy:
+        def execute(self, sql: str, *args, **kwargs):
+            sql_upper = sql.strip().upper()
+            if "WAL_CHECKPOINT" in sql_upper:
+                seen["at_checkpoint"] = intent_flag.exists()
+            elif sql_upper == "VACUUM":
+                seen["at_vacuum"] = intent_flag.exists()
+            return real_conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(real_conn, name)
+
+    monkeypatch.setattr(store.db, "_conn", _FlagProbeProxy())
+
+    assert not intent_flag.exists(), "flag must not pre-exist"
+    optimize_hippo_storage(store)
+
+    assert seen.get("at_checkpoint") is True, (
+        "consolidation intent flag absent during wal_checkpoint"
+    )
+    assert seen.get("at_vacuum") is True, (
+        "consolidation intent flag absent during VACUUM"
+    )
+    assert not intent_flag.exists(), "flag must be cleared after the window"
+
+def test_consolidation_intent_cleared_even_when_vacuum_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from iai_mcp.maintenance import optimize_hippo_storage
+
+    store = _make_store(tmp_path)
+    intent_flag = store.db._hippo_dir / ".consolidation-pending"
+    real_conn = store.db._conn
+
+    class _VacuumErrorProxy:
+        def execute(self, sql: str, *args, **kwargs):
+            if sql.strip().upper() == "VACUUM":
+                raise ValueError("simulated VACUUM failure")
+            return real_conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(real_conn, name)
+
+    monkeypatch.setattr(store.db, "_conn", _VacuumErrorProxy())
+
+    optimize_hippo_storage(store)
+
+    assert not intent_flag.exists(), (
+        "a VACUUM failure must not leave the intent flag behind — clients "
+        "would refuse shared opens until the next daemon boot"
+    )

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import sys
-
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from iai_mcp.lifecycle_state import (
-    LIFECYCLE_STATE_PATH,
     LifecycleState,
     LifecycleStateRecord,
     default_state,
@@ -125,8 +122,7 @@ def test_save_state_chmod_user_only(tmp_path):
     target = tmp_path / "lifecycle_state.json"
     save_state(default_state(), target)
     mode = os.stat(target).st_mode & 0o777
-    if sys.platform != "win32":
-        assert mode == 0o600
+    assert mode == 0o600
 
 
 def test_save_state_rejects_invalid_record(tmp_path):
@@ -194,3 +190,65 @@ def test_default_path_is_under_iai_mcp_home():
     assert path.name == "lifecycle_state.json"
     assert path.parent.name == ".iai-mcp"
     assert path.is_relative_to(Path.home())
+
+
+def test_resolver_default_store_byte_identical_to_module_path(monkeypatch):
+    from iai_mcp.lifecycle_state import lifecycle_state_path, LIFECYCLE_STATE_PATH
+
+    monkeypatch.delenv("IAI_MCP_STORE", raising=False)
+    resolved = lifecycle_state_path()
+    assert str(resolved) == str(LIFECYCLE_STATE_PATH), (
+        "default-store resolution must be byte-identical to the module path "
+        "so default installs see no behavior change"
+    )
+
+
+def test_resolver_honors_explicit_store_root(tmp_path):
+    from iai_mcp.lifecycle_state import lifecycle_state_path
+
+    resolved = lifecycle_state_path(tmp_path / "relocated")
+    assert resolved == (tmp_path / "relocated" / "lifecycle_state.json")
+
+
+def test_resolver_honors_iai_mcp_store_env(tmp_path, monkeypatch):
+    from iai_mcp.lifecycle_state import lifecycle_state_path
+
+    relocated = tmp_path / "envstore"
+    monkeypatch.setenv("IAI_MCP_STORE", str(relocated))
+    resolved = lifecycle_state_path()
+    assert resolved == (relocated / "lifecycle_state.json")
+
+
+def test_writer_and_reader_agree_for_relocated_store(tmp_path, monkeypatch):
+    """The asleep-skip latency optimization fires only when the daemon write
+    side and the CLI read side resolve to the same file. Simulate a non-default
+    store root: write the state via the resolver (daemon side), read via the
+    resolver (CLI side), and assert they reference the SAME file and the read
+    sees the written SLEEP state.
+    """
+    from iai_mcp.lifecycle_state import (
+        lifecycle_state_path,
+        load_state,
+        save_state,
+        default_state,
+        LifecycleState,
+    )
+
+    relocated = tmp_path / "relocated-store"
+    monkeypatch.setenv("IAI_MCP_STORE", str(relocated))
+
+    # Daemon write side resolves the path from the store root.
+    write_path = lifecycle_state_path(relocated)
+    record = default_state()
+    record["current_state"] = LifecycleState.SLEEP.value
+    save_state(record, write_path)
+
+    # CLI read side resolves the path from the same env-driven store root.
+    read_path = lifecycle_state_path()
+    assert read_path == write_path, (
+        "writer and reader diverged for a relocated store -- the asleep-skip "
+        "optimization would silently never fire"
+    )
+
+    loaded = load_state(read_path)
+    assert loaded["current_state"] == LifecycleState.SLEEP.value

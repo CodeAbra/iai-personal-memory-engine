@@ -9,7 +9,6 @@ pytest.importorskip("networkx")
 pytest.importorskip("hypothesis")
 pytest.importorskip("hypothesis_networkx")
 
-import hypothesis  # noqa: E402
 import networkx as nx  # noqa: E402
 import numpy as np  # noqa: E402
 from hypothesis import given, settings  # noqa: E402

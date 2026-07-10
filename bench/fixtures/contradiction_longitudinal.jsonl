@@ -1,0 +1,4 @@
+{"session": 0, "role": "user", "text": "The launch date is 2026-06-01.", "gold_fact": "2026-06-01"}
+{"session": 1, "role": "user", "text": "Correction: launch moved to 2026-09-01.", "gold_fact": "2026-09-01", "contradicts_session": 0}
+{"session": 2, "role": "user", "text": "What is the launch date?", "probe": "post_flip", "expects": "2026-09-01"}
+{"session": 2, "role": "user", "text": "Quote the original June announcement verbatim.", "probe": "historical_verbatim", "expects": "2026-06-01"}

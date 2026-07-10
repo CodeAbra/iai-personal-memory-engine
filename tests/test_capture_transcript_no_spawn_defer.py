@@ -7,7 +7,6 @@ import re
 import socket
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
-    sock_dir = Path(tempfile.mkdtemp(prefix="iai-sock-"))
+    sock_dir = Path(f"/tmp/iai-no-spawn-defer-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
 
     iai_dir = tmp_path / ".iai-mcp"
@@ -37,20 +37,9 @@ def _isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
     return env, iai_dir / ".deferred-captures", sock_path
 
 
-def _cleanup_socket(sock_path: Path) -> None:
-    try:
-        sock_path.unlink()
-    except FileNotFoundError:
-        pass
-    try:
-        sock_path.parent.rmdir()
-    except OSError:
-        pass
-
-
 def _make_transcript(tmp_path: Path) -> Path:
     turns = [
-        {"type": "user", "message": {"role": "user", "content": "hello phase 7 5"}},
+        {"type": "user", "message": {"role": "user", "content": "hello first user turn"}},
         {"type": "assistant", "message": {"role": "assistant", "content": "ack always defer"}},
         {"type": "user", "message": {"role": "user", "content": "third defer turn"}},
     ]
@@ -68,7 +57,7 @@ def _run_no_spawn(env: dict[str, str], transcript_path: Path) -> subprocess.Comp
             "capture-transcript",
             "--no-spawn",
             "--session-id",
-            "test-phase75",
+            "test-defer-session",
             str(transcript_path),
         ],
         env=env,
@@ -97,7 +86,10 @@ def test_no_spawn_reachable_defers_not_inserts(tmp_path):
         proc = _run_no_spawn(env, transcript)
     finally:
         listener.close()
-        _cleanup_socket(sock_path)
+        try:
+            sock_path.unlink()
+        except FileNotFoundError:
+            pass
 
     assert proc.returncode == 0, f"stderr={proc.stderr!r} stdout={proc.stdout!r}"
 
@@ -123,7 +115,7 @@ def test_no_spawn_reachable_defers_not_inserts(tmp_path):
     assert len(files) == 1, f"expected 1 deferred file, got {files}"
     header = json.loads(files[0].read_text().splitlines()[0])
     assert header["version"] == 1
-    assert header["session_id"] == "test-phase75"
+    assert header["session_id"] == "test-defer-session"
 
 
 def test_no_spawn_unreachable_still_defers(tmp_path):
@@ -132,10 +124,7 @@ def test_no_spawn_unreachable_still_defers(tmp_path):
 
     assert not sock_path.exists()
 
-    try:
-        proc = _run_no_spawn(env, transcript)
-    finally:
-        _cleanup_socket(sock_path)
+    proc = _run_no_spawn(env, transcript)
 
     assert proc.returncode == 0, f"stderr={proc.stderr!r} stdout={proc.stdout!r}"
     payload = json.loads(proc.stdout.strip())
@@ -158,7 +147,7 @@ def test_no_spawn_zero_embedder_imports_in_fresh_process(tmp_path):
         "from iai_mcp.cli import main\n"
         "rc = main([\n"
         "  'capture-transcript', '--no-spawn',\n"
-        "  '--session-id', 'test-phase75-fresh',\n"
+        "  '--session-id', 'test-defer-session-fresh',\n"
         f"  {str(transcript)!r},\n"
         "])\n"
         "loaded = sorted(\n"
@@ -168,7 +157,7 @@ def test_no_spawn_zero_embedder_imports_in_fresh_process(tmp_path):
         "  or k == 'torch' or k.startswith('torch.')\n"
         "  or k == 'transformers' or k.startswith('transformers.')\n"
         ")\n"
-        "print('IAIMCP75_DUMP=' + json.dumps({'rc': rc, 'loaded': loaded}))\n"
+        "print('IAIMCP_DUMP=' + json.dumps({'rc': rc, 'loaded': loaded}))\n"
     )
 
     proc = subprocess.run(
@@ -181,9 +170,9 @@ def test_no_spawn_zero_embedder_imports_in_fresh_process(tmp_path):
 
     assert proc.returncode == 0, f"driver failed: stderr={proc.stderr!r}"
 
-    dump_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("IAIMCP75_DUMP=")]
+    dump_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("IAIMCP_DUMP=")]
     assert len(dump_lines) == 1, f"expected 1 dump line, got {dump_lines!r}"
-    dump = json.loads(dump_lines[0][len("IAIMCP75_DUMP=") :])
+    dump = json.loads(dump_lines[0][len("IAIMCP_DUMP=") :])
 
     assert dump["rc"] == 0, f"main() returned {dump['rc']}"
 

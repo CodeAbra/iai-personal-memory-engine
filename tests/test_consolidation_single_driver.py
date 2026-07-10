@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -223,12 +222,17 @@ def test_e_no_double_drain_of_covered_outputs(tmp_path, monkeypatch):
 
 def test_f_foraging_gated_during_sleep(daemon_store, monkeypatch, tmp_path):
     from iai_mcp import daemon as daemon_mod
-    from iai_mcp.lifecycle_state import LifecycleState
+    from iai_mcp.lifecycle_state import LifecycleState, lifecycle_state_path
     from unittest.mock import patch
 
     store, state_path, _ = daemon_store
 
-    canon_path = tmp_path / "lifecycle_state.json"
+    # The daemon resolves the lifecycle-state file through lifecycle_state_path(),
+    # which honors IAI_MCP_STORE (set by the daemon_store fixture). Write the
+    # canonical state exactly where the daemon reads it so the test exercises the
+    # real production resolution, not a stale module-global override.
+    canon_path = lifecycle_state_path()
+    canon_path.parent.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(daemon_mod, "should_relearn", lambda last, now: False)
 
@@ -250,8 +254,7 @@ def test_f_foraging_gated_during_sleep(daemon_store, monkeypatch, tmp_path):
         "fsm_state": "SLEEP",
         "_last_forage_ts": "",
     }
-    with patch("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", canon_path), \
-         patch("iai_mcp.foraging.forage_for_connections", fake_forage):
+    with patch("iai_mcp.foraging.forage_for_connections", fake_forage):
         asyncio.run(daemon_mod._tick_body(store, state_sleep))
 
     assert forage_calls == [], (
@@ -265,8 +268,7 @@ def test_f_foraging_gated_during_sleep(daemon_store, monkeypatch, tmp_path):
         "fsm_state": "WAKE",
         "_last_forage_ts": "",
     }
-    with patch("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", canon_path), \
-         patch("iai_mcp.foraging.forage_for_connections", fake_forage):
+    with patch("iai_mcp.foraging.forage_for_connections", fake_forage):
         asyncio.run(daemon_mod._tick_body(store, state_wake))
 
     assert forage_calls == [1], (

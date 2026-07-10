@@ -5,8 +5,6 @@ and that re-running capture on the same transcript inserts no duplicates.
 """
 from __future__ import annotations
 
-import tempfile
-
 import json
 import platform
 import uuid
@@ -126,7 +124,7 @@ def test_deferred_capture_beyond_200(iai_home, tmp_path):
     out_path = write_deferred_captures(
         session_id=SESSION_ID,
         transcript_path=transcript,
-        cwd=str(Path(tempfile.gettempdir()) / "test"),
+        cwd="/tmp/test",
     )
 
     assert out_path.exists(), f"Deferred capture file not created at {out_path}"
@@ -247,8 +245,323 @@ def test_capture_turn_concurrent_drains_do_not_duplicate(iai_home, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Additive `provenance_extra` kwarg on capture_turn
+# ---------------------------------------------------------------------------
+
+def test_provenance_extra_additive_kwarg(iai_home):
+    """capture_turn(..., provenance_extra=D) appends D as a second entry
+    after the spine's {ts, cue, session_id, role} entry — ordered, length 2.
+    """
+    from uuid import UUID
+
+    from iai_mcp.capture import capture_turn
+
+    store = _open_store()
+    extra = {"source": "upload", "filename": "a.txt", "chunk_index": 0}
+    result = capture_turn(
+        store,
+        cue="ingest probe x",
+        text="some content here long enough to clear the min length gate",
+        session_id="s1",
+        role="user",
+        provenance_extra=extra,
+    )
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    prov = rec.provenance
+    assert isinstance(prov, list)
+    assert len(prov) == 2, f"expected 2 provenance entries, got {prov!r}"
+    spine = prov[0]
+    assert set(spine.keys()) == {"ts", "cue", "session_id", "role"}
+    assert spine["cue"] == "ingest probe x"
+    assert spine["session_id"] == "s1"
+    assert spine["role"] == "user"
+    assert prov[1] == extra
+
+
+def test_existing_callers_behavior_unchanged(iai_home):
+    """capture_turn without provenance_extra writes exactly one provenance
+    entry, byte-identical to the pre-extension shape.
+    """
+    from uuid import UUID
+
+    from iai_mcp.capture import capture_turn
+
+    store = _open_store()
+    result = capture_turn(
+        store,
+        cue="ingest probe y",
+        text="other content here long enough to clear the min length gate",
+        session_id="s2",
+        role="user",
+    )
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    prov = rec.provenance
+    assert isinstance(prov, list)
+    assert len(prov) == 1, (
+        f"expected 1 provenance entry (no kwarg), got {prov!r}"
+    )
+    spine = prov[0]
+    assert set(spine.keys()) == {"ts", "cue", "session_id", "role"}, (
+        "second provenance slot must be absent when provenance_extra is omitted"
+    )
+
+
+# ---------------------------------------------------------------------------
 # capture_turn embeds message content, not the positional cue label
 # ---------------------------------------------------------------------------
+
+def _write_deferred_backlog(home: Path, session_id: str, events: list[dict]) -> Path:
+    """Write a drainable deferred-capture backlog file (header + events).
+
+    Mirrors the on-disk shape ``write_deferred_captures`` produces: a JSONL file
+    whose first line is the version-1 header and whose remaining lines are turn
+    events. The filename has the plain ``.jsonl`` suffix (no ``.live`` /
+    ``.processing`` marker) so ``drain_deferred_captures`` claims it.
+    """
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    deferred_dir.mkdir(parents=True, exist_ok=True)
+    out_path = deferred_dir / f"{session_id}-backlog.jsonl"
+    header = {
+        "version": 1,
+        "deferred_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "cwd": "/tmp/test",
+    }
+    with out_path.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(header, ensure_ascii=False) + "\n")
+        for ev in events:
+            fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    return out_path
+
+
+def test_drain_writes_new_turn_pending_without_embedding(iai_home, monkeypatch):
+    """The in-daemon drain must NOT embed during the drain, and MUST reinforce a
+    duplicate.
+
+    A backlog drain is decoupled from embedding: every genuinely-new turn is
+    written as a pending (un-embedded) row — the drain is a sequence of cheap
+    SQLite writes whose resident-memory cost does not grow with the backlog size.
+    The real vector is filled later by the bounded deferred-embed pass. A
+    duplicate is detected by its idem-tag before any write, skipped, AND the
+    pre-existing record is reinforced once — re-seeing a turn is a
+    memory-strengthening signal.
+
+    This test inserts one episodic record (so its idem-tag exists), then drains a
+    backlog containing that SAME turn (duplicate) plus one genuinely-new turn, and
+    asserts: the embedder is NEVER invoked during the drain, the new turn lands as
+    a pending row (recall-findable immediately), and the pre-existing record is
+    reinforced exactly once.
+    """
+    from iai_mcp.capture import capture_turn, drain_deferred_captures
+    from iai_mcp.embed import Embedder
+    from iai_mcp.store import MemoryStore
+
+    store = _open_store()
+
+    dup_uuid = str(uuid.uuid4())
+    dup_ts = "2026-07-02T00:00:00Z"
+    dup_text = "Duplicate turn already stored before the drain runs"
+
+    new_uuid = str(uuid.uuid4())
+    new_ts = "2026-07-02T00:01:00Z"
+    new_text = "Genuinely new turn that has never been embedded or stored"
+
+    # Seed the store with the duplicate turn so its idem-tag exists.
+    seed = capture_turn(
+        store,
+        cue=f"session {SESSION_ID} turn 1",
+        text=dup_text,
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+        ts=dup_ts,
+        source_uuid=dup_uuid,
+    )
+    assert seed["status"] == "inserted", seed
+    count_before = _count_episodic_records(store)
+    seed_id = seed["record_id"]
+
+    # Spy on the embedder: it must NOT be invoked at all during the drain — the
+    # whole point of the two-phase drain is that no embed runs synchronously.
+    seen: list[str] = []
+    real_embed = Embedder.embed
+
+    def spy_embed(self, text):
+        seen.append(text)
+        return real_embed(self, text)
+
+    monkeypatch.setattr(Embedder, "embed", spy_embed)
+
+    # Spy on reinforcement to prove the duplicate strengthens the pre-existing
+    # record (and to count how many times it is reinforced).
+    reinforced_ids: list[str] = []
+    real_reinforce = MemoryStore.reinforce_record
+
+    def spy_reinforce(self, record_id, *args, **kwargs):
+        reinforced_ids.append(str(record_id))
+        return real_reinforce(self, record_id, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryStore, "reinforce_record", spy_reinforce)
+
+    backlog_events = [
+        {
+            "text": dup_text,
+            "cue": f"session {SESSION_ID} turn 1",
+            "tier": "episodic",
+            "role": "user",
+            "ts": dup_ts,
+            "source_uuid": dup_uuid,
+        },
+        {
+            "text": new_text,
+            "cue": f"session {SESSION_ID} turn 2",
+            "tier": "episodic",
+            "role": "user",
+            "ts": new_ts,
+            "source_uuid": new_uuid,
+        },
+    ]
+    _write_deferred_backlog(iai_home, SESSION_ID, backlog_events)
+
+    counts = drain_deferred_captures(store)
+
+    # The drain embedded nothing — neither the duplicate nor the new turn. The
+    # new turn's vector is deferred to the bounded deferred-embed pass.
+    assert seen == [], (
+        f"the drain must not embed any turn — two-phase capture defers all "
+        f"embedding; saw {seen!r}. counts={counts!r}"
+    )
+    # The duplicate was reinforced (not silently dropped): the memory-strengthening
+    # signal survives the drain even with no embed.
+    assert counts["events_reinforced"] >= 1, (
+        f"duplicate must be reinforced, not silently skipped; counts={counts!r}"
+    )
+    assert reinforced_ids == [seed_id], (
+        f"the pre-existing record must be reinforced exactly once; "
+        f"reinforced_ids={reinforced_ids!r}, seed_id={seed_id!r}"
+    )
+    assert counts["events_inserted"] == 1, (
+        f"the new turn must be inserted; counts={counts!r}"
+    )
+
+    # The new record is actually in the store as a pending row; the duplicate
+    # added nothing.
+    count_after = _count_episodic_records(store)
+    assert count_after == count_before + 1, (
+        f"exactly one new record expected; before={count_before} after={count_after}"
+    )
+    # The new turn landed as a pending (un-embedded) row, and the seed row from
+    # capture_turn stayed fully embedded — so exactly one pending row exists, and
+    # it is recall-findable verbatim by its idem tag (encryption-independent).
+    with store.db._conn_lock:
+        pending_count = store.db._conn.execute(
+            "SELECT COUNT(*) FROM records"
+            " WHERE COALESCE(embedding_pending, 0) = 1 AND tombstoned_at IS NULL"
+        ).fetchone()[0]
+    assert pending_count == 1, (
+        f"exactly one pending row expected after the drain, got {pending_count}"
+    )
+    from iai_mcp.capture import _idem_tag, _resolve_ts
+    new_ts_iso = _resolve_ts(new_ts).isoformat()
+    new_tag = _idem_tag(SESSION_ID, "user", new_ts_iso, new_text, source_uuid=new_uuid)
+    new_id = store.find_record_by_tag(new_tag)
+    assert new_id is not None, (
+        "the new pending turn must be findable by its idem tag immediately — "
+        "verbatim dedup/recall holds before the embedding lands"
+    )
+
+
+def test_drain_reinforces_repeated_duplicate_at_most_once(iai_home, monkeypatch):
+    """A tag repeated many times in one backlog reinforces at most ONCE.
+
+    A crash-rotated backlog can repeat the same turn tens of thousands of times.
+    The drain must collapse all of those repeats to a single reinforcement so the
+    Hebbian signal is not inflated by the size of the backlog (the ``seen_this_run``
+    set protection). The embed must never run for any of the repeats.
+    """
+    from iai_mcp.capture import capture_turn, drain_deferred_captures
+    from iai_mcp.embed import Embedder
+    from iai_mcp.store import MemoryStore
+
+    store = _open_store()
+
+    dup_uuid = str(uuid.uuid4())
+    dup_ts = "2026-07-03T00:00:00Z"
+    dup_text = "A single turn that the crash-backlog repeats many times over"
+
+    seed = capture_turn(
+        store,
+        cue=f"session {SESSION_ID} turn 1",
+        text=dup_text,
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+        ts=dup_ts,
+        source_uuid=dup_uuid,
+    )
+    assert seed["status"] == "inserted", seed
+    seed_id = seed["record_id"]
+
+    # The embedder must never see the duplicate text, no matter how many repeats.
+    real_embed = Embedder.embed
+
+    def spy_embed(self, text):
+        if text == dup_text:
+            raise AssertionError(
+                "embedder was invoked for a repeated duplicate — the pre-embed "
+                "idem skip failed"
+            )
+        return real_embed(self, text)
+
+    monkeypatch.setattr(Embedder, "embed", spy_embed)
+
+    reinforced_ids: list[str] = []
+    real_reinforce = MemoryStore.reinforce_record
+
+    def spy_reinforce(self, record_id, *args, **kwargs):
+        reinforced_ids.append(str(record_id))
+        return real_reinforce(self, record_id, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryStore, "reinforce_record", spy_reinforce)
+
+    repeats = 50
+    backlog_events = [
+        {
+            "text": dup_text,
+            "cue": f"session {SESSION_ID} turn 1",
+            "tier": "episodic",
+            "role": "user",
+            "ts": dup_ts,
+            "source_uuid": dup_uuid,
+        }
+        for _ in range(repeats)
+    ]
+    _write_deferred_backlog(iai_home, SESSION_ID, backlog_events)
+
+    counts = drain_deferred_captures(store)
+
+    # The whole repeat-backlog collapses to exactly one reinforcement.
+    assert reinforced_ids == [seed_id], (
+        f"a {repeats}x-repeated duplicate must reinforce exactly once; "
+        f"reinforced_ids={reinforced_ids!r}, seed_id={seed_id!r}"
+    )
+    assert counts["events_reinforced"] == 1, (
+        f"events_reinforced must be exactly 1 for the whole repeat-backlog; "
+        f"counts={counts!r}"
+    )
+    # Every repeat after the first is collapsed by seen_this_run.
+    assert counts["events_skipped_existing"] == repeats - 1, (
+        f"the {repeats - 1} extra repeats must be collapsed under "
+        f"events_skipped_existing; counts={counts!r}"
+    )
+    assert counts["events_inserted"] == 0, (
+        f"nothing genuinely-new in this backlog; counts={counts!r}"
+    )
+
 
 def test_capture_turn_embeds_content_not_cue(iai_home, monkeypatch):
     """capture_turn must embed the message text, never the cue.

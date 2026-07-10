@@ -142,36 +142,30 @@ def test_reflection_synthesize_returns_semantic_record(
     assert isinstance(prov.get("recalled_count"), int)
 
     assert len(synth.embedding) == store._embed_dim
-    # The reflection record must carry a REAL embedding of its own
-    # literal_surface, not a zero placeholder. The old zero-vector placeholder
-    # relied on "next REM consolidation re-embeds", but nothing re-embedded an
-    # embedding_pending=0 record, so every daily-reflection record stayed
-    # permanently zero-norm and invisible to vector recall (and fed zero vectors
-    # into the scoring matmul). dmn_reflection now embeds at write time; on embed
-    # failure it falls back to a zero vector flagged embedding_pending=1.
-    import math as _math
-    _norm = _math.sqrt(sum(v * v for v in synth.embedding))
-    if synth.embedding_pending:
-        # Degraded fallback (embedder unavailable): zero + flagged for reembed.
-        assert all(v == 0.0 for v in synth.embedding)
-    else:
-        assert _norm > 0.5, (
-            f"reflection embedding must be a real (non-zero) vector; "
-            f"got norm={_norm}"
-        )
+    # A REAL embedding is required: the promised "re-embed at next REM" never
+    # ran, and zero-vector records surface as 0.000-score junk on every
+    # degraded recall lane while occupying ANN slots.
+    assert any(v != 0.0 for v in synth.embedding), (
+        "synthesised record must carry a real embedding of its surface"
+    )
 
 def test_meta_analyst_snapshot_counts_correct(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
 
+    # The event vocabulary the store actually writes: recall dispatches emit
+    # recall_dispatched; every insert passes the pattern-separation gate.
     for _ in range(4):
-        write_event(store, "memory_recall", {"cue": "alice"})
+        write_event(store, "recall_dispatched", {"cue": "alice"})
     for _ in range(3):
-        write_event(store, "memory_capture", {"text": "bob fact"})
+        write_event(store, "pattern_separation_pass", {"text": "bob fact"})
+    # The one per-completed-cycle event the pipeline actually writes to the
+    # store events table (sleep_step_completed goes only to the
+    # lifecycle-log sink and never lands in query_events).
     for _ in range(2):
         write_event(
             store,
-            "sleep_step_completed",
-            {"step": "HIPPO_CLEANUP"},
+            "cls_consolidation_run",
+            {"mode": "heavy", "tier": "tier0"},
         )
     write_event(
         store,
@@ -197,8 +191,9 @@ def test_meta_analyst_snapshot_counts_correct(tmp_path: Path) -> None:
         f"capture_count mismatch: expected 3, got {snap['capture_count']}"
     )
     assert snap["sleep_cycles_count"] == 2, (
-        f"sleep_cycles_count mismatch (only HIPPO_CLEANUP should "
-        f"count): expected 2, got {snap['sleep_cycles_count']}"
+        f"sleep_cycles_count mismatch (one per cls_consolidation_run; the "
+        f"lifecycle-only sleep_step_completed must NOT count): "
+        f"expected 2, got {snap['sleep_cycles_count']}"
     )
     assert snap["breach_count"] == 1, (
         f"breach_count mismatch: expected 1, got {snap['breach_count']}"
@@ -297,6 +292,32 @@ def test_dmn_reflection_step_runs_end_to_end(
         f"system_health_report body must echo dry_run_mode=False; "
         f"got {body!r}"
     )
+
+def test_dmn_empty_window_inserts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely quiet window writes NOTHING: a real-embedded 'captured 0
+    turns' record is a valid ANN neighbor for vague cues — junk that can
+    actually surface on degraded recall."""
+    monkeypatch.setenv("IAI_MCP_DMN_DRY_RUN", "false")
+
+    store = _make_store(tmp_path)
+    pre_count = len(store.all_records())
+
+    lifecycle_path = tmp_path / "lifecycle.json"
+    save_state(default_state(), lifecycle_path)
+    pipeline = SleepPipeline(
+        store=store, lifecycle_state_path=lifecycle_path,
+    )
+
+    done, payload = pipeline._step_dmn_reflection(interrupt_check=None)
+    assert done is True
+    assert payload.get("reflection_synthesized") is False, payload
+    assert payload.get("reflection_skipped_empty") is True, payload
+    assert len(store.all_records()) == pre_count, (
+        "an empty window must not grow the store"
+    )
+
 
 def test_dmn_dry_run_no_record_insert(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

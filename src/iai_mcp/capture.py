@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
@@ -28,6 +27,12 @@ MAX_DRAIN_EVENTS_PER_RUN = 5000
 # would kill the process — self-limit instead of getting killed. Operator-
 # overridable; ``0`` or a non-positive / malformed value disables the soft cap.
 DRAIN_RSS_SOFT_CAP_DEFAULT_BYTES = 2_684_354_560
+#: The drain may GROW the resident set by this much past its own starting
+#: point before yielding. The cap exists to yield before the watchdog's
+#: hard kill — it must measure what the DRAIN adds, not the daemon's
+#: legitimate standing footprint (indexes + embedder grow with the corpus,
+#: and an absolute cap below that baseline silences the drain forever).
+DRAIN_RSS_GROWTH_BUDGET_DEFAULT_BYTES = 805_306_368
 
 
 def _drain_rss_soft_cap_bytes() -> int:
@@ -39,6 +44,21 @@ def _drain_rss_soft_cap_bytes() -> int:
     except (TypeError, ValueError):
         return DRAIN_RSS_SOFT_CAP_DEFAULT_BYTES
     return val if val > 0 else 0
+
+
+def _drain_rss_stop_threshold(baseline_rss: int) -> int:
+    """Absolute-or-relative, whichever is HIGHER: the configured floor keeps
+    small daemons yielding early, the growth budget keeps a daemon whose
+    standing footprint already exceeds the floor able to drain at all."""
+    growth_raw = os.environ.get("IAI_MCP_DRAIN_RSS_GROWTH_BUDGET_BYTES")
+    try:
+        growth = int(growth_raw) if growth_raw else DRAIN_RSS_GROWTH_BUDGET_DEFAULT_BYTES
+    except (TypeError, ValueError):
+        growth = DRAIN_RSS_GROWTH_BUDGET_DEFAULT_BYTES
+    soft = _drain_rss_soft_cap_bytes()
+    if soft <= 0:
+        return 0
+    return max(soft, baseline_rss + max(growth, 0))
 
 
 def _indaemon_drain_disabled() -> bool:
@@ -70,47 +90,6 @@ def _drain_rss_bytes() -> int:
 # processing; this guards double resident cost.
 _DRAIN_SINGLE_FLIGHT_LOCK = threading.Lock()
 
-
-# Drain-in-progress accounting for the daemon's lifecycle idle countdown.
-#
-# The wrapper heartbeat file is only ONE signal that the daemon is busy. A
-# deferred-capture drain (triggered by real RPC traffic, kicked off at the
-# drowsy edge, or run on startup) can keep writing to the store long after the
-# heartbeat file has gone stale. If the idle countdown only watched the
-# heartbeat, it would force the FSM toward SLEEP -- which escalates to an
-# EXCLUSIVE store lock -- while these drain threads are still hammering the
-# store, causing lock contention. The daemon consults `is_drain_in_progress`
-# so an in-flight drain holds the idle countdown open. A depth counter (rather
-# than a boolean) keeps this correct under concurrent/overlapping drains across
-# the several threads that asyncio.to_thread dispatch spins up.
-_DRAIN_IN_PROGRESS_LOCK = threading.Lock()
-_drain_in_progress_depth = 0
-
-
-@contextlib.contextmanager
-def _drain_in_progress_guard():
-    """Mark a deferred-capture drain as in flight for its whole duration."""
-    global _drain_in_progress_depth
-    with _DRAIN_IN_PROGRESS_LOCK:
-        _drain_in_progress_depth += 1
-    try:
-        yield
-    finally:
-        with _DRAIN_IN_PROGRESS_LOCK:
-            _drain_in_progress_depth -= 1
-
-
-def is_drain_in_progress() -> bool:
-    """True while at least one deferred-capture drain is running.
-
-    The daemon's lifecycle idle countdown reads this so it does NOT advance the
-    FSM toward SLEEP (and the EXCLUSIVE store lock it takes) while drain threads
-    are still writing to the store.
-    """
-    with _DRAIN_IN_PROGRESS_LOCK:
-        return _drain_in_progress_depth > 0
-
-
 _LIVE_ACTIVE_RE = re.compile(r"\.live\.jsonl$")
 
 from iai_mcp.store import MemoryStore
@@ -125,6 +104,18 @@ log = logging.getLogger(__name__)
 DEDUP_COS_THRESHOLD = 0.95
 MIN_CAPTURE_LEN = 12
 MAX_CAPTURE_LEN = 8000
+
+
+def _dedup_cos_threshold() -> float:
+    """Operator-tunable near-duplicate floor for the capture-time cosine gate."""
+    raw = os.environ.get("IAI_MCP_DEDUP_COS_THRESHOLD")
+    if raw is None:
+        return DEDUP_COS_THRESHOLD
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEDUP_COS_THRESHOLD
+    return val if 0.0 < val <= 1.0 else DEDUP_COS_THRESHOLD
 
 # Daemon RPC dispatch runs each request on its own thread (asyncio.to_thread),
 # so concurrent capture_turn() calls (e.g. several sessions/forks draining
@@ -145,16 +136,6 @@ QUARANTINE_MAX_ATTEMPTS: int = 2
 
 
 def _pid_is_alive(pid: int) -> bool:
-    # NOT os.kill(pid, 0): on Windows signal 0 is CTRL_C_EVENT (it would try to
-    # signal the process group), not a liveness probe — so the stale-PID
-    # crash-recovery rescan never reclaims abandoned .processing-<pid> files.
-    # psutil.pid_exists is correct and cross-platform (psutil is a hard dep).
-    try:
-        import psutil
-
-        return psutil.pid_exists(pid)
-    except Exception:
-        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -174,13 +155,11 @@ def _strip_processing_marker(
         return path, True
     new_path = path.with_name(new_name)
     try:
-        # replace (not rename): rename raises on Windows if the dest exists;
-        # POSIX rename already replaces, so behaviour is unchanged there.
-        path.replace(new_path)
+        path.rename(new_path)
     except OSError as e:
         if log_path is not None:
             try:
-                with log_path.open("a", encoding="utf-8") as logf:
+                with log_path.open("a") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} "
                         f"strip-marker-failed {path.name}: {type(e).__name__}\n"
@@ -226,7 +205,7 @@ def _quarantine_file(
     except Exception as exc:  # noqa: BLE001 -- fail-safe boundary
         log.debug("quarantine_event_write_failed: %s", exc)
         try:
-            with log_path.open("a", encoding="utf-8") as logf:
+            with log_path.open("a") as logf:
                 logf.write(
                     f"{datetime.now(timezone.utc).isoformat()} "
                     f"quarantined-event-skipped {target.name}\n"
@@ -235,7 +214,7 @@ def _quarantine_file(
             log.debug("quarantine_event_log_fallback_failed: %s", exc2)
 
     try:
-        with log_path.open("a", encoding="utf-8") as logf:
+        with log_path.open("a") as logf:
             logf.write(
                 f"{datetime.now(timezone.utc).isoformat()} "
                 f"quarantined {target.name}: crash_loop attempts={attempts}\n"
@@ -274,7 +253,7 @@ def _advance_failed_path(
     if next_attempt > FAILED_MAX_ATTEMPTS:
         new_name = f"{base}.permanent-failed-{ts_str}.jsonl"
         failed_path = fpath.with_name(new_name)
-        fpath.replace(failed_path)
+        fpath.rename(failed_path)
         try:
             from iai_mcp.events import write_event
 
@@ -292,7 +271,7 @@ def _advance_failed_path(
         except Exception as exc:  # noqa: BLE001 -- fail-safe boundary
             log.debug("permanent_capture_failure_event_failed: %s", exc)
             try:
-                with log_path.open("a", encoding="utf-8") as logf:
+                with log_path.open("a") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} "
                         f"permanent_capture_failure-event-skipped {new_name}\n"
@@ -302,7 +281,7 @@ def _advance_failed_path(
         return failed_path
     new_name = f"{base}.failed-{ts_str}-attempt-{next_attempt}.jsonl"
     failed_path = fpath.with_name(new_name)
-    fpath.replace(failed_path)
+    fpath.rename(failed_path)
     return failed_path
 
 
@@ -362,12 +341,26 @@ def capture_turn(
     ts: str | None = None,
     source_uuid: str | None = None,
     provenance_extra: dict | None = None,
+    extra_tags: "list[str] | None" = None,
+    near_dup_gate: bool = False,
 ) -> dict[str, Any]:
+    # near_dup_gate=True runs the cosine near-duplicate gate even for
+    # conversational-shaped records (episodic + user/assistant), AFTER the
+    # exact-key idem check misses. Bulk ingest (study/teach) needs it: idem
+    # keys only dedup byte-identical re-teaches, so paraphrases and reflows
+    # would otherwise insert near-duplicates at cos 0.95+.
     if tier not in TIER_ENUM:
         return {"status": "skipped", "record_id": None, "reason": f"invalid tier {tier!r}"}
 
     text = (text or "").strip()
-    if len(text) < MIN_CAPTURE_LEN:
+    # A durable working-tier result is stored byte-identical even below the
+    # generic noise floor — the marker is carried out-of-band in
+    # provenance_extra, never folded into text, so literal_surface stays
+    # verbatim. Only the length floor is relaxed for the marked path.
+    durable = bool((provenance_extra or {}).get("working_tier_durable"))
+    if len(text) < MIN_CAPTURE_LEN and not durable:
+        return {"status": "skipped", "record_id": None, "reason": "too short"}
+    if not text:
         return {"status": "skipped", "record_id": None, "reason": "too short"}
     if len(text) > MAX_CAPTURE_LEN:
         text = text[:MAX_CAPTURE_LEN]
@@ -381,53 +374,33 @@ def capture_turn(
     from iai_mcp.embed import embedder_for_store
     from iai_mcp.events import TELEMETRY_EMBED_NATIVE_FAILURE, write_event
 
-    # Embedding is the expensive native (Rust) matmul; the exact-key idem dedup
-    # below is a cheap SQLite lookup. Active sessions re-drain the *whole*
-    # transcript every turn (write_deferred_captures / capture_transcript walk
-    # from line 0 on each call), so embedding eagerly here re-embedded every
-    # already-stored turn only to throw the vector away as a "reinforced"
-    # exact-key re-drain -> chronic daemon CPU. Defer the embed so it runs at
-    # most once and only when actually needed: an already-seen episodic turn
-    # short-circuits on its idem tag and never embeds. Embed the message
-    # content, never the cue (the cue is a positional provenance label;
-    # embedding it collapsed the vector space and broke semantic recall). text
-    # is validated non-empty above (the MIN_CAPTURE_LEN guard).
-    _embed_cache: dict[str, list[float]] = {}
-
-    def _compute_embedding() -> list[float]:
-        if "v" in _embed_cache:
-            return _embed_cache["v"]
-        try:
-            emb = embedder_for_store(store).embed(text)
-        except Exception as exc:
-            write_event(
-                store,
-                TELEMETRY_EMBED_NATIVE_FAILURE,
-                {
-                    "op_type": "capture",
-                    "backend": "rust",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            raise NativeError(f"capture encode failed: {exc}") from exc
-        vec = list(emb)
-        _embed_cache["v"] = vec
-        return vec
+    try:
+        # Embed the message content, never the cue. The cue is a provenance
+        # label only (transcript drains and deferred-drain pass a positional
+        # cue such as "session <id> turn <n>"); embedding it collapsed the
+        # stored vector space and broke semantic recall. text is already
+        # validated non-empty above (the MIN_CAPTURE_LEN guard), so embedding
+        # text is safe for every caller.
+        emb = embedder_for_store(store).embed(text)
+    except Exception as exc:
+        write_event(
+            store,
+            TELEMETRY_EMBED_NATIVE_FAILURE,
+            {
+                "op_type": "capture",
+                "backend": "rust",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        raise NativeError(f"capture encode failed: {exc}") from exc
+    embedding = list(emb)
 
     with _CAPTURE_DEDUP_LOCK:
-        if _is_episodic_conversational(tier, role):
+        conversational = _is_episodic_conversational(tier, role)
+        if conversational:
             ts_iso = now.isoformat()
             idem_t = _idem_tag(session_id, role, ts_iso, text, source_uuid=source_uuid)
-            # find_record_by_tag reads SQLite, but a just-inserted record may
-            # still sit in the in-process _record_buffer (not yet flushed to the
-            # records table). Under _CAPTURE_DEDUP_LOCK the insert path is
-            # serialized with this find, so flushing the buffer here makes every
-            # prior committed insert visible to the SQLite-backed find and closes
-            # the check-then-insert race that produced live idem-tag duplicates.
-            from iai_mcp.store import flush_record_buffer
-
-            flush_record_buffer(store)
             existing_id = store.find_record_by_tag(idem_t)
             if existing_id is not None:
                 try:
@@ -440,14 +413,22 @@ def capture_turn(
                             "record_id": str(existing_id),
                         },
                     )
+                if extra_tags:
+                    # Shared-ownership union: a chunk two documents share must
+                    # carry BOTH doc tags, or superseding the first document
+                    # fades a record the second still owns.
+                    try:
+                        store.add_tags(existing_id, list(extra_tags)[:8])
+                    except Exception as exc:  # noqa: BLE001 -- tag union is additive
+                        log.debug("reinforce tag union failed: %s", exc)
                 return {
                     "status": "reinforced",
                     "record_id": str(existing_id),
                     "reason": "exact-key re-drain",
                 }
-        else:
+        if not conversational or near_dup_gate:
             try:
-                neighbours = store.query_similar(_compute_embedding(), k=3, tier=tier)
+                neighbours = store.query_similar(embedding, k=3, tier=tier)
             except (ValueError, IOError) as exc:
                 log.warning(
                     "capture_dedup_query_failed",
@@ -455,8 +436,12 @@ def capture_turn(
                 )
                 neighbours = []
 
+            dedup_floor = _dedup_cos_threshold()
             for record, score in neighbours:
-                if score >= DEDUP_COS_THRESHOLD:
+                if score >= dedup_floor:
+                    # A pinned neighbour is a hard lock; never reinforce it.
+                    if getattr(record, "never_merge", False):
+                        continue
                     try:
                         store.reinforce_record(record.id)
                     except (ValueError, IOError) as exc:
@@ -467,13 +452,25 @@ def capture_turn(
                                 "record_id": str(record.id),
                             },
                         )
+                    if extra_tags:
+                        try:
+                            store.add_tags(record.id, list(extra_tags)[:8])
+                        except Exception as exc:  # noqa: BLE001 -- tag union is additive
+                            log.debug("reinforce tag union failed: %s", exc)
                     return {
                         "status": "reinforced",
                         "record_id": str(record.id),
-                        "reason": f"cos={score:.3f} >= {DEDUP_COS_THRESHOLD}",
+                        "reason": f"cos={score:.3f} >= {dedup_floor}",
                     }
 
         tags = ["capture", f"role:{role}"]
+        if extra_tags:
+            # Caller-scoped grouping tags (e.g. a per-document tag on a study
+            # ingest). Bounded and deduped; never fold into the idem tag.
+            for _t in list(extra_tags)[:8]:
+                _t = str(_t).strip()
+                if _t and _t not in tags:
+                    tags.append(_t)
         if verdict == "FLAG_FOR_REVIEW":
             tags.append("shield:flagged")
             tags.extend(f"shield:{t}" for t in shield_tags[:3])
@@ -494,7 +491,7 @@ def capture_turn(
             tier=tier,
             literal_surface=text,
             aaak_index="",
-            embedding=_compute_embedding(),
+            embedding=embedding,
             community_id=None,
             centrality=0.0,
             detail_level=2,
@@ -534,6 +531,24 @@ def capture_turn(
             },
         )
 
+    # Anticipate the next turn while the cue embedding is already in hand:
+    # a live conversational user turn refreshes the next-turn memory pack.
+    # Bulk/file sources are not turns; failures never fail the capture.
+    if role == "user" and tier == "episodic" and (
+        (provenance_extra or {}).get("source")
+        not in ("upload", "study", "brainview")
+    ):
+        try:
+            from iai_mcp.foresight import refresh_pack
+            refresh_pack(
+                store,
+                cue_text=text,
+                cue_embedding=embedding,
+                session_id=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 -- anticipation is additive
+            log.debug("foresight refresh skipped: %s", exc)
+
     return {"status": "inserted", "record_id": str(rec.id), "reason": f"tier={tier}"}
 
 
@@ -554,7 +569,7 @@ def _drain_write_pending(
     of the synchronous embed. The row lands with ``embedding_pending=1`` and a
     zero-vector placeholder; a later deferred-embed pass fills the real vector.
     This keeps the drain a sequence of cheap SQLite writes whose resident-memory
-    cost does not grow with the backlog size — a long backlog no longer holds the
+    cost does not grow with the backlog size — a long backlog does not hold the
     embedder, JIT, and columnar pages resident through one synchronous run.
 
     The same validation, idempotency tag, tags, and provenance shape as the
@@ -619,7 +634,7 @@ def _drain_write_pending(
 
         record_id = str(uuid4())
         try:
-            store.db.insert_pending_row(
+            store.insert_pending(
                 record_id=record_id,
                 tier=tier,
                 literal_surface=text,
@@ -664,7 +679,7 @@ def capture_transcript(
 
     counts = {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 0}
     seen = 0
-    with path.open(encoding="utf-8") as fh:
+    with path.open() as fh:
         for line in fh:
             if seen >= max_turns:
                 break
@@ -769,8 +784,25 @@ def write_deferred_event(
     deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
     deferred_dir.mkdir(parents=True, exist_ok=True)
     path = deferred_dir / f"{session_id}.live.jsonl"
+
+    _compact_live_file_if_oversized(path, session_id)
+
     need_header = (not path.exists()) or path.stat().st_size == 0
-    with path.open("a", encoding="utf-8") as fh:
+    # Pre-encode plaintext boundary; mode 0600 mirrors capture_queue.py's
+    # os.open precedent so no other local user/process can read it.
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # O_CREAT mode applies only on create; enforce 0600 on every open so a
+    # pre-existing 0644 file is tightened too (idempotent, best-effort).
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    try:
+        fh = os.fdopen(fd, "a")  # fdopen now owns fd; the with-block closes it
+    except BaseException:
+        os.close(fd)  # only reached if fdopen itself failed (fd not yet owned)
+        raise
+    with fh:
         if need_header:
             header = {
                 "version": 1,
@@ -795,6 +827,151 @@ def write_deferred_event(
 _TAIL_MAX_EVENT_LINES: int = 500
 
 _LIVE_SELECT_MAX_FILES: int = 20
+
+# Write-side cap for a single session's .live.jsonl: past this many event
+# lines, the next write triggers a drain (promote via drain_active_live_captures)
+# then compacts away only the already-promoted lines. Generous relative to the
+# 3 existing promotion triggers so this rarely fires in normal operation.
+_WRITE_SIDE_MAX_EVENT_LINES: int = 5000
+
+# Conservative min bytes/line used only to gate the expensive exact
+# line-count behind a cheap os.stat() in the common case -- never used as
+# the actual cap (the cap is always the exact _WRITE_SIDE_MAX_EVENT_LINES
+# line count, counted only once the byte-size heuristic trips).
+_WRITE_SIDE_MIN_BYTES_PER_LINE: int = 40
+
+# Sentinel exclude_session_id for a self-compaction drain: never equal to a
+# real session id, so drain_active_live_captures processes this session's own
+# file too (mirrors the nightly SLEEP-tick's exclude_session_id="-").
+_SELF_COMPACT_DRAIN_SENTINEL: str = "-"
+
+
+def _compact_live_file_if_oversized(path: Path, session_id: str) -> None:
+    """Bound a session's .live.jsonl before the next append.
+
+    Cheap in the common case: a single os.stat() byte-size check. Only once
+    the file is plausibly oversized (byte-size heuristic) does an exact
+    line-count read run. Past the cap, drains THIS session's file via the
+    existing promotion machinery, then keeps only the header plus lines
+    still un-promoted (index >= the persisted drain-offset). Un-promoted
+    content is never dropped -- if nothing was promoted, the file is left
+    intact (lossless wins over bounded).
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= _WRITE_SIDE_MAX_EVENT_LINES * _WRITE_SIDE_MIN_BYTES_PER_LINE:
+        return
+
+    try:
+        with path.open(encoding="utf-8") as fh:
+            line_count = sum(1 for _ in fh)
+    except OSError:
+        return
+    if line_count <= _WRITE_SIDE_MAX_EVENT_LINES:
+        return
+
+    # Best-effort self-drain: succeeds only when NO daemon holds the writer
+    # (daemon down). When the daemon IS alive it owns the single writer and
+    # advances the drain-offset itself at its drowsy edges — so a failed open
+    # here is normal, NOT a reason to skip the trim below. The trim keys off
+    # the persisted offset regardless of who advanced it, which is what keeps
+    # a marathon session's file bounded while the daemon is the one promoting.
+    try:
+        from iai_mcp.store import MemoryStore
+
+        store = MemoryStore()
+    except Exception as exc:  # noqa: BLE001 -- daemon-alive is the common case
+        log.debug("live_compact_self_drain_skipped (daemon owns writer): %s", exc)
+    else:
+        try:
+            drain_active_live_captures(
+                store, exclude_session_id=_SELF_COMPACT_DRAIN_SENTINEL
+            )
+        except Exception as exc:  # noqa: BLE001 -- compaction is best-effort
+            log.debug("live_compact_drain_failed: %s", exc)
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    state_dir = Path.home() / ".iai-mcp" / ".capture-state"
+    offset_path = state_dir / f"{session_id}.drain-offset"
+    try:
+        drain_offset = int(offset_path.read_text().strip() or "0") if offset_path.exists() else 0
+    except (ValueError, OSError):
+        drain_offset = 0
+
+    if drain_offset <= 0:
+        return
+
+    try:
+        with path.open(encoding="utf-8") as fh:
+            pre_stat = os.fstat(fh.fileno())
+            raw_lines = fh.readlines()
+    except OSError:
+        return
+    complete_lines = [ln for ln in raw_lines if ln.endswith("\n")]
+    if not complete_lines:
+        return
+
+    header_line = complete_lines[0]
+    event_lines = complete_lines[1:]
+    if drain_offset >= len(event_lines):
+        remaining = []
+    else:
+        remaining = event_lines[drain_offset:]
+
+    tmp_path = path.with_suffix(".jsonl.compact-tmp")
+    try:
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            tmp_fh = os.fdopen(fd, "w")  # fdopen now owns fd
+        except BaseException:
+            os.close(fd)  # only reached if fdopen itself failed
+            raise
+        with tmp_fh:
+            tmp_fh.write(header_line)
+            tmp_fh.writelines(remaining)
+        # Lossless fence: if a concurrent same-session appender grew the file
+        # between the read above and this swap, os.replace would discard that
+        # un-promoted append. Re-stat and abort (leave the file intact) on any
+        # change -- lossless wins over bounded, matching the drain_offset<=0
+        # bail-out above.
+        try:
+            post_stat = path.stat()
+        except OSError:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            return
+        if (
+            post_stat.st_size != pre_stat.st_size
+            or post_stat.st_mtime_ns != pre_stat.st_mtime_ns
+        ):
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            return
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        log.warning("live_compact_rewrite_failed: %s", exc)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        return
+
+    try:
+        tmp_offset = offset_path.with_suffix(".drain-offset.tmp")
+        tmp_offset.write_text("0")
+        os.replace(tmp_offset, offset_path)
+    except OSError as exc:
+        log.warning("live_compact_offset_reset_failed: %s", exc)
 
 
 def read_pending_live_events(session_id: str | None = None) -> list[dict]:
@@ -899,7 +1076,7 @@ def write_deferred_captures(
     final_name = f"{session_id}-{int(time.time())}-{os.getpid()}.jsonl"
     out_path = deferred_dir / final_name
     tmp_path = deferred_dir / f"{final_name}.tmp"
-    with tmp_path.open("w", encoding="utf-8") as fh:
+    with tmp_path.open("w") as fh:
         header = {
             "version": 1,
             "deferred_at": datetime.now(timezone.utc).isoformat(),
@@ -910,7 +1087,7 @@ def write_deferred_captures(
         path = Path(transcript_path).expanduser()
         if path.exists():
             seen = 0
-            with path.open(encoding="utf-8") as src:
+            with path.open() as src:
                 for line in src:
                     if seen >= max_turns:
                         break
@@ -955,6 +1132,19 @@ def write_deferred_captures(
     return out_path
 
 
+def drain_capture_backlog(store: MemoryStore) -> dict[str, int]:
+    """Drain both the rotated/crashed deferred files and the still-open live
+    spools (incremental, offset-tracked) into the store."""
+    counts = drain_deferred_captures(store)
+    try:
+        live = drain_active_live_captures(store, exclude_session_id="-")
+        for k, v in live.items():
+            counts[f"live_{k}"] = v
+    except Exception as exc:  # noqa: BLE001 -- live sweep must not sink the drain
+        log.debug("live spool sweep failed: %s", exc)
+    return counts
+
+
 def drain_deferred_captures(store: MemoryStore) -> dict[str, int]:
     counts = {
         "files_drained": 0,
@@ -981,11 +1171,7 @@ def drain_deferred_captures(store: MemoryStore) -> dict[str, int]:
         counts["skipped_single_flight"] = 1
         return counts
     try:
-        # Mark in-progress for the daemon idle countdown so the FSM does not
-        # advance toward SLEEP (EXCLUSIVE store lock) mid-drain. See
-        # `is_drain_in_progress`.
-        with _drain_in_progress_guard():
-            return _drain_deferred_captures_locked(store, counts)
+        return _drain_deferred_captures_locked(store, counts)
     finally:
         _DRAIN_SINGLE_FLIGHT_LOCK.release()
 
@@ -1007,7 +1193,7 @@ def _drain_deferred_captures_locked(
     # resident set already exceeds the soft cap, the drain stops cleanly (the
     # remaining files stay on disk for the next cycle, like the event cap) so the
     # process yields BEFORE the watchdog hard cap would kill it.
-    rss_soft_cap = _drain_rss_soft_cap_bytes()
+    rss_soft_cap = _drain_rss_stop_threshold(_drain_rss_bytes())
     rss_soft_cap_hit = False
     # Cheap pre-embed idem skip, scoped to this whole drain call. A crash-rotated
     # backlog is dominated by duplicates of already-stored records; embedding each
@@ -1051,7 +1237,7 @@ def _drain_deferred_captures_locked(
                 ".jsonl", f".crash-{next_n}.jsonl"
             )
             try:
-                fpath.replace(fpath.with_name(new_name))
+                fpath.rename(fpath.with_name(new_name))
             except Exception as exc:  # noqa: BLE001
                 log.debug("crash_rename_failed %s: %s", fpath.name, exc)
 
@@ -1103,12 +1289,12 @@ def _drain_deferred_captures_locked(
             fpath.stem + f".processing-{os.getpid()}.jsonl"
         )
         try:
-            fpath.replace(claim_path)
+            fpath.rename(claim_path)
         except FileNotFoundError:
             continue
         except OSError as e:
             try:
-                with log_path.open("a", encoding="utf-8") as logf:
+                with log_path.open("a") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} "
                         f"claim-failed {fpath.name}: {type(e).__name__}\n"
@@ -1121,153 +1307,188 @@ def _drain_deferred_captures_locked(
         file_had_insert_failure = False
         file_first_error: str | None = None
         try:
-            with work_path.open(encoding="utf-8") as fh:
-                lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
-            if not lines:
-                work_path.unlink()
-                continue
-            header = json.loads(lines[0])
-            if header.get("version", 0) > 1:
-                with log_path.open("a", encoding="utf-8") as logf:
-                    logf.write(
-                        f"{datetime.now(timezone.utc).isoformat()} skip "
-                        f"{work_path.name}: version={header.get('version')}\n"
-                    )
-                _strip_processing_marker(work_path, log_path=log_path)
-                continue
-            session_id = header.get("session_id", "-")
-            event_lines = lines[1:]
-            processed_in_file = 0
-            for idx, ln in enumerate(event_lines):
-                if total_events_processed >= MAX_DRAIN_EVENTS_PER_RUN:
-                    remainder = event_lines[idx:]
-                    work_path, _strip_ok = _strip_processing_marker(
-                        work_path, log_path=log_path
-                    )
-                    if not _strip_ok:
+            # Stream the claimed file line-by-line instead of materializing it.
+            # A single deferred file can hold up to the capture turn ceiling of
+            # events; reading it all into a list would size the read step's
+            # resident cost to the file, not to MAX_DRAIN_EVENTS_PER_RUN. The
+            # handle stays open across the whole per-file loop so the per-run cap
+            # bounds the resident batch to ~MAX_DRAIN_EVENTS_PER_RUN parsed
+            # events, and the un-processed tail is streamed straight to
+            # .partial.jsonl from the same handle (never buffered).
+            with work_path.open() as fh:
+                header_line: str | None = None
+                for raw in fh:
+                    if raw.strip():
+                        header_line = raw.rstrip("\n")
+                        break
+                if header_line is None:
+                    work_path.unlink()
+                    continue
+                header = json.loads(header_line)
+                if header.get("version", 0) > 1:
+                    with log_path.open("a") as logf:
+                        logf.write(
+                            f"{datetime.now(timezone.utc).isoformat()} skip "
+                            f"{work_path.name}: version={header.get('version')}\n"
+                        )
+                    _strip_processing_marker(work_path, log_path=log_path)
+                    continue
+                session_id = header.get("session_id", "-")
+                processed_in_file = 0
+                for raw in fh:
+                    if not raw.strip():
+                        continue
+                    ln = raw.rstrip("\n")
+                    if total_events_processed >= MAX_DRAIN_EVENTS_PER_RUN:
+                        work_path, _strip_ok = _strip_processing_marker(
+                            work_path, log_path=log_path
+                        )
+                        if not _strip_ok:
+                            cap_hit = True
+                            break
+                        partial_path = work_path.with_suffix(".partial.jsonl")
+                        tmp_path = work_path.with_suffix(".partial.tmp")
+                        # Write header + the cap-triggering line + the rest of the
+                        # still-open handle directly. The marker rename above does
+                        # not invalidate the open fd (same inode), so the tail is
+                        # streamed through one line at a time — the remainder is
+                        # preserved byte-for-byte without ever being buffered.
+                        with tmp_path.open("w") as ph:
+                            ph.write(header_line + "\n")
+                            ph.write(ln + "\n")
+                            for tail in fh:
+                                if not tail.strip():
+                                    continue
+                                ph.write(tail.rstrip("\n") + "\n")
+                            ph.flush()
+                            os.fsync(ph.fileno())
+                        os.replace(tmp_path, partial_path)
+                        work_path.unlink()
+                        counts["files_drained"] += 1
                         cap_hit = True
                         break
-                    partial_path = work_path.with_suffix(".partial.jsonl")
-                    tmp_path = work_path.with_suffix(".partial.tmp")
-                    with tmp_path.open("w", encoding="utf-8") as ph:
-                        ph.write(lines[0] + "\n")
-                        for r in remainder:
-                            ph.write(r + "\n")
-                        ph.flush()
-                        os.fsync(ph.fileno())
-                    os.replace(tmp_path, partial_path)
-                    work_path.unlink()
-                    counts["files_drained"] += 1
-                    cap_hit = True
-                    break
-                ev = json.loads(ln)
-                tier = ev.get("tier", "episodic")
-                role = ev.get("role", "user")
+                    ev = json.loads(ln)
+                    tier = ev.get("tier", "episodic")
+                    role = ev.get("role", "user")
 
-                # Pre-embed idem skip for conversational episodic events. The tag
-                # is reproduced exactly as capture_turn computes it (stripped,
-                # length-bounded text + resolved timestamp). A too-short event
-                # would never become a record (capture_turn skips it before
-                # embedding), so it can never match a stored tag — leave those to
-                # fall through to capture_turn's own "too short" skip.
-                if _is_episodic_conversational(tier, role):
-                    norm_text = (ev.get("text", "") or "").strip()
-                    if MIN_CAPTURE_LEN <= len(norm_text):
-                        if len(norm_text) > MAX_CAPTURE_LEN:
-                            norm_text = norm_text[:MAX_CAPTURE_LEN]
-                        ts_iso = _resolve_ts(ev.get("ts")).isoformat()
-                        tag = _idem_tag(
-                            session_id,
-                            role,
-                            ts_iso,
-                            norm_text,
-                            source_uuid=ev.get("source_uuid"),
-                        )
-                        if tag in seen_this_run:
-                            # Already inserted-or-reinforced this exact tag earlier
-                            # in this drain. A crash-rotated backlog can repeat the
-                            # same turn tens of thousands of times; collapse those
-                            # to a single reinforcement so the Hebbian signal is not
-                            # inflated by the size of the backlog.
-                            counts["events_skipped_existing"] += 1
-                            total_events_processed += 1
-                            processed_in_file += 1
-                            continue
-                        existing_id = store.find_record_by_tag(tag)
-                        if existing_id is not None:
-                            # The record already exists in the store. Skip the
-                            # expensive embed, but still reinforce it once — re-seeing
-                            # a turn is a memory-strengthening signal, exactly what
-                            # capture_turn's own duplicate branch does. reinforce_record
-                            # is a cheap edge boost (no embed), so the drain stays fast.
-                            try:
-                                store.reinforce_record(existing_id)
-                                counts["events_reinforced"] += 1
-                            except (ValueError, IOError) as exc:
-                                log.warning(
-                                    "drain_dedup_reinforce_failed",
-                                    extra={
-                                        "err_type": type(exc).__name__,
-                                        "record_id": str(existing_id),
-                                    },
-                                )
-                            seen_this_run.add(tag)
-                            total_events_processed += 1
-                            processed_in_file += 1
-                            continue
-                        seen_this_run.add(tag)
-
-                # Phase-1 of the two-phase drain: write the genuinely-new event as
-                # a pending (un-embedded) row. No embedder, JIT, or columnar pages
-                # are held resident during the drain, so a large backlog no longer
-                # climbs the resident set through one long synchronous embed run.
-                # The deferred-embed pass (driven by the wake sequence after the
-                # drain) fills the real vector in bounded batches. The pending row
-                # is dedup-findable by tag and verbatim-recallable immediately.
-                result = _drain_write_pending(
-                    store,
-                    cue=ev.get("cue", ""),
-                    text=ev.get("text", ""),
-                    tier=tier,
-                    session_id=session_id,
-                    role=role,
-                    ts=ev.get("ts"),
-                    source_uuid=ev.get("source_uuid"),
-                )
-                status = result.get("status", "skipped")
-                reason = result.get("reason", "")
-                if status == "inserted":
-                    counts["events_inserted"] += 1
-                    # Mirror the new turn into the recent bank so the daemon-down
-                    # degraded-recall path (bank-recall) still surfaces it. The
-                    # recent-bank recall is verbatim substring matching — it never
-                    # reads the stored vector — so the pending row's placeholder
-                    # vector is irrelevant here; the verbatim text is what matters.
+                    # Politeness: a live foreground recall preempts background
+                    # ingestion. Each drained event costs an embed plus several
+                    # shared-connection round trips; grinding through them while
+                    # a recall is in flight serializes the recall behind this
+                    # loop. The backoff is bounded per event and fail-open, so
+                    # the drain always completes even under a continuous stream
+                    # of foreground reads.
                     try:
-                        from iai_mcp.memory_bank import append_recent_record
+                        from iai_mcp.concurrency import foreground_backoff
 
-                        rid_str = result.get("record_id")
-                        if rid_str:
-                            rec = store.get(UUID(rid_str))
-                            if rec is not None:
-                                append_recent_record(store, rec)
-                    except Exception:  # noqa: BLE001 -- best-effort fail-safe boundary
-                        log.warning(
-                            "bank-recent append failed for record %s",
-                            result.get("record_id"),
-                            exc_info=True,
-                        )
-                elif status == "reinforced":
-                    counts["events_reinforced"] += 1
-                elif status == "skipped" and reason.startswith("insert-failed:"):
-                    counts["events_skipped_insert_failed"] += 1
-                    file_had_insert_failure = True
-                    if file_first_error is None:
-                        file_first_error = reason
-                else:
-                    counts["events_skipped_intentional"] += 1
-                total_events_processed += 1
-                processed_in_file += 1
+                        foreground_backoff(max_wait_s=2.0)
+                    except Exception:  # noqa: BLE001 -- politeness is advisory
+                        pass
+
+                    # Pre-embed idem skip for conversational episodic events. The tag
+                    # is reproduced exactly as capture_turn computes it (stripped,
+                    # length-bounded text + resolved timestamp). A too-short event
+                    # would never become a record (capture_turn skips it before
+                    # embedding), so it can never match a stored tag — leave those to
+                    # fall through to capture_turn's own "too short" skip.
+                    if _is_episodic_conversational(tier, role):
+                        norm_text = (ev.get("text", "") or "").strip()
+                        if MIN_CAPTURE_LEN <= len(norm_text):
+                            if len(norm_text) > MAX_CAPTURE_LEN:
+                                norm_text = norm_text[:MAX_CAPTURE_LEN]
+                            ts_iso = _resolve_ts(ev.get("ts")).isoformat()
+                            tag = _idem_tag(
+                                session_id,
+                                role,
+                                ts_iso,
+                                norm_text,
+                                source_uuid=ev.get("source_uuid"),
+                            )
+                            if tag in seen_this_run:
+                                # Already inserted-or-reinforced this exact tag earlier
+                                # in this drain. A crash-rotated backlog can repeat the
+                                # same turn tens of thousands of times; collapse those
+                                # to a single reinforcement so the Hebbian signal is not
+                                # inflated by the size of the backlog.
+                                counts["events_skipped_existing"] += 1
+                                total_events_processed += 1
+                                processed_in_file += 1
+                                continue
+                            existing_id = store.find_record_by_tag(tag)
+                            if existing_id is not None:
+                                # The record already exists in the store. Skip the
+                                # expensive embed, but still reinforce it once — re-seeing
+                                # a turn is a memory-strengthening signal, exactly what
+                                # capture_turn's own duplicate branch does. reinforce_record
+                                # is a cheap edge boost (no embed), so the drain stays fast.
+                                try:
+                                    store.reinforce_record(existing_id)
+                                    counts["events_reinforced"] += 1
+                                except (ValueError, IOError) as exc:
+                                    log.warning(
+                                        "drain_dedup_reinforce_failed",
+                                        extra={
+                                            "err_type": type(exc).__name__,
+                                            "record_id": str(existing_id),
+                                        },
+                                    )
+                                seen_this_run.add(tag)
+                                total_events_processed += 1
+                                processed_in_file += 1
+                                continue
+                            seen_this_run.add(tag)
+
+                    # First phase of the two-phase drain: write the genuinely-new event as
+                    # a pending (un-embedded) row. No embedder, JIT, or columnar pages
+                    # are held resident during the drain, so a large backlog does not
+                    # climb the resident set through one long synchronous embed run.
+                    # The deferred-embed pass (driven by the wake sequence after the
+                    # drain) fills the real vector in bounded batches. The pending row
+                    # is dedup-findable by tag and verbatim-recallable immediately.
+                    result = _drain_write_pending(
+                        store,
+                        cue=ev.get("cue", ""),
+                        text=ev.get("text", ""),
+                        tier=tier,
+                        session_id=session_id,
+                        role=role,
+                        ts=ev.get("ts"),
+                        source_uuid=ev.get("source_uuid"),
+                    )
+                    status = result.get("status", "skipped")
+                    reason = result.get("reason", "")
+                    if status == "inserted":
+                        counts["events_inserted"] += 1
+                        # Mirror the new turn into the recent bank so the daemon-down
+                        # degraded-recall path (bank-recall) still surfaces it. The
+                        # recent-bank recall is verbatim substring matching — it never
+                        # reads the stored vector — so the pending row's placeholder
+                        # vector is irrelevant here; the verbatim text is what matters.
+                        try:
+                            from iai_mcp.memory_bank import append_recent_record
+
+                            rid_str = result.get("record_id")
+                            if rid_str:
+                                rec = store.get(UUID(rid_str))
+                                if rec is not None:
+                                    append_recent_record(store, rec)
+                        except Exception:  # noqa: BLE001 -- best-effort fail-safe boundary
+                            log.warning(
+                                "bank-recent append failed for record %s",
+                                result.get("record_id"),
+                                exc_info=True,
+                            )
+                    elif status == "reinforced":
+                        counts["events_reinforced"] += 1
+                    elif status == "skipped" and reason.startswith("insert-failed:"):
+                        counts["events_skipped_insert_failed"] += 1
+                        file_had_insert_failure = True
+                        if file_first_error is None:
+                            file_first_error = reason
+                    else:
+                        counts["events_skipped_intentional"] += 1
+                    total_events_processed += 1
+                    processed_in_file += 1
             if cap_hit:
                 break
             if file_had_insert_failure:
@@ -1276,7 +1497,7 @@ def _drain_deferred_captures_locked(
                 )
                 if not _strip_ok:
                     try:
-                        with log_path.open("a", encoding="utf-8") as logf:
+                        with log_path.open("a") as logf:
                             logf.write(
                                 f"{datetime.now(timezone.utc).isoformat()} "
                                 f"insert-failed-skip {work_path.name}: "
@@ -1292,7 +1513,7 @@ def _drain_deferred_captures_locked(
                     first_error=file_first_error or "unknown",
                     log_path=log_path,
                 )
-                with log_path.open("a", encoding="utf-8") as logf:
+                with log_path.open("a") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} insert-failed "
                         f"{work_path.name}: first_error={file_first_error}\n"
@@ -1308,7 +1529,7 @@ def _drain_deferred_captures_locked(
                 )
                 if not _strip_ok:
                     try:
-                        with log_path.open("a", encoding="utf-8") as logf:
+                        with log_path.open("a") as logf:
                             logf.write(
                                 f"{datetime.now(timezone.utc).isoformat()} "
                                 f"exception-skip {work_path.name}: "
@@ -1324,7 +1545,7 @@ def _drain_deferred_captures_locked(
                     first_error=file_first_error or repr(e),
                     log_path=log_path,
                 )
-                with log_path.open("a", encoding="utf-8") as logf:
+                with log_path.open("a") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} failed "
                         f"{work_path.name}: {type(e).__name__}: {e}\n"
@@ -1358,6 +1579,21 @@ def _drain_deferred_captures_locked(
         except Exception as exc:  # noqa: BLE001 -- telemetry must not break the drain
             log.debug("drain_rss_soft_cap_event_failed: %s", exc)
 
+    # Flush the drained records out of the in-memory insert buffer HERE, in
+    # the drain's own background context. Left unflushed, the buffer's
+    # read-your-writes discipline makes the FIRST post-drain read that needs
+    # a buffered row (a recall's by-id batch fetch) pay the whole flush —
+    # encrypt + batch insert + index feeds — synchronously on the awake
+    # recall path, and every concurrent recall serializes behind it.
+    if counts["events_inserted"]:
+        try:
+            from iai_mcp.store import flush_record_buffer
+
+            flush_record_buffer(store)
+        except Exception as exc:  # noqa: BLE001 -- flush failure defers to the
+            # read-side flush; never breaks the drain.
+            log.debug("drain_post_flush_failed: %s", exc)
+
     # Rail: post-drain memory relief. After a run that did real work, hand idle
     # allocator pages back to the OS (arrow pool release + gc + macOS pressure
     # relief) so the per-run transient does not accumulate into the warm plateau.
@@ -1381,7 +1617,7 @@ _PERMANENT_FAILED_NAMED_RE = re.compile(r"^(.+)\.permanent-failed-([^.]+)\.jsonl
 
 def _count_lines(fpath: Path) -> int:
     try:
-        with fpath.open(encoding="utf-8") as fh:
+        with fpath.open() as fh:
             return sum(1 for ln in fh if ln.strip())
     except OSError:
         return 0
@@ -1446,7 +1682,7 @@ def drain_permanent_failed_files(
         file_dropped = 0
 
         try:
-            with fpath.open(encoding="utf-8") as fh:
+            with fpath.open() as fh:
                 lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
 
             if not lines:
@@ -1551,23 +1787,6 @@ def drain_active_live_captures(
     *,
     exclude_session_id: str,
 ) -> dict[str, int]:
-    """Drain live-session capture files into the store.
-
-    Marked in-progress for the daemon idle countdown, like
-    `drain_deferred_captures` -- both write to the store and must hold the FSM
-    out of SLEEP while running. See `is_drain_in_progress`.
-    """
-    with _drain_in_progress_guard():
-        return _drain_active_live_captures_impl(
-            store, exclude_session_id=exclude_session_id,
-        )
-
-
-def _drain_active_live_captures_impl(
-    store: MemoryStore,
-    *,
-    exclude_session_id: str,
-) -> dict[str, int]:
     deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
     state_dir = Path.home() / ".iai-mcp" / ".capture-state"
     counts: dict[str, int] = {
@@ -1585,7 +1804,7 @@ def _drain_active_live_captures_impl(
         if not _LIVE_ACTIVE_RE.search(fpath.name):
             continue
         try:
-            with fpath.open(encoding="utf-8") as fh:
+            with fpath.open() as fh:
                 raw_lines = fh.readlines()
         except OSError:
             continue
@@ -1611,7 +1830,7 @@ def _drain_active_live_captures_impl(
         prev_offset: int = 0
         try:
             if offset_path.exists():
-                prev_offset = int(offset_path.read_text(encoding="utf-8").strip() or "0")
+                prev_offset = int(offset_path.read_text().strip() or "0")
         except (ValueError, OSError):
             prev_offset = 0
 
@@ -1659,7 +1878,7 @@ def _drain_active_live_captures_impl(
         state_dir.mkdir(parents=True, exist_ok=True)
         tmp_offset = offset_path.with_suffix(".drain-offset.tmp")
         try:
-            tmp_offset.write_text(str(new_offset), encoding="utf-8")
+            tmp_offset.write_text(str(new_offset))
             os.replace(tmp_offset, offset_path)
         except OSError as exc:
             log.warning("drain_active_offset_write_failed: %s", exc)

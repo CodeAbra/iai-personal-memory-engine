@@ -2,18 +2,18 @@
 # Linux systemd install/uninstall idempotency.
 #
 # Verifies:
-# -: unit installed under ~/.config/systemd/user
-# -: silent install (--yes bypasses consent banner)
-# - Uninstall removes unit + ~/.iai-mcp/.lock +
-# ~/.iai-mcp/.daemon.sock + ~/.iai-mcp/.daemon-state.json
-# - Idempotency: install twice / uninstall twice -> no error
+#   - unit installed under ~/.config/systemd/user
+#   - silent install (--yes bypasses consent banner)
+#   - uninstall removes unit + ~/.iai-mcp/.lock +
+#     ~/.iai-mcp/.daemon.sock + ~/.iai-mcp/.daemon-state.json
+#   - Idempotency: install twice / uninstall twice -> no error
 #
 # Skipped on non-Linux (returns 0). macOS equivalent lives in
 # tests/shell/test_launchd_install.sh.
 #
 # Skipped if systemctl --user is not usable (headless CI without an active
 # user-systemd session, e.g. GitHub Actions ubuntu-latest by default).
-# cross-platform parity is enforced by CI matrix; this script is
+# Cross-platform parity is enforced by CI matrix; this script is
 # a smoke test that runs FULL flow when a user session exists.
 
 set -euo pipefail
@@ -131,15 +131,15 @@ if [[ -f "$UNIT" ]]; then
     exit 1
 fi
 if [[ -f "$LOCK" ]]; then
-    echo "FAIL: lock file not removed"
+    echo "FAIL: lock file not removed (cleanup violation)"
     exit 1
 fi
 if [[ -f "$SOCK" ]]; then
-    echo "FAIL: socket file not removed"
+    echo "FAIL: socket file not removed (cleanup violation)"
     exit 1
 fi
 if [[ -f "$STATE" ]]; then
-    echo "FAIL: state file not removed"
+    echo "FAIL: state file not removed (cleanup violation)"
     exit 1
 fi
 

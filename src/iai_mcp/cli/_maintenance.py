@@ -63,7 +63,7 @@ def _maintenance_compact_preflight_daemon_alive() -> str | None:
     if not _cli.STATE_PATH.exists():
         return None
     try:
-        state = _json.loads(_cli.STATE_PATH.read_text(encoding="utf-8"))
+        state = _json.loads(_cli.STATE_PATH.read_text())
     except (OSError, ValueError):
         return None
     pid = state.get("daemon_pid")
@@ -181,7 +181,7 @@ def _maintenance_compact_apply(
         }
         try:
             failed_path.parent.mkdir(parents=True, exist_ok=True)
-            failed_path.write_text(_json.dumps(failed_payload, indent=2), encoding="utf-8")
+            failed_path.write_text(_json.dumps(failed_payload, indent=2))
         except OSError:
             pass
         print(
@@ -206,7 +206,7 @@ def _maintenance_compact_apply(
     }
     try:
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_path.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+        audit_path.write_text(_json.dumps(payload, indent=2))
     except OSError as exc:
         print(
             f"warning: could not write audit file {audit_path}: {exc}",
@@ -593,6 +593,84 @@ def cmd_drain_permanent_failed(args: argparse.Namespace) -> int:
         return 1
 
     _print_drain_result(result)
+    return 0
+
+
+def cmd_deferred_drain(args: argparse.Namespace) -> int:
+    import os
+
+    from iai_mcp import cli as _cli
+
+    deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+
+    env_store = os.environ.get("IAI_MCP_STORE")
+    if env_store:
+        store_root = Path(env_store)
+    else:
+        from iai_mcp.store import DEFAULT_STORAGE_PATH
+        store_root = Path(DEFAULT_STORAGE_PATH)
+
+    force = bool(getattr(args, "force", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    from iai_mcp.migrate._dead_pid_unlock import _read_live_daemon_pid
+
+    if _read_live_daemon_pid() is not None and not force:
+        print(
+            "a live daemon is running — stop the daemon and unload the launch "
+            "service before draining the backlog, or pass --force to rely on "
+            "the store lock as the single-writer guard",
+            file=_cli.sys.stderr,
+        )
+        return 1
+
+    # Permanently-failed capture files are NOT drained here; the operator should
+    # also run `iai-mcp drain-permanent-failed` to recover those. This keeps the
+    # backlog drain additive.
+    print(
+        "note: .permanent-failed-* capture files are not drained by this "
+        "command — run `iai-mcp drain-permanent-failed` to recover them",
+        file=_cli.sys.stderr,
+    )
+
+    from iai_mcp.deferred_drain import run_deferred_drain
+    from iai_mcp.hippo import HippoLockHeldError
+
+    try:
+        result = run_deferred_drain(
+            deferred_dir=deferred_dir,
+            store_root=store_root,
+            batch_bytes=args.batch_bytes,
+            dry_run=dry_run,
+        )
+    except HippoLockHeldError:
+        print(
+            "the store is locked — another writer (the daemon?) holds it; stop "
+            "it and retry",
+            file=_cli.sys.stderr,
+        )
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(result))
+        return 0
+
+    if result.get("dry_run"):
+        print(
+            f"dry-run: {result['files_enumerated']} file(s), "
+            f"{result['events_seen']} event(s), "
+            f"{len(result['batches'])} batch(es), "
+            f"{result['total_bytes']} bytes; nothing mutated"
+        )
+    else:
+        print(
+            f"drained {result['events_seen']} event(s): "
+            f"inserted={result['inserted']} reinforced={result['reinforced']} "
+            f"skipped_existing={result.get('skipped_existing', 0)} "
+            f"skipped={result['skipped']} across {len(result['batches'])} "
+            f"batch(es); remaining={result['remaining_events']}; "
+            f"reconciled={result['reconciled']}"
+        )
     return 0
 
 

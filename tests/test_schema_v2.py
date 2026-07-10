@@ -248,7 +248,6 @@ def test_record_to_from_row_preserves_schema_version(tmp_path):
     assert got.schema_version == 2
 
 def test_legacy_record_reads_default_v1_defaults(tmp_path):
-    import json
     from datetime import datetime, timezone
 
     from iai_mcp.store import MemoryStore, RECORDS_TABLE

@@ -24,3 +24,6 @@ pyo3                = { workspace = true }
 pyo3-stub-gen       = { workspace = true }
 iai_mcp_embed_core  = { path = "../iai_mcp_embed_core" }
 iai_mcp_graph_core  = { path = "../iai_mcp_graph_core" }
+lilli-hd            = { path = "../../crates/lilli-hd" }
+lillibrain          = { path = "../../crates/lillibrain" }
+lilliengine         = { path = "../../crates/lilliengine" }

@@ -2,7 +2,7 @@
 # scripts/update.sh — pull + rebuild + restart daemon for collaborators
 #
 # Usage (from repo root or anywhere inside the clone):
-# bash scripts/update.sh
+#   bash scripts/update.sh
 #
 # Idempotent. Aborts on a dirty working tree so local changes are never
 # clobbered. Re-runs safely — each step detects whether it is needed.

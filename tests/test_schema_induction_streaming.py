@@ -15,7 +15,6 @@ from iai_mcp.schema import (
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -29,7 +28,6 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
         _keyring, "delete_password", lambda s, u: fake.pop((s, u), None)
     )
     yield fake
-
 
 @pytest.fixture(autouse=True)
 def _patch_embedder(monkeypatch: pytest.MonkeyPatch):
@@ -51,7 +49,6 @@ def _patch_embedder(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(embed_mod, "Embedder", _FakeEmbedder)
     yield
-
 
 def _rec(
     *,
@@ -84,11 +81,9 @@ def _rec(
         language=language,
     )
 
-
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(path=tmp_path / "hippo")
-
+    return MemoryStore(path=tmp_path / "lancedb")
 
 def test_induce_schemas_tier0_uses_iter_record_columns_not_all_records(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -112,7 +107,6 @@ def test_induce_schemas_tier0_uses_iter_record_columns_not_all_records(
         f"once; got {spy_iter.call_count} call(s)"
     )
 
-
 def test_induce_schemas_tier0_zero_decrypt_calls(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -128,7 +122,6 @@ def test_induce_schemas_tier0_zero_decrypt_calls(
         f"induce_schemas_tier0 must NOT trigger ANY _decrypt_for_record "
         f"calls; got {decrypt_spy.call_count} call(s)"
     )
-
 
 def test_induce_schemas_tier0_byte_identical_to_pre_d26_implementation(
     store: MemoryStore,
@@ -195,7 +188,6 @@ def test_induce_schemas_tier0_byte_identical_to_pre_d26_implementation(
         f"meeting+notes pair; got {[(c.pattern, c.evidence_count, c.status) for c in actual_sorted]!r}"
     )
 
-
 def test_induce_schemas_tier0_evidence_ids_are_uuids(
     store: MemoryStore,
 ) -> None:
@@ -216,7 +208,6 @@ def test_induce_schemas_tier0_evidence_ids_are_uuids(
                 f"for {ev_id!r}"
             )
         assert set(c.evidence_ids).issubset(set(inserted))
-
 
 def test_persist_schema_uses_iter_record_columns_not_all_records_for_keeper_scan(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -245,9 +236,8 @@ def test_persist_schema_uses_iter_record_columns_not_all_records_for_keeper_scan
     )
     assert spy_iter.call_count >= 1, (
         f"persist_schema must call store.iter_record_columns() at least once "
-        f"(keeper scan); got {spy_iter.call_count} call(s)"
+        f"in the keeper scan; got {spy_iter.call_count} call(s)"
     )
-
 
 def test_persist_schema_early_exit_on_first_match(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -299,7 +289,6 @@ def test_persist_schema_early_exit_on_first_match(
         f"after the first match — strictly < 50)"
     )
 
-
 def test_persist_schema_returns_correct_id_when_keeper_is_mid_stream(
     store: MemoryStore,
 ) -> None:
@@ -350,7 +339,6 @@ def test_persist_schema_returns_correct_id_when_keeper_is_mid_stream(
         f"persist_schema must return a UUID, not a string from row['id']; "
         f"got {type(returned_id).__name__}"
     )
-
 
 def test_persist_schema_falls_through_to_insert_when_no_keeper(
     store: MemoryStore,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import socket
 import tempfile
 from datetime import datetime, timezone
@@ -51,17 +50,12 @@ def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
 
-    # os.kill(pid, 0) is the POSIX liveness idiom, but on Windows os.kill
-    # rejects signal 0 with OSError [WinError 87] (invalid parameter). Skip
-    # the probe there and rely on the psutil refinement below, which both
-    # confirms the pid exists and that it is actually an iai_mcp.daemon.
-    if platform.system() != "Windows":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
     try:
         import psutil

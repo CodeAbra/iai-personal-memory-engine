@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from uuid import UUID, uuid4
@@ -49,6 +51,42 @@ _STALE_REASON_SUFFIX: str = " · stale"
 # on every write.
 _DRIFT_DEFAULT_ABS: int = 500
 _DRIFT_DEFAULT_FRAC: float = 0.05
+
+
+# Boot-rebuild back-pressure: the streaming loops run in a worker thread, but a
+# long uninterrupted pass can still starve a sibling foreground-recall thread
+# past a sub-second SLA. `time.sleep(0)` forces a real OS-scheduler yield;
+# yielding every `_GRAPH_STREAM_CHUNK_ROWS` rows bounds how long any single
+# slice runs. Operator-overridable; a non-positive override uses the default.
+_GRAPH_STREAM_CHUNK_ROWS_DEFAULT: int = 256
+
+
+def _graph_stream_chunk_rows() -> int:
+    raw = os.environ.get("IAI_MCP_RGC_STREAM_CHUNK_ROWS")
+    if raw is None:
+        return _GRAPH_STREAM_CHUNK_ROWS_DEFAULT
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return _GRAPH_STREAM_CHUNK_ROWS_DEFAULT
+    return parsed if parsed > 0 else _GRAPH_STREAM_CHUNK_ROWS_DEFAULT
+
+
+def _yield_to_event_loop() -> None:
+    """Force an actual OS-level thread-scheduling yield at a streaming-loop
+    chunk boundary so a foreground recall in a sibling thread gets to run.
+
+    Also honours the foreground-activity beacon: while a live recall is in
+    flight the rebuild pauses here (bounded, fail-open) — background rebuild
+    work must never compete with an awake read.
+    """
+    try:
+        from iai_mcp.concurrency import foreground_backoff
+
+        foreground_backoff(max_wait_s=0.5)
+    except Exception:  # noqa: BLE001 -- politeness is advisory
+        pass
+    time.sleep(0)
 
 
 def _drift_tolerance(cached_count: int) -> int:
@@ -108,6 +146,21 @@ def recall(
     k_anti: int = 3,
     mode: str = "verbatim",
 ) -> RecallResponse:
+    # A missing or all-zero cue vector must be embedded HERE, not searched:
+    # the SLEEP/exception fallback dispatchers pad an absent cue_embedding
+    # with zeros, and ranking by distance to the zero vector returns
+    # cue-IRRELEVANT memories — the hippocampus must answer correctly on
+    # every path, not just the primary one. Embed failure keeps the caller's
+    # vector (degraded, never a crash into recall).
+    if cue_text and (not cue_embedding or not any(cue_embedding)):
+        try:
+            from iai_mcp.embed import embedder_for_store
+            # Full cue, same as the primary path — the encoder truncates at
+            # its own token limit; a char slice here would rank differently.
+            cue_embedding = list(embedder_for_store(store).embed(cue_text))
+        except Exception as exc:  # noqa: BLE001 -- degraded beats dead
+            log.warning("recall cue re-embed failed, using caller vector: %s", exc)
+
     raw = store.query_similar(cue_embedding, k=k_hits + k_anti)
 
     if mode == "verbatim":
@@ -149,8 +202,16 @@ def recall(
             log.warning("provenance_batch write failed: %s", exc)
 
     anti_hits: list[MemoryHit] = []
+    # The anti window must never overlap the hit window: with fewer than
+    # k_hits+k_anti survivors (small corpus, verbatim-filtered) the head and
+    # tail slices intersect, and a TOP memory would be served as a
+    # low-similarity anti-hit — anti_hits carry the same contractual weight
+    # as hits.
+    hit_ids = {h.record_id for h in hits}
     tail = raw[-k_anti:] if len(raw) >= k_anti else []
     for record, score in reversed(tail):
+        if record.id in hit_ids:
+            continue
         anti_hits.append(
             MemoryHit(
                 record_id=record.id,
@@ -165,12 +226,7 @@ def recall(
     derive_temporal_validity(store, anti_hits)
     apply_stale_downweight(hits)
     apply_stale_downweight(anti_hits)
-    # Rank on the internal unclamped key (falls back to score), so ordering
-    # survives the display clamp applied at serialization.
-    hits.sort(
-        key=lambda h: (h.sort_score if h.sort_score is not None else h.score),
-        reverse=True,
-    )
+    hits.sort(key=lambda h: h.score, reverse=True)
 
     try:
         from iai_mcp.s4 import on_read_check
@@ -233,6 +289,14 @@ def contradict(
     original = store.get(original_id)
     if original is None:
         raise ValueError(f"unknown record {original_id}")
+    # An absent or all-zero corrector vector must be embedded HERE (the
+    # dispatcher pads omissions with zeros and no MCP client sends one):
+    # a zero-embedded corrector is semantically invisible while the
+    # SUPERSEDED belief keeps surfacing — the inverse of what contradiction
+    # exists for. Same contract as recall's cue re-embed.
+    if new_fact and (not new_embedding or not any(new_embedding)):
+        from iai_mcp.embed import embedder_for_store
+        new_embedding = list(embedder_for_store(store).embed(new_fact))
     target_dim = store.embed_dim
     if len(new_embedding) != target_dim:
         raise ValueError(
@@ -280,88 +344,87 @@ def contradict(
     )
 
 
-_tv_cache: dict[int, tuple[dict[str, list[str]], dict[str, datetime]]] = {}
-_tv_cache_dirty: dict[int, bool] = {}
+def _parse_created_ts(v: object) -> datetime:
+    if isinstance(v, datetime):
+        return v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+    dt = datetime.fromisoformat(str(v))
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+# Weak-keyed on the store OBJECT, not id(store): an id can be reused by a
+# new store after the old one is collected (serving a dead store's maps),
+# and id-keyed entries never evict. Weak keys evict with the store.
+import weakref as _weakref
+
+_tv_cache: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
+_tv_cache_dirty: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
 
 
 def invalidate_temporal_validity_cache(store: "MemoryStore") -> None:
-    _tv_cache_dirty[id(store)] = True
+    try:
+        _tv_cache_dirty[store] = True
+    except TypeError:
+        # Non-weakrefable store stub (tests): no cache, nothing to dirty.
+        pass
 
 
 def build_temporal_validity_maps(
     store: MemoryStore,
 ) -> tuple[dict[str, list[str]], dict[str, datetime]] | None:
-    store_id = id(store)
-    if not _tv_cache_dirty.get(store_id, True) and store_id in _tv_cache:
-        return _tv_cache[store_id]
-
-    edges_tbl = store.db.open_table("edges")
     try:
-        edges_count = int(edges_tbl.count_rows())
-        if edges_count > 0:
-            edges_df = (
-                edges_tbl.search()
-                .select(["src", "dst", "edge_type"])
-                .limit(edges_count)
-                .to_pandas()
-            )
-        else:
-            edges_df = None
-    except (OSError, ValueError, RuntimeError) as exc:
+        if not _tv_cache_dirty.get(store, True) and store in _tv_cache:
+            return _tv_cache[store]
+    except TypeError:
+        pass
+
+    # Bounded by the number of CONTRADICTIONS, never the corpus: this runs on
+    # the awake fallback recall lane and is invalidated by every contradict —
+    # including sleep-time reconsolidation — so a full-table materialization
+    # here couples an awake recall's latency to corpus size. Only contradicts
+    # edges and the timestamps of the records they touch are needed;
+    # derive_temporal_validity falls back to the hit's own captured_at for
+    # valid_from.
+    outgoing: dict[str, list[str]] = {}
+    involved: set[str] = set()
+    try:
+        with store.db.ro_conn() as conn:
+            rows = conn.execute(
+                "SELECT src, dst FROM edges WHERE edge_type = 'contradicts'"
+            ).fetchall()
+        for row in rows:
+            src_s, dst_s = str(row[0]), str(row[1])
+            outgoing.setdefault(src_s, []).append(dst_s)
+            involved.add(src_s)
+            involved.add(dst_s)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         log.warning("build_temporal_validity_maps edges read failed: %s", exc)
         return None
 
-    outgoing: dict[str, list[str]] = {}
-    if edges_df is not None and not edges_df.empty:
-        try:
-            ctr = edges_df[edges_df["edge_type"] == "contradicts"]
-        except (KeyError, ValueError, RuntimeError) as exc:
-            log.warning("build_temporal_validity_maps filter failed: %s", exc)
-            return None
-        if not ctr.empty:
-            try:
-                for src_s, dst_s in zip(
-                    ctr["src"].tolist(), ctr["dst"].tolist(), strict=False
-                ):
-                    outgoing.setdefault(str(src_s), []).append(str(dst_s))
-            except (KeyError, ValueError, RuntimeError) as exc:
-                log.warning("build_temporal_validity_maps zip failed: %s", exc)
-                return None
-
-
+    ts_by_id: dict[str, datetime] = {}
     try:
-        records_tbl = store.db.open_table("records")
-        records_count = int(records_tbl.count_rows())
-        if records_count > 0:
-            records_df = (
-                records_tbl.search()
-                .select(["id", "created_at"])
-                .limit(records_count)
-                .to_pandas()
-            )
-            def _parse_ts(v: object) -> datetime:
-                if isinstance(v, datetime):
-                    return v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
-                s = str(v)
-                dt = datetime.fromisoformat(s)
-                return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-
-            ts_by_id: dict[str, datetime] = {
-                str(k): _parse_ts(v)
-                for k, v in zip(
-                    records_df["id"].tolist(),
-                    records_df["created_at"].tolist(),
-                    strict=False,
-                )
-            }
-        else:
-            ts_by_id = {}
-    except (OSError, ValueError, RuntimeError) as exc:
+        ids = sorted(involved)
+        with store.db.ro_conn() as conn:
+            for start in range(0, len(ids), 400):
+                window = ids[start:start + 400]
+                placeholders = ", ".join("?" for _ in window)
+                for row in conn.execute(
+                    "SELECT id, created_at FROM records"  # nosemgrep: sql-injection
+                    f" WHERE id IN ({placeholders})",
+                    tuple(window),
+                ).fetchall():
+                    try:
+                        ts_by_id[str(row[0])] = _parse_created_ts(row[1])
+                    except (TypeError, ValueError):
+                        continue
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         log.warning("build_temporal_validity_maps records read failed: %s", exc)
         return None
     _result_full: tuple[dict[str, list[str]], dict[str, datetime]] = (outgoing, ts_by_id)
-    _tv_cache[store_id] = _result_full
-    _tv_cache_dirty[store_id] = False
+    try:
+        _tv_cache[store] = _result_full
+        _tv_cache_dirty[store] = False
+    except TypeError:
+        pass
     return _result_full
 
 
@@ -383,6 +446,29 @@ def derive_temporal_validity(
         if built is None:
             return hits
         outgoing, ts_by_id = built
+
+    # Bounded maps carry timestamps only for contradiction-involved records;
+    # the hits' own created_at is fetched here — at most k ids, one query.
+    missing = [
+        str(h.record_id) for h in hits if str(h.record_id) not in ts_by_id
+    ]
+    if missing and store is not None:
+        try:
+            filled = dict(ts_by_id)
+            with store.db.ro_conn() as conn:
+                placeholders = ", ".join("?" for _ in missing)
+                for row in conn.execute(
+                    "SELECT id, created_at FROM records"  # nosemgrep: sql-injection
+                    f" WHERE id IN ({placeholders})",
+                    tuple(missing),
+                ).fetchall():
+                    try:
+                        filled[str(row[0])] = _parse_created_ts(row[1])
+                    except (TypeError, ValueError):
+                        continue
+            ts_by_id = filled
+        except Exception as exc:  # noqa: BLE001 -- validity derivation is best-effort
+            log.debug("temporal validity hit-timestamp fill failed: %s", exc)
 
     def _created_at(rid: UUID) -> datetime | None:
         return ts_by_id.get(str(rid))
@@ -427,10 +513,6 @@ def apply_stale_downweight(
             continue
         if not getattr(hit, "_stale_downweighted", False):
             hit.score *= STALE_DOWNWEIGHT_FACTOR
-            # Keep the internal ranking key in lock-step with the displayed
-            # score so stale hits demote in the actual ordering too.
-            if getattr(hit, "sort_score", None) is not None:
-                hit.sort_score *= STALE_DOWNWEIGHT_FACTOR
             hit._stale_downweighted = True
         if not hit.reason.endswith(_STALE_REASON_SUFFIX):
             hit.reason = f"{hit.reason}{_STALE_REASON_SUFFIX}"
@@ -579,13 +661,99 @@ def _detect_communities_isolated(store: MemoryStore, graph, *, with_centrality: 
         return assignment
 
 
+# Bounds worst-case boot-time lock contention across the whole background
+# fleet (graph rebuild, sigma, foraging, deferred-capture drain), not just the
+# graph-rebuild callers the lock above already dedups. On a freshly migrated
+# large corpus every one of these tasks can independently hold the storage
+# engine's writer connection for seconds at a time; letting several of them run
+# concurrently at boot serializes them anyway (they all fight over the same
+# connection lock) while ALSO fragmenting the executor's thread pool and
+# starving the event loop's own scheduling turns (including the socket
+# server's bind and the daemon's own liveness-probe roundtrip). A single
+# low-priority semaphore around each task's heavy body bounds concurrent
+# lock-holders to 1, freeing the executor sooner without changing what any
+# task does. Recall never acquires this gate — reader isolation (the RO pool)
+# already keeps recall off the writer path entirely, so recall always
+# preempts the background fleet by construction, not by priority inversion.
+#
+# Bounded-wait + retry-with-backoff, never indefinite deferral: a task that
+# cannot acquire the gate after every retry runs ANYWAY (fail-open) rather
+# than being silently skipped or starved forever — every boot task must still
+# complete. A gate bug (acquire always raising) degrades the same way:
+# the task still runs, just without the serialization benefit.
+_BACKGROUND_STORE_WORK_GATE = threading.BoundedSemaphore(1)
+
+_BACKGROUND_GATE_MAX_WAIT_SEC_DEFAULT = 5.0
+_BACKGROUND_GATE_MAX_RETRIES_DEFAULT = 3
+_BACKGROUND_GATE_BACKOFF_BASE_SEC_DEFAULT = 0.5
+
+
+@contextmanager
+def background_store_work(
+    name: str,
+    *,
+    max_wait_s: float = _BACKGROUND_GATE_MAX_WAIT_SEC_DEFAULT,
+    max_retries: int = _BACKGROUND_GATE_MAX_RETRIES_DEFAULT,
+    backoff_base_s: float = _BACKGROUND_GATE_BACKOFF_BASE_SEC_DEFAULT,
+):
+    """Low-priority single-flight gate around one boot-fleet task's heavy body.
+
+    Acquires ``_BACKGROUND_STORE_WORK_GATE`` with a bounded wait; on a timeout,
+    sleeps with linear backoff and retries up to ``max_retries`` times. If the
+    gate still cannot be acquired (or acquisition itself raises — a gate bug
+    must never block a boot task), the body runs anyway with a warning log:
+    fail-open, because completion always outweighs contention purity.
+
+    Intended to wrap only the synchronous, heavy store-work body of a boot
+    task inside its own ``asyncio.to_thread`` call — never the async
+    scheduling wrapper itself, and never any part of the recall/dispatch path
+    (recall is reader-isolated and must never acquire this gate).
+    """
+    acquired = False
+    waited_total = 0.0
+    try:
+        for attempt in range(max_retries + 1):
+            try:
+                acquired = _BACKGROUND_STORE_WORK_GATE.acquire(timeout=max_wait_s)
+            except Exception as exc:  # noqa: BLE001 -- a broken gate must never block boot
+                log.warning(
+                    "background_store_work gate acquire raised for %s "
+                    "(attempt %d): %s -- running without the gate",
+                    name, attempt, exc,
+                )
+                acquired = False
+                break
+            if acquired:
+                break
+            if attempt < max_retries:
+                backoff_s = backoff_base_s * (attempt + 1)
+                log.debug(
+                    "background_store_work gate busy for %s (attempt %d), "
+                    "backing off %.2fs", name, attempt, backoff_s,
+                )
+                time.sleep(backoff_s)
+                waited_total += max_wait_s + backoff_s
+        if not acquired:
+            log.warning(
+                "background_store_work gate not acquired for %s after %d "
+                "retries (~%.1fs waited) -- running anyway (fail-open)",
+                name, max_retries, waited_total,
+            )
+        else:
+            log.debug("background_store_work gate acquired for %s", name)
+        yield
+    finally:
+        if acquired:
+            _BACKGROUND_STORE_WORK_GATE.release()
+
+
 # Serializes the cache-MISS rebuild of the runtime graph across concurrent
 # callers. The rebuild streams the whole corpus and spawns a child for community
 # detection plus centrality; under a stale or absent cache several callers can
-# fire at once and each run the full rebuild, spawning a redundant fleet of
-# children grinding the same graph. A single-flight guard around the rebuild
-# section collapses that fleet to one: the first caller rebuilds and saves the
-# cache, the rest re-check the freshly-saved cache and take the light path. The
+# fire at once and each run the full rebuild, spawning redundant children. A
+# single-flight guard around the rebuild section collapses them to one: the
+# first caller rebuilds and saves the cache, the rest re-check the
+# freshly-saved cache and take the light path. The
 # daemon's callers run in `asyncio.to_thread` worker threads, so a threading
 # lock serializes them. The cheap cache-hit probe runs OUTSIDE this lock, so the
 # common warm path stays lock-free.
@@ -641,21 +809,158 @@ def _runtime_graph_rebuild_needed(store: MemoryStore) -> bool:
     return False
 
 
-def build_runtime_graph(store: MemoryStore):
-    # Common path: a warm cache that needs no rebuild reconstructs the graph
-    # without spawning any child — run it lock-free so warm recall never blocks
-    # on a peer's rebuild.
-    if not _runtime_graph_rebuild_needed(store):
-        return _build_runtime_graph_impl(store)
+def _rgc_disk_mtime_ns(store: MemoryStore) -> "int | None":
+    from iai_mcp import runtime_graph_cache
 
-    # Cache miss: single-flight the rebuild so concurrent callers don't each
-    # spawn a redundant child fleet on the same graph. Double-checked — a peer
-    # that held the lock may have rebuilt and saved a fresh cache while this
-    # caller waited, in which case the re-probe passes and the impl takes the
-    # light cache-hit branch, spawning no child of its own. Otherwise this caller
-    # is the single-flight winner and performs the one rebuild.
-    with _RUNTIME_GRAPH_REBUILD_LOCK:
-        return _build_runtime_graph_impl(store)
+    try:
+        return runtime_graph_cache._cache_path(store).stat().st_mtime_ns
+    except (OSError, AttributeError):
+        return None
+
+
+def _warm_graph_bundle_if_valid(store: MemoryStore):
+    """Return the last-built (graph, assignment, rich_club) when still valid.
+
+    Every build registers a graph_sync_hook, so record writes land on the
+    memoized graph LIVE — the bundle stays node-fresh between builds. Validity
+    reuses exactly the staleness signals the design already blesses: the
+    on-disk cache file is unchanged (every invalidate unlinks it, every rebuild
+    rewrites it), the corpus is within the persisted-cache drift tolerance, and
+    the freshness fuse has not tripped (dirty-counter delta and age within the
+    same bounds the snapshot overlay enforces). Without this memo every recall
+    re-streams the whole corpus: the shed node_payload makes the "warm" path a
+    full scan.
+    """
+    from iai_mcp import runtime_graph_cache
+
+    memo = getattr(store, "_warm_graph_bundle", None)
+    if memo is None:
+        return None
+    bundle, cache_key, mtime_ns, dirty_at_build, built_mono = memo
+    if mtime_ns != _rgc_disk_mtime_ns(store):
+        return None
+    # Same windowed key the persisted cache uses: a window-crossing write set
+    # invalidates the memo exactly when it invalidates the disk cache.
+    if cache_key != runtime_graph_cache._cache_key(store):
+        return None
+    dirty_delta = runtime_graph_cache.get_dirty_counter() - dirty_at_build
+    if dirty_delta > runtime_graph_cache._FUSE_DIRTY_THRESHOLD:
+        return None
+    if (time.monotonic() - built_mono) > runtime_graph_cache._FUSE_MAX_AGE_SECONDS:
+        return None
+    return bundle
+
+
+def _memoize_graph_bundle(store: MemoryStore, bundle) -> None:
+    from iai_mcp import runtime_graph_cache
+
+    try:
+        store._warm_graph_bundle = (
+            bundle,
+            runtime_graph_cache._cache_key(store),
+            _rgc_disk_mtime_ns(store),
+            runtime_graph_cache.get_dirty_counter(),
+            time.monotonic(),
+        )
+    except (AttributeError, OSError, RuntimeError) as exc:
+        log.warning("warm graph bundle memoization failed: %s", exc)
+
+
+def _refresh_graph_bundle_async(store: MemoryStore) -> "threading.Thread | None":
+    """Single-flight background rebuild + re-memoization of the warm bundle.
+
+    Returns the refresher thread (for deterministic joins in tests), or None
+    when a refresh is already in flight.
+    """
+    latch = getattr(store, "_graph_refresh_inflight", None)
+    if latch is None:
+        latch = threading.Lock()
+        store._graph_refresh_inflight = latch
+    if not latch.acquire(blocking=False):
+        return None
+
+    def _refresh() -> None:
+        try:
+            with store.count_memo(), _RUNTIME_GRAPH_REBUILD_LOCK:
+                if _warm_graph_bundle_if_valid(store) is None:
+                    _memoize_graph_bundle(store, _build_runtime_graph_impl(store))
+        except Exception:  # noqa: BLE001 -- refresh must never kill its host
+            log.warning("background graph refresh failed", exc_info=True)
+        finally:
+            latch.release()
+
+    t = threading.Thread(target=_refresh, name="graph-bundle-refresh", daemon=True)
+    store._graph_refresh_thread = t
+    t.start()
+    return t
+
+
+def _flush_buffered_edges_for_build(store: MemoryStore) -> None:
+    """Flush-before-read barrier for graph builds: edge INSERTs buffer
+    in-process (flushed by size or the daemon's periodic tick), so a table
+    stream in a non-daemon process can otherwise miss edges this same process
+    just wrote — the graph would silently diverge from the corpus."""
+    try:
+        from iai_mcp.store import flush_edge_buffer
+        flush_edge_buffer(store)
+    except Exception as exc:  # noqa: BLE001 -- a failed flush degrades to the pre-barrier lag, never a failed build
+        log.debug("edge-buffer flush before graph build failed: %s", exc)
+
+
+def build_runtime_graph(store: MemoryStore):
+    # Memoize the corpus COUNT(*) probes for the duration of this one build. The
+    # cache-key derivation, the drift gate, and the impl each ask for the active
+    # / pending / edges counts; on the lilli engine each filtered COUNT re-scans
+    # every leaf page, so without the memo a single warm build pays a dozen
+    # full-corpus scans. The scope is operation-local — torn down on return — so
+    # no count is ever cached across a write.
+    with store.count_memo():
+        warm = _warm_graph_bundle_if_valid(store)
+        if warm is not None:
+            return warm
+
+        # Stale-while-revalidate: background churn (consolidation cycles saving
+        # the disk cache, window-crossing write bursts) constantly re-keys the
+        # memo, and rebuilding INLINE would put a full corpus stream on the
+        # awake read path every time — the exact cost this cache exists to
+        # remove. A bundle inside the freshness fuse is served immediately
+        # (its sync-hook has kept nodes live; new records stay index-findable
+        # — the same bounded lag the persisted-cache drift gate blesses) while
+        # a single-flight refresher rebuilds behind it. Two states refuse the
+        # stale serve and force the inline rebuild below: a bundle past the
+        # fuse age, and a MISSING disk cache — churn REWRITES the cache file,
+        # only an explicit invalidation (invalidate / invalidate_at_root, e.g.
+        # the pending-embedding wake sequence) UNLINKS it, and that caller has
+        # demanded that the next build see the new rows.
+        memo = getattr(store, "_warm_graph_bundle", None)
+        if memo is not None and _rgc_disk_mtime_ns(store) is not None:
+            from iai_mcp import runtime_graph_cache
+            if (time.monotonic() - memo[4]) <= runtime_graph_cache._FUSE_MAX_AGE_SECONDS:
+                _refresh_graph_bundle_async(store)
+                return memo[0]
+
+        # Common path: a warm cache that needs no rebuild reconstructs the graph
+        # without spawning any child — run it lock-free so warm recall never
+        # blocks on a peer's rebuild.
+        if not _runtime_graph_rebuild_needed(store):
+            bundle = _build_runtime_graph_impl(store)
+            _memoize_graph_bundle(store, bundle)
+            return bundle
+
+        # Cache miss: single-flight the rebuild so concurrent callers don't each
+        # spawn a redundant child fleet on the same graph. Double-checked — a
+        # peer that held the lock may have rebuilt and saved a fresh cache while
+        # this caller waited, in which case the re-probe passes and the impl
+        # takes the light cache-hit branch, spawning no child of its own.
+        # Otherwise this caller is the single-flight winner and performs the one
+        # rebuild.
+        with _RUNTIME_GRAPH_REBUILD_LOCK:
+            warm = _warm_graph_bundle_if_valid(store)
+            if warm is not None:
+                return warm
+            bundle = _build_runtime_graph_impl(store)
+            _memoize_graph_bundle(store, bundle)
+            return bundle
 
 
 def _build_runtime_graph_impl(store: MemoryStore):
@@ -671,26 +976,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
     cached_node_payload: dict[str, dict] | None = None
     cached_max_degree: int = 0
     if cached is not None:
-        assignment, rich_club, cached_node_payload, cached_max_degree = cached
-
-    records_count_for_shrink = store.active_records_count()
-    if (
-        cached_node_payload is not None
-        and len(cached_node_payload) > records_count_for_shrink
-    ):
-        # The cache holds MORE nodes than are live: records were tombstoned
-        # (dedup/erasure) since it was built, so the cached assignment / rich_club
-        # were computed over now-dead nodes. Drop them and recompute on the fresh
-        # live graph (rebuilt from the records table below, which already excludes
-        # tombstoned rows). Pure GROWTH (cache has FEWER nodes than live) is left
-        # to the drift-tolerance gate, which reuses the assignment so a single
-        # insert is absorbed without an O(n^2) recompute. Dropping the cached
-        # payload here also forces the streaming rebuild so no dead node survives
-        # via a verbatim payload reuse, and a stale rich_club can never leak a
-        # tombstoned node downstream.
-        assignment = None
-        rich_club = None
-        cached_node_payload = None
+        assignment, rich_club, cached_node_payload, cached_max_degree, _ = cached
 
     # The compact results (community assignment + centrality) survive the size
     # cap even when the large node_payload is shed; at production-scale corpora
@@ -765,36 +1051,28 @@ def _build_runtime_graph_impl(store: MemoryStore):
             "pinned",
             "tags_json",
             "language",
-            # Projected so the streamed dict carries the tombstone marker for the
-            # in-loop defensive guard below (the primary filter is the SQL WHERE).
-            "tombstoned_at",
         ]
-        # Exclude tombstoned (soft-deleted / deduped / erased) records from the
-        # runtime graph at the SQL layer: they must not pollute communities,
-        # centrality, rich_club or the sigma topology audit, and including them
-        # keeps the node count out of sync with active_records_count() (the
-        # cache-validity anchor), permanently invalidating the cache -> a full
-        # rebuild every wake. Matches active_records_count(): tombstoned_at IS NULL.
+        # Stream only ACTIVE records — tombstoned (deleted) records are not graph
+        # nodes. This matches the active-records predicate used everywhere else
+        # (active_records_count, the read-only graph export, and recall), so the
+        # node set built here equals active_records_count exactly. Aligning the
+        # two is what lets the drift gate recognise a freshly-built cache as fresh
+        # (otherwise payload_record_count is inflated by the tombstone count and
+        # the cache is rejected as stale on every boot, forcing a cold rebuild).
+        active_where = (
+            "tombstoned_at IS NULL AND COALESCE(embedding_pending, 0) = 0"
+        )
+        _chunk_rows = _graph_stream_chunk_rows()
+        _rows_since_yield = 0
         for row in store.iter_record_columns(
-            stream_cols, batch_size=1024, where="tombstoned_at IS NULL"
+            stream_cols, batch_size=1024, where=active_where
         ):
+            _rows_since_yield += 1
+            if _rows_since_yield >= _chunk_rows:
+                _yield_to_event_loop()
+                _rows_since_yield = 0
             if int(row.get("embedding_pending") or 0) != 0:
                 continue
-            # Defensive in-loop guard mirroring the SQL filter: the batch reader
-            # yields a Python None for a NULL tombstoned_at, but a backend that
-            # surfaces the column via a datetime/NA representation could stringify
-            # a live value; only a real, non-empty timestamp string marks a
-            # tombstone. (pandas is imported lazily so the streaming path keeps no
-            # hard pandas dependency.)
-            _tomb = row.get("tombstoned_at")
-            if _tomb is not None:
-                try:
-                    import pandas as _pd
-                    _is_na = bool(_pd.isna(_tomb))
-                except Exception:  # noqa: BLE001 -- pandas absent / unhashable value
-                    _is_na = False
-                if not _is_na and str(_tomb).strip():
-                    continue
             rid = UUID(row["id"])
             _comm_raw = row.get("community_id")
             community_id = UUID(_comm_raw) if _comm_raw else None
@@ -869,21 +1147,30 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 },
             )
 
-    edges_df = store.db.open_table("edges").to_pandas()
-    for _, row in edges_df.iterrows():
-        # Skip edges whose endpoints are not live nodes: graph.add_edge() does
-        # setdefault() on both endpoints, so an edge referencing a tombstoned
-        # record would re-create it as a payload-less node and undo the tombstone
-        # filter above (re-bloating the graph and the sigma audit).
-        src_s, dst_s = row["src"], row["dst"]
-        if not graph.has_node(src_s) or not graph.has_node(dst_s):
-            continue
-        graph.add_edge(
-            UUID(src_s),
-            UUID(dst_s),
-            weight=float(row["weight"]),
-            edge_type=row["edge_type"],
-        )
+    # Stream the edges table as batched row dicts over a read-only snapshot
+    # connection instead of materializing it into one DataFrame — avoids a
+    # full-table pandas round-trip under the shared connection lock. Row order
+    # is irrelevant to the resulting graph (the edge set is order-insensitive).
+    _flush_buffered_edges_for_build(store)
+    edges_query = (
+        store.db.open_table("edges")
+        .search()
+        .select(["src", "dst", "weight", "edge_type"])
+    )
+    _edge_chunk_rows = _graph_stream_chunk_rows()
+    _edge_rows_since_yield = 0
+    for batch in edges_query.to_batches(batch_size=2048):
+        for row in batch.to_pylist():
+            _edge_rows_since_yield += 1
+            if _edge_rows_since_yield >= _edge_chunk_rows:
+                _yield_to_event_loop()
+                _edge_rows_since_yield = 0
+            graph.add_edge(
+                UUID(row["src"]),
+                UUID(row["dst"]),
+                weight=float(row["weight"]),
+                edge_type=row["edge_type"],
+            )
 
     try:
         deg_values = [d for _, d in graph.degrees()]
@@ -1045,4 +1332,294 @@ def _build_runtime_graph_impl(store: MemoryStore):
     if not hasattr(graph, "_max_degree"):
         graph._max_degree = 0
 
+    # Centrality has been resolved through exactly one of the branches above
+    # (cached-fresh, cached-payload-nonzero, child map, child recompute,
+    # last-good degrade, or neutral all-zero degrade). All converge here, so the
+    # map carried by the graph is final for this build. Stamp it resolved once so
+    # the recall path reads this map instead of recomputing betweenness per
+    # recall. A legitimately all-zero (edgeless) map and a neutral-degrade map are
+    # both RESOLVED — those are precisely the states a value-based guard would
+    # mistake for "needs recompute" and loop on every recall.
+    graph._centrality_resolved = True
+
     return graph, assignment, rich_club
+
+
+def _parse_record_timestamp(raw: Any) -> "datetime | None":
+    """Parse a records/edges `updated_at` cell (the store's own
+    `str(datetime.now(timezone.utc))` or a driver-native datetime) into a
+    tz-aware ``datetime``. Returns ``None`` on anything unparseable rather than
+    raising -- a delta build treats an unparseable timestamp as "changed"
+    (falls into the delta set) so it is never silently dropped.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+    if hasattr(raw, "to_pydatetime"):
+        dt = raw.to_pydatetime()
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def build_runtime_graph_incremental(store: MemoryStore):
+    """Delta-only runtime-graph rebuild: update just the records/edges changed
+    since the last saved cache, instead of re-streaming the whole corpus.
+
+    This is the chunked/incremental path the boot rebuild uses so a small
+    drift never pays a whole-corpus rebuild even off the loop. It is additive
+    to (never a replacement for) `build_runtime_graph`'s existing warm-cache
+    behaviour: the drift-tolerance gate's "reuse the cached graph verbatim,
+    tolerate bounded staleness" contract is untouched (recall stays correct via
+    the index regardless of which graph-build path ran last).
+
+    Falls back to a full rebuild (`build_runtime_graph`) whenever the delta
+    cannot be safely computed: no cache to diff against, the cached
+    node_payload was shed (production-scale caches always shed it -- the
+    compact centrality survives but the per-node embedding/surface needed to
+    patch in a delta does not), or the drift is large enough that streaming
+    the delta would touch most of the corpus anyway (no cheaper than a full
+    rebuild). When a delta IS applied, the result is topology-equivalent to a
+    full rebuild over the same corpus state: every node changed after the
+    cache's `saved_at` is refreshed from the live row, every node tombstoned
+    since is removed, and the full edge set is re-applied (edges carry their
+    own `updated_at` and are cheap relative to the decrypt-heavy record scan).
+    """
+    from iai_mcp import runtime_graph_cache
+    from iai_mcp.graph import MemoryGraph
+
+    with store.count_memo():
+        cached = runtime_graph_cache.try_load(store)
+        if cached is None:
+            return build_runtime_graph(store)
+
+        assignment, rich_club, cached_node_payload, cached_max_degree, _node_degrees = cached
+        cache_results = runtime_graph_cache.try_load_cache_results(store)
+        if cache_results is None:
+            return build_runtime_graph(store)
+        cached_centrality, cached_payload_record_count = cache_results
+
+        # The delta path patches the per-node embedding/surface payload; a
+        # shed payload (the production-scale norm) leaves nothing to patch, so
+        # fall back to the full rebuild rather than serving a delta built on an
+        # incomplete node set.
+        if not cached_node_payload:
+            return build_runtime_graph(store)
+
+        records_count = store.active_records_count()
+        if not _within_drift_tolerance(cached_payload_record_count, records_count):
+            # Large/mismatched drift: a delta stream would touch most of the
+            # corpus anyway, so the full rebuild is no more expensive and stays
+            # the single source of truth for a cache this stale.
+            return build_runtime_graph(store)
+
+        cache_saved_at: "datetime | None" = None
+        try:
+            raw_cache_data = runtime_graph_cache._load_and_decrypt_cache(store)
+            if raw_cache_data is not None:
+                cache_saved_at = _parse_record_timestamp(raw_cache_data.get("saved_at"))
+        except Exception:  # noqa: BLE001 -- a saved_at read failure forces a full delta scan
+            cache_saved_at = None
+
+        graph = MemoryGraph()
+        for nid, payload in cached_node_payload.items():
+            graph.add_node(
+                UUID(nid),
+                community_id=None,
+                embedding=list(payload.get("embedding") or []),
+            )
+            graph.set_node_payload(nid, {
+                "embedding": list(payload.get("embedding") or []),
+                "surface": payload.get("surface", ""),
+                "centrality": float(payload.get("centrality") or 0.0),
+                "tier": payload.get("tier", "episodic"),
+                "pinned": bool(payload.get("pinned", False)),
+                "tags": list(payload.get("tags") or []),
+                "language": str(payload.get("language", "en") or "en"),
+            })
+        node_payload_for_cache = dict(cached_node_payload)
+        cached_ids = set(node_payload_for_cache.keys())
+
+        # ---- Delta 1: records changed (added/updated/tombstoned) since the
+        # cache was saved. When `cache_saved_at` cannot be resolved, every row
+        # is treated as "changed" -- degrading to the same corpus size as a
+        # full stream, but still cheaper than a full rebuild (no community
+        # detection / betweenness child is spawned).
+        stream_cols = [
+            "id",
+            "embedding",
+            "community_id",
+            "embedding_pending",
+            "literal_surface",
+            "tier",
+            "centrality",
+            "pinned",
+            "tags_json",
+            "language",
+            "updated_at",
+            "tombstoned_at",
+        ]
+        chunk_rows = _graph_stream_chunk_rows()
+        rows_since_yield = 0
+        seen_active_ids: set[str] = set()
+        decrypt_fail_events = 0
+        for row in store.iter_record_columns(stream_cols, batch_size=1024):
+            rows_since_yield += 1
+            if rows_since_yield >= chunk_rows:
+                _yield_to_event_loop()
+                rows_since_yield = 0
+
+            rid_s = str(row["id"])
+            tombstoned = row.get("tombstoned_at") is not None
+            pending = int(row.get("embedding_pending") or 0) != 0
+
+            if tombstoned or pending:
+                if rid_s in node_payload_for_cache:
+                    graph.remove_node(rid_s)
+                    node_payload_for_cache.pop(rid_s, None)
+                continue
+
+            seen_active_ids.add(rid_s)
+
+            row_updated_at = _parse_record_timestamp(row.get("updated_at"))
+            is_new = rid_s not in cached_ids
+            is_changed = (
+                is_new
+                or cache_saved_at is None
+                or row_updated_at is None
+                or row_updated_at > cache_saved_at
+            )
+            if not is_changed:
+                continue
+
+            rid = UUID(rid_s)
+            _comm_raw = row.get("community_id")
+            community_id = UUID(_comm_raw) if _comm_raw else None
+            _emb_raw = row.get("embedding")
+            embedding = (
+                list(_emb_raw) if _emb_raw is not None else [0.0] * EMBED_DIM
+            )
+            literal_raw = row.get("literal_surface") or ""
+            try:
+                from iai_mcp.crypto import is_encrypted
+                if is_encrypted(literal_raw):
+                    literal_raw = store._decrypt_for_record(rid, literal_raw)
+            except Exception:  # noqa: BLE001 -- InvalidTag / OSError / ValueError / RuntimeError
+                decrypt_fail_events += 1
+                continue
+
+            tier = row.get("tier") or "episodic"
+            centrality = float(row.get("centrality") or 0.0)
+            pinned = bool(row.get("pinned") or False)
+            tags_raw = row.get("tags_json") or "[]"
+            try:
+                import json as _json
+                tags_list = (
+                    _json.loads(tags_raw)
+                    if isinstance(tags_raw, str)
+                    else list(tags_raw)
+                )
+                if not isinstance(tags_list, list):
+                    tags_list = []
+            except (ValueError, TypeError):
+                tags_list = []
+            language = str(row.get("language") or "en")
+
+            payload = {
+                "embedding": list(embedding),
+                "surface": str(literal_raw),
+                "centrality": centrality,
+                "tier": str(tier),
+                "pinned": pinned,
+                "tags": list(tags_list),
+                "language": language,
+            }
+            graph.add_node(rid, community_id=community_id, embedding=embedding)
+            graph.set_node_payload(rid, payload)
+            node_payload_for_cache[rid_s] = payload
+
+        if decrypt_fail_events > 0:
+            log.warning(
+                "graph_build_incremental_decrypt_failed_summary",
+                extra={"total_skip_events": decrypt_fail_events},
+            )
+
+        # A cached node absent from this live scan (should not happen under a
+        # correct active-records predicate, but the corpus can shrink between
+        # the cache-key probe and this stream) is dropped defensively so the
+        # graph never carries a phantom node the store no longer has.
+        for stale_id in cached_ids - seen_active_ids:
+            if stale_id in node_payload_for_cache:
+                graph.remove_node(stale_id)
+                node_payload_for_cache.pop(stale_id, None)
+
+        # ---- Delta 2: re-apply the full edge set. Edges are cheap relative to
+        # the decrypt-heavy record scan (no per-row decrypt), so re-streaming
+        # them in full keeps the edge set exactly correct without needing a
+        # second timestamp-diff pass; still chunked/yielding so the corpus
+        # stream never dominates a single uninterrupted slice.
+        _flush_buffered_edges_for_build(store)
+        edges_query = (
+            store.db.open_table("edges")
+            .search()
+            .select(["src", "dst", "weight", "edge_type"])
+        )
+        edge_rows_since_yield = 0
+        edge_chunk_rows = _graph_stream_chunk_rows()
+        for batch in edges_query.to_batches(batch_size=2048):
+            for row in batch.to_pylist():
+                edge_rows_since_yield += 1
+                if edge_rows_since_yield >= edge_chunk_rows:
+                    _yield_to_event_loop()
+                    edge_rows_since_yield = 0
+                graph.add_edge(
+                    UUID(row["src"]),
+                    UUID(row["dst"]),
+                    weight=float(row["weight"]),
+                    edge_type=row["edge_type"],
+                )
+
+        try:
+            deg_values = [d for _, d in graph.degrees()]
+            max_degree = max(deg_values) if deg_values else 0
+        except (ValueError, RuntimeError, AttributeError):
+            max_degree = cached_max_degree
+        if max_degree == 0 and cached_max_degree > 0:
+            max_degree = cached_max_degree
+        graph._max_degree = int(max_degree)
+
+        # Centrality: apply the cached map to every surviving node; a delta
+        # node absent from the cached map (newly added since the cache was
+        # built) gets a neutral 0.0 until the next full rebuild recomputes
+        # betweenness -- the same bounded-staleness degrade the warm cache-hit
+        # path already tolerates (seeds rank 0.6*cos + 0.4*centrality, so a
+        # neutral term degrades to cosine-led ranking, never a crash).
+        resolved_centrality: dict = {}
+        for nid_s in node_payload_for_cache:
+            try:
+                nid = UUID(nid_s)
+            except (ValueError, TypeError):
+                continue
+            cval = float(cached_centrality.get(nid, 0.0)) if cached_centrality else 0.0
+            graph.set_node_centrality(nid, cval)
+            resolved_centrality[nid] = cval
+            node_payload_for_cache[nid_s]["centrality"] = cval
+
+        graph._centrality_resolved = True
+
+        runtime_graph_cache.save(
+            store, assignment, rich_club,
+            node_payload=node_payload_for_cache,
+            max_degree=int(getattr(graph, "_max_degree", 0) or 0),
+        )
+
+        try:
+            store.register_graph_sync_hook(_make_graph_sync_hook(graph))
+        except (AttributeError, TypeError, RuntimeError) as exc:
+            log.warning("graph_sync_hook registration failed: %s", exc)
+
+        return graph, assignment, rich_club

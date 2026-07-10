@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import sys
-
 import base64
 import json
 import os
 import stat
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +25,7 @@ def iai_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-recent-passphrase")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "hippo"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
 
     import keyring.core
 
@@ -112,8 +109,7 @@ def test_recent_append_creates_dated_window_file(iai_home):
 
     file_mode = stat.S_IMODE(os.stat(target).st_mode)
     parent_mode = stat.S_IMODE(os.stat(target.parent).st_mode)
-    if sys.platform != "win32":
-        assert file_mode == 0o600, f"file mode = 0o{file_mode:o}, expected 0o600"
+    assert file_mode == 0o600, f"file mode = 0o{file_mode:o}, expected 0o600"
     assert parent_mode == 0o700, f"parent mode = 0o{parent_mode:o}, expected 0o700"
 
     body = target.read_text(encoding="utf-8")
@@ -244,7 +240,7 @@ def test_recent_prune_deletes_files_older_than_keep_days(iai_home):
     assert bogus_a.exists() and bogus_b.exists(), "malformed filenames must be skipped"
 
 
-def test_drain_writes_to_store_and_bank_recent(iai_home):
+def test_drain_writes_to_lancedb_and_bank_recent(iai_home):
     deferred_dir = iai_home / ".iai-mcp" / ".deferred-captures"
     deferred_dir.mkdir(parents=True, exist_ok=True)
     deferred_file = deferred_dir / "test-session.jsonl"
@@ -271,7 +267,7 @@ def test_drain_writes_to_store_and_bank_recent(iai_home):
 
     records = store.all_records()
     matching = [r for r in records if r.literal_surface == "integration smoke text"]
-    assert len(matching) >= 1, "drain must persist the record in the store"
+    assert len(matching) >= 1, "drain must persist the record in LanceDB"
 
     recent = _recent_dir(iai_home)
     windows = list(recent.glob("window-*.jsonl"))

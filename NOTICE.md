@@ -1,149 +1,110 @@
-# NOTICE
+# NOTICE — Third-party attributions
 
-This project is MIT-licensed (see `LICENSE`). The load-bearing components are
-**our own original code**; this file attributes only the genuine **third-party**
-software the project depends on. Every third-party runtime dependency is MIT,
-BSD, Apache-2.0, or PSF — all compatible with this project's MIT license.
+This project includes the following third-party software. Each is used under
+its own license; the license name, upstream URL, and authorship for every
+runtime dependency are listed below. The project itself is MIT-licensed (see
+`LICENSE`); the license-compatibility summary at the foot of this file confirms
+every runtime dep is MIT, BSD, Apache-2.0, or PSF and therefore compatible.
 
-## Our own components (not third-party)
-
-These are original code written for this project, under its MIT `LICENSE` — they
-are **not** dependencies and are listed here only to make the boundary explicit:
-
-- **Hippo** — the storage engine (encrypted records + ANN vector index + graph +
-  event ledger in one local store). Our code, built on the standard-library
-  `sqlite3`, the `hnswlib` index, and the audited `cryptography` AES-256-GCM
-  primitive.
-- **MOSAIC** — our community-detection algorithm, written from scratch for the
-  memory-graph workload (`src/iai_mcp/mosaic*.py`). Pure Python + Numba.
-- **Lilli** — our hyperdimensional cognitive/memory substrate (BSC / FHRR /
-  sparse VSA tiers) and the recall, capture, and sleep-consolidation pipelines
-  (`src/iai_mcp/lilli/` and the daemon).
-- **Native engine** (`iai_mcp_native`) — our Rust embedder + graph kernels.
-
-For Python deps, version pins live in `pyproject.toml`; for the Rust engine, in
-`rust/*/Cargo.toml`; for npm, in `mcp-wrapper/package.json`.
+For Python deps, version-pin information lives in `pyproject.toml`; the
+versions listed below are the resolved versions observed at the time of the
+release-hardening pass. For npm deps, direct
+declarations live in `mcp-wrapper/package.json` and resolved versions in
+`mcp-wrapper/package-lock.json`.
 
 ## Python runtime dependencies
 
-| Package      | License             | Author / maintainer                           | Upstream URL                            |
-| ------------ | ------------------- | --------------------------------------------- | --------------------------------------- |
-| cachetools   | MIT                 | Thomas Kemmer                                 | https://github.com/tkem/cachetools/     |
-| cryptography | Apache-2.0 or BSD-3 | Python Cryptographic Authority + contributors | https://github.com/pyca/cryptography    |
-| hnswlib      | Apache-2.0          | Yury Malkov et al.                            | https://github.com/nmslib/hnswlib       |
-| keyring      | MIT                 | Jason R. Coombs (maintainer)                  | https://github.com/jaraco/keyring       |
-| numba        | BSD-2-Clause        | Numba project (Anaconda Inc.)                 | https://numba.pydata.org                |
-| numpy        | BSD-3-Clause        | NumPy developers                              | https://numpy.org                       |
-| pandas       | BSD-3-Clause        | pandas development team (PyData)              | https://pandas.pydata.org               |
-| psutil       | BSD-3-Clause        | Giampaolo Rodola                              | https://github.com/giampaolo/psutil     |
-| pyarrow      | Apache-2.0          | Apache Arrow project                          | https://arrow.apache.org/               |
-| scipy        | BSD-3-Clause        | SciPy developers                              | https://scipy.org                       |
-| tiktoken     | MIT                 | OpenAI                                        | https://github.com/openai/tiktoken      |
-
-The standard-library `sqlite3` binds SQLite, which is public domain.
-
-## Rust native engine dependencies
-
-The package builds a native extension (`iai_mcp_native`) from the `rust/`
-workspace via `setuptools-rust` during `pip install`. The compiled extension
-links the following crates — all permissively licensed (MIT, Apache-2.0, or
-BSD). (Exact per-crate SPDX is regenerated with `cargo license` before release;
-the values below are the upstream norms.)
-
-| Crate          | License            | Upstream                                            |
-| -------------- | ------------------ | --------------------------------------------------- |
-| pyo3           | Apache-2.0         | https://github.com/PyO3/pyo3                        |
-| pyo3-stub-gen  | MIT or Apache-2.0  | https://github.com/Jij-Inc/pyo3-stub-gen            |
-| candle-core    | MIT or Apache-2.0  | https://github.com/huggingface/candle               |
-| candle-nn      | MIT or Apache-2.0  | https://github.com/huggingface/candle               |
-| safetensors    | Apache-2.0         | https://github.com/huggingface/safetensors          |
-| tokenizers     | Apache-2.0         | https://github.com/huggingface/tokenizers           |
-| hf-hub         | Apache-2.0         | https://github.com/huggingface/hf-hub               |
-| serde          | MIT or Apache-2.0  | https://github.com/serde-rs/serde                   |
-| serde_json     | MIT or Apache-2.0  | https://github.com/serde-rs/json                    |
-| thiserror      | MIT or Apache-2.0  | https://github.com/dtolnay/thiserror                |
-| petgraph       | MIT or Apache-2.0  | https://github.com/petgraph/petgraph                |
-| rustworkx-core | Apache-2.0         | https://github.com/Qiskit/rustworkx                 |
-| rayon          | MIT or Apache-2.0  | https://github.com/rayon-rs/rayon                   |
-| fixedbitset    | MIT or Apache-2.0  | https://github.com/petgraph/fixedbitset             |
-| rand           | MIT or Apache-2.0  | https://github.com/rust-random/rand                 |
-| rand_pcg       | MIT or Apache-2.0  | https://github.com/rust-random/rand                 |
-| numpy (rust)   | BSD-2-Clause       | https://github.com/PyO3/rust-numpy                  |
-| uuid           | MIT or Apache-2.0  | https://github.com/uuid-rs/uuid                     |
-| accelerate-src | MIT or Apache-2.0  | https://github.com/blas-lapack-rs/accelerate-src    |
-
-`accelerate-src` binds Apple's Accelerate framework on macOS; it is build/link
-glue only and ships no Apple code.
-
-## Python build dependency
-
-| Package         | License | Upstream                                |
-| --------------- | ------- | --------------------------------------- |
-| setuptools-rust | MIT     | https://github.com/PyO3/setuptools-rust |
-
-Build-time only (compiles the Rust extension during `pip install`); not imported
-at runtime.
+| Package               | Resolved version | License             | Author / maintainer                          | Upstream URL                                              |
+| --------------------- | ---------------- | ------------------- | -------------------------------------------- | --------------------------------------------------------- |
+| anthropic             | 0.102.0          | MIT                 | Anthropic                                    | https://github.com/anthropics/anthropic-sdk-python        |
+| cachetools            | 7.1.1            | MIT                 | Thomas Kemmer                                | https://github.com/tkem/cachetools/                       |
+| cryptography          | 48.0.0           | Apache-2.0 or BSD-3 | Python Cryptographic Authority + contributors | https://github.com/pyca/cryptography                      |
+| keyring               | 25.7.0           | MIT                 | Kang Zhang (Jason R. Coombs maintains)       | https://github.com/jaraco/keyring                         |
+| lancedb               | 0.30.2           | Apache-2.0          | LanceDB devs                                 | https://github.com/lancedb/lancedb                        |
+| networkx              | 3.6.1            | BSD-3-Clause        | Aric Hagberg et al.                          | https://networkx.org/                                     |
+| numba                 | 0.65.1           | BSD-2-Clause        | Numba project (Anaconda Inc.)                | https://numba.pydata.org                                  |
+| numpy                 | 2.2.6            | BSD-3-Clause        | Travis Oliphant et al.                       | https://numpy.org                                         |
+| psutil                | 7.2.2            | BSD-3-Clause        | Giampaolo Rodola                             | https://github.com/giampaolo/psutil                       |
+| pyarrow               | 24.0.0           | Apache-2.0          | Apache Arrow project                         | https://arrow.apache.org/                                 |
+| pydantic              | 2.13.4           | MIT                 | Samuel Colvin et al.                         | https://github.com/pydantic/pydantic                      |
+| structlog             | 25.5.0           | MIT or Apache-2.0   | Hynek Schlawack                              | https://github.com/hynek/structlog                        |
+| tiktoken              | 0.13.0           | MIT                 | OpenAI (Shantanu Jain)                       | https://github.com/openai/tiktoken                        |
+| torch-hd              | 5.8.4            | MIT                 | Hyperdimensional Computing org               | https://github.com/hyperdimensional-computing/torchhd     |
 
 ## Python optional dependencies
 
-Installable via extras but NOT pulled in by a default install.
+These are installable via `pip install -e .[compress]` or `pip install -e
+.[dev]` but are NOT pulled in by default. The `compress` extra is opt-in
+because the underlying model weights are large; the `dev` extra is for test
+runs only.
 
-### `compress` extra (opt-in; large model weights)
+### `compress` extra (opt-in)
 
-| Package    | License    | Upstream                                  |
-| ---------- | ---------- | ----------------------------------------- |
-| llmlingua  | MIT        | https://github.com/microsoft/LLMLingua    |
-| accelerate | Apache-2.0 | https://github.com/huggingface/accelerate |
-
-### `migration` extra (one-time legacy-store import only)
-
-| Package | License    | Upstream                           |
-| ------- | ---------- | ---------------------------------- |
-| lancedb | Apache-2.0 | https://github.com/lancedb/lancedb |
-
-Installed only to import data from a pre-Hippo store; not used by a fresh install
-or at runtime.
+| Package    | Resolved version | License    | Upstream URL                                |
+| ---------- | ---------------- | ---------- | ------------------------------------------- |
+| llmlingua  | varies           | MIT        | https://github.com/microsoft/LLMLingua      |
+| accelerate | varies           | Apache-2.0 | https://github.com/huggingface/accelerate   |
 
 ### `dev` extra (test-only, not shipped at runtime)
 
-| Package             | License      | Upstream                                       |
-| ------------------- | ------------ | ---------------------------------------------- |
-| pytest              | MIT          | https://github.com/pytest-dev/pytest           |
-| pytest-cov          | MIT          | https://github.com/pytest-dev/pytest-cov       |
-| ruff                | MIT          | https://github.com/astral-sh/ruff              |
-| networkx            | BSD-3-Clause | https://networkx.org/                          |
-| hypothesis-networkx | MIT          | https://github.com/pckroon/hypothesis-networkx |
-| scikit-learn        | BSD-3-Clause | https://scikit-learn.org                       |
-
-`networkx` is a test-only oracle for the graph-algorithm parity checks; it is not
-imported on any runtime path.
+| Package     | Resolved version | License | Upstream URL                          |
+| ----------- | ---------------- | ------- | ------------------------------------- |
+| pytest      | >=8.0            | MIT     | https://github.com/pytest-dev/pytest  |
+| pytest-cov  | >=5.0            | MIT     | https://github.com/pytest-dev/pytest-cov |
+| ruff        | >=0.5.0          | MIT     | https://github.com/astral-sh/ruff     |
 
 ## TypeScript wrapper runtime dependencies
 
-The `mcp-wrapper/` subdirectory contains the TypeScript MCP wrapper. Its runtime
-dependencies (NOT devDependencies, which are build-only) are:
+The `mcp-wrapper/` subdirectory contains the TypeScript MCP wrapper. Its
+runtime dependencies (NOT devDependencies, which are build-only and not
+shipped) are:
 
-| Package                   | Version pin | License | Upstream                                               |
-| ------------------------- | ----------- | ------- | ------------------------------------------------------ |
-| @modelcontextprotocol/sdk | ^1.0.0      | MIT     | https://github.com/modelcontextprotocol/typescript-sdk |
-| zod                       | ^3.23.0     | MIT     | https://github.com/colinhacks/zod                      |
+| Package                       | Version pin (package.json) | License | Upstream URL                                                |
+| ----------------------------- | -------------------------- | ------- | ----------------------------------------------------------- |
+| @modelcontextprotocol/sdk     | ^1.0.0                     | MIT     | https://github.com/modelcontextprotocol/typescript-sdk      |
+| zod                           | ^3.23.0                    | MIT     | https://github.com/colinhacks/zod                           |
 
 The wrapper's `devDependencies` (`@types/node`, `typescript`, `tsx`) are
-build-time only and not bundled.
+build-time only — they are not bundled into the shipped wrapper artifact and
+therefore do not require runtime attribution. They are nonetheless listed in
+`mcp-wrapper/package.json` for transparency.
 
 ## License compatibility summary
 
-Every third-party runtime dependency above — Python, Rust, and TypeScript — is
-licensed under one of **MIT**, **BSD-2/BSD-3**, **Apache-2.0**, or **PSF**, or a
-permissive dual-license that includes one of these. SQLite is public domain. All
-are permissive and compatible with this project's MIT `LICENSE`.
+Every runtime dependency above is licensed under one of: **MIT**, **BSD-2** or
+**BSD-3**, **Apache-2.0**, or a permissive dual-license that includes one of
+the above (e.g. `cryptography` is "Apache-2.0 OR BSD-3-Clause"; `structlog` is
+"MIT OR Apache-2.0").
+
+All of these are compatible with this project's MIT license declared in
+`LICENSE`. There are no copyleft (GPL / LGPL / AGPL) runtime dependencies in
+the shipped distribution.
+
+A custom MIT-licensed Leiden implementation removed the
+project's previous dependence on `leidenalg` and `python-igraph`, both of
+which were copyleft-licensed. The replacement MOSAIC community-detection
+backend (`src/iai_mcp/mosaic.py`) is original code under the project's MIT
+license, with the Numba JIT runtime (BSD-2-Clause) as its only Numba-specific
+dep. After that change the repository is fully MIT-compatible for both static
+distribution and dynamic linking.
 
 ## Updating this file
 
-Regenerate when `pyproject.toml` dependencies, `rust/*/Cargo.toml`, or
-`mcp-wrapper/package.json` change:
+When `pyproject.toml [project] dependencies` or `mcp-wrapper/package.json
+dependencies` changes, regenerate this file. The fastest path is:
 
 ```
-pip install pip-licenses && pip-licenses --format=markdown --with-urls --with-authors
-cargo install cargo-license && cargo license --manifest-path rust/iai_mcp_native/Cargo.toml
+pip install pip-licenses
+pip-licenses --packages lancedb pyarrow numpy pydantic \
+  torch-hd structlog networkx numba anthropic tiktoken \
+  cryptography keyring cachetools psutil \
+  --format=markdown --with-urls --with-authors
 ```
+
+then merge the resulting table into the `## Python runtime dependencies`
+section above. For npm, `mcp-wrapper/package.json` is short enough to update
+the wrapper table by hand.
+
+The regression-gate test in `tests/test_release_hardening.py` enforces that
+every name in `pyproject.toml [project] dependencies` and the two direct
+wrapper deps appear by substring somewhere in this file.

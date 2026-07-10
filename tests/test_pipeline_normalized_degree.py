@@ -9,7 +9,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _ControlledEmbedder:
 
     DIM = EMBED_DIM
@@ -34,7 +33,6 @@ class _ControlledEmbedder:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
 
-
 def _unit_vector_with_cosine(cue_vec: list[float], target_cos: float) -> list[float]:
     cue = np.asarray(cue_vec, dtype=np.float32)
     cue_norm = float(np.linalg.norm(cue))
@@ -57,7 +55,6 @@ def _unit_vector_with_cosine(cue_vec: list[float], target_cos: float) -> list[fl
     if n > 0:
         v = v / n
     return v.astype(np.float32).tolist()
-
 
 def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -83,7 +80,6 @@ def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
         language="en",
     )
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -98,12 +94,11 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 def test_build_runtime_graph_sets_max_degree_attribute(tmp_path):
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
     for i in range(5):
         vec = embedder.embed(f"isolated-{i}")
@@ -114,13 +109,12 @@ def test_build_runtime_graph_sets_max_degree_attribute(tmp_path):
     assert isinstance(graph._max_degree, int), "_max_degree must be int"
     assert graph._max_degree >= 0
 
-
 def test_cache_round_trip_preserves_max_degree(tmp_path):
     from iai_mcp import runtime_graph_cache
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
     ids = []
     for i in range(6):
@@ -140,19 +134,18 @@ def test_cache_round_trip_preserves_max_degree(tmp_path):
 
     cache = runtime_graph_cache.try_load(store)
     assert cache is not None, "cache must round-trip"
-    assert len(cache) == 4, f"try_load must return 4-tuple, got {len(cache)}"
-    _assignment, _rich_club, _node_payload, cached_md = cache
+    assert len(cache) == 5, f"try_load must return 5-tuple, got {len(cache)}"
+    _assignment, _rich_club, _node_payload, cached_md, _node_degrees = cache
     assert int(cached_md) == md1
 
     graph2, _, _ = build_runtime_graph(store)
     assert graph2._max_degree == md1
 
-
 def test_empty_store_max_degree_is_zero(tmp_path):
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
     rec = _make_episodic(embedder.embed("only"), "only one")
     store.insert(rec)
@@ -160,12 +153,11 @@ def test_empty_store_max_degree_is_zero(tmp_path):
     graph, _, _ = build_runtime_graph(store)
     assert graph._max_degree == 0
 
-
 def _seed_hub_vs_verbatim(tmp_path, hub_degree: int = 64):
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
 
     cue_text = "verbatim cue marker A"
@@ -199,7 +191,6 @@ def _seed_hub_vs_verbatim(tmp_path, hub_degree: int = 64):
         hub_rec.id, verbatim_rec.id, cue_text,
     )
 
-
 def test_normalized_degree_lets_verbatim_outrank_hub(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
@@ -229,7 +220,6 @@ def test_normalized_degree_lets_verbatim_outrank_hub(tmp_path):
         f"verbatim must be position-0 under new formula; got {hit_ids[0]} "
         f"(verbatim_id={verbatim_id}, hits={hit_ids})"
     )
-
 
 def test_old_formula_would_have_ranked_hub_above_verbatim(tmp_path):
     from math import log
@@ -264,7 +254,6 @@ def test_old_formula_would_have_ranked_hub_above_verbatim(tmp_path):
         f"hub_deg={hub_deg} verbatim_deg={verbatim_deg}"
     )
 
-
 def test_pipeline_reason_contains_deg_norm_not_raw_log(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
@@ -290,13 +279,12 @@ def test_pipeline_reason_contains_deg_norm_not_raw_log(tmp_path):
             f"reason must NOT contain raw 'log(deg+1)'; got: {h.reason!r}"
         )
 
-
 def test_zero_max_degree_does_not_raise_division_error(tmp_path):
     from iai_mcp.pipeline import recall_for_response
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
     cue_text = "cold start cue with no graph topology"
     cue_vec = embedder.embed(cue_text)

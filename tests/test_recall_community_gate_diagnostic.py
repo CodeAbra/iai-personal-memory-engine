@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import numpy as np
 import pytest
 
 from iai_mcp.community import CommunityAssignment
@@ -18,7 +17,6 @@ from iai_mcp.pipeline import (
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _FakeEmbedder:
 
     DIM = EMBED_DIM
@@ -31,7 +29,6 @@ class _FakeEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [list(self._vec) for _ in texts]
-
 
 def _make(vec: list[float], text: str = "rec") -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -57,12 +54,11 @@ def _make(vec: list[float], text: str = "rec") -> MemoryRecord:
         language="en",
     )
 
-
 def _build_one_record_per_community(
     tmp_path,
     n: int = 50,
 ) -> tuple[MemoryStore, MemoryGraph, list[MemoryRecord], CommunityAssignment]:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs: list[MemoryRecord] = []
     for i in range(n):
         vec = [0.0] * EMBED_DIM
@@ -99,7 +95,6 @@ def _build_one_record_per_community(
     )
     return store, graph, recs, assignment
 
-
 def test_records_outside_gated_communities_surface_via_cosine(tmp_path):
     store, graph, recs, assignment = _build_one_record_per_community(tmp_path, n=50)
 
@@ -116,20 +111,19 @@ def test_records_outside_gated_communities_surface_via_cosine(tmp_path):
 
     found_ids = {h.record_id for h in resp.hits}
     assert recs[5].id in found_ids, (
-        "gold record (cosine 1.0 to cue, on axis 5) "
+        "Gate violation: gold record (cosine 1.0 to cue, on axis 5) "
         "is NOT in top-10 hits. The gate must NEVER filter — only "
-        "bias. If this fails, someone re-introduced the hard-filter "
-        "behavior (candidates restricted to top-3 "
+        "bias. If this fails, someone re-introduced the old "
+        "hard-filter behavior (candidates restricted to top-3 "
         "gated-community members)."
     )
     assert resp.hits[0].record_id == recs[5].id, (
-        f"gold should be top-1 by cosine alone (1.0 vs ~0); "
+        f"Gold should be top-1 by cosine alone (1.0 vs ~0); "
         f"got {resp.hits[0].record_id} as top hit. Possible cause: "
         "Stage 5 weights were re-tuned, or community-bias scalar is "
         "being applied multiplicatively/subtractively instead of "
         "additively to records inside the gated set."
     )
-
 
 def test_mode_bias_verbatim_zero_concept_nonzero(tmp_path):
     assert COMMUNITY_BIAS_VERBATIM == 0.0
@@ -164,7 +158,7 @@ def test_mode_bias_verbatim_zero_concept_nonzero(tmp_path):
     verbatim_ids = {h.record_id for h in result_v.scored_hits}
     concept_ids = {h.record_id for h in result_c.scored_hits}
     assert verbatim_ids == concept_ids, (
-        "gate must NEVER filter; mode change should not "
+        "Gate fence: gate must NEVER filter; mode change should not "
         f"alter the record list. verbatim_only={verbatim_ids - concept_ids}, "
         f"concept_only={concept_ids - verbatim_ids}"
     )
@@ -178,7 +172,7 @@ def test_mode_bias_verbatim_zero_concept_nonzero(tmp_path):
     expected_bonus = COMMUNITY_BIAS_CONCEPT * cos_GATED
     delta_gated = c_gated.score - v_gated.score
     assert delta_gated == pytest.approx(expected_bonus, abs=1e-4), (
-        f"concept mode: GATED record (rec[0], cosine={cos_GATED}) "
+        f"Concept mode: GATED record (rec[0], cosine={cos_GATED}) "
         f"should gain ~{expected_bonus:.4f} from "
         f"COMMUNITY_BIAS_CONCEPT * cos when transitioning verbatim -> "
         f"concept. Got delta = c_gated.score - v_gated.score = "
@@ -189,7 +183,7 @@ def test_mode_bias_verbatim_zero_concept_nonzero(tmp_path):
 
     delta_ctrl = c_ctrl.score - v_ctrl.score
     assert delta_ctrl == pytest.approx(0.0, abs=1e-6), (
-        f"concept mode: CONTROL record (rec[20], cosine 0 to cue, "
+        f"Concept mode: CONTROL record (rec[20], cosine 0 to cue, "
         f"in non-gated community c20) must NOT receive the community "
         f"bias. Got delta = c_ctrl.score - v_ctrl.score = {delta_ctrl:.6f}; "
         f"expected 0.0.\n"
@@ -203,7 +197,7 @@ def test_mode_bias_verbatim_zero_concept_nonzero(tmp_path):
     assert actual_verbatim_delta == pytest.approx(
         expected_verbatim_delta, abs=1e-4
     ), (
-        f"verbatim mode: gated vs control score delta should be "
+        f"Verbatim mode: gated vs control score delta should be "
         f"W_COSINE * cos_diff = {W_COSINE} * 1.0 = {expected_verbatim_delta:.4f} "
         f"with NO community-bias contribution. Got delta = "
         f"{actual_verbatim_delta:.4f}. If this differs, either "

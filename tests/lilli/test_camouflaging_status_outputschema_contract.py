@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 TOOLS_TS = Path(__file__).resolve().parent.parent.parent / "mcp-wrapper" / "src" / "tools.ts"
 
 EXPECTED_RESPONSE_KEYS = frozenset({
@@ -18,7 +17,6 @@ FORBIDDEN_KEYS = frozenset({
     "formality_trend",
     "anomaly_score",
 })
-
 
 def _extract_camouflaging_status_outputschema(text: str) -> str:
     entry_marker = "camouflaging_status: {"
@@ -48,7 +46,6 @@ def _extract_camouflaging_status_outputschema(text: str) -> str:
     raise AssertionError(
         "outputSchema block in camouflaging_status is not brace-balanced."
     )
-
 
 def _declared_property_keys(schema_body: str) -> set[str]:
     props_marker = "properties: {"
@@ -95,10 +92,8 @@ def _declared_property_keys(schema_body: str) -> set[str]:
         i += 1
     return keys
 
-
 def test_tools_ts_exists() -> None:
     assert TOOLS_TS.is_file(), f"missing {TOOLS_TS}"
-
 
 def test_camouflaging_status_outputschema_matches_actual_response() -> None:
     text = TOOLS_TS.read_text(encoding="utf-8")
@@ -110,18 +105,17 @@ def test_camouflaging_status_outputschema_matches_actual_response() -> None:
 
     assert not missing_from_schema, (
         f"camouflaging_status outputSchema is missing these keys that "
-        f"camouflaging.detect_camouflaging() + core.py actually return: "
+        f"camouflaging.detect_camouflaging() + the camouflaging_status dispatch actually returns: "
         f"{sorted(missing_from_schema)}. "
-        f"Source of truth: src/iai_mcp/camouflaging.py and "
-        f"src/iai_mcp/core.py."
+        f"Source of truth: src/iai_mcp/camouflaging.py:87-92 and "
+        f"src/iai_mcp/core/__init__.py (camouflaging_status dispatch)."
     )
     assert not extras_in_schema, (
         f"camouflaging_status outputSchema declares these keys that are "
         f"NEVER in the response: {sorted(extras_in_schema)}. "
-        f"Source of truth: src/iai_mcp/camouflaging.py and "
-        f"src/iai_mcp/core.py."
+        f"Source of truth: src/iai_mcp/camouflaging.py:87-92 and "
+        f"src/iai_mcp/core/__init__.py (camouflaging_status dispatch)."
     )
-
 
 def test_camouflaging_status_outputschema_has_no_legacy_names() -> None:
     text = TOOLS_TS.read_text(encoding="utf-8")

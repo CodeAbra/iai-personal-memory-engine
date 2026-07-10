@@ -18,6 +18,17 @@ class MemoryGraph:
         self._node_payload: dict[str, dict[str, Any]] = {}
         self._centrality_cache: dict[UUID, float] | None = None
         self._dirty_since_centrality: bool = True
+        self._centrality_resolved: bool = False
+        self._normalized_pool: tuple[Any, np.ndarray] | None = None
+        # Raw collected pool (id sequence + embedding matrix) cached per content
+        # version; reused across recalls over the same build so the full node-set
+        # iteration + matrix construction runs once, not every recall.
+        self._collected_pool: tuple[int, list, np.ndarray] | None = None
+        # Monotonic counter bumped by every embedding-affecting mutator. Folded
+        # into the normalized-pool cache key so a content change with an
+        # unchanged id-sequence still invalidates the cache — making a stale
+        # cosine structurally impossible, not invariant-dependent.
+        self._pool_content_version: int = 0
 
 
     def clear_and_rebuild(
@@ -39,6 +50,9 @@ class MemoryGraph:
         """
         self._centrality_cache = None
         self._dirty_since_centrality = True
+        self._centrality_resolved = False
+        self._normalized_pool = None
+        self._pool_content_version += 1
         if hasattr(self, "_node_ids_csr_order"):
             del self._node_ids_csr_order
 
@@ -75,6 +89,8 @@ class MemoryGraph:
             "embedding": list(embedding),
         }
         self._dirty_since_centrality = True
+        self._normalized_pool = None
+        self._pool_content_version += 1
 
     def set_node_payload(
         self, node_id: UUID | str, payload: dict[str, Any]
@@ -85,6 +101,10 @@ class MemoryGraph:
         for k, v in payload.items():
             merged[k] = v
         self._node_payload[key] = merged
+        # The pool matrix is built from node embeddings; a payload change can
+        # alter an embedding, so the cached normalized pool must be dropped.
+        self._normalized_pool = None
+        self._pool_content_version += 1
 
     def set_node_centrality(self, node_id: UUID | str, value: float) -> None:
         self.set_node_payload(node_id, {"centrality": float(value)})
@@ -106,6 +126,8 @@ class MemoryGraph:
                 pass
         self._node_payload.pop(label, None)
         self._dirty_since_centrality = True
+        self._normalized_pool = None
+        self._pool_content_version += 1
 
     def add_edge(
         self,
@@ -122,6 +144,8 @@ class MemoryGraph:
         if u != v:
             self._adj[v][u] = attrs
         self._dirty_since_centrality = True
+        self._normalized_pool = None
+        self._pool_content_version += 1
 
 
     def centrality(self) -> dict[UUID, float]:

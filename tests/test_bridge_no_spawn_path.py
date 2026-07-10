@@ -44,10 +44,9 @@ def test_dist_bridge_js_has_no_child_process_spawn(built_bridge_js):
     found = [s for s in forbidden_substrings if s in text]
     assert not found, (
         "REGRESSION: dist/bridge.js contains spawn-related substring(s) "
-        f"that were explicitly removed: {found}. "
+        f"that the pure-connector refactor removed: {found}. "
         "Someone has re-introduced the TOCTOU spawn race that the "
-        "pure-connector refactor eliminated. Review the bridge.ts "
-        "spawn-removal scope before pushing."
+        "pure-connector refactor eliminated."
     )
 
 
@@ -70,7 +69,7 @@ def test_dist_bridge_js_has_5000_socket_timeout(built_bridge_js):
         "REGRESSION: dist/bridge.js does not contain "
         "'SOCKET_CONNECT_TIMEOUT_MS = 5000'. Either the constant was "
         "renamed, the value was changed, or tsc minification was "
-        "enabled (which would also break the source-level grep "
-        "criteria). 5000ms is required to cover the "
+        "enabled (which would also break the source-level grep done "
+        "criteria). The bridge requires 5000ms to cover the "
         "launchd socket-activation cold-start window."
     )

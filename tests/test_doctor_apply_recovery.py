@@ -23,7 +23,7 @@ def isolated_daemon_paths(tmp_path, monkeypatch):
     store_dir = iai_dir / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
 
-    sock_dir = tmp_path / "sock"
+    sock_dir = Path(f"/tmp/iai-rec-{os.getpid()}-{id(tmp_path)}")
     sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
 
@@ -185,17 +185,54 @@ def test_apply_yes_recovers_from_kill(isolated_daemon_paths):
         post_fails = [r.name for r in post_results if not r.passed]
         assert post_fails == [], f"post-recovery FAILs remain: {post_fails}"
 
+        # Stop the respawned daemon so we can open the store for event audit.
+        # Use the PID from the state file for a reliable kill.
+        _respawned_pid = new_pid
+        try:
+            os.kill(_respawned_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _kill_test_daemons(sock_path)
+
+        # Poll until the hippo flock is released (kernel releases on
+        # process death, but reaping may take a moment).
+        import errno as _errno
+        import fcntl as _fcntl
+        _hippo_lock = store_dir / "hippo" / ".lock"
+        _flock_deadline = time.monotonic() + 8.0
+        while time.monotonic() < _flock_deadline:
+            if not _hippo_lock.exists():
+                break
+            _probe_fd = os.open(str(_hippo_lock), os.O_RDONLY)
+            try:
+                _fcntl.flock(_probe_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                _fcntl.flock(_probe_fd, _fcntl.LOCK_UN)
+                break
+            except OSError as _e:
+                if _e.errno not in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                    raise
+            finally:
+                os.close(_probe_fd)
+            time.sleep(0.2)
+
         from iai_mcp.events import query_events
         from iai_mcp.store import MemoryStore
 
-        store = MemoryStore()
-        recent = query_events(store, kind="doctor_action", limit=10)
+        with MemoryStore() as store:
+            recent = query_events(store, kind="doctor_action", limit=10)
         assert len(recent) >= 1, (
             "doctor_action events not written to ledger after --apply"
         )
         action_labels = {e["data"].get("action") for e in recent}
-        assert "respawn_daemon" in action_labels, (
-            f"respawn_daemon event missing; saw actions: {action_labels}"
+        # unlink_stale_socket is written before the daemon respawns (store
+        # still idle). daemon_respawned_by_doctor is written by the daemon
+        # itself on boot (via IAI_DAEMON_RESPAWN_BY env marker), so it
+        # does not contend with the doctor for the EXCLUSIVE flock.
+        assert "unlink_stale_socket" in action_labels, (
+            f"unlink_stale_socket event missing; saw actions: {action_labels}"
+        )
+        assert "daemon_respawned_by_doctor" in action_labels, (
+            f"daemon_respawned_by_doctor event missing; saw actions: {action_labels}"
         )
     finally:
         if proc.poll() is None:

@@ -40,16 +40,24 @@ def test_install_uses_sys_executable_linux(monkeypatch):
     )
 
 
-def test_plist_keepalive_is_crashed_only(monkeypatch):
+def test_plist_keepalive_resurrects_after_kill(monkeypatch):
     fake_python = "/path/to/venv/bin/python3"
     monkeypatch.setattr("iai_mcp.cli.sys.executable", fake_python)
     from iai_mcp.cli import _render_launchd_plist
 
     rendered = _render_launchd_plist()
     assert "<key>Crashed</key>" in rendered
-    assert "<key>SuccessfulExit</key>" not in rendered, (
-        "SuccessfulExit=false must be absent from the plist. Its presence "
-        "would create a respawn loop because exit 0 is now the steady state."
+    # SuccessfulExit=false is REQUIRED: launchd does not count SIGKILL
+    # (jetsam/OOM, force-kill) as Crashed, so without it a killed daemon
+    # stays down until a manual start. Graceful paths (hibernation, the
+    # SIGTERM stop handler) exit 0 = successful, so this key does NOT
+    # respawn a deliberately stopped daemon.
+    assert "<key>SuccessfulExit</key>" in rendered
+    successful_exit_idx = rendered.index("<key>SuccessfulExit</key>")
+    tail = rendered[successful_exit_idx:successful_exit_idx + 80]
+    assert "<false/>" in tail, (
+        "SuccessfulExit must be FALSE (respawn only after an unsuccessful "
+        "death); TRUE would respawn on clean exits and break hibernation."
     )
 
 

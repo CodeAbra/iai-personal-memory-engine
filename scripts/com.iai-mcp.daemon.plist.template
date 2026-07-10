@@ -23,11 +23,14 @@
   <key>RunAtLoad</key>
   <true/>
 
-  <!-- Respawn only on non-zero exit; graceful lifecycle shutdown exits 0. -->
+  <!-- Respawn after any unsuccessful death incl. SIGKILL (jetsam), which
+       launchd does not count as Crashed; graceful shutdown exits 0. -->
   <key>KeepAlive</key>
   <dict>
     <key>Crashed</key>
     <true/>
+    <key>SuccessfulExit</key>
+    <false/>
   </dict>
 
   <key>ThrottleInterval</key>
@@ -70,6 +73,14 @@
     <key>LANG</key>
     <string>en_US.UTF-8</string>
     <key>IAI_MCP_LAUNCHD_MANAGED</key>
+    <string>1</string>
+    <!-- mimalloc page decommit: return freed pages to the OS immediately
+         instead of holding them resident until the heap next re-grows. -->
+    <key>MIMALLOC_DECOMMIT_DELAY</key>
+    <string>0</string>
+    <key>MIMALLOC_SEGMENT_DECOMMIT_DELAY</key>
+    <string>0</string>
+    <key>MIMALLOC_ALLOW_DECOMMIT</key>
     <string>1</string>
     <key>LIFECYCLE_DROWSY_AFTER_SEC</key>
     <string>300</string>

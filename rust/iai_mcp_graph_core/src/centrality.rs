@@ -11,21 +11,21 @@
 //! CHANGELOG entry that ships alongside the σ-assembly plan.
 //!
 //! The PyO3 entry point releases the GIL during the Rust kernel via
-//! `py.allow_threads(move ||...)`. Brandes at N≥10k can take seconds,
+//! `py.allow_threads(move || ...)`. Brandes at N≥10k can take seconds,
 //! and the daemon's status handler must stay responsive on multi-second
 //! kernels — same discipline as `shortest::average_shortest_path_length`.
 //!
 //! Return contract: a 2-tuple of owned numpy arrays.
-//! 1. `centrality: PyArray1<f64>` — one entry per CSR row, in CSR row
-//! order. `Option<f64>::None` from rustworkx-core is unwrapped to
-//! `0.0` (matches networkx's behaviour for isolated nodes).
-//! 2. `node_indices: PyArray1<i64>` — `[0, 1, …, n_nodes - 1]`, the CSR
-//! row indices in the order the Python wrapper must consume to map
-//! each scalar back to a node identifier. The wrapper does NOT
-//! assume any other order — if a future kernel returns the array in
-//! a different order, the Python consumer simply iterates
-//! `zip(node_arr, centrality_arr)` and maps via its own CSR-row-to-
-//! UUID table.
+//!   1. `centrality: PyArray1<f64>` — one entry per CSR row, in CSR row
+//!      order. `Option<f64>::None` from rustworkx-core is unwrapped to
+//!      `0.0` (matches networkx's behaviour for isolated nodes).
+//!   2. `node_indices: PyArray1<i64>` — `[0, 1, …, n_nodes - 1]`, the CSR
+//!      row indices in the order the Python wrapper must consume to map
+//!      each scalar back to a node identifier. The wrapper does NOT
+//!      assume any other order — if a future kernel returns the array in
+//!      a different order, the Python consumer simply iterates
+//!      `zip(node_arr, centrality_arr)` and maps via its own CSR-row-to-
+//!      UUID table.
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
@@ -47,15 +47,15 @@ const PARALLEL_THRESHOLD: usize = 50;
 /// Mirrors the connectivity-side helper of the same name but uses the
 /// top-level `petgraph` (no `rustworkx_core::petgraph` re-export) because
 /// rustworkx-core 0.17's `betweenness_centrality` is generic over
-/// `NodeIndexable + IntoNodeIdentifiers +...` and the bound holds for
+/// `NodeIndexable + IntoNodeIdentifiers + ...` and the bound holds for
 /// both `petgraph::graph::UnGraph` and the rustworkx-core re-export
 /// equivalently. Using the local `petgraph` keeps the dependency surface
 /// minimal — no extra trait-bound debugging needed.
 ///
 /// Returns `Err(GraphError::InvalidNodeId)` on:
-/// * indptr length mismatch (must equal `n_nodes + 1`),
-/// * any negative `indices[i]`,
-/// * any `indices[i] >= n_nodes` (out-of-range neighbour).
+///   * indptr length mismatch (must equal `n_nodes + 1`),
+///   * any negative `indices[i]`,
+///   * any `indices[i] >= n_nodes` (out-of-range neighbour).
 ///
 /// Edges are de-duplicated via the `u <= v` guard — the CSR layout
 /// double-lists each undirected edge (once per endpoint); inserting only
@@ -221,8 +221,8 @@ mod tests {
     fn star_graph_hub_dominates_leaves() {
         // 5-node star: 0 is the hub; 1..4 are leaves. CSR lists each
         // hub-leaf edge twice (hub-leaf and leaf-hub).
-        // indptr: [0, 4, 5, 6, 7, 8]
-        // indices: [1,2,3,4, 0, 0, 0, 0]
+        //   indptr: [0, 4, 5, 6, 7, 8]
+        //   indices: [1,2,3,4, 0, 0, 0, 0]
         let indptr = vec![0_i64, 4, 5, 6, 7, 8];
         let indices = vec![1_i64, 2, 3, 4, 0, 0, 0, 0];
         let g = build_graph_from_csr(&indptr, &indices, 5).unwrap();

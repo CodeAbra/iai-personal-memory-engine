@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import functools
 import json
 import os
 import random
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Sequence
@@ -21,12 +20,9 @@ from iai_mcp.hippo import _REAL_IAI_ROOT, AccessMode, HippoDB, HippoIntegrityErr
 
 import pyarrow as pa
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from iai_mcp.crypto import (
-    CIPHERTEXT_PREFIX,
-    NONCE_BYTES,
     CryptoKey,
+    decrypt_field,
     encrypt_field,
     is_encrypted,
 )
@@ -48,6 +44,45 @@ from iai_mcp.store._buffers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recency_buffer_maxlen() -> int:
+    """Return the recency buffer capacity from the environment (default 200).
+
+    200 = 4 × the worst-case consumer over-fetch (50 hits × 4).
+    Override with ``IAI_MCP_RECENCY_BUFFER_MAXLEN`` for testing.
+    """
+    import os as _os
+    raw = _os.environ.get("IAI_MCP_RECENCY_BUFFER_MAXLEN", "")
+    try:
+        v = int(raw)
+        return v if v > 0 else 200
+    except (TypeError, ValueError):
+        return 200
+
+
+_UUID_HYPHEN_POSITIONS = (8, 13, 18, 23)
+_UUID_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_canonical_uuid_str(s: str) -> bool:
+    """Return True iff *s* is a canonical 36-char hyphenated UUID string.
+
+    Equivalent to ``UUID(s)`` succeeding for the canonical form that
+    ``_uuid_literal`` writes for every ``edges.src``/``edges.dst`` value, but
+    without constructing a UUID object — used on the hot degree-build path
+    where only the string key is needed. Both this predicate and the
+    UUID-object path reject a malformed key identically.
+    """
+    if len(s) != 36:
+        return False
+    for i, ch in enumerate(s):
+        if i in _UUID_HYPHEN_POSITIONS:
+            if ch != "-":
+                return False
+        elif ch not in _UUID_HEX:
+            return False
+    return True
 
 
 def _uuid_literal(value):
@@ -77,6 +112,36 @@ def _normalize_ts_for_compare(value) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _derive_role(tags: list[str] | None) -> str | None:
+    """Return the conversational role value from a tags list.
+
+    Scans the list for the first tag with a ``role:`` prefix and returns
+    the verbatim suffix (e.g. "user", "assistant", "tool"). Returns None
+    when no role tag is present or the input is empty/None.
+
+    This is the single source of truth for role derivation — used by
+    _to_row, insert_pending_row, and the backfill migrator so that
+    write-time and read-time derivation are always identical.
+    """
+    for t in (tags or []):
+        if isinstance(t, str) and t.startswith("role:"):
+            return t[len("role:"):]
+    return None
+
+
+def _derive_live(tombstoned_at: "str | None") -> int:
+    """Return the denormalized live-flag value for a ``tombstoned_at`` cell.
+
+    ``1`` when the record is live (``tombstoned_at`` is unset), ``0`` when it
+    carries a tombstone timestamp. This is the single source of truth for
+    live-flag derivation, kept in permanent agreement with the
+    ``tombstoned_at IS NULL`` predicate it denormalizes — every write path
+    that sets ``tombstoned_at`` MUST derive ``live`` from the same value in
+    the same write.
+    """
+    return 0 if tombstoned_at else 1
+
+
 class MemoryStore:
 
     def __init__(
@@ -87,6 +152,7 @@ class MemoryStore:
         *,
         access_mode: AccessMode = AccessMode.EXCLUSIVE,
         read_only: bool = False,
+        persist_index: bool = True,
     ) -> None:
         # late import so the package attribute is re-fetched per call and monkeypatches stay visible
         from iai_mcp.store import DEFAULT_STORAGE_PATH as _DSP
@@ -120,15 +186,173 @@ class MemoryStore:
             crypto_key_provider=_key_via_weakref,
             access_mode=access_mode,
             read_only=read_only,
+            persist_index=persist_index,
         )
         self._embed_dim: int = _resolve_embed_dim()
+        # Assumed healthy until _run_boot_migrations proves otherwise (or
+        # fails outright before reaching the assignment) — find_record_by_tag
+        # only falls back to the LIKE-scan when this is explicitly False.
+        self._record_tags_backfill_ok: bool = True
         self._ensure_tables()
+        self._run_boot_migrations()
         self._graph_sync_hook: Callable[[str, "MemoryRecord"], None] | None = None
+        # In-process recency buffer: bounded, volatile, RAM-only.
+        # Constructed eagerly alongside the other write-path organs so the
+        # reconcile callback (registered below) is live before any lifecycle
+        # tick can fire a reembed.
+        from iai_mcp.store._recency_buffer import RecencyBuffer as _RecencyBuffer
+        self._recency_buffer = _RecencyBuffer(maxlen=_recency_buffer_maxlen())
+        # Register the reembed-reconcile callback eagerly in the constructor —
+        # before any wake tick or pending_embeddings_wake_sequence can flip
+        # embedding_pending 1→0.  Lazy registration (e.g. inside
+        # warm_recency_buffer) would leave the callback None during the window
+        # between store construction and the first warm call, causing silent
+        # divergence when a reembed fires before warm.
+        # Bind the callbacks through weak references so HippoDB never holds a
+        # strong reference back to this store. A bound method (or a closure
+        # capturing ``self``) stored on ``self.db`` would form a store<->db
+        # reference cycle that only the cyclic GC can break — leaving the
+        # underlying file lock held until a non-deterministic gc pass runs,
+        # which surfaces as spurious HippoLockHeldError when a short-lived store
+        # is dropped and the path is reopened. Mirrors the crypto-key provider
+        # above, which uses the same WeakMethod discipline for the same reason.
+        _weak_reconcile = weakref.ref(self._recency_buffer)
+
+        def _recency_reconcile_via_weakref(rid) -> None:
+            buf = _weak_reconcile()
+            if buf is not None:
+                buf.reconcile_reembed(str(rid))
+
+        self.db.register_recency_reconcile(_recency_reconcile_via_weakref)
+        # Register the pending-row feed callback eagerly so insert_pending_row
+        # on the underlying HippoDB always feeds the buffer, even when called
+        # via store.db.insert_pending_row() directly (e.g. from tests or the
+        # daemon's own pending capture path).
+        _weak_feed = weakref.WeakMethod(self._feed_recency_pending)
+
+        def _feed_recency_pending_via_weakref(**kwargs) -> None:
+            fn = _weak_feed()
+            if fn is not None:
+                fn(**kwargs)
+
+        self.db.register_recency_pending_feed(_feed_recency_pending_via_weakref)
+        # Single-flight warm lock: serializes the lazy warm-on-first-read so only
+        # ONE thread rebuilds the buffer while concurrent cold readers wait, then
+        # observe a fully-warm buffer.  Prevents the TOCTOU where two cold recalls
+        # both warm and the second empties the buffer the first is about to read.
+        self._recency_warm_lock = threading.Lock()
         self._write_queue = None  # type: ignore[assignment]
         self._async_loop: asyncio.AbstractEventLoop | None = None
         self._async_thread: threading.Thread | None = None
         self._async_conn = None
         self._provenance_queue = None  # type: ignore[assignment]
+        self._reinforce_queue = None  # type: ignore[assignment]
+        # Per-operation COUNT memo. None when inactive. When a `count_memo()`
+        # scope is open it holds the corpus-count results for the duration of one
+        # logical operation (e.g. a single runtime-graph build) so the same
+        # full-corpus COUNT(*) is not re-scanned a dozen times within that
+        # operation. The scope is opened around a self-contained read sequence and
+        # torn down on exit, so a memoized count can never outlive the operation
+        # that opened it or be served to an unrelated caller.
+        self._count_memo: dict[str, int] | None = None
+        # Cross-read corpus-count cache: holds the three corpus COUNT values
+        # (active/pending/edges) between writes so a read-only recall burst pays
+        # one live SQL COUNT per count on the first call, then serves O(1) cached
+        # reads for the rest of the burst.  Invalidated on every count-changing
+        # write (the write path wires invalidation).  Constructed eagerly — before
+        # any lifecycle tick — so the invalidation callbacks the write path
+        # registers always find a live cache instance.
+        from iai_mcp.store._corpus_count_cache import CorpusCountCache as _CorpusCountCache
+        self._corpus_count_cache = _CorpusCountCache()
+        # Wire the cache's on_invalidate hook to the RO pool's staleness bump.
+        # This single wire covers the whole union of committed corpus-changing
+        # writes: buffered record/edge flush (_buffers.py invalidates the cache
+        # directly), async-drain, delete, sleep tombstones/optimize/erasure,
+        # dedupe, and the db-fired insert_pending_row/reembed_pending_rows
+        # callbacks — every one of them ends at cache.invalidate()/clear().
+        # getattr-defensive: a db without mark_ro_pool_stale (stdlib driver,
+        # or an older/mocked db in a test) simply never gets a hook wired.
+        _mark_stale = getattr(self.db, "mark_ro_pool_stale", None)
+        if _mark_stale is not None:
+            self._corpus_count_cache.on_invalidate = _mark_stale
+        # Register the corpus-count invalidation callback eagerly so every
+        # count-changing write path that fires through HippoDB (insert_pending_row,
+        # reembed_pending_rows) invalidates the correct cache keys immediately.
+        # Registered after the cache is constructed so the callback always finds
+        # a live cache instance.
+        _weak_invalidate = weakref.WeakMethod(self._invalidate_corpus_count)
+
+        def _invalidate_corpus_count_via_weakref(*keys: str) -> None:
+            fn = _weak_invalidate()
+            if fn is not None:
+                fn(*keys)
+
+        self.db.register_corpus_count_invalidate(_invalidate_corpus_count_via_weakref)
+
+        # Resident exact-cosine authority: the object is constructed eagerly so
+        # the write seams below always have somewhere to feed, but the matrix
+        # itself stays cold until the first exact_top_k call (lazy build keeps
+        # the boot budget untouched — no scan runs at store open).
+        from iai_mcp.store._exact_index import ExactCosineIndex as _ExactCosineIndex
+        self._exact_index = _ExactCosineIndex(self._embed_dim)
+        # Build-failure cooldown: a monotonic deadline before which
+        # exact_top_k skips the full-corpus SELECT + build retry entirely
+        # (see exact_top_k / invalidate_exact_index).
+        self._exact_index_build_cooldown_until = 0.0
+        # Single-flight guard for the cold-matrix build: concurrent callers
+        # (a warm-up probe racing a first recall) must never run two
+        # whole-corpus builds of the same matrix side by side.
+        self._exact_index_build_lock = threading.Lock()
+        # Register the reembed-flip feed callback eagerly, mirroring the
+        # recency-buffer and count-cache registrations above: bound through a
+        # weakref so HippoDB never holds a strong reference back to this store.
+        _weak_exact_feed = weakref.WeakMethod(self._feed_exact_index)
+
+        def _feed_exact_index_via_weakref(record_id: str, vec) -> None:
+            fn = _weak_exact_feed()
+            if fn is not None:
+                fn(record_id, vec)
+
+        self.db.register_exact_index_feed(_feed_exact_index_via_weakref)
+
+    def _invalidate_corpus_count(self, *keys: str) -> None:
+        """Forward a cache-key invalidation to the corpus-count cache.
+
+        Every count-changing write path routes its invalidation through here
+        so there is exactly one place that touches the cache from the write
+        side.  Best-effort: a missing or broken cache never propagates an
+        exception to the caller.
+        """
+        try:
+            self._corpus_count_cache.invalidate(*keys)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @contextmanager
+    def count_memo(self):
+        """Memoize corpus COUNT(*) results for the duration of one operation.
+
+        Within the scope, repeated calls to `active_records_count` (and the
+        runtime-graph cache key's corpus counts) reuse the first result instead
+        of re-scanning the table. A runtime-graph build probes the same counts
+        ~a dozen times (cache-key derivation runs per cache read, and the drift
+        gate plus the impl each ask again); on the lilli engine each scan reads
+        every leaf page, so the redundancy dominates a warm boot. The scope makes
+        those reads collapse to one per distinct count.
+
+        The memo is strictly operation-scoped: it is cleared on exit and nested
+        scopes reuse the outermost memo, so no count is ever cached across a write
+        or served to an unrelated read path.
+        """
+        if self._count_memo is not None:
+            # Already inside a scope — reuse the outer memo, do not reset it.
+            yield
+            return
+        self._count_memo = {}
+        try:
+            yield
+        finally:
+            self._count_memo = None
 
     def close(self) -> None:
         if self.db is None:
@@ -185,13 +409,99 @@ class MemoryStore:
             _edge_last_flush_at.pop(id(self), None)
             try:
                 from iai_mcp.retrieve import _tv_cache, _tv_cache_dirty
-                _tv_cache.pop(id(self), None)
-                _tv_cache_dirty.pop(id(self), None)
-            except ImportError:
+                # Weak-keyed on the store object (evicts with it); explicit
+                # pop here just frees the maps at close instead of at GC.
+                _tv_cache.pop(self, None)
+                _tv_cache_dirty.pop(self, None)
+            except (ImportError, TypeError):
                 pass
+
+            self._drain_async_writes_on_close()
 
             self.db.close()
             self.db = None
+
+    def _drain_async_writes_on_close(self) -> None:
+        """Drain and tear down a live async write queue before closing the store.
+
+        A store with async writes enabled owns a background event loop, thread,
+        and coalesce task.  Closing without draining leaks all three into the
+        process (a pending coalesce task plus a live daemon thread).  This stops
+        the queue, stops the loop, joins the thread, and tears down the
+        provenance queue too, then nulls the async handles so the store is left
+        in a clean state.
+
+        It is a strict no-op when no queue is live, so it is production-safe for
+        the common case where async writes were never enabled.  The stop is
+        inlined (rather than calling the async ``disable_async_writes``) because
+        ``close()`` is synchronous and cannot await; it mirrors that teardown.
+        Every step is bounded so a wedged loop cannot hang ``close()``, and a
+        failure is logged-and-swallowed so a best-effort teardown never makes
+        ``close()`` raise; the handles are nulled in a ``finally`` regardless.
+        """
+        _log = logging.getLogger(__name__)
+        try:
+            self.disable_provenance_queue()
+        except Exception as exc:  # noqa: BLE001 -- teardown MUST NOT block close()
+            _log.warning(
+                "memorystore_close_drain_failed",
+                extra={
+                    "flush": "disable_provenance_queue",
+                    "err_type": type(exc).__name__,
+                    "err": str(exc)[:120],
+                },
+            )
+        try:
+            self.disable_reinforce_queue()
+        except Exception as exc:  # noqa: BLE001 -- teardown MUST NOT block close()
+            _log.warning(
+                "memorystore_close_drain_failed",
+                extra={
+                    "flush": "disable_reinforce_queue",
+                    "err_type": type(exc).__name__,
+                    "err": str(exc)[:120],
+                },
+            )
+
+        if self._write_queue is None:
+            return
+
+        bg_loop = self._async_loop
+        queue = self._write_queue
+        try:
+            if bg_loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    queue.stop(), bg_loop
+                ).result(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001 -- teardown MUST NOT block close()
+            _log.warning(
+                "memorystore_close_drain_failed",
+                extra={
+                    "flush": "async_write_queue_stop",
+                    "err_type": type(exc).__name__,
+                    "err": str(exc)[:120],
+                },
+            )
+        finally:
+            try:
+                if bg_loop is not None:
+                    bg_loop.call_soon_threadsafe(bg_loop.stop)
+                if self._async_thread is not None:
+                    self._async_thread.join(timeout=5.0)
+            except Exception as exc:  # noqa: BLE001 -- teardown MUST NOT block close()
+                _log.warning(
+                    "memorystore_close_drain_failed",
+                    extra={
+                        "flush": "async_loop_thread_stop",
+                        "err_type": type(exc).__name__,
+                        "err": str(exc)[:120],
+                    },
+                )
+            finally:
+                self._write_queue = None
+                self._async_loop = None
+                self._async_thread = None
+                self._async_conn = None
 
     def __enter__(self) -> "MemoryStore":
         return self
@@ -210,6 +520,40 @@ class MemoryStore:
                 self._embed_dim = int(actual_dim)
         except (OSError, KeyError, ValueError, AttributeError) as exc:
             logger.debug("records table schema introspection skipped: %s", exc)
+
+    def _run_boot_migrations(self) -> None:
+        """Run lightweight idempotent migrations that backfill derived columns.
+
+        Called once per store open, after ``_ensure_tables``. Each migration is
+        gated by a persisted ``_hippo_meta`` stamp written once the backfill has
+        run to completion — so the overhead on a post-migration open is a single
+        keyed meta lookup (O(1)), never a scan of ``records``. The first open of
+        a store written before the derived column existed pays the one-time
+        backfill, then sets the stamp.
+        """
+        from iai_mcp.migrate._role_column import migrate_role_column
+        try:
+            migrate_role_column(self)
+        except Exception as exc:  # noqa: BLE001 — boot migration must not abort open
+            logger.warning("boot migration migrate_role_column failed (non-fatal): %s", exc)
+
+        from iai_mcp.migrate._live_flag_backfill import migrate_live_flag_backfill
+        try:
+            migrate_live_flag_backfill(self)
+        except Exception as exc:  # noqa: BLE001 — boot migration must not abort open
+            logger.warning(
+                "boot migration migrate_live_flag_backfill failed (non-fatal): %s", exc
+            )
+
+        from iai_mcp.migrate._record_tags_backfill import migrate_record_tags_backfill
+        try:
+            result = migrate_record_tags_backfill(self)
+            self._record_tags_backfill_ok = bool(result.get("ok", False))
+        except Exception as exc:  # noqa: BLE001 — boot migration must not abort open
+            logger.warning(
+                "boot migration migrate_record_tags_backfill failed (non-fatal): %s", exc
+            )
+            self._record_tags_backfill_ok = False
 
     def _table_names(self) -> list[str]:
         result = self.db.list_tables()
@@ -239,31 +583,18 @@ class MemoryStore:
             return value
         return encrypt_field(value, self._key(), associated_data=self._ad(record_id))
 
-    @functools.cached_property
-    def _cached_aesgcm(self) -> AESGCM:
-        # late import so the package attribute is re-fetched per call and monkeypatches stay visible
-        from iai_mcp.store import AESGCM as _AESGCM
-        return _AESGCM(self._key())
-
-    def _invalidate_aesgcm_cache(self) -> None:
-        self.__dict__.pop("_cached_aesgcm", None)
-
     def _decrypt_for_record(self, record_id: UUID, value: str) -> str:
         if not is_encrypted(value):
             return value
-        if not value.startswith(CIPHERTEXT_PREFIX):
-            raise ValueError("field is not iai:enc:v1:-prefixed ciphertext")
-        payload_b64 = value[len(CIPHERTEXT_PREFIX):]
-        payload = base64.b64decode(payload_b64)
-        if len(payload) < NONCE_BYTES + 16:
-            raise ValueError("ciphertext payload too short")
-        nonce = payload[:NONCE_BYTES]
-        ct_with_tag = payload[NONCE_BYTES:]
-        associated_data = self._ad(record_id)
-        plaintext_bytes = self._cached_aesgcm.decrypt(
-            nonce, ct_with_tag, associated_data or None
-        )
-        return plaintext_bytes.decode("utf-8")
+        try:
+            return decrypt_field(
+                value, self._key(), associated_data=self._ad(record_id)
+            )
+        except ValueError as exc:
+            raise HippoIntegrityError(
+                f"records decrypt failed for id={record_id}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
 
     def register_graph_sync_hook(
@@ -293,6 +624,331 @@ class MemoryStore:
             except Exception:  # noqa: BLE001 -- logger-of-logger recursion guard
                 pass
 
+    # ------------------------------------------------------------------
+    # Recency buffer — feed, pending-feed, boot-rebuild
+    # ------------------------------------------------------------------
+
+    def _feed_recency(self, record: "MemoryRecord") -> None:
+        """Push a MemoryRecord into the recency buffer if it is buffer-relevant.
+
+        Buffer-relevant means: role='user' OR embedding_pending=1.  All other
+        records (assistant, no-role, non-pending) are skipped so the capacity
+        budget is spent on the served set.
+
+        Resolves ``source_rowid`` with a quick ``SELECT rowid FROM records
+        WHERE id = ? LIMIT 1``; falls back to -1 on failure (the boot rebuild
+        will re-key the entry from the true rowid).
+
+        Failures are logged-and-swallowed so a buffer feed error never breaks
+        a write or crashes the daemon.
+        """
+        try:
+            from iai_mcp.store._recency_buffer import RecencyMarker as _RecencyMarker
+            role = _derive_role(record.tags)
+            ep = int(getattr(record, "embedding_pending", 0) or 0)
+            if role != "user" and ep != 1:
+                return
+            session_id: str | None = None
+            if record.provenance:
+                try:
+                    session_id = record.provenance[0].get("session_id")
+                except Exception:  # noqa: BLE001
+                    pass
+            # Resolve the rowid of the just-written row by id.
+            source_rowid = -1
+            try:
+                with self.db._conn_lock:
+                    row = self.db._conn.execute(
+                        "SELECT rowid FROM records WHERE id = ? LIMIT 1",
+                        (str(record.id),),
+                    ).fetchone()
+                if row is not None:
+                    source_rowid = int(row[0])
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("recency_feed rowid lookup failed id=%s: %s", record.id, exc)
+            from datetime import timezone as _tz_feed
+            created_at = record.created_at
+            if created_at is not None and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=_tz_feed.utc)
+            marker = _RecencyMarker(
+                id=str(record.id),
+                literal_surface=record.literal_surface,
+                created_at=created_at,
+                session_id=session_id,
+                embedding_pending=ep,
+                role=role,
+                source_rowid=source_rowid,
+                tier=getattr(record, "tier", "episodic") or "episodic",
+            )
+            self._recency_buffer.push(marker)
+        except Exception as exc:  # noqa: BLE001 -- hook isolation
+            logger.debug("recency_feed failed: %s", exc)
+
+    def _feed_working(self, record: "MemoryRecord") -> None:
+        """Feed a MemoryRecord into the working tier's per-turn update.
+
+        Mirrors _feed_recency's isolation contract exactly: a failure here
+        must never crash or block a write.
+        """
+        try:
+            from iai_mcp import working_tier
+            working_tier.update_from_record(record, store=self)
+        except Exception as exc:  # noqa: BLE001 -- hook isolation
+            logger.debug("working_feed failed: %s", exc)
+
+    def _feed_recency_pending(
+        self,
+        *,
+        record_id: str,
+        literal_surface: str,
+        tags_json: str,
+        provenance_json: str,
+        created_at: str,
+        tier: str = "episodic",
+    ) -> None:
+        """Feed the buffer after an ``insert_pending_row`` write.
+
+        ``literal_surface`` is the plaintext value as passed to
+        ``insert_pending_row`` (before encryption at the HippoDB layer).  The
+        buffer receives plaintext; it never decrypts or holds ciphertext.
+
+        This is the dedicated pending-capture feed.  It is registered as a
+        callback on the HippoDB so it fires for every caller of
+        ``insert_pending_row``, including direct callers that bypass
+        ``MemoryStore.insert_pending()``.
+
+        Failures are logged-and-swallowed for hook isolation.
+        """
+        try:
+            import json as _json
+            from iai_mcp.store._recency_buffer import RecencyMarker as _RecencyMarker
+            from datetime import timezone as _tz
+
+            # Derive role from the tags JSON (mirrors insert_pending_row's own logic).
+            role: str | None = None
+            try:
+                tags_list = _json.loads(tags_json) if tags_json else []
+                for t in tags_list:
+                    if isinstance(t, str) and t.startswith("role:"):
+                        role = t[len("role:"):]
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Only role:user pending rows belong in the buffer.
+            if role != "user":
+                return
+
+            # Parse created_at.
+            ca = None
+            try:
+                ca = datetime.fromisoformat(
+                    str(created_at).replace("Z", "+00:00").replace(" ", "T")
+                )
+                if ca.tzinfo is None:
+                    ca = ca.replace(tzinfo=_tz.utc)
+            except (TypeError, ValueError):
+                pass
+
+            # Parse session_id from provenance JSON.
+            session_id: str | None = None
+            try:
+                prov = _json.loads(provenance_json) if provenance_json else []
+                if prov:
+                    session_id = prov[0].get("session_id")
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Resolve the rowid of the just-inserted pending row.
+            source_rowid = -1
+            try:
+                with self.db._conn_lock:
+                    row = self.db._conn.execute(
+                        "SELECT rowid FROM records WHERE id = ? LIMIT 1",
+                        (record_id,),
+                    ).fetchone()
+                if row is not None:
+                    source_rowid = int(row[0])
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "recency_pending_feed rowid lookup failed id=%s: %s",
+                    record_id, exc,
+                )
+
+            marker = _RecencyMarker(
+                id=record_id,
+                literal_surface=literal_surface,
+                created_at=ca,
+                session_id=session_id,
+                embedding_pending=1,
+                role=role,
+                source_rowid=source_rowid,
+                tier=tier or "episodic",
+            )
+            self._recency_buffer.push(marker)
+        except Exception as exc:  # noqa: BLE001 -- hook isolation
+            logger.debug("recency_pending_feed failed: %s", exc)
+
+    def insert_pending(
+        self,
+        *,
+        record_id: str,
+        tier: str,
+        literal_surface: str,
+        tags_json: str,
+        provenance_json: str,
+        created_at: str,
+        updated_at: str,
+    ) -> None:
+        """Store-level wrapper for ``HippoDB.insert_pending_row``.
+
+        Delegates to the underlying DB method then feeds the recency buffer.
+        The buffer feed is also registered as a callback on HippoDB so all
+        callers (including direct ``store.db.insert_pending_row(...)`` calls)
+        receive the feed — this wrapper is kept for callers that prefer the
+        store API surface.
+        """
+        self.db.insert_pending_row(
+            record_id=record_id,
+            tier=tier,
+            literal_surface=literal_surface,
+            tags_json=tags_json,
+            provenance_json=provenance_json,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        # The feed also fires via the HippoDB callback registered in __init__,
+        # so no explicit feed call is needed here.  The callback is idempotent
+        # (push-by-id updates in place), so a double-push is safe, but we
+        # avoid it for efficiency.
+
+    def warm_recency_buffer(self) -> None:
+        """Rebuild the recency buffer from a bounded, embedding-free SQL query.
+
+        Issues ``ORDER BY created_at DESC LIMIT maxlen`` against the live
+        store connection, selects marker fields only (no embedding column),
+        and fills the buffer with up to ``maxlen`` entries.
+
+        Idempotent: clears then refills on every call.  Daemon-independent:
+        reads from ``self.db._conn`` (the store's own connection), so it works
+        on a directly-opened store without the daemon running.
+
+        Re-keys every entry from the true SQL rowid, correcting any write-path
+        entries that were fed with an unresolved (-1) rowid.
+
+        The boot rebuild decodes NO embedding — it uses a projection that
+        explicitly omits the embedding column.
+        """
+        from iai_mcp.store._recency_buffer import RecencyMarker as _RecencyMarker
+        import json as _json
+        from datetime import timezone as _tz
+
+        maxlen = self._recency_buffer._maxlen
+
+        # Embedding-free bounded recency query.
+        # Includes rowid (the tie-break authority) and excludes the embedding
+        # BLOB so the per-row decode is cheap (no frombuffer, no AES on a BLOB).
+        # Push the EXACT eligibility predicate of the SQL authority into the
+        # warm query BEFORE the LIMIT, so the top-maxlen rows are the top-maxlen
+        # ELIGIBLE by created_at — not the top-maxlen of ALL rows (which would let
+        # recent non-eligible turns, e.g. role:assistant, crowd out older eligible
+        # role:user / pending markers the authority surfaces). The predicate is the
+        # union of the authority's two branches:
+        #   pending branch: embedding_pending = 1   (tier-agnostic)
+        #   role branch:    role = 'user' AND tier = 'episodic'
+        # Stays embedding-free (no embedding column) so the warm scan rides the
+        # role / created_at index and never decodes a BLOB.
+        _RECENCY_BOOT_SQL = (
+            "SELECT"
+            " rowid, id, literal_surface, provenance_json,"
+            " created_at, embedding_pending, role, tier, tags_json"
+            " FROM records"
+            " WHERE tombstoned_at IS NULL"
+            "   AND ("
+            "        COALESCE(embedding_pending, 0) = 1"
+            "        OR (role = 'user' AND tier = 'episodic')"
+            "       )"
+            " ORDER BY created_at DESC"
+            " LIMIT ?"
+        )
+
+        with self.db._conn_lock:
+            rows = self.db._conn.execute(_RECENCY_BOOT_SQL, (maxlen,)).fetchall()
+
+        new_buffer_entries: list[_RecencyMarker] = []
+        for raw in rows:
+            row = dict(raw)
+            row_id = row.get("id") or ""
+            ep = int(row.get("embedding_pending") or 0)
+            role_raw = row.get("role")
+            role: str | None = str(role_raw) if role_raw is not None else None
+            tier_raw = row.get("tier")
+            tier_val = str(tier_raw) if tier_raw is not None else None
+            # Mirror the SQL authority's eligibility exactly so the warm set is
+            # byte-identical to _recent_pending_markers_sql:
+            #   pending branch: embedding_pending = 1 (tier-agnostic, role-agnostic)
+            #   role branch:    role = 'user' AND tier = 'episodic'
+            # The role decision reads the role COLUMN (as the authority does); no
+            # tags fallback here, because the authority's role predicate is the
+            # column — a tags-only derivation would diverge from the authority.
+            role_eligible = role == "user" and tier_val == "episodic"
+            if ep != 1 and not role_eligible:
+                continue
+
+            # Decrypt literal_surface if encrypted.
+            literal_raw = row.get("literal_surface") or ""
+            try:
+                from uuid import UUID as _UUID
+                row_uuid = _UUID(row_id)
+                if is_encrypted(literal_raw):
+                    literal_raw = self._decrypt_for_record(row_uuid, literal_raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("warm_recency_buffer decrypt failed id=%s: %s", row_id, exc)
+
+            # Parse session_id from provenance_json.
+            session_id: str | None = None
+            prov_raw = row.get("provenance_json") or "[]"
+            try:
+                from uuid import UUID as _UUID2
+                if is_encrypted(prov_raw):
+                    prov_raw = self._decrypt_for_record(_UUID2(row_id), prov_raw)
+                prov = _json.loads(prov_raw)
+                if prov:
+                    session_id = prov[0].get("session_id")
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Parse created_at.
+            ca = None
+            ca_raw = row.get("created_at")
+            try:
+                ca = datetime.fromisoformat(
+                    str(ca_raw).replace("Z", "+00:00").replace(" ", "T")
+                )
+                if ca.tzinfo is None:
+                    ca = ca.replace(tzinfo=_tz.utc)
+            except (TypeError, ValueError):
+                pass
+
+            source_rowid = int(row.get("rowid") or -1)
+
+            new_buffer_entries.append(_RecencyMarker(
+                id=row_id,
+                literal_surface=literal_raw,
+                created_at=ca,
+                session_id=session_id,
+                embedding_pending=ep,
+                role=role,
+                source_rowid=source_rowid,
+                tier=tier_val or "episodic",
+            ))
+
+        # Atomically swap in the new entry set under a single lock acquisition.
+        # replace_all installs the full new map and sets warm=True in ONE hold,
+        # never clear-then-fill across separate acquisitions — so a concurrent
+        # reader never observes an empty or half-filled buffer mid-warm.
+        self._recency_buffer.replace_all(new_buffer_entries)
+
     def insert(self, record: MemoryRecord) -> None:
         if record.tier not in TIER_ENUM:
             raise ValueError(f"invalid tier {record.tier!r}")
@@ -318,7 +974,24 @@ class MemoryStore:
             pass
 
         from iai_mcp.daemon_config import _load_patsep_config
-        from iai_mcp.events import write_event
+        from iai_mcp.events import TELEMETRY_EMBED_NONFINITE, write_event
+        import numpy as _np_ins
+        _emb_arr = _np_ins.asarray(record.embedding, dtype=_np_ins.float32)
+        if not bool(_np_ins.all(_np_ins.isfinite(_emb_arr))):
+            write_event(
+                self,
+                TELEMETRY_EMBED_NONFINITE,
+                {
+                    "record_id": str(record.id),
+                    "nan_count": int(_np_ins.sum(_np_ins.isnan(_emb_arr))),
+                    "inf_count": int(_np_ins.sum(_np_ins.isinf(_emb_arr))),
+                },
+                severity="error",
+            )
+            raise ValueError(
+                f"embedding for record {record.id} contains non-finite values "
+                f"(NaN or inf); a corrupt embedding must not be persisted"
+            )
         _psep_cfg = _load_patsep_config()
         (
             _psep_action,
@@ -329,6 +1002,8 @@ class MemoryStore:
         _psep_near_dup_cos: float | None = None
         _psep_edges_seeded = 0
         _psep_top_k_probed = len(_psep_hits)
+        _psep_ann_prefilter_cos = getattr(record, "_psep_ann_prefilter_cos", None)
+        _psep_exact_confirm_cos = getattr(record, "_psep_exact_confirm_cos", None)
         if _psep_action == GateAction.SKIP:
             _psep_near_dup_hit_id = str(_psep_payload)
             if _psep_hits:
@@ -349,6 +1024,8 @@ class MemoryStore:
                     "threshold_near_dup": float(_psep_cfg.near_dup_threshold),
                     "threshold_link": float(_psep_cfg.link_threshold),
                     "dry_run_mode": False,
+                    "ann_prefilter_cos": _psep_ann_prefilter_cos,
+                    "exact_confirm_cos": _psep_exact_confirm_cos,
                 }, severity="info", buffered=True)
                 return
             write_event(self, "pattern_separation_pass", {
@@ -360,6 +1037,8 @@ class MemoryStore:
                 "threshold_near_dup": float(_psep_cfg.near_dup_threshold),
                 "threshold_link": float(_psep_cfg.link_threshold),
                 "dry_run_mode": True,
+                "ann_prefilter_cos": _psep_ann_prefilter_cos,
+                "exact_confirm_cos": _psep_exact_confirm_cos,
             }, severity="info", buffered=True)
 
         if _psep_action == GateAction.INSERT:
@@ -413,6 +1092,8 @@ class MemoryStore:
                     "threshold_near_dup": float(_psep_cfg.near_dup_threshold),
                     "threshold_link": float(_psep_cfg.link_threshold),
                     "dry_run_mode": bool(_psep_cfg.dry_run),
+                    "ann_prefilter_cos": _psep_ann_prefilter_cos,
+                    "exact_confirm_cos": _psep_exact_confirm_cos,
                 }, severity="info", buffered=True)
             return
 
@@ -423,6 +1104,8 @@ class MemoryStore:
         from iai_mcp.retrieve import invalidate_temporal_validity_cache
         invalidate_temporal_validity_cache(self)
         self._fire_graph_sync_hook("insert", record)
+        self._feed_recency(record)
+        self._feed_working(record)
         if _psep_action == GateAction.INSERT and not _psep_cfg.dry_run:
             self.boost_edges(
                 [(record.id, record.id)],
@@ -450,6 +1133,8 @@ class MemoryStore:
                 "threshold_near_dup": float(_psep_cfg.near_dup_threshold),
                 "threshold_link": float(_psep_cfg.link_threshold),
                 "dry_run_mode": bool(_psep_cfg.dry_run),
+                "ann_prefilter_cos": _psep_ann_prefilter_cos,
+                "exact_confirm_cos": _psep_exact_confirm_cos,
             }, severity="info", buffered=True)
 
 
@@ -501,10 +1186,27 @@ class MemoryStore:
         adapter = _RecordTableAdapter(sync_records_tbl, to_row)
 
         fire_hook = self._fire_graph_sync_hook
+        feed = self._feed_recency
+        feed_exact = self._feed_exact_index
+        feed_working = self._feed_working
 
         def _on_flushed(batch: list) -> None:
+            # The async write queue calls on_flushed AFTER adapter.add writes the
+            # rows to SQL, so the active count in SQL has already increased.
+            # Invalidate before notifying the graph hook so any hook that
+            # immediately reads the count sees the post-flush live value.
+            try:
+                self._invalidate_corpus_count("active")
+            except Exception:  # noqa: BLE001 -- invalidation must not crash flush
+                pass
             for rec in batch:
                 fire_hook("insert", rec)
+                feed(rec)
+                feed_working(rec)
+                try:
+                    feed_exact(str(rec.id), rec.embedding)
+                except Exception:  # noqa: BLE001 -- hook isolation
+                    pass
 
         queue = AsyncWriteQueue(
             adapter,
@@ -521,12 +1223,15 @@ class MemoryStore:
         self._write_queue = queue
 
         self.enable_provenance_queue()
+        self.enable_reinforce_queue()
 
     async def disable_async_writes(self) -> None:
         if self._write_queue is None:
             self.disable_provenance_queue()
+            self.disable_reinforce_queue()
             return
         self.disable_provenance_queue()
+        self.disable_reinforce_queue()
         bg_loop = self._async_loop
         queue = self._write_queue
         try:
@@ -578,6 +1283,50 @@ class MemoryStore:
             return
         self.append_provenance_batch(pairs, records_cache=records_cache)
 
+    def enable_reinforce_queue(self, *, coalesce_ms: int = 50) -> None:
+        if self._reinforce_queue is not None:
+            return
+        from iai_mcp.reinforce_queue import ReinforceWriteQueue
+        q = ReinforceWriteQueue(self, coalesce_ms=coalesce_ms)
+        q.start()
+        self._reinforce_queue = q
+
+    def disable_reinforce_queue(self) -> None:
+        q = self._reinforce_queue
+        if q is None:
+            return
+        try:
+            q.flush(timeout=2.0)
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            logger.debug("reinforce queue flush during teardown: %s", exc)
+        try:
+            q.stop()
+        except (OSError, RuntimeError) as exc:
+            logger.debug("reinforce queue stop during teardown: %s", exc)
+        self._reinforce_queue = None
+
+    def queue_reinforce(self, record_ids: "list[UUID]") -> None:
+        """Enqueue record ids for deferred reinforcement, or reinforce synchronously.
+
+        When the background reinforce queue is live (enabled), record ids are
+        enqueued for deferred processing on the background thread — the call
+        returns immediately without waiting for the writes.  When the queue is
+        not live (e.g. in non-daemon or test contexts without async writes),
+        reinforcement falls back to synchronous per-id calls so the writes
+        still happen (the fallback path is never a no-op).
+        """
+        if not record_ids:
+            return
+        q = self._reinforce_queue
+        if q is not None:
+            q.enqueue(list(record_ids))
+            return
+        # Synchronous fallback: reinforce each id directly.
+        for rid in record_ids:
+            try:
+                self.reinforce_record(rid, is_retrieval=True)
+            except Exception as exc:  # noqa: BLE001 -- best-effort, never raise into caller
+                logger.debug("queue_reinforce_sync_fallback_failed: rid=%s err=%s", rid, exc)
 
     def update(self, record: MemoryRecord) -> None:
         if len(record.embedding) != self._embed_dim:
@@ -601,6 +1350,8 @@ class MemoryStore:
             },
         )
         self._fire_graph_sync_hook("update", record)
+        self._feed_recency(record)
+        self._feed_working(record)
 
     def delete(self, record_id: UUID) -> None:
         tbl = self.db.open_table(RECORDS_TABLE)
@@ -609,6 +1360,15 @@ class MemoryStore:
         except (OSError, ValueError, RuntimeError) as exc:
             logger.warning("store delete normalised to no-op for %s: %s", record_id, exc)
             return
+
+        # The row has been removed from SQL: the active count decreased.  Invalidate
+        # so the next active_records_count() recomputes the live filtered count.
+        # store.delete does not cascade to edges, so only the active key is affected.
+        self._invalidate_corpus_count("active")
+        # The deleted id must never linger in the resident exact-cosine matrix:
+        # invalidate so the next exact_top_k rebuilds from the post-delete SQL
+        # state.
+        self.invalidate_exact_index()
 
         class _DeleteShim:
             def __init__(self, rid):
@@ -633,15 +1393,250 @@ class MemoryStore:
         return [self._from_row(r.to_dict()) for _, r in df.iterrows()]
 
     def active_records_count(self) -> int:
+        """COUNT of active records (not tombstoned, not pending an embedding).
+
+        Read sequence (memo-then-cache-then-live):
+        1. Operation-scoped ``count_memo()`` checked first: collapses repeats
+           within a single build and is the correct boundary for within-build
+           stale-count masking (a write inside an open memo is reflected on
+           the NEXT memo scope, not immediately — this is intentional; the
+           post-write recall opens a fresh memo, misses the invalidated cache,
+           and recomputes live, so the effect is never lost permanently).
+        2. Cross-read ``_corpus_count_cache`` checked second: on a cache hit
+           the live SQL COUNT is skipped and the cached value is seeded into
+           the open memo (if any) so subsequent same-scope reads are free.
+        3. On any miss (cache miss or any cache-layer exception), the live
+           FILTERED SQL COUNT is run under ``_conn_lock``.  The cache-layer
+           ``try/except`` ensures that a ``KeyError``, ``AttributeError``, or
+           missing-attribute error on the cache path degrades to the live
+           filtered COUNT and is never propagated to the caller.  This keeps
+           the unfiltered ``count_rows()`` fallback in
+           ``runtime_graph_cache._cache_key`` unreachable via this method.
+
+        Lock ordering: the cache lock is taken and released around the dict
+        read only; ``_conn_lock`` is taken for the SQL COUNT with no cache
+        lock held, so the two locks are never held simultaneously.
+        """
+        memo = self._count_memo
+        if memo is not None and "active" in memo:
+            return memo["active"]
+        # Cross-read cache: check then, on a hit, skip the SQL COUNT.
+        try:
+            cached = self._corpus_count_cache.get("active")
+        except Exception:  # noqa: BLE001
+            cached = None
+        if cached is not None:
+            if memo is not None:
+                memo["active"] = cached
+            return cached
+        # Cache miss: snapshot the generation BEFORE the live COUNT so a
+        # concurrent invalidate during the COUNT refuses the stale put.
+        try:
+            gen = self._corpus_count_cache.generation()
+        except Exception:  # noqa: BLE001
+            gen = None
+        # Run the live FILTERED COUNT (no cache lock held).
         with self.db._conn_lock:
             row = self.db._conn.execute(
                 "SELECT COUNT(*) FROM records"
                 " WHERE tombstoned_at IS NULL"
                 " AND COALESCE(embedding_pending, 0) = 0"
             ).fetchone()
-        return int(row[0]) if row else 0
+        value = int(row[0]) if row else 0
+        # Populate the cross-read cache (compare-and-set on generation) and the
+        # open memo (best-effort).
+        try:
+            if gen is not None:
+                self._corpus_count_cache.put_if_gen("active", value, gen)
+        except Exception:  # noqa: BLE001
+            pass
+        if memo is not None:
+            memo["active"] = value
+        return value
+
+    def pending_records_count(self) -> int:
+        """COUNT of records still awaiting an embedding (embedding_pending = 1).
+
+        The runtime-graph cache key folds this raw (unwindowed) count in so a
+        single re-embed flip (pending −1) changes the key and forces a warm
+        rebuild, ensuring the newly-embedded row is included.
+
+        Read sequence is memo-then-cache-then-live (same as
+        ``active_records_count``).  A cache-layer exception degrades to the
+        live FILTERED COUNT; the unfiltered fallback in ``_cache_key`` is
+        unreachable via this method.
+        """
+        memo = self._count_memo
+        if memo is not None and "pending" in memo:
+            return memo["pending"]
+        try:
+            cached = self._corpus_count_cache.get("pending")
+        except Exception:  # noqa: BLE001
+            cached = None
+        if cached is not None:
+            if memo is not None:
+                memo["pending"] = cached
+            return cached
+        try:
+            gen = self._corpus_count_cache.generation()
+        except Exception:  # noqa: BLE001
+            gen = None
+        with self.db._conn_lock:
+            row = self.db._conn.execute(
+                "SELECT COUNT(*) FROM records WHERE embedding_pending = 1"
+            ).fetchone()
+        value = int(row[0]) if row else 0
+        try:
+            if gen is not None:
+                self._corpus_count_cache.put_if_gen("pending", value, gen)
+        except Exception:  # noqa: BLE001
+            pass
+        if memo is not None:
+            memo["pending"] = value
+        return value
+
+    def edges_count(self) -> int:
+        """COUNT of rows in the edges table.
+
+        Folded into the runtime-graph cache key alongside the record counts.
+        Read sequence is memo-then-cache-then-live (same as
+        ``active_records_count``).  A cache-layer exception degrades to the
+        live count; the unfiltered fallback in ``_cache_key`` is unreachable
+        via this method.
+        """
+        memo = self._count_memo
+        if memo is not None and "edges" in memo:
+            return memo["edges"]
+        try:
+            cached = self._corpus_count_cache.get("edges")
+        except Exception:  # noqa: BLE001
+            cached = None
+        if cached is not None:
+            if memo is not None:
+                memo["edges"] = cached
+            return cached
+        try:
+            gen = self._corpus_count_cache.generation()
+        except Exception:  # noqa: BLE001
+            gen = None
+        value = int(self.db.open_table("edges").count_rows())
+        try:
+            if gen is not None:
+                self._corpus_count_cache.put_if_gen("edges", value, gen)
+        except Exception:  # noqa: BLE001
+            pass
+        if memo is not None:
+            memo["edges"] = value
+        return value
 
     def find_record_by_tag(self, tag: str) -> UUID | None:
+        """Resolve a record id by an exact tag match.
+
+        Indexed equality lookup on ``record_tags(record_id, tag)`` — no scan
+        of ``records.tags_json``. Falls back to the LIKE-scan only when
+        the one-time backfill (``migrate_record_tags_backfill``) failed for
+        this store instance, so a store whose tag index could not be
+        populated still resolves correctly rather than silently returning
+        wrong answers. This is a per-store-instance flag set once at open —
+        never a silent per-call fallback.
+
+        Single-table queries only (both drivers' SQL surfaces support no
+        JOIN and no column-qualified aliases across tables — confirmed on
+        the lilli engine: ``JOIN`` and ``SELECT r.col`` both raise). Resolves
+        via two single-table lookups: candidates from ``record_tags`` ordered
+        by its own insertion order (rowid), then the first candidate that
+        still exists in ``records`` wins. ``record_tags`` rows are written
+        in the same relative order as their owning ``records`` row (each
+        record's tags are upserted immediately after that record's insert, in
+        the same transaction), so this reproduces the LIKE-scan's
+        natural table-scan (insertion order) first-match semantics. The
+        existence re-check also guards against an orphaned ``record_tags``
+        row surviving a swallowed ``_delete_record_tags`` failure.
+        """
+        if not getattr(self, "_record_tags_backfill_ok", True):
+            return self._find_record_by_tag_like_scan(tag)
+
+        with self.db._conn_lock:
+            candidates = self.db._conn.execute(
+                "SELECT record_id FROM record_tags WHERE tag = ? ORDER BY rowid",
+                (tag,),
+            ).fetchall()
+            for cand in candidates:
+                raw_id = cand["record_id"]
+                if raw_id is None:
+                    continue
+                exists = self.db._conn.execute(
+                    "SELECT 1 FROM records WHERE id = ? LIMIT 1",
+                    (str(raw_id),),
+                ).fetchone()
+                if exists is None:
+                    continue
+                try:
+                    return UUID(str(raw_id))
+                except (ValueError, AttributeError):
+                    continue
+        return None
+
+    def add_tags(self, record_id: UUID, tags: "list[str]") -> bool:
+        """Union tags onto an existing record, keeping the indexed
+        ``record_tags`` table in sync (the generic ``update()`` does not
+        maintain it). Plaintext column; verbatim surface untouched. Returns
+        True when the stored set changed."""
+        new_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
+        if not new_tags:
+            return False
+        rec = self.get(record_id)
+        if rec is None:
+            return False
+        current = list(rec.tags or [])
+        missing = [t for t in new_tags if t not in current]
+        if not missing:
+            return False
+        tags_json = json.dumps(current + missing)
+        self.db.open_table(RECORDS_TABLE).update(
+            where=f"id = '{_uuid_literal(record_id)}'",
+            values={"tags_json": tags_json},
+        )
+        from iai_mcp.hippo._table import _upsert_record_tags
+        with self.db._conn_lock:
+            _upsert_record_tags(self.db._conn, str(record_id), tags_json)
+        return True
+
+    def remove_tags(self, record_id: UUID, tags: "list[str]") -> bool:
+        """Remove tags from an existing record, mirrored into ``record_tags``.
+        Returns True when the stored set changed."""
+        drop = {str(t).strip() for t in (tags or []) if str(t).strip()}
+        if not drop:
+            return False
+        rec = self.get(record_id)
+        if rec is None:
+            return False
+        current = list(rec.tags or [])
+        kept = [t for t in current if t not in drop]
+        if len(kept) == len(current):
+            return False
+        self.db.open_table(RECORDS_TABLE).update(
+            where=f"id = '{_uuid_literal(record_id)}'",
+            values={"tags_json": json.dumps(kept)},
+        )
+        with self.db._conn_lock:
+            try:
+                self.db._conn.executemany(
+                    "DELETE FROM record_tags WHERE record_id = ? AND tag = ?",
+                    [(str(record_id), t) for t in sorted(drop)],
+                )
+            except Exception:  # noqa: BLE001 -- tag-index maintenance must not abort
+                logger.debug(
+                    "record_tags delete failed for %s", record_id, exc_info=True,
+                )
+        return True
+
+    def _find_record_by_tag_like_scan(self, tag: str) -> UUID | None:
+        """The LIKE-scan fallback path
+        for the backfill-failed edge case only (never a silent per-call
+        fallback — gated on ``_record_tags_backfill_ok`` in
+        ``find_record_by_tag``).
+        """
         tag_json_literal = json.dumps(tag)
         sql = (
             "SELECT id, tags_json FROM records"
@@ -693,6 +1688,36 @@ class MemoryStore:
                 continue
         return out
 
+    _RECENT_USER_TURNS_COLUMNS = [
+        "id",
+        "tier",
+        "literal_surface",
+        "tags_json",
+        "provenance_json",
+        "created_at",
+        "embedding_pending",
+    ]
+
+    # Bare-shape widening bound for the recent_user_turns candidate read:
+    # the SQL below must stay a WHERE-less `ORDER BY created_at DESC LIMIT`
+    # to ride OrderedColIndex's strict top-K fast path (any residual
+    # conjunct forces a full scan). MAX_WIDEN_DOUBLINGS bounds the Python-
+    # side widening loop so a sparse-and-old corpus degrades gracefully
+    # (returns fewer than n candidates) instead of widening toward a
+    # full-corpus scan.
+    _RECENT_USER_TURNS_MAX_WIDEN_DOUBLINGS = 6
+
+    def _recent_user_turns_candidate_rows(self, k: int) -> list:
+        """Bare top-K read: no WHERE clause, so it rides the ordered-column
+        index's strict fast path (a residual predicate would force a full
+        scan). Filtering happens in Python on the fetched window only.
+        """
+        cols = ", ".join(self._RECENT_USER_TURNS_COLUMNS)
+        sql = f"SELECT {cols} FROM records ORDER BY created_at DESC LIMIT ?"
+        with self.db._conn_lock:
+            rows = self.db._conn.execute(sql, (int(k),)).fetchall()
+        return [self._from_row(dict(row)) for row in rows]
+
     def recent_user_turns(
         self,
         n: int = 10,
@@ -701,28 +1726,35 @@ class MemoryStore:
     ) -> "list":
         from iai_mcp.capture import _idem_tag as _cap_idem_tag
 
-        records = self.all_records()
-        cands = [
-            r for r in records
-            if r.tier == "episodic"
-            and (
-                "role:user" in (r.tags or [])
-                or r.embedding_pending
-            )
-        ]
-        if session_id:
+        n_effective = max(1, int(n)) if n and n > 0 else 1
+        k = max(4 * n_effective, 40)
+        cands: list = []
+        doublings = 0
+        while True:
+            fetched = self._recent_user_turns_candidate_rows(k)
             cands = [
-                r for r in cands
-                if (r.provenance or [{}])[0].get("session_id") == session_id
+                r for r in fetched
+                if r.tier == "episodic"
+                and (
+                    "role:user" in (r.tags or [])
+                    or r.embedding_pending
+                )
             ]
+            if session_id:
+                cands = [
+                    r for r in cands
+                    if (r.provenance or [{}])[0].get("session_id") == session_id
+                ]
+            enough_matches = len(cands) >= n_effective
+            window_exhausted = len(fetched) < k
+            if enough_matches or window_exhausted:
+                break
+            if doublings >= self._RECENT_USER_TURNS_MAX_WIDEN_DOUBLINGS:
+                break
+            k *= 2
+            doublings += 1
 
         if pending_live_events is not None:
-            store_idem_set: set[str] = set()
-            for r in records:
-                for tag in (r.tags or []):
-                    if tag.startswith("idem:"):
-                        store_idem_set.add(tag)
-
             seen_pending_idem: set[str] = set()
 
             pending_wrappers = []
@@ -736,7 +1768,7 @@ class MemoryStore:
                 ts_iso = ev["ts_iso"]
                 text = ev.get("text", "")
                 idem = _cap_idem_tag(ev_session, "user", ts_iso, text, source_uuid=src_uuid)
-                if idem in store_idem_set:
+                if self.find_record_by_tag(idem) is not None:
                     continue
                 if idem in seen_pending_idem:
                     continue
@@ -781,15 +1813,320 @@ class MemoryStore:
     ):
         if not columns:
             raise ValueError("iter_record_columns requires a non-empty columns list")
-        tbl = self.db.open_table(RECORDS_TABLE)
-        query = tbl.search()
-        if where is not None:
-            query = query.where(where)
-        query = query.select(columns)
-        reader = query.to_batches(batch_size=batch_size)
-        for batch in reader:
-            for row_dict in batch.to_pylist():
-                yield row_dict
+        db_path = getattr(self.db, "_db_path", None)
+        if not db_path:
+            # Detached / pre-construction store: no lock-free snapshot to page
+            # over — fall back to the streaming reader.
+            tbl = self.db.open_table(RECORDS_TABLE)
+            query = tbl.search()
+            if where is not None:
+                query = query.where(where)
+            query = query.select(columns)
+            for batch in query.to_batches(batch_size=batch_size):
+                yield from batch.to_pylist()
+            return
+
+        # Keyset pagination over the primary key: each page is a short-lived
+        # query on its own read-only snapshot, resuming from the last id seen.
+        # A concurrent WAL checkpoint fences the snapshot ("read-only snapshot
+        # invalidated") — but because the cursor advances by id, a reopen
+        # resumes exactly where it left off instead of re-scanning from the
+        # start. Forward progress is therefore guaranteed at any corpus size.
+        import sqlite3 as _sqlite3
+
+        from iai_mcp.hippo._ro_pool import _RO_SNAPSHOT_FENCE_MARKER
+
+        want = list(columns)
+        select_cols = want if "id" in want else ["id", *want]
+        col_sql = ", ".join(select_cols)
+        where_sql = f"({where}) AND " if where else ""
+        page_sql = (
+            f"SELECT {col_sql} FROM {RECORDS_TABLE} WHERE {where_sql}id > ?"
+            f" ORDER BY id LIMIT {int(batch_size)}"
+        )
+
+        strip_id = "id" not in want
+        conn = self._open_keyset_snapshot(db_path)
+        last_id = ""
+        try:
+            while True:
+                try:
+                    rows = conn.execute(page_sql, (last_id,)).fetchall()
+                except _sqlite3.OperationalError as exc:
+                    if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
+                        raise
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    conn = self._open_keyset_snapshot(db_path)  # resume from last_id — no re-scan
+                    continue
+                if not rows:
+                    break
+                for row in rows:
+                    d = dict(row)
+                    last_id = d["id"]
+                    if strip_id:
+                        d.pop("id", None)
+                    # The raw page carries the embedding column as its stored
+                    # BLOB; without this decode a 384-d vector leaks downstream
+                    # as 1536 per-byte ints and poisons every consumer matrix.
+                    yield self._decode_raw_row(d)
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _open_keyset_snapshot(self, db_path: str):
+        """Short-lived read-only snapshot for a keyset scan page (driver-aware,
+        lock-free). A single seam so a fence retry always reopens the same way."""
+        import contextlib as _cl
+        import sqlite3 as _sqlite3
+
+        from iai_mcp.hippo._raw_open import open_store_conn
+
+        conn = open_store_conn(db_path, read_only=True)
+        if conn is None:
+            conn = _sqlite3.connect(
+                db_path, check_same_thread=False, isolation_level=None,
+            )
+        with _cl.suppress(Exception):
+            conn.execute("PRAGMA busy_timeout=2000")
+        with _cl.suppress(Exception):
+            conn.execute("PRAGMA query_only=ON")
+        conn.row_factory = _sqlite3.Row
+        return conn
+
+    _EXACT_INDEX_BUILD_BACKOFF_SEC = 30.0
+
+    def _build_exact_index_sync(self) -> None:
+        """Single-flight cold build of the resident exact-cosine matrix.
+
+        Reads the active corpus (plaintext id+embedding through
+        ``self.db.ro_conn()``, no AES decrypt, no record materialization,
+        never touching ``_hnsw_lock``) and installs the normalized matrix.
+        Serialized by ``_exact_index_build_lock`` so a warm-up probe racing a
+        first recall never runs two whole-corpus builds side by side — the
+        loser of the race re-checks warmth under the lock and no-ops.
+
+        A build failure starts a cooldown window
+        (``_EXACT_INDEX_BUILD_BACKOFF_SEC``): while it is active, callers skip
+        the full-corpus SELECT + build retry entirely, so a persistently
+        unbuildable state costs one scan, not one scan per recall.
+        ``invalidate_exact_index()`` clears the cooldown immediately, so a
+        fresh write always gets an immediate retry. No-raise.
+        """
+        with self._exact_index_build_lock:
+            try:
+                if self._exact_index.is_warm:
+                    return
+                _cooldown_until = getattr(self, "_exact_index_build_cooldown_until", 0.0)
+                if time.monotonic() < _cooldown_until:
+                    return
+                _expected_gen = self._exact_index.generation
+                # The whole-corpus embedding fetch holds its connection for
+                # the full scan — run it on a DEDICATED short-lived snapshot
+                # reader (cheap to open; the decoded index sidecar is served
+                # from the process-wide cache) so this maintenance read never
+                # occupies a pooled reader slot or the shared writer
+                # connection that live recalls depend on.
+                _sql = (
+                    "SELECT id, embedding FROM records"
+                    " WHERE tombstoned_at IS NULL"
+                    " AND COALESCE(embedding_pending, 0) = 0"
+                )
+                rows = None
+                _snap = None
+                try:
+                    from iai_mcp.hippo._raw_open import open_store_conn
+
+                    _db_path = getattr(self.db, "_db_path", None)
+                    if _db_path is not None:
+                        _snap = open_store_conn(_db_path, read_only=True)
+                except Exception:  # noqa: BLE001 -- snapshot open is an
+                    # optimization; the pooled reader below stays correct.
+                    _snap = None
+                if _snap is not None:
+                    try:
+                        import sqlite3 as _sqlite3
+                        _snap.row_factory = _sqlite3.Row
+                        rows = _snap.execute(_sql).fetchall()
+                    finally:
+                        try:
+                            _snap.close()
+                        except Exception:  # noqa: BLE001 -- close is best-effort
+                            pass
+                if rows is None:
+                    with self.db.ro_conn() as conn:
+                        rows = conn.execute(_sql).fetchall()
+                build_rows = [(row["id"], row["embedding"]) for row in rows]
+                try:
+                    self._exact_index.build(build_rows, expected_generation=_expected_gen)
+                except Exception:
+                    self._exact_index_build_cooldown_until = (
+                        time.monotonic() + self._EXACT_INDEX_BUILD_BACKOFF_SEC
+                    )
+                    logger.warning(
+                        "exact-cosine matrix build failed; backing off for %.0fs",
+                        self._EXACT_INDEX_BUILD_BACKOFF_SEC,
+                        exc_info=True,
+                    )
+            except Exception:  # noqa: BLE001 -- no-raise contract
+                logger.debug("exact-cosine matrix build failed", exc_info=True)
+
+    def _schedule_exact_index_build(self) -> None:
+        """Kick the cold-matrix build on a background thread, at most one at a
+        time (the build lock is the single-flight gate; a second kick while a
+        build is in flight starts a thread that immediately queues on the lock,
+        re-checks warmth, and exits). No-raise."""
+        try:
+            threading.Thread(
+                target=self._build_exact_index_sync,
+                name="exact-index-build",
+                daemon=True,
+            ).start()
+        except Exception:  # noqa: BLE001 -- scheduling failure degrades to the
+            # next caller's kick; never breaks the caller.
+            logger.debug("exact-index build scheduling failed", exc_info=True)
+
+    def lexical_search(
+        self, query: str, k: int = 10,
+    ) -> "list[tuple[MemoryRecord, float]]":
+        """Identifier-grade lexical lane over decrypted surfaces (in RAM only).
+
+        Complements the semantic lane where embeddings are weakest: exact
+        code identifiers and env names. Rebuilds on demand when the corpus
+        generation moved; surfaces are write-once verbatim, so a generation
+        keyed on corpus-changing writes is a sufficient freshness fence.
+        Never used on the recall critical path — this is the scoped-search
+        surface (MCP memory_search / CLI)."""
+        from iai_mcp.store._lexical_index import LexicalIndex
+
+        idx = getattr(self, "_lexical_idx", None)
+        if idx is None:
+            idx = LexicalIndex()
+            self._lexical_idx = idx
+        try:
+            gen = self._corpus_count_cache.generation()
+        except Exception:  # noqa: BLE001
+            gen = None
+        if idx.generation is None or idx.generation != gen:
+            # Single-flight: the rebuild decrypts the whole corpus; a second
+            # concurrent search waits here and finds the fresh generation.
+            with idx.build_lock:
+                if idx.generation is None or idx.generation != gen:
+                    ids: list[UUID] = []
+                    # Pending-embed rows ARE included: the lexical lane needs
+                    # only the decrypted surface, never the vector, so a
+                    # captured-but-not-yet-embedded row must be findable by
+                    # exact identifier immediately.
+                    for row in self.iter_record_columns(
+                        ["id"],
+                        batch_size=2048,
+                        where="tombstoned_at IS NULL",
+                    ):
+                        try:
+                            ids.append(UUID(str(row["id"])))
+                        except (TypeError, ValueError):
+                            continue
+                    rows: list[tuple[str, str]] = []
+                    for i in range(0, len(ids), 400):
+                        batch = self.get_batch(ids[i : i + 400])
+                        rows.extend(
+                            (str(rid), rec.literal_surface or "")
+                            for rid, rec in batch.items()
+                        )
+                    idx.build(rows, gen)
+        pairs = idx.query(query, k=k)
+        if not pairs:
+            return []
+        recs = self.get_batch(
+            [u for u in (self._maybe_uuid(rid) for rid, _s in pairs) if u]
+        )
+        out: "list[tuple[MemoryRecord, float]]" = []
+        for rid, score in pairs:
+            rec = recs.get(self._maybe_uuid(rid))
+            if rec is not None:
+                out.append((rec, score))
+        return out
+
+    @staticmethod
+    def _maybe_uuid(value: str) -> "UUID | None":
+        try:
+            return UUID(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    def exact_top_k(
+        self, vec: list[float], k: int = 10, *, build_if_cold: bool = True,
+    ) -> list[tuple[UUID, float]]:
+        """Exact cosine top-k over the active corpus, from the resident matrix.
+
+        Lazily builds the matrix on first call (single-flight, see
+        ``_build_exact_index_sync``). With ``build_if_cold=False`` — the recall
+        critical path — a cold matrix is never built synchronously: the build
+        is kicked onto a background thread and THIS call degrades to an empty
+        result immediately, so index maintenance never sits on the awake
+        recall path. The exact authority is a backstop over the ANN candidates
+        (its callers already treat an empty result as "authority contributed
+        nothing"), and it warms within one background build regardless.
+
+        No-raise contract: any internal failure — a cold rebuild that cannot
+        complete, a corrupted index, an unexpected exception — degrades to an
+        empty result, never to a raised exception. A broken exact-similarity
+        authority must never make recall worse than baseline.
+
+        The matrix is invalidated on every corpus-changing destructive write
+        (delete, sleep-pipeline optimize/erasure, dedupe migrator) so it never
+        serves a tombstoned or stale id; the recall-side authority path adds a
+        live-id-set liveness filter on top of this for the same reason.
+        """
+        try:
+            if not self._exact_index.is_warm:
+                _cooldown_until = getattr(self, "_exact_index_build_cooldown_until", 0.0)
+                if time.monotonic() < _cooldown_until:
+                    return []
+                if build_if_cold:
+                    self._build_exact_index_sync()
+                else:
+                    self._schedule_exact_index_build()
+                    return []
+            result = self._exact_index.top_k(vec, k)
+            if result is None:
+                return []
+            return [(UUID(rid), score) for rid, score in result]
+        except Exception:  # noqa: BLE001 -- no-raise contract, a broken authority
+            # must never break recall.
+            logger.debug("exact_top_k failed; returning empty result", exc_info=True)
+            return []
+
+    def _feed_exact_index(self, record_id: str, vec) -> None:
+        """No-raise upsert forward into the resident exact-cosine matrix.
+
+        A no-op when the matrix is cold (the index itself no-ops an upsert
+        while cold); the next exact_top_k call rebuilds from live SQL instead.
+        """
+        try:
+            self._exact_index.upsert(record_id, vec)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def invalidate_exact_index(self) -> None:
+        """Mark the resident exact-cosine matrix cold; no-raise.
+
+        Every corpus-changing write path that fires through HippoDB or the
+        sleep pipeline routes its destructive-write invalidation through here
+        so the matrix never serves a tombstoned or stale id: the next
+        exact_top_k call rebuilds from a fresh active-corpus scan. Clears any
+        active build-failure cooldown so a fresh write always gets an
+        immediate retry rather than waiting out the backoff window.
+        """
+        try:
+            self._exact_index.invalidate()
+        except Exception:  # noqa: BLE001
+            pass
+        self._exact_index_build_cooldown_until = 0.0
 
     def query_similar(
         self,
@@ -798,6 +2135,7 @@ class MemoryStore:
         tier: str | None = None,
         *,
         n: int | None = None,
+        over_fetch_factor: int = 3,
     ) -> list[tuple[MemoryRecord, float]]:
         _return_records_only = n is not None
         if n is not None:
@@ -808,23 +2146,164 @@ class MemoryStore:
             )
 
         tbl = self.db.open_table(RECORDS_TABLE)
-        if tbl.count_rows() == 0:
+        # Emptiness guard through the corpus-count cache (O(1) warm), never a
+        # raw count_rows: a COUNT on the lilli engine re-scans every leaf
+        # page, and this guard sat on the per-recall hot path. Zero active
+        # records short-circuits identically — the ANN post-filter would
+        # return nothing for that corpus anyway.
+        if self.active_records_count() == 0:
             return []
         q = tbl.search(list(vec)).distance_type("cosine")
-        where_clause = "COALESCE(embedding_pending, 0) = 0"
+        where_clause = "tombstoned_at IS NULL AND COALESCE(embedding_pending, 0) = 0"
         if tier is not None:
             where_clause = f"tier = '{tier}' AND " + where_clause
         q = q.where(where_clause)
-        results = q.limit(k).to_pandas()
-        out: list[tuple[MemoryRecord, float]] = []
+        # Over-fetch then trim: the ANN tier runs knn_query(k) FIRST and
+        # applies the tombstone/pending predicate as a post-filter (tombstoned
+        # vectors stay in the hnsw index until the next sleep-cycle rebuild),
+        # so a k-sized fetch can silently underfill when live neighbors are
+        # outnumbered by tombstoned ones in the raw top-k. Mirrors
+        # query_similar_temporal's existing over-fetch discipline.
+        k_effective = max(1, int(k) * max(1, int(over_fetch_factor)))
+        q = q.limit(k_effective)
+
+        out: list[tuple[MemoryRecord, float]] | None = None
+        if os.environ.get("IAI_MCP_ANN_FAST_DECODE_OFF") != "1":
+            # The seed query decodes fetched rows directly, skipping the
+            # pandas DataFrame round-trip _ann_to_pandas otherwise builds:
+            # the raw cursor rows are fetched once and fed straight into
+            # _from_row. The DataFrame materialization stays available (and
+            # exercised, byte-for-byte) behind the kill-switch below.
+            try:
+                row_dicts = q.to_row_dicts()
+                fast_out: list[tuple[MemoryRecord, float]] = []
+                for row in row_dicts:
+                    record = self._from_row(row)
+                    distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
+                    score = 1.0 - distance
+                    fast_out.append((record, score))
+                out = fast_out
+            except Exception as exc:  # noqa: BLE001 — fail-safe: never break recall
+                logger.debug(
+                    "query_similar fast decode branch failed, falling back to "
+                    "the DataFrame materialization path: %s", exc,
+                )
+                out = None
+
+        if out is None:
+            results = q.to_pandas()
+            out = []
+            for _, row in results.iterrows():
+                record = self._from_row(row.to_dict())
+                distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
+                score = 1.0 - distance
+                out.append((record, score))
+
+        out = out[:k]
+        if _return_records_only:
+            return [r for r, _s in out]
+        return out
+
+    def query_similar_temporal(
+        self,
+        vec: list[float] | None = None,
+        *,
+        as_of: str | None = None,
+        k: int = 10,
+        tier: str | None = None,
+        over_fetch_factor: int = 3,
+    ) -> list[tuple[MemoryRecord, float]]:
+        """Time-bounded similarity search; sibling of query_similar.
+
+        Four cue/as_of combinations:
+          - vec given, as_of None: delegates to query_similar(vec, k, tier).
+          - vec given, as_of given: over-fetch ANN candidates by k * over_fetch_factor,
+            AND-append created_at <= as_of AND tombstoned_at IS NULL, trim to k.
+          - vec None, as_of given: skip ANN; direct SQL SELECT ORDER BY created_at DESC.
+          - vec None, as_of None: returns []. (Range-less, cue-less recall is a no-op.)
+
+        as_of MUST be a canonical UTC ISO string from _normalize_ts_for_compare; the
+        method does NOT re-normalize. Caller (dispatch branch) owns normalization.
+        """
+        if tier is not None and tier not in TIER_ENUM:
+            raise ValueError(
+                f"invalid tier {tier!r}; must be one of {sorted(TIER_ENUM)}"
+            )
+
+        if vec is not None and as_of is None:
+            return self.query_similar(list(vec), k=k, tier=tier)
+
+        if vec is None and as_of is None:
+            return []
+
+        if vec is None and as_of is not None:
+            # datetime() wrapping makes the comparison format-agnostic: both
+            # T-form and space-form created_at values are normalized by SQLite
+            # before the inequality, so same-date timestamps compare by actual
+            # time rather than by the separator byte (0x20 vs 0x54).
+            # Tombstone filter is T-relative: a record tombstoned after the
+            # as_of point existed at T and must appear in the view.
+            sql_where = [
+                "(tombstoned_at IS NULL OR datetime(tombstoned_at) > datetime(?))",
+                "COALESCE(embedding_pending, 0) = 0",
+                "datetime(created_at) <= datetime(?)",
+            ]
+            params: list = [as_of, as_of]
+            if tier is not None:
+                sql_where.append("tier = ?")
+                params.append(tier)
+            sql = (
+                "SELECT"
+                " id, tier, literal_surface, aaak_index,"
+                " community_id, centrality, detail_level, pinned,"
+                " stability, difficulty, last_reviewed, never_decay, never_merge,"
+                " provenance_json, created_at, updated_at, tags_json, language,"
+                " s5_trust_score, profile_modulation_gain_json, schema_version,"
+                " hv_tier, structure_hv_payload,"
+                " COALESCE(embedding_pending, 0) AS embedding_pending"
+                " FROM records"
+                f" WHERE {' AND '.join(sql_where)}"
+                " ORDER BY datetime(created_at) DESC"
+                " LIMIT ?"
+            )
+            params.append(int(k))
+            with self.db._conn_lock:
+                cursor = self.db._conn.execute(sql, params)
+                rows = cursor.fetchall()
+            out: list[tuple[MemoryRecord, float]] = []
+            for row in rows:
+                record = self._from_row(dict(row))
+                out.append((record, 0.0))
+            return out
+
+        tbl = self.db.open_table(RECORDS_TABLE)
+        if tbl.count_rows() == 0:
+            return []
+        k_effective = max(1, int(k) * max(1, int(over_fetch_factor)))
+        q = tbl.search(list(vec)).distance_type("cosine")
+        # Defensive re-normalization: ensure as_of is a valid ISO string before
+        # interpolation into SQL. _normalize_ts_for_compare raises ValueError on
+        # any non-ISO input, so an injected quote string would fail here.
+        as_of = _normalize_ts_for_compare(as_of)
+        # datetime() wrapping makes the comparison format-agnostic (T-form vs
+        # space-form). Tombstone filter is T-relative: a record tombstoned after
+        # the as_of point existed at T and must appear in the view.
+        where_clause = (
+            f"datetime(created_at) <= datetime('{as_of}')"
+            f" AND (tombstoned_at IS NULL OR datetime(tombstoned_at) > datetime('{as_of}'))"
+            " AND COALESCE(embedding_pending, 0) = 0"
+        )
+        if tier is not None:
+            where_clause = f"tier = '{tier}' AND " + where_clause
+        q = q.where(where_clause)
+        results = q.limit(k_effective).to_pandas()
+        out_hybrid: list[tuple[MemoryRecord, float]] = []
         for _, row in results.iterrows():
             record = self._from_row(row.to_dict())
             distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
             score = 1.0 - distance
-            out.append((record, score))
-        if _return_records_only:
-            return [r for r, _s in out]
-        return out
+            out_hybrid.append((record, score))
+        return out_hybrid[:k]
 
     def pattern_separation_gate(
         self,
@@ -833,12 +2312,90 @@ class MemoryStore:
         action, payload, _hits = self._pattern_separation_gate_with_hits(record)
         return (action, payload)
 
+    def _exact_scan_full_corpus(
+        self, record: MemoryRecord,
+    ) -> list[tuple[UUID, float]]:
+        """Exact cosine top-k over the whole active corpus for ``record``.
+
+        k is the full corpus size — the exact authority is the lossless
+        backstop over the ANN's approximate top-k window, so k-truncation
+        here would silently reintroduce the same tail-miss the backstop
+        exists to close. The matrix is already resident (float32, ~1.5KB
+        per row at d=384), so an argsort at any prod corpus size is a
+        sub-ms hold under the exact-index lock. Write-path only:
+        ``build_if_cold=True`` must never reach recall.
+        """
+        corpus_size = len(self._exact_index)
+        k = max(corpus_size, 10)
+        return self.exact_top_k(list(record.embedding), k=k, build_if_cold=True)
+
+    def _exact_confirm_near_dup(
+        self,
+        record: MemoryRecord,
+        candidate_id: UUID,
+        threshold: float,
+    ) -> bool:
+        """Compare the exact-cosine authority's own score for ``candidate_id``
+        against ``threshold``. Returns True iff a full exact scan carries
+        evidence for ``candidate_id`` at cosine >= ``threshold``.
+
+        Public helper. NOT on the write hot path: ``_exact_near_dup_target``
+        already carries every candidate's exact score from its outer scan
+        and decides SKIP-vs-INSERT directly, so calling this helper inside
+        that loop would repeat the same full-corpus matmul + argsort per
+        candidate. Kept as a standalone comparator for callers outside
+        that walk (external confirms, ad-hoc checks) and as an armed
+        forbidden-symbol on the recall-purity guard.
+        """
+        for exact_id, exact_cos in self._exact_scan_full_corpus(record):
+            if exact_id == candidate_id:
+                return exact_cos >= threshold
+        return False
+
+    def _exact_near_dup_target(
+        self,
+        record: MemoryRecord,
+        threshold: float,
+    ) -> tuple[UUID, float] | None:
+        """The exact-cosine authority's own best SKIP-eligible near-dup for
+        ``record``, or None if no exact candidate clears ``threshold`` while
+        respecting ``never_merge`` on both sides.
+
+        Runs a SINGLE full-corpus exact scan; the outer walk already knows
+        each candidate's exact cosine (``exact_cos`` from the descending
+        exact ranking IS the authority's own score — no rescan needed to
+        re-derive it). The ANN top-k prefilter only decides WHETHER to
+        consult the exact authority at all; the actual SKIP target comes
+        from the exact ranking itself, which may find the true near-dup
+        elsewhere in the ranking when the ANN's own top-1 is
+        ``never_merge``-locked or when the true match sits outside the
+        ANN's approximate window.
+        """
+        # exact score is the truth; ANN score is the prefilter
+        if getattr(record, "never_merge", False):
+            return None
+        for exact_id, exact_cos in self._exact_scan_full_corpus(record):
+            if exact_cos < threshold:
+                break
+            neighbour = self.get(exact_id)
+            if neighbour is None:
+                continue
+            if getattr(neighbour, "never_merge", False):
+                continue
+            return (exact_id, float(exact_cos))
+        return None
+
     def _pattern_separation_gate_with_hits(
         self,
         record: MemoryRecord,
     ) -> tuple["GateAction", "GatePayload", list[tuple[MemoryRecord, float]]]:
         from iai_mcp.daemon_config import _load_patsep_config
         cfg = _load_patsep_config()
+
+        # Reset transient telemetry so a repeat-gate on the same record
+        # instance cannot leak the prior pass's cosines into this event.
+        record._psep_ann_prefilter_cos = None
+        record._psep_exact_confirm_cos = None
 
         hits = self.query_similar(list(record.embedding), k=cfg.top_k)
 
@@ -894,11 +2451,21 @@ class MemoryStore:
             if hits:
                 top_record, top_cos = hits[0]
                 if top_cos >= cfg.near_dup_threshold:
-                    if not (
-                        getattr(record, "never_merge", False)
-                        or getattr(top_record, "never_merge", False)
-                    ):
-                        return (GateAction.SKIP, top_record.id, hits)
+                    # ANN prefilter (approximate) only decides whether to
+                    # consult the exact authority at all; the SKIP target is
+                    # always re-derived from the full exact-cosine scan, since
+                    # the ANN's own top-1 candidate may not be the exact
+                    # authority's true near-dup (or may itself be
+                    # never_merge-locked).
+                    target = self._exact_near_dup_target(
+                        record, cfg.near_dup_threshold,
+                    )
+                    record._psep_ann_prefilter_cos = float(top_cos)
+                    record._psep_exact_confirm_cos = (
+                        target[1] if target is not None else None
+                    )
+                    if target is not None:
+                        return (GateAction.SKIP, target[0], hits)
 
         edges: list[tuple[UUID, float]] = []
         for rec, cos in hits:
@@ -982,19 +2549,31 @@ class MemoryStore:
                 update_ids.append(canonical)
                 update_prov.append(new_ct)
         else:
-            df = tbl.to_pandas()
-            if df.empty:
-                return
+            # Read only the provenance rows for the ids being appended, never the
+            # whole corpus. The previous full-table materialization decoded every
+            # record's embedding just to look up a handful of provenance strings —
+            # the dominant cost of provenance bookkeeping on the recall path.
+            target_ids = list(grouped.keys())
+            ph = ", ".join("?" for _ in target_ids)
+            sql = (  # nosemgrep: sql-injection
+                f"SELECT id, provenance_json FROM records WHERE id IN ({ph})"  # noqa: S608
+            )
+            with self.db._conn_lock:
+                rows = self.db._conn.execute(sql, target_ids).fetchall()
+            prov_by_id: dict[str, str] = {}
+            for raw in rows:
+                rid_key = str(raw[0] if hasattr(raw, "__getitem__") else raw["id"])
+                prov_by_id[rid_key] = (
+                    raw[1] if hasattr(raw, "__getitem__") else raw["provenance_json"]
+                )
             for rid_str, entries in grouped.items():
-                idx_list = df.index[df["id"] == rid_str].tolist()
-                if not idx_list:
+                if rid_str not in prov_by_id:
                     continue
                 try:
                     canonical = _uuid_literal(rid_str)
                 except ValueError:
                     continue
-                i = idx_list[0]
-                raw_prov = df.at[i, "provenance_json"] or "[]"
+                raw_prov = prov_by_id[rid_str] or "[]"
                 if is_encrypted(raw_prov):
                     try:
                         raw_prov = self._decrypt_for_record(UUID(rid_str), raw_prov)
@@ -1039,24 +2618,29 @@ class MemoryStore:
 
 
     _RECORD_COLS = (
-        "id, tier, literal_surface, aaak_index, embedding,"
+        "id, tier, literal_surface, aaak_index, embedding, structure_hv,"
         " community_id, centrality, detail_level, pinned,"
         " stability, difficulty, last_reviewed, never_decay, never_merge,"
         " provenance_json, created_at, updated_at, tags_json, language,"
         " s5_trust_score, profile_modulation_gain_json, schema_version,"
-        " structure_hv, hv_tier, structure_hv_payload,"
-        " COALESCE(embedding_pending, 0) AS embedding_pending"
+        " hv_tier, structure_hv_payload,"
+        " COALESCE(embedding_pending, 0) AS embedding_pending,"
+        " role"
     )
 
+    # Soft-tombstoned rows (tombstoned_at IS NOT NULL) are dead and must never
+    # surface as recency markers. Both authority branches filter them so the
+    # SQL path agrees with the embedding-free warm path (which already excludes
+    # tombstoned rows) — preserving byte-identity after a dedupe soft-tombstone.
     _PENDING_READ_SQL = (
         f"SELECT {_RECORD_COLS} FROM records"  # noqa: S608
-        " WHERE embedding_pending = 1"
+        " WHERE embedding_pending = 1 AND tombstoned_at IS NULL"
         " ORDER BY rowid DESC LIMIT ?"
     )
 
     _ROLE_USER_READ_SQL = (
         f"SELECT {_RECORD_COLS} FROM records"  # noqa: S608
-        " WHERE tier='episodic' AND tags_json LIKE ?"
+        " WHERE tier='episodic' AND role='user' AND tombstoned_at IS NULL"
         " ORDER BY rowid DESC LIMIT ?"
     )
 
@@ -1064,9 +2648,20 @@ class MemoryStore:
     def _decode_raw_row(row: "dict") -> "dict":
         import numpy as _np
         emb_raw = row.get("embedding")
-        if isinstance(emb_raw, (bytes, bytearray)) and emb_raw:
-            row = dict(row)
-            row["embedding"] = _np.frombuffer(emb_raw, dtype=_np.float32).tolist()
+        # The stored embedding BLOB arrives as bytes on the stdlib sqlite3 driver
+        # and as a zero-copy memoryview slice on the engine driver's projected
+        # scan. np.frombuffer reads all three; admitting memoryview here keeps the
+        # decoded vector at its true float length instead of leaking the raw byte
+        # count downstream (which would mis-read a 384-d vector as 1536 elements).
+        # Use .nbytes for the length guard: len(memoryview) returns element count,
+        # which equals byte count only when itemsize==1; .nbytes is always bytes.
+        if isinstance(emb_raw, (bytes, bytearray, memoryview)):
+            # .nbytes for the length guard: len(memoryview) returns element count,
+            # which equals byte count only when itemsize==1; .nbytes is always bytes.
+            n = emb_raw.nbytes if isinstance(emb_raw, memoryview) else len(emb_raw)
+            if n:
+                row = dict(row)
+                row["embedding"] = _np.frombuffer(emb_raw, dtype=_np.float32).tolist()
         return row
 
     def incident_edges(
@@ -1074,7 +2669,30 @@ class MemoryStore:
         ids: "list[UUID]",
         edge_types: "list[str] | None" = None,
         top_k: "int | None" = 5,
-    ) -> "dict[UUID, list[tuple[UUID, str, float]]]":
+        neighbor_keys_as_str: bool = False,
+    ) -> "dict[UUID, list[tuple[UUID, str, float]]] | dict[UUID, list[tuple[str, str, float]]]":
+        """Return the edges incident to every id in *ids*.
+
+        Parameters
+        ----------
+        ids:
+            Candidate node ids to look up.
+        edge_types:
+            Optional whitelist of edge-type strings (e.g. ``["hebbian"]``).
+            ``None`` returns all edge types.
+        top_k:
+            Per-node neighbour cap.  ``None`` = uncapped.  When set, the
+            result is ordered by weight descending, ties broken
+            deterministically by neighbour id then edge type, before the
+            cap is applied.
+        neighbor_keys_as_str:
+            When ``True``, neighbour ids in the returned tuples are plain
+            strings instead of ``UUID`` objects.  This avoids constructing a
+            ``UUID`` object for each neighbour on callers that only need a
+            dict key or an immediate ``str()`` value (e.g. the degree-map and
+            contradicts builds on the spread path).  The outer dict keys are
+            always ``UUID`` objects regardless of this flag.
+        """
         if not ids:
             return {}
 
@@ -1093,10 +2711,10 @@ class MemoryStore:
             sql += f" AND edge_type IN ({et_ph})"
             params += list(edge_types)
 
-        with self.db._conn_lock:
-            rows = self.db._conn.execute(sql, params).fetchall()
+        with self.db.ro_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
 
-        result: dict[UUID, list[tuple[UUID, str, float]]] = {i: [] for i in ids}
+        result: dict = {i: [] for i in ids}
         id_to_uuid: dict[str, UUID] = {str(i): i for i in ids}
 
         for row in rows:
@@ -1107,51 +2725,127 @@ class MemoryStore:
 
             if src_s in id_set:
                 qid = id_to_uuid[src_s]
-                try:
-                    neighbour = UUID(dst_s)
-                except (ValueError, AttributeError):
-                    continue
-                result[qid].append((neighbour, et, wt))
+                if neighbor_keys_as_str:
+                    # String fast path: validate with the canonical-UUID
+                    # predicate (same acceptance as the UUID-object path for
+                    # canonical keys) WITHOUT constructing a UUID object, so
+                    # the per-edge UUID reconstruction is skipped on the hot
+                    # degree-build path.
+                    if _is_canonical_uuid_str(dst_s):
+                        result[qid].append((dst_s, et, wt))
+                else:
+                    try:
+                        neighbour = UUID(dst_s)
+                    except (ValueError, AttributeError):
+                        continue
+                    result[qid].append((neighbour, et, wt))
 
             if dst_s in id_set and dst_s != src_s:
                 qid = id_to_uuid[dst_s]
-                try:
-                    neighbour = UUID(src_s)
-                except (ValueError, AttributeError):
-                    continue
-                result[qid].append((neighbour, et, wt))
+                if neighbor_keys_as_str:
+                    if _is_canonical_uuid_str(src_s):
+                        result[qid].append((src_s, et, wt))
+                else:
+                    try:
+                        neighbour = UUID(src_s)
+                    except (ValueError, AttributeError):
+                        continue
+                    result[qid].append((neighbour, et, wt))
 
         if top_k is not None:
             for uid, edges in result.items():
-                edges.sort(key=lambda t: t[2], reverse=True)
+                edges.sort(key=lambda t: (-t[2], str(t[0]), t[1]))
                 result[uid] = edges[:top_k]
 
         return result
+
+    # Per-statement id ceiling for the batched fetch below: bounds the SQL
+    # placeholder count per round trip while still collapsing a whole recall's
+    # candidate set into a handful of statements.
+    _GET_BATCH_CHUNK = 400
 
     def get_batch(self, ids: "list[UUID]") -> "dict[UUID, MemoryRecord]":
         if not ids:
             return {}
 
-        str_ids = [str(i) for i in ids]
-        ph = ", ".join("?" for _ in str_ids)
-        sql = (  # nosemgrep: sql-injection
-            f"SELECT {self._RECORD_COLS} FROM records"  # noqa: S608
-            f" WHERE id IN ({ph})"
-        )
-        with self.db._conn_lock:
-            raw_rows = self.db._conn.execute(sql, str_ids).fetchall()
+        # Dedup the input so a repeated id is fetched once, then resolve the
+        # whole set through chunked `id IN (...)` statements on ONE borrowed
+        # reader connection. The engine serves `id IN` through the same
+        # id-index probes as a per-id equality, so the result set is
+        # identical to a per-id loop — but a recall's hop expansion (a
+        # hundred-plus candidates) costs a handful of round trips instead of
+        # one connection borrow + one statement PER id.
+        seen_ids: set[str] = set()
+        uniq: list[str] = []
+        for i in ids:
+            id_str = str(i)
+            if id_str not in seen_ids:
+                seen_ids.add(id_str)
+                uniq.append(id_str)
 
         out: dict[UUID, MemoryRecord] = {}
-        for raw in raw_rows:
-            row_dict = self._decode_raw_row(dict(raw))
-            try:
-                rec = self._from_row(row_dict)
-                out[rec.id] = rec
-            except Exception:  # noqa: BLE001 — skip corrupt rows, never crash
-                continue
+        with self.db.ro_conn() as conn:
+            for start in range(0, len(uniq), self._GET_BATCH_CHUNK):
+                chunk = uniq[start : start + self._GET_BATCH_CHUNK]
+                ph = ", ".join("?" for _ in chunk)
+                sql = (  # nosemgrep: sql-injection
+                    f"SELECT {self._RECORD_COLS} FROM records"  # noqa: S608
+                    f" WHERE id IN ({ph})"
+                )
+                raw_rows = conn.execute(sql, chunk).fetchall()
+                for raw in raw_rows:
+                    row_dict = self._decode_raw_row(dict(raw))
+                    try:
+                        rec = self._from_row(row_dict)
+                        out[rec.id] = rec
+                    except Exception:  # noqa: BLE001 — skip corrupt rows, never crash
+                        continue
         return out
 
-    def recent_pending_markers(self, n: int = 50) -> "list[MemoryRecord]":
+    def _recency_marker_to_record(self, marker) -> "MemoryRecord":
+        """Build a lightweight MemoryRecord from a RecencyMarker for the buffer read path.
+
+        Only populates the fields the recall pipeline consumer reads:
+        ``id``, ``literal_surface``, ``created_at``, ``provenance`` (for
+        ``session_id``), ``embedding_pending``, ``role``.  All other fields
+        carry neutral defaults.  This record must NOT be written back to the
+        store or used outside the recency read path.
+        """
+        from uuid import UUID as _UUID
+        prov: list[dict] = []
+        if marker.session_id is not None:
+            prov = [{"session_id": marker.session_id}]
+        return MemoryRecord(
+            id=_UUID(marker.id),
+            tier="episodic",
+            literal_surface=marker.literal_surface,
+            aaak_index="",
+            embedding=[],
+            community_id=None,
+            centrality=0.0,
+            detail_level=1,
+            pinned=False,
+            stability=0.0,
+            difficulty=0.0,
+            last_reviewed=None,
+            never_decay=False,
+            never_merge=False,
+            provenance=prov,
+            created_at=marker.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            updated_at=marker.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            language="en",
+            embedding_pending=marker.embedding_pending,
+            role=marker.role,
+        )
+
+    def _recent_pending_markers_sql(self, n: int) -> "list[MemoryRecord]":
+        """SQL union path — the lossless-authority fallback for recent_pending_markers.
+
+        Returns the same ordered list that the warm buffer path returns, by
+        reading directly from the store.  Called when the buffer is not warm or
+        on any buffer error.  The result is always correct; it is slow at scale
+        because it decodes every candidate row including its embedding BLOB.
+        """
         seen: dict[UUID, "MemoryRecord"] = {}
 
         with self.db._conn_lock:
@@ -1168,10 +2862,15 @@ class MemoryStore:
             except Exception:  # noqa: BLE001
                 continue
 
+        # Over-fetch by rowid before the created_at re-rank below: the final
+        # ordering is by created_at, so a wider rowid window must be gathered to
+        # surface the true most-recent-by-created_at turns when rowid order and
+        # created_at order disagree (post-reembed / bulk-copy re-keying). The
+        # indexed role='user' predicate makes this wide gather cheap.
         over_fetch = n * 4
         with self.db._conn_lock:
             rows_b = self.db._conn.execute(
-                self._ROLE_USER_READ_SQL, ('%"role:user"%', over_fetch)
+                self._ROLE_USER_READ_SQL, (over_fetch,)
             ).fetchall()
 
         for raw in rows_b:
@@ -1179,8 +2878,6 @@ class MemoryStore:
             try:
                 rec = self._from_row(row_dict)
             except Exception:  # noqa: BLE001
-                continue
-            if "role:user" not in (rec.tags or []):
                 continue
             if rec.id not in seen:
                 seen[rec.id] = rec
@@ -1191,6 +2888,36 @@ class MemoryStore:
             reverse=True,
         )
         return candidates[:n]
+
+    def recent_pending_markers(self, n: int = 50) -> "list[MemoryRecord]":
+        # Fast path: serve from the in-process recency buffer when it is warm.
+        # The buffer holds already-decrypted, embedding-free markers in RAM,
+        # so this path decodes nothing from the store and returns immediately.
+        #
+        # Lazy warm-on-first-read: if the buffer has not been warmed yet, warm
+        # it once here so the first recall after a store open benefits from the
+        # buffer without requiring an explicit warm call at every open site.
+        buf = self._recency_buffer
+        if not buf.is_warm:
+            # Single-flight, double-checked: only one thread warms while others
+            # wait on the lock; they then see is_warm True and skip re-warming.
+            # warm_recency_buffer swaps the buffer atomically (replace_all), so a
+            # waiter that proceeds to markers() never observes a torn buffer.
+            with self._recency_warm_lock:
+                if not buf.is_warm:
+                    try:
+                        self.warm_recency_buffer()
+                    except Exception as exc:  # noqa: BLE001 -- warm failure falls to SQL
+                        logger.debug("recency_buffer lazy warm failed, using SQL: %s", exc)
+                        return self._recent_pending_markers_sql(n)
+
+        # Buffer is warm (either was already, or just became warm above).
+        # Serve from RAM: markers(n) returns [] for an empty corpus, which is correct.
+        try:
+            return [self._recency_marker_to_record(m) for m in buf.markers(n)]
+        except Exception as exc:  # noqa: BLE001 -- hydration error → SQL fallback
+            logger.debug("recency_buffer serve failed, falling back to SQL: %s", exc)
+            return self._recent_pending_markers_sql(n)
 
 
     def boost_edges(
@@ -1232,78 +2959,54 @@ class MemoryStore:
         new_weights: dict[tuple[str, str], float] = {}
         now = datetime.now(timezone.utc)
 
+        # Edge reads here go through the WRITER connection, never the RO pool:
+        # this is a read-modify-write — an RO snapshot can miss an edge this
+        # same call graph just committed, and a write-path verb must never
+        # queue behind (or wedge on) RO-slot opens.
         if len(coalesced) <= _SMALL_BATCH:
             for (src_str, dst_str), accum_delta in coalesced.items():
-                predicate = (
-                    f"src = '{_uuid_literal(src_str)}' "
-                    f"AND dst = '{_uuid_literal(dst_str)}' "
-                    f"AND edge_type = '{edge_type}'"
-                )
-                try:
-                    df = (
-                        tbl.search()
-                        .where(predicate)
-                        .select(["weight"])
-                        .limit(1)
-                        .to_pandas()
-                    )
-                except Exception as exc:  # noqa: BLE001 -- fallback gate
-                    logger.warning(
-                        "edge predicate-scan fallback for (%s,%s,%s): %s",
-                        src_str, dst_str, edge_type, exc, exc_info=True,
-                    )
-                    df = None
-                if df is not None and not df.empty:
-                    cur = float(df["weight"].iloc[0])
+                with self.db._conn_lock:
+                    row = self.db._conn.execute(
+                        f"SELECT weight FROM {EDGES_TABLE}"
+                        " WHERE src = ? AND dst = ? AND edge_type = ? LIMIT 1",
+                        (src_str, dst_str, edge_type),
+                    ).fetchone()
+                if row is not None:
+                    cur = float(row["weight"])
                     nw = cur + accum_delta
                     update_rows.append({
                         "src": src_str, "dst": dst_str,
                         "edge_type": edge_type,
                         "weight": nw, "updated_at": now,
                     })
-                elif df is not None:
+                else:
                     nw = accum_delta
                     insert_rows.append({
                         "src": src_str, "dst": dst_str,
                         "edge_type": edge_type,
                         "weight": nw, "updated_at": now,
                     })
-                else:
-                    existing = tbl.to_pandas()
-                    mask = (
-                        (existing["src"] == src_str)
-                        & (existing["dst"] == dst_str)
-                        & (existing["edge_type"] == edge_type)
-                    ) if len(existing) > 0 else None
-                    if mask is not None and mask.any():
-                        cur = float(existing.loc[mask, "weight"].iloc[0])
-                        nw = cur + accum_delta
-                        update_rows.append({
-                            "src": src_str, "dst": dst_str,
-                            "edge_type": edge_type,
-                            "weight": nw, "updated_at": now,
-                        })
-                    else:
-                        nw = accum_delta
-                        insert_rows.append({
-                            "src": src_str, "dst": dst_str,
-                            "edge_type": edge_type,
-                            "weight": nw, "updated_at": now,
-                        })
                 new_weights[(src_str, dst_str)] = nw
         else:
-            existing = tbl.to_pandas()
+            with self.db._conn_lock:
+                _edge_rows = self.db._conn.execute(
+                    f"SELECT src, dst, weight FROM {EDGES_TABLE}"
+                    " WHERE edge_type = ?",
+                    (edge_type,),
+                ).fetchall()
+            # Build a single (src, dst) -> weight lookup over the rows of this
+            # edge_type ONCE, then resolve each pair in O(1). The edges table's
+            # PRIMARY KEY (src, dst, edge_type) makes the mapping unambiguous —
+            # at most one row per key — so the dict is exact, not lossy. This
+            # replaces a per-pair full-table boolean mask (O(pairs x edges)) with
+            # O(pairs + edges): on a large boost it is the difference between
+            # minutes and milliseconds.
+            existing_weights: dict[tuple[str, str], float] = {
+                (r["src"], r["dst"]): float(r["weight"]) for r in _edge_rows
+            }
             for (src_str, dst_str), accum_delta in coalesced.items():
-                if len(existing) > 0:
-                    mask = (
-                        (existing["src"] == src_str)
-                        & (existing["dst"] == dst_str)
-                        & (existing["edge_type"] == edge_type)
-                    )
-                else:
-                    mask = None
-                if mask is not None and mask.any():
-                    cur = float(existing.loc[mask, "weight"].iloc[0])
+                cur = existing_weights.get((src_str, dst_str))
+                if cur is not None:
                     nw = cur + accum_delta
                     update_rows.append({
                         "src": src_str, "dst": dst_str,
@@ -1539,7 +3242,10 @@ class MemoryStore:
             "drawer": getattr(r, "drawer", None),
             "hv_tier": r.hv_tier,
             "structure_hv_payload": bytes(r.structure_hv_payload or b""),
-            "embedding_pending": int(r.embedding_pending),
+            "role": _derive_role(r.tags),
+            # A freshly-inserted record is always live by construction — no
+            # write path through _to_row ever carries a pre-set tombstone.
+            "live": _derive_live(None),
         }
 
     def _maybe_tag_schema_bypass(self, record: MemoryRecord) -> None:
@@ -1720,7 +3426,7 @@ class MemoryStore:
         structure_raw = row.get("structure_hv")
         if structure_raw is None:
             structure_hv = b""
-        elif isinstance(structure_raw, (bytes, bytearray)):
+        elif isinstance(structure_raw, (bytes, bytearray, memoryview)):
             structure_hv = bytes(structure_raw)
         else:
             structure_hv = b""
@@ -1743,7 +3449,7 @@ class MemoryStore:
             hv_tier = "bsc"
             structure_hv_payload = b""
         elif structure_hv_payload_raw is not None and not isinstance(
-            structure_hv_payload_raw, (bytes, bytearray)
+            structure_hv_payload_raw, (bytes, bytearray, memoryview)
         ):
             _codec_reason = (
                 f"structure_hv_payload expected bytes, "
@@ -1755,7 +3461,7 @@ class MemoryStore:
             hv_tier = str(hv_tier_raw)
             structure_hv_payload = (
                 bytes(structure_hv_payload_raw)
-                if isinstance(structure_hv_payload_raw, (bytes, bytearray))
+                if isinstance(structure_hv_payload_raw, (bytes, bytearray, memoryview))
                 else b""
             )
 
@@ -1831,6 +3537,9 @@ class MemoryStore:
         except (TypeError, json.JSONDecodeError):
             provenance_list = []
 
+        role_raw = row.get("role")
+        role = str(role_raw) if role_raw is not None else None
+
         rec = MemoryRecord(
             id=row_uuid,
             tier=row.get("tier", "episodic"),
@@ -1862,6 +3571,7 @@ class MemoryStore:
             hv_tier=hv_tier,
             structure_hv_payload=structure_hv_payload,
             embedding_pending=_safe_int(row.get("embedding_pending"), 0),
+            role=role,
         )
         if language == "__LEGACY_EMPTY__":
             rec.language = ""

@@ -323,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         report_path.write_text("\n".join(violations) + "\n")
         print(
             f"\n*** {len(violations)} MONOTONICITY VIOLATION(S) "
-            f"-- monotonicity gate FAILS ***",
+            f"-- recall-parity gate FAILS ***",
             file=sys.stderr,
         )
         for v in violations[:20]:
@@ -335,8 +335,10 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         print(
-            "\n  Results may only RISE, never DROP. "
-            "Investigate FP-determinism drift on the failing qids.",
+            "\n  Rule: "
+            "results may only RISE, never DROP. "
+            "Route back to the embedder forward pass to "
+            "investigate FP-determinism drift on the failing qids.",
             file=sys.stderr,
         )
         return 1

@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Bench-isolated IAI_MCP_STORE path passed through to inner bench. "
             "Default lets the inner bench use its DEFAULT_STORE_DIR "
-            "(/tmp/iai-mcp-bench/store)."
+            "(/tmp/iai-mcp-bench-claude/store)."
         ),
     )
     args = parser.parse_args(argv)
@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     env.pop("IAI_MCP_AROUSAL_USE_SHADOW", None)
     cmd = [
         sys.executable,
-        str(worktree_root / "bench" / "contradiction_longitudinal.py"),
+        str(worktree_root / "bench" / "contradiction_longitudinal_claude.py"),
         "--output-dir", str(args.output_dir),
         "--scale", args.scale,
         "--seeds", *(str(s) for s in args.seeds),

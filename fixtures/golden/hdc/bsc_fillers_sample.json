@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_codebooks.py",
+  "name": "bsc_fillers_sample",
+  "payload": null,
+  "sha256": "de69be2b9cd2e70c8d87c19a6691c70645ab3e19205f43151ec832a1886a6d12",
+  "shape": [
+    510,
+    512
+  ],
+  "source": "src/iai_mcp/lilli/tiers/bsc.py filler_hv(s, D=4096) over sample_strings.json",
+  "subsystem": "hdc"
+}

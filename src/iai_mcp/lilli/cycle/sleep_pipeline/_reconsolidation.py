@@ -21,44 +21,39 @@ def step_reconsolidation(
     cfg = _load_reconsolidation_config()
 
     from iai_mcp.events import write_event
-    from iai_mcp.store import RECORDS_TABLE
     from iai_mcp.reconsolidation_critic import evaluate_batch_reconsolidation
     import uuid as _uuid
 
     now = self._now()
-    tbl = self._store.db.open_table(RECORDS_TABLE)
 
-    try:
-        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        df = (
-            tbl.search()
-            .where(
-                f"labile_until > '{now_str}'"
-            )
-            .to_pandas()
-        )
-    except (OSError, ValueError, RuntimeError, StoreError) as exc:
-        logger.debug("reconsolidation labile query failed: %s", exc)
-        df = None
-
-    records_scanned = 0 if df is None else int(len(df))
+    records_scanned = 0
     records_reconsolidated = 0
     critic_calls = 0
 
-    if (
-        df is not None
-        and not df.empty
-        and cfg.reconsolidation_tier1
-    ):
-
-        pool: list[tuple[_uuid.UUID, str]] = []
-        for chunk_idx, (_, row) in enumerate(df.iterrows(), start=1):
+    # Stream only the id of each labile row instead of materializing the full
+    # record corpus; the labile filter is already a SQL pushdown. The full
+    # record (with the decrypted literal surface) is re-fetched per id below.
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    pool: list[tuple[_uuid.UUID, str]] = []
+    want_pool = bool(cfg.reconsolidation_tier1)
+    try:
+        for chunk_idx, row in enumerate(
+            self._store.iter_record_columns(
+                ["id"],
+                batch_size=1024,
+                where=f"labile_until > '{now_str}'",
+            ),
+            start=1,
+        ):
             if self._check_interrupt(
                 SleepStep.RECONSOLIDATION,
                 chunk_idx,
                 interrupt_check,
             ):
                 return False, {}
+            records_scanned += 1
+            if not want_pool:
+                continue
             rid_str = row["id"]
             try:
                 rid = _uuid.UUID(str(rid_str))
@@ -68,7 +63,10 @@ def step_reconsolidation(
             if rec is None:
                 continue
             pool.append((rid, rec.literal_surface))
+    except (OSError, ValueError, RuntimeError, StoreError) as exc:
+        logger.debug("reconsolidation labile query failed: %s", exc)
 
+    if want_pool and records_scanned > 0:
         try:
             errors_by_id = evaluate_batch_reconsolidation(
                 pool,

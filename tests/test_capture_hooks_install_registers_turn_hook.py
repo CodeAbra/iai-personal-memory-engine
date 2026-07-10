@@ -83,9 +83,12 @@ def test_install_idempotent(home):
 
     settings = home / ".claude" / "settings.json"
     stop_entries = _entries(settings, "Stop")
-    submit_entries = _entries(settings, "UserPromptSubmit")
+    submit_cmds = _commands_for(_entries(settings, "UserPromptSubmit"))
     assert len(stop_entries) == 1, stop_entries
-    assert len(submit_entries) == 1, submit_entries
+    # UserPromptSubmit carries two distinct hooks (turn-capture + per-turn
+    # recall); idempotency means exactly one entry per marker, not one total.
+    assert sum(c.endswith("iai-mcp-turn-capture.sh") for c in submit_cmds) == 1, submit_cmds
+    assert sum(c.endswith("iai-mcp-per-turn-recall.sh") for c in submit_cmds) == 1, submit_cmds
 
 
 def test_uninstall_removes_both(home):

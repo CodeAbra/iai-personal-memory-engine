@@ -4,6 +4,8 @@ import json
 import logging
 import os
 
+import numpy as np
+
 from iai_mcp.exceptions import StoreError
 from iai_mcp.lifecycle_state import _utc_now_iso
 
@@ -60,15 +62,14 @@ def set_crisis_mode_via_s2_or_fallback(
 def run_essential_variable_tracker_hook(self) -> None:
     from iai_mcp.daemon_config import _load_sleep_overhaul_config
     from iai_mcp.ashby_step import (
+        CRISIS_GATING_VARIABLES,
         EssentialVariableTracker,
         TopologySnapshot,
+        decide_crisis_transition,
     )
+    from iai_mcp.graph import MemoryGraph
     from iai_mcp.events import write_event
-    from iai_mcp.store import RECORDS_TABLE
-    from iai_mcp.lilli.cycle.sleep_pipeline._live_graph import (
-        _is_tombstoned,
-        build_live_graph,
-    )
+    from iai_mcp.store import RECORDS_TABLE, EDGES_TABLE
 
     cfg = _load_sleep_overhaul_config()
     dry_run = cfg.dry_run
@@ -83,37 +84,74 @@ def run_essential_variable_tracker_hook(self) -> None:
         return
     if recs.empty:
         return
+    # Tombstoned records are dead memories, not graph nodes -- counting them
+    # inflates total_nodes against a numerator (live edges) that can never
+    # reference them once orphan_edge_sweep runs (HIPPO_CLEANUP), which
+    # silently deflates avg_degree and skews giant_component_fraction. Every
+    # topology variable in this hook (new and pre-existing) should read the
+    # same live graph the orphan sweep maintains.
+    if "tombstoned_at" in recs.columns:
+        recs = recs[recs["tombstoned_at"].isna()]
+    if recs.empty:
+        return
 
     import uuid as _uuid
-    # Build the graph on LIVE records + live-only edges only. Previously this
-    # hook constructed the graph from ALL records (tombstoned included) and ALL
-    # edges, so rich_club_coefficient was computed on a graph polluted by the
-    # 3000+ deduped/tombstoned nodes (and phantom nodes re-created by add_edge).
-    # That pushed rich_club below its floor and re-armed crisis on every sleep
-    # cycle even on a healthy store. build_live_graph mirrors retrieve.py's fix
-    # (53f04f9) so the crisis view matches recall's view of the graph.
-    g = build_live_graph(self._store)
+    g = MemoryGraph()
     community_ids: set = set()
     _community_embeddings: dict[str, list[list[float]]] = {}
+    live_node_labels: set[str] = set()
     for _, row in recs.iterrows():
-        if _is_tombstoned(row.get("tombstoned_at")):
-            continue
         try:
+            rid = _uuid.UUID(str(row["id"]))
             emb = row.get("embedding")
             emb_list = list(emb) if emb is not None else []
             cid_raw = row.get("community_id")
+            cid_uuid: _uuid.UUID | None
             if cid_raw is not None:
                 try:
-                    _cid_str = str(_uuid.UUID(str(cid_raw)))
+                    cid_uuid = _uuid.UUID(str(cid_raw))
+                    _cid_str = str(cid_uuid)
                     community_ids.add(_cid_str)
                     if emb_list:
                         _community_embeddings.setdefault(
                             _cid_str, []
                         ).append(emb_list)
                 except (ValueError, TypeError):
-                    pass
+                    cid_uuid = None
+            else:
+                cid_uuid = None
+            g.add_node(rid, cid_uuid, emb_list)
+            live_node_labels.add(str(rid))
         except (ValueError, TypeError, AttributeError):
             continue
+
+    try:
+        edges_df = (
+            self._store.db.open_table(EDGES_TABLE).search().to_pandas()
+        )
+        for _, e in edges_df.iterrows():
+            try:
+                src_s = str(e["src"])
+                dst_s = str(e["dst"])
+                # An edge referencing a tombstoned/missing record must not
+                # fabricate a phantom node -- add_edge() would otherwise
+                # silently create adjacency entries for ids that were never
+                # add_node()'d, re-inflating total_nodes exactly like the
+                # tombstone filter above was meant to prevent. HIPPO_CLEANUP
+                # sweeps these edges away periodically; until that sweep
+                # runs, the hook itself must not count them.
+                if src_s not in live_node_labels or dst_s not in live_node_labels:
+                    continue
+                src_u = _uuid.UUID(src_s)
+                dst_u = _uuid.UUID(dst_s)
+                g.add_edge(
+                    src_u, dst_u,
+                    weight=float(e.get("weight", 1.0) or 1.0),
+                )
+            except (ValueError, TypeError, KeyError):
+                continue
+    except (OSError, ValueError, RuntimeError, StoreError) as exc:
+        logger.debug("essential_variable_tracker edges query failed: %s", exc)
 
     total_nodes = g.node_count()
     if total_nodes == 0:
@@ -124,44 +162,151 @@ def run_essential_variable_tracker_hook(self) -> None:
     except (ValueError, RuntimeError, ZeroDivisionError) as exc:
         logger.debug("rich_club_coefficient failed: %s", exc)
         rc_ratio = 0.0
+    # self-loops (if any survive upstream filtering) are counted twice here,
+    # same as the pre-existing edge_density numerator -- kept consistent so
+    # avg_degree and edge_density agree on what an "edge" is.
     nedges = sum(1 for _ in g.iter_edges_with_weight())
     edge_density = (
         (2.0 * nedges) / (total_nodes * (total_nodes - 1))
         if total_nodes >= 2 else 0.0
     )
+    avg_degree = (2.0 * nedges / total_nodes) if total_nodes else 0.0
+
+    try:
+        indptr, indices, _data = g.to_csr_arrays()
+        # non_isolated must be computed over the SAME edge set that feeds
+        # the component search below -- to_csr_arrays() drops self-loops (a
+        # node linked only to itself has no real connectivity), so counting
+        # degree via g.degrees() (which does count a self-loop as +1 degree)
+        # would call a self-loop-only node "non-isolated" while the
+        # component search correctly treats it as its own singleton island.
+        # Deriving non_isolated from the CSR row pointers keeps both the
+        # numerator and denominator of giant_component_fraction defined over
+        # the identical connectivity graph.
+        non_isolated = sum(
+            1 for i in range(total_nodes) if indptr[i + 1] > indptr[i]
+        )
+        try:
+            from iai_mcp_native.graph import connected_components as _native_cc
+            components = _native_cc(indptr, indices, total_nodes)
+            giant = max((len(c) for c in components), default=0)
+        except (ImportError, AttributeError) as exc:
+            logger.debug(
+                "native connected_components unavailable, using scipy "
+                "fallback: %s", exc,
+            )
+            import scipy.sparse as _sp
+            import scipy.sparse.csgraph as _csgraph
+            csr = _sp.csr_matrix(
+                (
+                    np.ones(len(indices), dtype=np.float64)
+                    if len(indices)
+                    else np.zeros(0, dtype=np.float64),
+                    indices,
+                    indptr,
+                ),
+                shape=(total_nodes, total_nodes),
+            )
+            n_comp, labels = _csgraph.connected_components(
+                csr, directed=False,
+            )
+            if n_comp == 0:
+                giant = 0
+            else:
+                counts = np.bincount(labels, minlength=n_comp)
+                giant = int(counts.max())
+        # Vacuously healthy when there are no edges at all -- a graph with
+        # zero non-isolated nodes has no fragmentation to measure; the
+        # avg_degree floor is what catches the edgeless-collapse case.
+        giant_component_fraction = (
+            (giant / non_isolated) if non_isolated else 1.0
+        )
+    except (ValueError, RuntimeError, ImportError) as exc:
+        # Fail-open: a broken component sensor must never arm crisis. But a
+        # PERSISTENT failure silently halves the gating surface, so surface it
+        # at warning level to keep it observable in prod logs.
+        logger.warning(
+            "giant_component_fraction computation failed, "
+            "defaulting fail-healthy (1.0): %s",
+            exc,
+        )
+        giant_component_fraction = 1.0
 
     snapshot = TopologySnapshot(
         rich_club_ratio=float(rc_ratio),
         community_count=int(len(community_ids)),
         edge_density=float(edge_density),
         total_nodes=int(total_nodes),
+        avg_degree=float(avg_degree),
+        giant_component_fraction=float(giant_component_fraction),
     )
     tracker = EssentialVariableTracker(cfg)
     breaches = tracker.check(snapshot)
 
-    # rich_club_ratio is kept as a DIAGNOSTIC only, not a crisis trigger. On the
-    # real corpus the live (tombstone-filtered) rich_club sits ~0.019, just under
-    # the 0.02 floor, so it false-positives on a demonstrably healthy graph and
-    # is non-discriminant at this scale (a true collapse instead shows up as
-    # edge_density/community_count). edge_density and community_count remain the
-    # crisis triggers (both healthy with clear margin). The rich_club breach is
-    # still recorded as an event for observability.
-    _CRISIS_TRIGGER_VARS = {"edge_density", "community_count"}
-    crisis_mode_already_set_this_cycle = False
+    any_gating_breach = any(
+        breaches.get(var_name) is not None
+        for var_name in CRISIS_GATING_VARIABLES
+    )
+
+    state_record = self._load_state_record()
+    consecutive_breaches = int(
+        state_record.get("essential_variable_consecutive_breaches", 0)
+    )
+    consecutive_clears = int(
+        state_record.get("essential_variable_consecutive_clears", 0)
+    )
+    decision, new_consecutive_breaches, new_consecutive_clears = (
+        decide_crisis_transition(
+            any_gating_breach,
+            consecutive_breaches,
+            consecutive_clears,
+            arm_after_n=cfg.ev_arm_after_n,
+            disarm_after_n=cfg.ev_disarm_after_n,
+        )
+    )
+
+    if not dry_run:
+        # Persist the hysteresis counters BEFORE any crisis-mode write: the
+        # crisis writer (_set_crisis_mode_via_s2_or_fallback fallback path)
+        # does its own load-modify-save of the same lifecycle_state.json, so
+        # writing counters after it would clobber the counters this cycle
+        # just computed with whatever crisis_mode-only view the writer saved.
+        state_record["essential_variable_consecutive_breaches"] = (
+            new_consecutive_breaches
+        )
+        state_record["essential_variable_consecutive_clears"] = (
+            new_consecutive_clears
+        )
+        self._save_state_record(state_record)
+
+    crisis_mode_set = False
+    if decision is True and not dry_run:
+        first_gating_var = next(
+            (
+                var_name
+                for var_name in breaches
+                if var_name in CRISIS_GATING_VARIABLES
+                and breaches[var_name] is not None
+            ),
+            "unknown",
+        )
+        self._set_crisis_mode_via_s2_or_fallback(
+            value=True,
+            reason=f"essential_variable_breach:{first_gating_var}",
+        )
+        crisis_mode_set = True
+    elif decision is False and not dry_run:
+        current_record = self._load_state_record()
+        if bool(current_record.get("crisis_mode", False)):
+            self._set_crisis_mode_via_s2_or_fallback(
+                value=False,
+                reason="essential_variable_recovered",
+            )
+
     for var_name, breach in breaches.items():
         if breach is None:
             continue
-        is_trigger = var_name in _CRISIS_TRIGGER_VARS
-        crisis_mode_set = False
-        if is_trigger and not dry_run and not crisis_mode_already_set_this_cycle:
-            self._set_crisis_mode_via_s2_or_fallback(
-                value=True,
-                reason=f"essential_variable_breach:{var_name}",
-            )
-            crisis_mode_already_set_this_cycle = True
-            crisis_mode_set = True
-        elif is_trigger and not dry_run and crisis_mode_already_set_this_cycle:
-            crisis_mode_set = True
+        gates_crisis = var_name in CRISIS_GATING_VARIABLES
         write_event(
             self._store,
             "essential_variable_breach",
@@ -171,11 +316,11 @@ def run_essential_variable_tracker_hook(self) -> None:
                 "threshold": float(breach.threshold),
                 "direction": str(breach.direction),
                 "total_nodes": int(total_nodes),
-                "crisis_mode_set": bool(crisis_mode_set),
-                "is_crisis_trigger": bool(is_trigger),
+                "crisis_mode_set": bool(crisis_mode_set and not dry_run),
                 "dry_run_mode": bool(dry_run),
+                "gates_crisis": bool(gates_crisis),
             },
-            severity="warning",
+            severity="warning" if gates_crisis else "info",
         )
 
     if os.environ.get(

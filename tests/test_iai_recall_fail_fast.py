@@ -12,7 +12,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_store import _make
-from _socket_test_helpers import bind_fake_daemon_socket
 
 
 FAIL_FAST_CEILING_S = 3.5
@@ -45,7 +44,15 @@ def _unix_socket_server_stall(sock_path: str, stall_seconds: float = 60.0) -> th
     ready = threading.Event()
 
     def _server():
-        srv = bind_fake_daemon_socket(sock_path)
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(sock_path)
+        srv.listen(5)
         ready.set()
         srv.settimeout(120.0)
         try:
@@ -71,7 +78,15 @@ def _unix_socket_server_fast(sock_path: str, hits: list[dict]) -> threading.Even
     ready = threading.Event()
 
     def _server():
-        srv = bind_fake_daemon_socket(sock_path)
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(sock_path)
+        srv.listen(5)
         ready.set()
         srv.settimeout(10.0)
         try:
@@ -111,7 +126,6 @@ def _hermetic_env(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "store"))
     monkeypatch.delenv("IAI_DAEMON_SOCKET_PATH", raising=False)
-    monkeypatch.delenv("IAI_RECALL_READ_TIMEOUT", raising=False)
     yield
 
 
@@ -140,6 +154,11 @@ def test_slow_daemon_degrades_in_under_3s(monkeypatch, tmp_path, short_socket):
 
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", sock_path)
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
+    # Pin the read timeout: this test verifies the fail-fast MACHINERY (the
+    # socket read gives up and the degrade path engages within the ceiling).
+    # The shipped default is deliberately longer — it waits out a
+    # consolidating daemon for a real answer; policy rides the env override.
+    monkeypatch.setenv("IAI_RECALL_READ_TIMEOUT", "2.0")
 
     import iai_mcp.iai_cli as _iai_cli
 

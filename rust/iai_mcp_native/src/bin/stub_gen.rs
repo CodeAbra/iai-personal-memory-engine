@@ -1,10 +1,10 @@
 //! Emits the `.pyi` stub for the native wrapper module.
 //!
 //! Invocation:
-//! cargo run --bin stub_gen -p iai_mcp_native
+//!   cargo run --bin stub_gen -p iai_mcp_native
 //!
 //! Output:
-//! rust/iai_mcp_native/iai_mcp_native.pyi
+//!   rust/iai_mcp_native/iai_mcp_native.pyi
 //!
 //! The generated stub is the source of truth for `mypy --strict` checks
 //! against the Rust-facing Python surface. `maturin build` bundles it

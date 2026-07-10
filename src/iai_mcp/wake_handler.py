@@ -1,9 +1,29 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
-__all__ = ["WakeHandler"]
+__all__ = ["WakeHandler", "wake_signal_path"]
+
+WAKE_SIGNAL_FILENAME: str = "wake.signal"
+
+
+def wake_signal_path(store_root: Path | str | None = None) -> Path:
+    """Resolve the wake-signal file path under the active store root.
+
+    Mirrors ``lifecycle_state_path``/``daemon_state_path``: an explicit
+    ``store_root`` wins; absent that, the ``IAI_MCP_STORE`` environment
+    variable is honored (read at call time); absent both, the home-rooted
+    default is returned, keeping default resolution byte-identical to the
+    pre-existing hard-coded path.
+    """
+    if store_root is not None:
+        return Path(store_root) / WAKE_SIGNAL_FILENAME
+    env = os.environ.get("IAI_MCP_STORE")
+    if env:
+        return Path(env) / WAKE_SIGNAL_FILENAME
+    return Path.home() / ".iai-mcp" / WAKE_SIGNAL_FILENAME
 
 
 class WakeHandler:
@@ -16,24 +36,6 @@ class WakeHandler:
             self._wake_signal_path.unlink()
         except FileNotFoundError:
             return False
-        except OSError:
-            return False
-        return True
-
-    def signal_wake(self) -> bool:
-        """Create the wake signal so the next daemon boot enters WAKE.
-
-        Symmetric counterpart to ``consume_wake_signal``. Whoever brings the
-        daemon up from a hibernated (process-exited) state — the CLI
-        start/install path, or the per-turn capture hook — must create this
-        signal *before* the kickstart, so the booting daemon transitions
-        HIBERNATION -> WAKE and serves its socket, instead of re-reading the
-        persisted HIBERNATION state and immediately hibernate-exiting (which
-        closes the socket and leaves recall unserved). Idempotent.
-        """
-        try:
-            self._wake_signal_path.parent.mkdir(parents=True, exist_ok=True)
-            self._wake_signal_path.touch()
         except OSError:
             return False
         return True

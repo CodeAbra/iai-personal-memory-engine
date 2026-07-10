@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# scripts/idle_cpu_regression_fence.sh — A7 idle-CPU regression fence.
+# scripts/idle_cpu_regression_fence.sh — idle-CPU regression fence.
 #
 # SPEC A7: 30-min `python -m iai_mcp.daemon` run with first_turn_pending = 1
 # shows process CPU < 5% sampled every 30s.
 #
 # Usage:
-# scripts/idle_cpu_regression_fence.sh # 30-min run, samples every 30s
-# IAI_FENCE_DURATION_MIN=5 scripts/idle_cpu_regression_fence.sh # short run
+#   scripts/idle_cpu_regression_fence.sh        # 30-min run, samples every 30s
+#   IAI_FENCE_DURATION_MIN=5 scripts/idle_cpu_regression_fence.sh  # short run
 #
 # Pre-condition: daemon must already be running. The script does NOT spawn
 # the daemon and does NOT manage launchd — D7.2-26 + D7.2-27 keep daemon
 # lifecycle entirely under user discretion. To start the daemon manually
 # before running this fence, run:
 #
-# python -m iai_mcp.daemon &
+#   python -m iai_mcp.daemon &
 #
 # (development / manual subprocess path; foreground or background). The
 # fence treats the daemon as a black box and only reads its self-CPU% via
@@ -21,10 +21,10 @@
 # will work.
 #
 # Exit codes:
-# 0 — all samples < THRESHOLD_PCT sustained
-# 1 — at least one sample >= THRESHOLD_PCT
-# 2 — daemon not running / pgrep returned 0 matches
-# 3 — psutil / Python error
+#   0 — all samples < THRESHOLD_PCT sustained
+#   1 — at least one sample >= THRESHOLD_PCT
+#   2 — daemon not running / pgrep returned 0 matches
+#   3 — psutil / Python error
 set -eu
 
 DURATION_MIN="${IAI_FENCE_DURATION_MIN:-30}"

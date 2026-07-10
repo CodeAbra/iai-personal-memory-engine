@@ -9,7 +9,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _DispatchEmbedder:
 
     DIM = EMBED_DIM
@@ -31,7 +30,6 @@ class _DispatchEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
-
 
 def _make_record(
     *,
@@ -65,7 +63,6 @@ def _make_record(
         language=language,
     )
 
-
 def _add_contradicts_edge_raw(
     store, *, src: UUID, dst: UUID, when: datetime | None = None
 ) -> None:
@@ -78,15 +75,12 @@ def _add_contradicts_edge_raw(
         "updated_at": when or datetime.now(timezone.utc),
     }])
 
-
 @pytest.fixture
 def fresh_store(tmp_path):
     from iai_mcp.store import MemoryStore
-    return MemoryStore(path=tmp_path / "hippo")
-
+    return MemoryStore(path=tmp_path / "lancedb")
 
 def test_valid_from_set_from_created_at(fresh_store, monkeypatch):
-    from iai_mcp import core
     from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
 
@@ -107,7 +101,7 @@ def test_valid_from_set_from_created_at(fresh_store, monkeypatch):
     fresh_store.insert(rec)
 
     from iai_mcp import retrieve
-    from iai_mcp.embed import embedder_for_store  # noqa: F401 — patched above
+    from iai_mcp.embed import embedder_for_store  # noqa: F401  — patched above
     from iai_mcp.pipeline import recall_for_response
 
     graph, assignment, rc = retrieve.build_runtime_graph(fresh_store)
@@ -127,7 +121,6 @@ def test_valid_from_set_from_created_at(fresh_store, monkeypatch):
     assert hit is not None, f"target record not in hits: {[h.record_id for h in resp.hits]}"
     assert hit.valid_from == t0
     assert hit.valid_to is None
-
 
 def test_valid_to_none_when_no_contradiction(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
@@ -169,7 +162,6 @@ def test_valid_to_none_when_no_contradiction(fresh_store, monkeypatch):
     hit = next((h for h in resp.hits if h.record_id == rec1.id), None)
     assert hit is not None
     assert hit.valid_to is None
-
 
 def test_valid_to_set_when_newer_contradiction(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
@@ -221,7 +213,6 @@ def test_valid_to_set_when_newer_contradiction(fresh_store, monkeypatch):
         f"new has no newer contradicter; expected None, got {hit_new.valid_to}"
     )
 
-
 def test_older_contradiction_ignored_for_valid_to(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
@@ -266,7 +257,6 @@ def test_older_contradiction_ignored_for_valid_to(fresh_store, monkeypatch):
     assert hit.valid_to is None, (
         f"older dst must be ignored; expected None, got {hit.valid_to}"
     )
-
 
 def test_multiple_contradictions_use_oldest_newer(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
@@ -325,7 +315,6 @@ def test_multiple_contradictions_use_oldest_newer(fresh_store, monkeypatch):
         f"({t1}); got {hit_orig.valid_to}"
     )
 
-
 def test_stale_record_downweighted_not_hidden(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
@@ -381,12 +370,9 @@ def test_stale_record_downweighted_not_hidden(fresh_store, monkeypatch):
         f"got {hit_old.score} (fresh score={hit_new.score})"
     )
 
-
 def test_downweight_reranks_order(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
-    from iai_mcp import retrieve
-    from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
     monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
@@ -441,7 +427,6 @@ def test_downweight_reranks_order(fresh_store, monkeypatch):
         f"stale_score={hits[pos_stale]['score']} fresh_score={hits[pos_fresh]['score']}"
     )
 
-
 def test_episodic_schema_byte_identical(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
@@ -485,7 +470,6 @@ def test_episodic_schema_byte_identical(fresh_store, monkeypatch):
         f"records table schema must be byte-identical (write-once preserved); "
         f"before:\n{before_schema_repr}\nafter:\n{after_schema_repr}"
     )
-
 
 def test_json_wire_carries_new_keys(fresh_store, monkeypatch):
     from iai_mcp import core
@@ -538,7 +522,6 @@ def test_json_wire_carries_new_keys(fresh_store, monkeypatch):
     for entry in response["anti_hits"]:
         assert "valid_from" in entry, f"anti_hit missing valid_from: {entry}"
         assert "valid_to" in entry, f"anti_hit missing valid_to: {entry}"
-
 
 def test_reason_string_marked_stale(fresh_store, monkeypatch):
     from iai_mcp import embed as _embed_mod

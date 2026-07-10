@@ -51,8 +51,8 @@ def test_run_diagnosis_includes_z_row() -> None:
     results = run_diagnosis()
     names = [r.name for r in results]
 
-    assert len(results) == 25, (
-        f"expected 25 rows after hippo rows (r/s/t) + (u) centrality + (v) native embedder + (w) permanent-failed + (x) collapsed-timestamp check added; got {len(results)}: {names}"
+    assert len(results) == 26, (
+        f"expected 26 rows after hippo rows (r/s/t) + (u) centrality + (v) native embedder + (w) permanent-failed + (x) collapsed-timestamp + (y) RSS plateau check added; got {len(results)}: {names}"
     )
     assert results[-1].name.startswith("(z)"), (
         f"the new (z) row must be last; got last name {results[-1].name!r}"

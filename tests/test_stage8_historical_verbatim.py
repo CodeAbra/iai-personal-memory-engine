@@ -3,10 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
-
 
 class _BenchEmbedder:
 
@@ -35,7 +33,6 @@ class _BenchEmbedder:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
 
-
 def _make_rec(vec: list[float], text: str, tags: list[str]) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
@@ -60,7 +57,6 @@ def _make_rec(vec: list[float], text: str, tags: list[str]) -> MemoryRecord:
         language="en",
     )
 
-
 def _high_cos_variant(base_vec: list[float], noise_seed: int, noise_scale: float = 0.20) -> list[float]:
     import hashlib
     import random
@@ -79,12 +75,11 @@ def _high_cos_variant(base_vec: list[float], noise_seed: int, noise_scale: float
         mixed = [x / m_norm for x in mixed]
     return mixed
 
-
 def _seed_bench_scenario(tmp_path, n_filler: int = 8):
     from iai_mcp.retrieve import build_runtime_graph, contradict
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _BenchEmbedder(base_seed=24)
 
     cue_text = "Quote the original ETA wording."
@@ -131,7 +126,6 @@ def _seed_bench_scenario(tmp_path, n_filler: int = 8):
         gold_id_post_insert, wrong_id, no_edge_id_post_insert, cue_vec,
     )
 
-
 def test_bench_failing_cue_corrector_ranks_above_original(tmp_path):
     from iai_mcp.pipeline import recall_for_benchmark
 
@@ -167,13 +161,12 @@ def test_bench_failing_cue_corrector_ranks_above_original(tmp_path):
         f"Hits: {[(str(h.record_id)[:8], h.literal_surface, round(h.score, 3)) for h in resp.hits[:5]]}"
     )
 
-
 def test_superseded_original_in_top10_below_corrector_buried_cosine(tmp_path):
     from iai_mcp.retrieve import build_runtime_graph, contradict
     from iai_mcp.store import MemoryStore
     from iai_mcp.pipeline import recall_for_benchmark
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _BenchEmbedder(base_seed=77)
 
     cue_text = "Quote the original ETA wording."
@@ -238,7 +231,6 @@ def test_superseded_original_in_top10_below_corrector_buried_cosine(tmp_path):
         f"Hits: {[(str(h.record_id)[:8], h.literal_surface, round(h.score,3)) for h in resp.hits[:5]]}"
     )
 
-
 def test_neutral_cue_does_not_apply_downweight(tmp_path):
     from iai_mcp.pipeline import recall_for_benchmark
 
@@ -264,7 +256,6 @@ def test_neutral_cue_does_not_apply_downweight(tmp_path):
             f"~{HISTORICAL_VERBATIM_DOWNWEIGHT} downweight; got gap={gap:.4f}. "
             f"GOLD={gold_hit.score:.4f} WRONG={wrong_hit.score:.4f}"
         )
-
 
 def test_russian_historical_cue_corrector_ranks_above_original(tmp_path):
     from iai_mcp.pipeline import recall_for_benchmark
@@ -295,7 +286,6 @@ def test_russian_historical_cue_corrector_ranks_above_original(tmp_path):
         f"RU historical cue: corrector must rank above the superseded original "
         f"(current-fact primacy). corrector_rank={wrong_rank} gold_rank={gold_rank}."
     )
-
 
 def test_record_without_contradicts_edge_unaffected_by_downweight(tmp_path):
     from iai_mcp.pipeline import recall_for_benchmark
@@ -340,7 +330,6 @@ def test_record_without_contradicts_edge_unaffected_by_downweight(tmp_path):
         f"must not touch it."
     )
 
-
 def test_historical_verbatim_downweight_constant_is_module_level(tmp_path):
     from iai_mcp import pipeline as _pipeline_mod
 
@@ -352,7 +341,6 @@ def test_historical_verbatim_downweight_constant_is_module_level(tmp_path):
         f"HISTORICAL_VERBATIM_DOWNWEIGHT must be in (0, 1) for stability, "
         f"got {_pipeline_mod.HISTORICAL_VERBATIM_DOWNWEIGHT}"
     )
-
 
 def test_bench_harness_calls_classify_cue_for_intent(tmp_path):
     from iai_mcp.pipeline import recall_for_benchmark

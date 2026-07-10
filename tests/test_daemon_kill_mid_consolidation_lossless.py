@@ -14,7 +14,7 @@ from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
 
-_TEST_PASSPHRASE = "iai-mcp-test-passphrase-2026-04-30"
+_TEST_PASSPHRASE = "iai-mcp-test-passphrase"
 
 K_SEEDS = 5
 _CHILD_BARRIER_TIMEOUT_S = 60.0
@@ -143,6 +143,22 @@ def _active_count(store: MemoryStore) -> int:
     return int(row[0]) if row else 0
 
 
+def _indexable_count(store: MemoryStore) -> int:
+    """Rows the ANN index is expected to hold: live and fully embedded.
+
+    Matches the predicate the index rebuild selects on, so this is the only
+    count that is invariantly equal to the rebuilt index element count. A
+    plain tombstoned_at-IS-NULL snapshot also counts pending (not-yet-embedded)
+    rows, which the index legitimately excludes.
+    """
+    row = store.db._conn.execute(
+        "SELECT COUNT(*) FROM records"
+        " WHERE tombstoned_at IS NULL"
+        " AND COALESCE(embedding_pending, 0) = 0"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def test_sigkill_mid_write_leaves_store_lossless():
     tmp_root = Path(tempfile.mkdtemp(prefix="iai-lossless-gate-"))
     sentinel = tmp_root / ".child-ready"
@@ -201,12 +217,30 @@ def test_sigkill_mid_write_leaves_store_lossless():
 
             _run_consolidation_clean(reopened, tmp_root)
 
+            # The index must be reconciled to the CURRENT live, fully-embedded
+            # corpus after consolidation. Re-read that count now: consolidation
+            # legitimately mutates it (un-tombstoning pinned/never-decay rows,
+            # dropping expired tombstones, inserting a reflection record), so a
+            # pre-consolidation snapshot is stale and only coincidentally equal.
+            # The invariant is current-index == current-indexable-corpus.
             raw_after = int(reopened.db._hnsw.get_current_count())
-            assert raw_after == active, (
-                f"index not reconciled by consolidation: raw={raw_after} != "
-                f"active={active} (raw at boot was {raw_at_boot})"
+            active_labels_after = len(reopened.db._label_map)
+            indexable_after = _indexable_count(reopened)
+            # Raw element count includes nothing soft-deleted after a clean
+            # rebuild, and the active label map is the recall-visible set; both
+            # must equal the live indexable corpus, closing the soft-delete
+            # blind spot a single raw-count check would leave open.
+            assert raw_after == indexable_after, (
+                "index not reconciled by consolidation: "
+                f"index={raw_after} != live indexable corpus={indexable_after} "
+                f"(pre-consolidation snapshot was {active}, "
+                f"raw at boot was {raw_at_boot})"
             )
-            assert raw_after >= raw_at_boot, "consolidation shrank the index"
+            assert active_labels_after == indexable_after, (
+                "recall-visible label map diverged from the live corpus: "
+                f"active_labels={active_labels_after} != "
+                f"indexable={indexable_after}"
+            )
             churn_hits = reopened.query_similar(churn_vec, n=5)
             assert any(r.id not in set(seed_ids) for r in churn_hits), (
                 "no surviving churn record resolvable via the index after the "
@@ -286,3 +320,82 @@ def _run_consolidation_clean(store: MemoryStore, tmp_root: Path) -> None:
     assert int(result.get("critic_calls", 0) or 0) == 0, (
         "remote critic fired during the post-kill consolidation run"
     )
+
+
+def test_rebuild_index_reconciles_to_indexable_corpus():
+    """The ANN index rebuild must equal exactly the live, fully-embedded corpus.
+
+    This is the deterministic core invariant behind the SIGKILL recovery test,
+    proven here without the non-deterministic fork/kill race: insert N rows,
+    flush, tombstone K (including a pinned one), add a pending-embed row, reopen,
+    rebuild from SQLite, and assert the index holds exactly the rows that are
+    live (tombstoned_at IS NULL) and fully embedded (embedding_pending = 0) —
+    never a tombstoned row, never a pending row, never dropping a live one.
+    """
+    tmp_root = Path(tempfile.mkdtemp(prefix="iai-rebuild-invariant-"))
+    try:
+        store = MemoryStore(path=tmp_root)
+        ids: list[UUID] = []
+        for i in range(10):
+            rec = _make_pinned_seed(i)
+            ids.append(rec.id)
+            store.insert(rec)
+        from iai_mcp.store import flush_record_buffer
+
+        flush_record_buffer(store)
+
+        # Tombstone two rows directly (one of them pinned/never_decay) to model a
+        # corpus where SQLite carries dead rows the saved index has not yet shed.
+        with store.db._conn_lock:
+            for rid in ids[:2]:
+                store.db._conn.execute(
+                    "UPDATE records SET tombstoned_at = '2020-01-01 00:00:00'"
+                    " WHERE id = ?",
+                    (str(rid),),
+                )
+
+        # Add a not-yet-embedded row: live in SQLite but legitimately absent from
+        # the index until its embedding lands.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        store.db.insert_pending_row(
+            record_id=str(uuid4()),
+            tier="episodic",
+            literal_surface="alice pending embed in flight",
+            tags_json="[]",
+            provenance_json="[]",
+            created_at=now_iso,
+            updated_at=now_iso,
+        )
+        store.close()
+
+        reopened = MemoryStore(path=tmp_root)
+        try:
+            reopened.db._rebuild_index_from_sqlite()
+
+            indexable = _indexable_count(reopened)
+            index_count = int(reopened.db._hnsw.get_current_count())
+            assert index_count == indexable, (
+                "rebuild did not reconcile the index to the indexable corpus: "
+                f"index={index_count} != indexable={indexable}"
+            )
+            # 10 inserted, 2 tombstoned, 0 of the pending row embedded -> 8.
+            assert indexable == 8, f"expected 8 indexable rows, got {indexable}"
+
+            # The tombstoned rows must not be index-resolvable; the live ones must.
+            for i, rid in enumerate(ids):
+                vec = [0.0] * i + [1.0] + [0.0] * (EMBED_DIM - i - 1)
+                hit_ids = {r.id for r in reopened.query_similar(vec, n=3)}
+                if i < 2:
+                    assert rid not in hit_ids, (
+                        f"tombstoned row {i} still resolvable after rebuild"
+                    )
+                else:
+                    assert rid in hit_ids, (
+                        f"live row {i} not resolvable after rebuild"
+                    )
+        finally:
+            reopened.close()
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp_root, ignore_errors=True)

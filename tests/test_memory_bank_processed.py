@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import stat
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,8 +125,7 @@ def test_processed_salience_top_n_written_at_rem_completion(
     assert target.exists(), f"expected file at {target}"
 
     file_mode = oct(stat.S_IMODE(os.stat(target).st_mode))
-    if sys.platform != "win32":
-        assert file_mode == "0o600", f"file mode {file_mode} != 0o600"
+    assert file_mode == "0o600", f"file mode {file_mode} != 0o600"
 
     lines = _read_jsonl(target)
     expected_count = min(m_records, 4)

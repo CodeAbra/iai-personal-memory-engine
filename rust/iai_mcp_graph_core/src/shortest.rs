@@ -10,7 +10,7 @@
 //! coefficient implementation.
 //!
 //! The PyO3 entry point releases the GIL during the Rust kernel via
-//! `py.allow_threads(...)`. `distance_matrix` is O(V·(V+E)) and at the
+//! `py.allow_threads(|| ...)`. `distance_matrix` is O(V·(V+E)) and at the
 //! N≥2000 scale the daemon's status handler must stay responsive.
 //!
 //! Unreachable-cell handling: `distance_matrix` accepts a `null_value: f64`
@@ -76,7 +76,7 @@ fn build_ungraph_from_csr(
 /// Return a fresh `UnGraphMap` containing only the nodes (and edges
 /// between them) of the largest connected component of `graph`. Mirrors
 /// the `nx.connected_components(g)` → `max(..., key=len)` → `g.subgraph(...)
-///.copy()` pattern from the small-world coefficient implementation.
+/// .copy()` pattern from the small-world coefficient implementation.
 ///
 /// On an empty input the empty graph is returned. On an already-connected
 /// input a 1-component clone is returned — the post-call code path is
@@ -138,7 +138,7 @@ fn average_shortest_path_length_on_connected_subgraph(
 ///
 /// Build an undirected graph from the CSR buffers, take its largest
 /// connected component, and return the average shortest path length on
-/// that component. The Rust kernel runs under `py.allow_threads(...)`
+/// that component. The Rust kernel runs under `py.allow_threads(|| ...)`
 /// so the daemon's other Python callers stay responsive on N≥2000
 /// inputs.
 ///
@@ -146,10 +146,10 @@ fn average_shortest_path_length_on_connected_subgraph(
 /// applied here. `pyo3-stub-gen 0.6` (the only line compatible with the
 /// workspace's `pyo3 0.22` pin) does not implement `PyStubType` for
 /// `numpy::PyReadonlyArray1<T>`; annotating the function emits a `the
-/// trait bound …: PyStubType is not satisfied` compile error.
+/// trait bound … : PyStubType is not satisfied` compile error.
 /// Downstream callers that need a typed `.pyi` entry should treat the
 /// function as `def average_shortest_path_length(indptr: np.ndarray,
-/// indices: np.ndarray, n_nodes: int) -> float:...` and live with a
+/// indices: np.ndarray, n_nodes: int) -> float: ...` and live with a
 /// `--allow-untyped-call` exclusion until pyo3-stub-gen catches up.
 #[pyfunction]
 pub fn average_shortest_path_length(

@@ -64,14 +64,18 @@ WATCHDOG_PROBE_TIMEOUT_SEC: float = float(
 WATCHDOG_FAILURE_DEBOUNCE_N: int = int(
     os.environ.get("IAI_MCP_WATCHDOG_FAILURE_DEBOUNCE_N", "3"),
 )
-# Watchdog ceiling (4.0 GiB). The cap sits above the warm steady-state footprint
-# — the episodic corpus, the SQLite + hnsw index, the warm-on-WAKE graph cache,
-# and the deferred-capture drain loop — with headroom for VACUUM page cache and
-# the parallel drain, so it does not fire on legitimate steady state. The hnswlib
-# index rebuild runs in a spawn-context child worker, keeping the OPTIMIZE_HIPPO
-# transient out of the daemon address space. The cap still catches a runaway
-# leak: 4 GiB is well above the warm-plus-transient peak and well below host
-# memory pressure.
+# Watchdog ceiling (4.0 GiB). Calibrated against the current
+# corpus (25k+ episodic records, 270 MB SQLite, 17+ MB hnsw, plus the steady-state
+# warm-on-WAKE cache footprint and the deferred-capture drain loop). The previous
+# 2.5 GiB cap was set in mid-June when the corpus + warm caches sat near 1.72 GiB;
+# the warm plateau has since grown past 2.5 GiB on live observation, and the
+# watchdog was firing repeatedly on legitimate steady state (six kills in one day
+# during normal SLEEP cycles). The hnswlib index rebuild now runs in a spawn-
+# context child worker (so OPTIMIZE_HIPPO no longer adds a per-cycle transient
+# inside daemon address space), but the warm plateau itself needs the higher cap
+# to leave headroom for VACUUM page cache + the parallel deferred-capture drain.
+# The cap still catches a runaway leak — 4 GiB is well above the warm-plus-
+# transient peak and well below physical memory pressure on the 64 GiB host.
 # Operator-overridable via the env var.
 WATCHDOG_RSS_HARD_CAP_BYTES: int = int(
     os.environ.get("IAI_MCP_WATCHDOG_RSS_HARD_CAP_BYTES", "4294967296"),
@@ -138,6 +142,7 @@ async def _hippea_cascade_loop(
     from iai_mcp import retrieve
     from iai_mcp.daemon_state import load_state, save_state
     from iai_mcp.hippea_cascade import _install_warm, compute_and_fetch_warm
+    from iai_mcp.lock_protocol import check_consolidation_intent
     # late import so the package attribute is re-fetched and a monkeypatch stays visible
     from iai_mcp.daemon import write_event
 
@@ -149,6 +154,13 @@ async def _hippea_cascade_loop(
                 elapsed = _clock() - _pkg()._last_cascade_completed_at
                 if elapsed < HIPPEA_CASCADE_MIN_INTERVAL_SEC:
                     pass
+                elif await asyncio.to_thread(
+                    check_consolidation_intent, store.root / "hippo" / ".lock",
+                ):
+                    # existence-only, not staleness-aware — safe: the 5s poll
+                    # cadence re-checks next tick, so a stale flag only costs
+                    # extra cycles, never a hang
+                    log.debug("hippea cascade deferred: consolidation intent pending")
                 else:
                     try:
                         assignment = None
@@ -590,10 +602,7 @@ def _self_kill(reason: str, kind: str) -> None:
         _write_breadcrumb(line)
     except Exception:  # noqa: BLE001 -- breadcrumb is best-effort ONLY
         pass
-    if hasattr(signal, "SIGKILL"):
-        os.kill(os.getpid(), signal.SIGKILL)
-    else:
-        sys.exit(1)
+    os.kill(os.getpid(), signal.SIGKILL)
 
 
 def _capture_blackbox(
@@ -722,11 +731,7 @@ def _check_sleep_cycle_staleness(
         if not isinstance(progress, dict):
             return (False, {})
         attempt = progress.get("attempt")
-        # A retried-but-still-wedged cycle (attempt >= 2) is exactly the case the
-        # watchdog must catch, not ignore. Gate on attempt < 1 so any genuine
-        # running attempt is monitored; only attempt 0 / negative / non-int (and
-        # bool, since isinstance(True, int) is True) short-circuits.
-        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        if not isinstance(attempt, int) or attempt < 0 or attempt > 1:
             return (False, {})
         started_at_raw = progress.get("started_at")
         if not isinstance(started_at_raw, str) or not started_at_raw:
@@ -787,6 +792,11 @@ def _check_crisis_mode_expiry(
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         elapsed_sec = (now - since_dt).total_seconds()
+        if elapsed_sec < 0:
+            # since_ts is in the future (clock skew / forward-stamp corruption).
+            # Re-anchor to now so the safety net still fires ~threshold later
+            # instead of wedging crisis on forever.
+            return (False, {"backfilled_since_ts": now.isoformat()})
         if elapsed_sec <= threshold_sec:
             return (False, {})
         progress = state.get("sleep_cycle_progress") or {}
@@ -807,9 +817,10 @@ def _check_crisis_mode_expiry(
 
 
 async def _probe_status_roundtrip(sock_path: str, read_timeout: float) -> bool:
-    from iai_mcp._ipc import open_ipc_connection
     try:
-        reader, writer = await open_ipc_connection(sock_path, timeout=5.0)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(sock_path), timeout=5.0
+        )
     except (FileNotFoundError, ConnectionRefusedError, OSError):
         return False
     except asyncio.TimeoutError:
@@ -950,23 +961,44 @@ def _watchdog_tick(
     # --- sleep-cycle-staleness alert (informational, no kill) ---
     try:
         from iai_mcp.lifecycle_state import load_state as _load_lifecycle
+        from iai_mcp.events import query_events as _query_events
         lc_state = _load_lifecycle()
         is_stale, ctx = _check_sleep_cycle_staleness(
             lc_state, datetime.now(timezone.utc)
         )
         if is_stale:
             started_at = ctx["sleep_cycle_started_at"]
+            # Fast-path: in-process dedup skips a DB hit for ticks after the
+            # first emit within this process lifetime.
             if getattr(_pkg(), "_last_sleep_stale_started_at", "") != started_at:
+                # Durable dedup: scan the ledger for a prior event from the same
+                # stuck cycle (same started_at = same on-disk cycle identity) so
+                # the alert fires at most once per cycle even across daemon restarts.
+                already_emitted = False
                 try:
-                    write_event(
-                        store,
-                        DAEMON_SLEEP_CYCLE_STALE,
-                        ctx,
-                        severity="critical",
+                    prior_events = _query_events(
+                        store, kind=DAEMON_SLEEP_CYCLE_STALE, limit=500
                     )
+                    for ev in prior_events:
+                        if ev.get("data", {}).get("sleep_cycle_started_at") == started_at:
+                            already_emitted = True
+                            break
+                except Exception:  # noqa: BLE001 -- ledger read failure → treat as no prior
+                    pass
+                if already_emitted:
+                    # Prime the in-process fast-path so later ticks skip the DB hit.
                     setattr(_pkg(), "_last_sleep_stale_started_at", started_at)
-                except Exception:  # noqa: BLE001 -- ledger emit failure non-fatal
-                    log.debug("daemon_sleep_cycle_stale emit failed", exc_info=True)
+                else:
+                    try:
+                        write_event(
+                            store,
+                            DAEMON_SLEEP_CYCLE_STALE,
+                            ctx,
+                            severity="critical",
+                        )
+                        setattr(_pkg(), "_last_sleep_stale_started_at", started_at)
+                    except Exception:  # noqa: BLE001 -- ledger emit failure non-fatal
+                        log.debug("daemon_sleep_cycle_stale emit failed", exc_info=True)
     except Exception:  # noqa: BLE001 -- staleness check MUST NEVER crash the watchdog
         log.debug("sleep-cycle staleness check failed", exc_info=True)
 

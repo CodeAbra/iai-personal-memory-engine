@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 from iai_mcp.profile import (
     PHASE_1_LIVE,

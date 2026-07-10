@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
-from iai_mcp._filelock import LOCK_NB, LOCK_SH, LOCK_UN
-from iai_mcp._filelock import flock as _flock
 import os
 import shutil
 import subprocess
@@ -246,8 +245,8 @@ def _ex_held(store_dir: Path) -> bool:
     probe_fd = -1
     try:
         probe_fd = os.open(str(lock_path), os.O_RDWR)
-        _flock(probe_fd, LOCK_SH | LOCK_NB)
-        _flock(probe_fd, LOCK_UN)
+        fcntl.flock(probe_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(probe_fd, fcntl.LOCK_UN)
         return False
     except OSError as exc:
         if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):

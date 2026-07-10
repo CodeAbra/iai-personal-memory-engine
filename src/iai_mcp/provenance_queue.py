@@ -33,8 +33,19 @@ class ProvenanceWriteQueue:
         coalesce_ms: int = 50,
         max_queue_size: int = 4096,
         max_batch_pairs: int = 256,
+        overflow_dir: "Path | None" = None,
     ) -> None:
         self._store = store
+        # Bind the overflow directory to THIS queue's own store root once, at
+        # construction. It must never be re-derived from a process-global path at
+        # poll time: multiple queues in one process would otherwise all resolve to
+        # the same directory and drain each other's spilled batches into the wrong
+        # store. The store root already anchors at the install home, so the resolved
+        # path is unchanged in normal operation.
+        if overflow_dir is not None:
+            self._overflow_dir = Path(overflow_dir)
+        else:
+            self._overflow_dir = Path(store.root) / OVERFLOW_DIR_NAME
         self._coalesce_s = max(1, int(coalesce_ms)) / 1000.0
         self._max_batch = int(max_batch_pairs)
         self._q: queue.Queue = queue.Queue(maxsize=int(max_queue_size))
@@ -116,7 +127,7 @@ class ProvenanceWriteQueue:
         if not pairs:
             return
         try:
-            overflow_dir = Path.home() / ".iai-mcp" / OVERFLOW_DIR_NAME
+            overflow_dir = self._overflow_dir
             overflow_dir.mkdir(parents=True, exist_ok=True)
             ts_ms = int(time.time() * 1000)
             fpath = overflow_dir / f"{ts_ms}-{len(pairs)}-{id(pairs) & 0xFFFF:04x}.jsonl"
@@ -124,7 +135,7 @@ class ProvenanceWriteQueue:
             with tmp_path.open("w", encoding="utf-8") as fh:
                 for rid, entry in pairs:
                     fh.write(json.dumps({"id": str(rid), "entry": entry}) + "\n")
-            tmp_path.replace(fpath)
+            tmp_path.rename(fpath)
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("provenance_queue_spill_failed", extra={"err": str(exc)[:200], "n_pairs": len(pairs)})
             try:
@@ -137,7 +148,7 @@ class ProvenanceWriteQueue:
                 pass
 
     def _drain_overflow_dir(self) -> int:
-        overflow_dir = Path.home() / ".iai-mcp" / OVERFLOW_DIR_NAME
+        overflow_dir = self._overflow_dir
         if not overflow_dir.exists():
             return 0
         n_re_enqueued = 0
@@ -164,7 +175,7 @@ class ProvenanceWriteQueue:
                 logger.warning("provenance_queue_spill_drain_failed", extra={"err": str(exc)[:200]})
                 try:
                     failed = fpath.with_suffix(f".failed-{int(time.time())}.jsonl")
-                    fpath.replace(failed)
+                    fpath.rename(failed)
                     sys.stderr.write(
                         '{"event":"provenance_queue_spill_drain_failed","error":'
                         + _json_str(str(exc)) + '}\n'

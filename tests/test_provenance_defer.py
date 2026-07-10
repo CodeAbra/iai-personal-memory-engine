@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+
 from iai_mcp.provenance_buffer import (
     _BUFFER_FILENAME,
     defer_provenance,
@@ -14,7 +15,6 @@ from iai_mcp.provenance_buffer import (
 )
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
-
 
 def _make_record(store, text="alice test"):
     now = datetime.now(timezone.utc)
@@ -30,7 +30,6 @@ def _make_record(store, text="alice test"):
     store.insert(rec)
     return rec
 
-
 def test_defer_writes_jsonl(tmp_path):
     store = MemoryStore(path=tmp_path)
     rec = _make_record(store, "bob record")
@@ -45,7 +44,6 @@ def test_defer_writes_jsonl(tmp_path):
     assert entry["record_id"] == str(rec.id)
     assert entry["cue"] == "test cue"
 
-
 def test_flush_drains_buffer_to_store(tmp_path):
     store = MemoryStore(path=tmp_path)
     rec = _make_record(store, "alice flush test")
@@ -59,13 +57,11 @@ def test_flush_drains_buffer_to_store(tmp_path):
     assert len(loaded.provenance) >= 1
     assert loaded.provenance[-1]["cue"] == "flush cue"
 
-
 def test_flush_empty_buffer_returns_zero(tmp_path):
     store = MemoryStore(path=tmp_path)
     _make_record(store)
     count = flush_deferred_provenance(store)
     assert count == 0
-
 
 def test_flush_truncates_file(tmp_path):
     store = MemoryStore(path=tmp_path)
@@ -76,7 +72,6 @@ def test_flush_truncates_file(tmp_path):
 
     path = Path(store.root) / _BUFFER_FILENAME
     assert path.read_text().strip() == ""
-
 
 @pytest.mark.perf
 def test_bench_d_speed_still_green(tmp_path):
@@ -96,5 +91,5 @@ def test_bench_d_speed_still_green(tmp_path):
 
     min_p95 = best_of_n(_one_p95, n=3)
     assert min_p95 < D_SPEED_P95_MS, (
-        f"best-of-3 p95={min_p95:.1f}ms >= {D_SPEED_P95_MS}ms"
+        f"D-SPEED best-of-3 p95={min_p95:.1f}ms >= {D_SPEED_P95_MS}ms"
     )

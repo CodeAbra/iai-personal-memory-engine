@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 def _write_valid_creds(creds_path: Path, sub_type: str = "max") -> None:
@@ -100,7 +99,7 @@ def test_check_p_pass_when_sdk_absent(monkeypatch):
 
     def _raise_for_anthropic(name, *args, **kwargs):
         if name == "anthropic" or name.startswith("anthropic."):
-            raise ImportError(f"No module named '{name}'")
+            raise ImportError(f"No module named '{name}' (v7.5 expected)")
         return real_import(name, *args, **kwargs)
 
     with patch("builtins.__import__", side_effect=_raise_for_anthropic):

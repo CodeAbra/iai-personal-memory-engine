@@ -35,10 +35,8 @@ def cmd_crypto_status(args: argparse.Namespace) -> int:
         length = st.st_size
         status["mode"] = mode_octal
         status["mode_secure"] = (st.st_mode & 0o077 == 0)
-        status["uid"] = getattr(st, "st_uid", -1)
-        status["uid_matches_process"] = (
-            hasattr(_os, "geteuid") and st.st_uid == _os.geteuid()
-        )
+        status["uid"] = st.st_uid
+        status["uid_matches_process"] = (st.st_uid == _os.geteuid())
         status["length_bytes"] = length
         status["length_valid"] = (length == KEY_BYTES)
         status["passphrase_fallback_set"] = bool(
@@ -92,20 +90,48 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
 
     new_key = store._crypto_key_wrapper.rotate()
     store._crypto_key = new_key
-    store._invalidate_aesgcm_cache()
+
+    import json as _json_inner
 
     tbl = store.db.open_table(RECORDS_TABLE)
     record_count = 0
+    rotate_failures: list[tuple[str, str]] = []
     for rec in decrypted_records:
+        # Re-encrypt the encrypted columns in-place via a targeted SQL UPDATE.
+        # This avoids all side effects of store.insert (pattern separation,
+        # HNSW index rebuild, edge flush) and is purely a ciphertext swap.
+        # If the UPDATE fails, the original ciphertext under the old key
+        # remains intact on disk — the record is never lost.  On success,
+        # the row already holds the new-key ciphertext and there is nothing
+        # to delete.
         try:
-            tbl.delete(f"id = '{_uuid_literal(rec.id)}'")
-        except (OSError, ValueError, RuntimeError):
-            pass
-        try:
-            store.insert(rec)
+            rid = str(rec.id)
+            ad = store._ad(rec.id)
+            literal_ct = encrypt_field(
+                rec.literal_surface, new_key, associated_data=ad
+            )
+            provenance_plain = _json_inner.dumps(rec.provenance)
+            provenance_ct = encrypt_field(
+                provenance_plain, new_key, associated_data=ad
+            )
+            gain_plain = _json_inner.dumps(rec.profile_modulation_gain or {})
+            gain_ct = encrypt_field(
+                gain_plain, new_key, associated_data=ad
+            )
+            tbl.update(
+                where=f"id = '{_uuid_literal(rec.id)}'",
+                values={
+                    "literal_surface": literal_ct,
+                    "provenance_json": provenance_ct,
+                    "profile_modulation_gain_json": gain_ct,
+                },
+            )
             record_count += 1
-        except (OSError, ValueError, RuntimeError):
-            continue
+        except (OSError, ValueError, RuntimeError) as exc:
+            # Re-encrypt failed.  The original row is still on disk under
+            # the old key — do NOT delete it.  Record the failure so the
+            # operator can see which records could not be rotated.
+            rotate_failures.append((str(rec.id), str(exc)))
 
     event_count = 0
     for ev in decrypted_events:
@@ -120,19 +146,21 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
         except (OSError, ValueError, RuntimeError):
             continue
 
-    print(
-        _json.dumps(
-            {
-                "status": "rotated",
-                "user_id": user_id,
-                "records_re_encrypted": record_count,
-                "events_re_encrypted": event_count,
-                "algorithm": "AES-256-GCM",
-                "format": "iai:enc:v1:",
-            },
-            indent=2,
-        )
-    )
+    result: dict[str, object] = {
+        "status": "rotated" if not rotate_failures else "partial",
+        "user_id": user_id,
+        "records_re_encrypted": record_count,
+        "events_re_encrypted": event_count,
+        "algorithm": "AES-256-GCM",
+        "format": "iai:enc:v1:",
+    }
+    if rotate_failures:
+        result["records_failed"] = len(rotate_failures)
+        result["failed_record_ids"] = [r[0] for r in rotate_failures]
+        result["failure_details"] = [
+            {"id": r[0], "error": r[1]} for r in rotate_failures
+        ]
+    print(_json.dumps(result, indent=2))
     try:
         from iai_mcp.crypto_key_watch import sync_crypto_key_watcher_to_disk
         from iai_mcp.events import write_event
@@ -144,8 +172,9 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
                 "source": "cli_rotate",
                 "records_re_encrypted": record_count,
                 "events_re_encrypted": event_count,
+                "records_failed": len(rotate_failures),
             },
-            severity="info",
+            severity="info" if not rotate_failures else "error",
         )
         sync_crypto_key_watcher_to_disk(store)
     except (OSError, ValueError, RuntimeError) as exc:

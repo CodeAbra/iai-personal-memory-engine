@@ -383,6 +383,12 @@ def test_dispatch_end_to_end_knob_moves_verbatim_position(tmp_path, monkeypatch)
     (store, embedder, graph, assignment, rich_club,
      verbatim_id, hub_ids, cue_text) = _seed_verbatim_vs_hubs_separated(tmp_path)
 
+    # The exact-similarity authority pins an exact-cosine match at the head of
+    # the response regardless of the knob under test, which would swallow the
+    # position delta this test exercises. Disable it so this test keeps
+    # exercising the knob's end-to-end effect on the graph-ranked path.
+    monkeypatch.setenv("IAI_MCP_EXACT_AUTHORITY_OFF", "1")
+
     monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
 
     monkeypatch.setitem(core._profile_state, "literal_preservation", "strong")

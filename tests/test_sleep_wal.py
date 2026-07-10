@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from iai_mcp.sleep_wal import SleepWAL, WALEntry, TOMBSTONE_TTL_DAYS
+from iai_mcp.sleep_wal import SleepWAL, TOMBSTONE_TTL_DAYS
 
 @pytest.fixture
 def wal(tmp_path):

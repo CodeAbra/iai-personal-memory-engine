@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests._store_raw import open_store_raw
+
 import numpy as np
 import pytest
 
@@ -16,15 +18,7 @@ lancedb = pytest.importorskip("lancedb")
 
 from scripts.migrate_lance_to_hippo import (
     main,
-    move_to_trash,
-    pre_flight_daemon_alive,
-    rebuild_and_persist_hnsw,
-    rollback,
-    stream_copy_table,
-    verify_record_parity,
-    write_failure_json,
 )
-from iai_mcp.hippo import HippoDB
 from iai_mcp.types import EMBED_DIM
 
 
@@ -159,7 +153,7 @@ def test_migration_happy_path(tmp_path: Path, monkeypatch, _no_daemon_guard) -> 
 
     db_path = tmp_path / "hippo" / "brain.sqlite3"
     assert db_path.exists()
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     rows = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
     conn.close()
     assert rows == 3, f"expected 3 migrated records, got {rows}"
@@ -176,7 +170,7 @@ def test_migration_record_vector_byte_strict(tmp_path: Path, monkeypatch, _no_da
     main()
 
     db_path = tmp_path / "hippo" / "brain.sqlite3"
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     conn.row_factory = sqlite3.Row
 
     for rec in records:
@@ -375,7 +369,7 @@ def test_migration_dry_run_keeps_lancedb(tmp_path: Path, monkeypatch, _no_daemon
 
     hippo_db_path = tmp_path / "hippo" / "brain.sqlite3"
     if hippo_db_path.exists():
-        conn = sqlite3.connect(str(hippo_db_path))
+        conn = open_store_raw(hippo_db_path)
         count = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
         conn.close()
         assert count == 0, (

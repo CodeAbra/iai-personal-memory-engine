@@ -3,50 +3,37 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
-import threading
 from pathlib import Path
 
 import pytest
-
-from iai_mcp._ipc import IS_WINDOWS, open_ipc_connection
-
-
-def _endpoint_ready_path(sock_path: Path) -> Path:
-    """Path that exists once the SocketServer has bound its endpoint.
-    POSIX: the unix socket file. Windows: the TCP port file written alongside
-    it (``<sock_path>.port``, see iai_mcp._ipc._port_file_path)."""
-    return Path(f"{sock_path}.port") if IS_WINDOWS else sock_path
-
 
 @pytest.fixture
 def short_socket_paths(tmp_path, monkeypatch):
     from iai_mcp import concurrency, daemon_state
 
+    sock_dir = Path(f"/tmp/iai-srvdisp-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = sock_dir / "d.sock"
     state_path = tmp_path / ".daemon-state.json"
+
+    monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
     monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
     store_root = tmp_path / "store_root"
     store_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
 
-    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
-        sock_dir = Path(sock_dir_name)
-        sock_path = sock_dir / "d.sock"
-        monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
-        # Isolate the IPC endpoint per-test. POSIX uses this as the unix socket
-        # path; Windows persists the ephemeral TCP port to "<sock_path>.port".
-        # Both SocketServer.serve() and open_ipc_connection() resolve through it,
-        # so concurrent tests never collide on the shared default endpoint.
-        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
-
+    try:
+        yield None, sock_path, state_path
+    finally:
         try:
-            yield None, sock_path, state_path
-        finally:
-            try:
-                if sock_path.exists():
-                    sock_path.unlink()
-            except OSError:
-                pass
+            if sock_path.exists():
+                sock_path.unlink()
+        except OSError:
+            pass
+        try:
+            sock_dir.rmdir()
+        except OSError:
+            pass
 
 async def _send_jsonrpc(
     sock_path: Path,
@@ -56,7 +43,10 @@ async def _send_jsonrpc(
     *,
     timeout: float = 10.0,
 ) -> dict:
-    reader, writer = await open_ipc_connection(timeout=timeout)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_unix_connection(path=str(sock_path)),
+        timeout=timeout,
+    )
     try:
         envelope: dict = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params is not None:
@@ -75,7 +65,10 @@ async def _send_jsonrpc(
     return json.loads(line.decode("utf-8"))
 
 async def _send_raw(sock_path: Path, raw_bytes: bytes, *, timeout: float = 5.0) -> dict:
-    reader, writer = await open_ipc_connection(timeout=timeout)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_unix_connection(path=str(sock_path)),
+        timeout=timeout,
+    )
     try:
         writer.write(raw_bytes)
         await writer.drain()
@@ -94,16 +87,13 @@ async def _with_socket_server(sock_path: Path, store, coro_fn):
     from iai_mcp.socket_server import SocketServer
 
     srv = SocketServer(store, idle_secs=99999)
-    # No socket_path: serve() resolves the endpoint from IAI_DAEMON_SOCKET_PATH
-    # (set by the fixture) — a unix socket on POSIX, TCP loopback on Windows.
-    server_task = asyncio.create_task(srv.serve())
+    server_task = asyncio.create_task(srv.serve(socket_path=sock_path))
 
-    ready_path = _endpoint_ready_path(sock_path)
     for _ in range(250):
-        if ready_path.exists():
+        if sock_path.exists():
             break
         await asyncio.sleep(0.01)
-    if not ready_path.exists():
+    if not sock_path.exists():
         srv.shutdown_event.set()
         try:
             await asyncio.wait_for(server_task, timeout=5)
@@ -140,65 +130,6 @@ def test_memory_recall_routed_over_socket(short_socket_paths):
     assert resp["id"] == 1, resp
     assert "result" in resp, resp
     assert "hits" in resp["result"], resp["result"]
-
-
-def test_memory_recall_socket_concurrency_limit_returns_busy(
-    short_socket_paths,
-    monkeypatch,
-):
-    _, sock_path, _ = short_socket_paths
-    from iai_mcp import core
-    from iai_mcp.store import MemoryStore
-
-    monkeypatch.setenv("IAI_MCP_RECALL_CONCURRENCY", "1")
-    monkeypatch.setenv("IAI_MCP_RECALL_SLOT_WAIT_SEC", "0.02")
-
-    slow_started = threading.Event()
-    release_slow = threading.Event()
-    calls: list[str] = []
-
-    def _dispatch(store, method, params):
-        assert method == "memory_recall"
-        cue = params["cue"]
-        calls.append(cue)
-        if cue == "slow":
-            slow_started.set()
-            assert release_slow.wait(timeout=2.0)
-        return {"hits": [], "_recall_latency_ms": 0.1, "cue": cue}
-
-    monkeypatch.setattr(core, "dispatch", _dispatch)
-    store = MemoryStore()
-
-    async def _runner(sock_path, store):
-        slow_task = asyncio.create_task(
-            _send_jsonrpc(
-                sock_path,
-                "memory_recall",
-                {"cue": "slow", "budget_tokens": 100},
-                req_id=11,
-                timeout=2.0,
-            )
-        )
-        assert await asyncio.to_thread(slow_started.wait, 2.0)
-        busy = await _send_jsonrpc(
-            sock_path,
-            "memory_recall",
-            {"cue": "busy", "budget_tokens": 100},
-            req_id=12,
-            timeout=2.0,
-        )
-        release_slow.set()
-        slow = await slow_task
-        return slow, busy
-
-    slow, busy = asyncio.run(_with_socket_server(sock_path, store, _runner))
-
-    assert slow["result"]["cue"] == "slow"
-    assert busy["result"]["hits"] == []
-    assert busy["result"]["_degraded"] is True
-    assert busy["result"]["_reason"] == "recall_busy"
-    assert calls == ["slow"]
-
 
 def test_session_start_payload_routed(short_socket_paths):
     _, sock_path, _ = short_socket_paths

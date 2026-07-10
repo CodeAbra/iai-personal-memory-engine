@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import pytest
 from iai_mcp.lilli.tiers.sparse_vsa import (
     LILLI_SPARSE_DIM,
     SPARSE_K,
     TIER_INFO,
     bind,
     bundle,
-    filler_hv,
     pack_indices,
     permute,
     role_hv,
     similarity,
-    unbind,
     unpack_indices,
 )
 

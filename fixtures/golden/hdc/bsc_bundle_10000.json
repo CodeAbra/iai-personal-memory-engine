@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "bsc_bundle_10000",
+  "payload": null,
+  "sha256": "b3ecf80399b9bda18674c8989d07330b188c36b45e2cae9f49383e457a919359",
+  "shape": [
+    3,
+    1250
+  ],
+  "source": "src/iai_mcp/lilli/tiers/bsc.py D=10000 bundle table (1250 bytes/row, 2-byte tail): bound_i = bind(role_i, role_{i+1}); rows[0:3]=bundle(bound[:n]) for n in (3,7,10). Exercises the scalar tail-byte vote of the SWAR bundle.",
+  "subsystem": "hdc"
+}

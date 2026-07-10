@@ -55,7 +55,7 @@ def _make(text: str = "hello", language: str = "en"):
 
 
 def _write_plaintext_row(store, rec):
-    import sqlite3
+    from tests._store_raw import open_store_raw
     import numpy as np
 
     db_path = store.root / "hippo" / "brain.sqlite3"
@@ -65,7 +65,7 @@ def _write_plaintext_row(store, rec):
     created_at = rec.created_at.isoformat() if rec.created_at else None
     updated_at = rec.updated_at.isoformat() if rec.updated_at else None
 
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         conn.execute(
             "INSERT OR REPLACE INTO records "
@@ -138,7 +138,7 @@ def test_migration_preserves_content_byte_for_byte(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
-    text = "MEM-01 verbatim: Привет, мир"
+    text = "verbatim content: Привет, мир"
     rec = _make(text=text, language="ru")
     _write_plaintext_row(store, rec)
 
@@ -211,7 +211,6 @@ def test_migration_writes_event(tmp_path):
 
 
 def test_migration_encrypts_events_data_column(tmp_path):
-    from iai_mcp.events import write_event
     from iai_mcp.migrate import migrate_encryption_v2_to_v3
     from iai_mcp.store import MemoryStore, EVENTS_TABLE
 

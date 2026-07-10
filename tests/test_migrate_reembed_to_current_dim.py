@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-import pytest
 
 
 class _DimEmbedder:
@@ -88,7 +87,7 @@ def test_reembed_upgrades_dim_and_preserves_all_non_embedding_fields(tmp_path, m
     for rid in seeded_ids:
         post = store.get(rid)
         assert post is not None
-        assert post.literal_surface == pre[rid].literal_surface, "MEM-01: literal_surface byte-identical"
+        assert post.literal_surface == pre[rid].literal_surface, "literal_surface byte-identical"
         assert post.tier == pre[rid].tier
         assert post.tags == pre[rid].tags
         assert post.language == pre[rid].language

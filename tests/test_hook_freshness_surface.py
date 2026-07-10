@@ -14,10 +14,15 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    platform.system() == "Windows",
-    reason="POSIX bash + AF_UNIX",
-)
+pytestmark = [
+    pytest.mark.skipif(platform.system() == "Windows", reason="POSIX bash + AF_UNIX"),
+    pytest.mark.skipif(
+        os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
+        reason=(
+            "bash hook reads the store via inline stdlib sqlite3 and cannot read the engine format"
+        ),
+    ),
+]
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "src" / "iai_mcp" / "_deploy" / "hooks" / "iai-mcp-turn-capture.sh"

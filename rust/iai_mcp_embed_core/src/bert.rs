@@ -111,7 +111,7 @@ impl BertEmbeddings {
         let word_emb = embedding(VOCAB_SIZE, HIDDEN_SIZE, vb_emb.pp("word_embeddings"))?;
         let pos_emb = embedding(MAX_POSITION, HIDDEN_SIZE, vb_emb.pp("position_embeddings"))?;
         let type_emb = embedding(TYPE_VOCAB_SIZE, HIDDEN_SIZE, vb_emb.pp("token_type_embeddings"))?;
-        // must pass 1e-12 explicitly — candle default is 1e-5
+        // Pitfall 3: must pass 1e-12 explicitly — candle default is 1e-5
         let layer_norm = layer_norm(HIDDEN_SIZE, LAYER_NORM_EPS, vb_emb.pp("LayerNorm"))?;
         Ok(Self { word_emb, pos_emb, type_emb, layer_norm })
     }
@@ -124,7 +124,7 @@ impl BertEmbeddings {
         let seq_len = input_ids.dim(1)?;
         let device = input_ids.device();
 
-        // Generate position ids at runtime (buffer in safetensors is ignored)
+        // Generate position ids at runtime (buffer in safetensors is ignored per Pattern 4)
         let position_ids = Tensor::arange(0u32, seq_len as u32, device)?
             .unsqueeze(0)?;
 
@@ -269,7 +269,7 @@ impl BertLayer {
         let attn_out = self.attn_output_ln.forward(&attn_out.add(hidden)?)?;
 
         // --- FFN sub-layer ---
-        // gelu_erf (exact erf), NOT gelu (tanh approximation)
+        // Pitfall 2: gelu_erf (exact erf), NOT gelu (tanh approximation)
         let ffn_inter = self.ffn_intermediate.forward(&attn_out)?.gelu_erf()?;
         let ffn_out = self.ffn_output.forward(&ffn_inter)?;
         // Residual + LayerNorm
@@ -315,6 +315,12 @@ pub struct BertEmbedder {
     encoder: BertEncoder,
     tokenizer: Tokenizer,
     device: Device,
+    // Dedicated rayon pool: candle's CPU kernels par_iter on whatever pool is
+    // current, and the process-global registry is shared with every other
+    // native component — a wedged/poisoned global pool would freeze encode()
+    // forever (callers park on a LockLatch while global workers idle).
+    // install() scopes all kernel parallelism to this private pool.
+    pool: rayon::ThreadPool,
 }
 
 impl BertEmbedder {
@@ -328,7 +334,7 @@ impl BertEmbedder {
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| EmbedError::Tokenizer(e.to_string()))?;
 
-        // must configure truncation to 512; encode() alone does NOT truncate
+        // Pitfall 7: must configure truncation to 512; encode() alone does NOT truncate
         tokenizer
             .with_truncation(Some(TruncationParams {
                 max_length: MAX_POSITION,
@@ -343,7 +349,7 @@ impl BertEmbedder {
         #[cfg(not(feature = "metal"))]
         let device = Device::Cpu;
 
-        // unsafe scoped to mmap call; file integrity assumed via HF CDN + REVISION pin
+        // Pattern 4: unsafe scoped to mmap call; file integrity assumed via HF CDN + REVISION pin
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
         }?;
@@ -351,11 +357,23 @@ impl BertEmbedder {
         let embeddings = BertEmbeddings::load(vb.clone())?;
         let encoder = BertEncoder::load(vb)?;
 
-        Ok(Self { embeddings, encoder, tokenizer, device })
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .thread_name(|i| format!("embed-rayon-{i}"))
+            .build()
+            .map_err(|e| EmbedError::Pool(e.to_string()))?;
+
+        Ok(Self { embeddings, encoder, tokenizer, device, pool })
     }
 
     /// Encode a single text string to a 384-dim L2-normalized embedding.
     pub fn encode(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        // The whole pass runs inside the private pool so no tokenizer or
+        // candle kernel can ever park on the shared global registry.
+        self.pool.install(|| self.encode_inner(text))
+    }
+
+    fn encode_inner(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         let encoding = self
             .tokenizer
             .encode(text, true)
@@ -364,7 +382,7 @@ impl BertEmbedder {
         let ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
         let seq_len = ids.len();
 
-        // additive attention mask — 0.0 for real tokens, f32::MIN for padding
+        // Pattern 9: additive attention mask — 0.0 for real tokens, f32::MIN for padding
         let mask: Vec<f32> = encoding
             .get_attention_mask()
             .iter()
@@ -380,7 +398,7 @@ impl BertEmbedder {
         let embedded = self.embeddings.forward(&input_ids, &token_type_ids)?;
         let encoded = self.encoder.forward(&embedded, &attention_mask)?;
 
-        // raw CLS token — NOT BertPooler dense+tanh
+        // Pattern 8 / Pitfall 1: raw CLS token — NOT BertPooler dense+tanh
         let cls = encoded.i((0, 0))?;
 
         // L2 normalize

@@ -95,7 +95,6 @@ def test_recall_cue_encode_failure_emits_store_event_and_raises(
     from iai_mcp.embed import Embedder
     from iai_mcp.events import flush_event_buffer, query_events
     from iai_mcp.exceptions import NativeError
-    from iai_mcp.types import EMBED_DIM
 
     store = _make_store(tmp_path)
     _seed_one_record(store, "test content for recall")

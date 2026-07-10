@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import tempfile
-
 import json
 import time
 from datetime import datetime, timezone, timedelta
@@ -22,7 +20,7 @@ def _make_large_live_file(deferred_dir: Path, session_id: str, n_events: int = 5
         "version": 1,
         "deferred_at": datetime.now(timezone.utc).isoformat(),
         "session_id": session_id,
-        "cwd": str(Path(tempfile.gettempdir()) / "latency-test"),
+        "cwd": "/tmp/latency-test",
     }
     lines = [json.dumps(header, ensure_ascii=False)]
     base = datetime(2026, 5, 31, 8, 0, 0, tzinfo=timezone.utc)

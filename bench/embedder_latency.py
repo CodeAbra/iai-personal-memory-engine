@@ -1,5 +1,4 @@
 """Latency gate: Rust ≤ PyTorch / 2 on single-embed p50 AND p95."""
-
 from __future__ import annotations
 
 import argparse
@@ -209,7 +208,7 @@ def main_outer() -> int:
 
     if daemon_running():
         sys.stderr.write(
-            "ERROR: daemon is running. This gate requires daemon OFF for "
+            "ERROR: daemon is running. The latency gate requires daemon OFF for "
             "clean measurement (Hippo/lifecycle interference distorts latency).\n"
             "Run `iai-mcp daemon stop` and re-try.\n"
         )
@@ -268,9 +267,9 @@ def main_outer() -> int:
             print()
             for v in violations:
                 print(f"  {v}", file=sys.stderr)
-            print("\n*** FAIL ***", file=sys.stderr)
+            print("\n*** LATENCY GATE FAIL ***", file=sys.stderr)
             return 1
-        print("\n*** PASS: Rust ≥ 2× PyTorch on both p50 and p95 ***")
+        print("\n*** LATENCY GATE PASS: Rust ≥ 2× PyTorch on both p50 and p95 ***")
     return 0
 
 

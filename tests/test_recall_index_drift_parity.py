@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from uuid import uuid4, UUID
+from uuid import UUID
 
 import numpy as np
 import pytest
@@ -66,7 +66,6 @@ def test_drift_parity_overlay_superset_of_offline_rebuild(tmp_path):
 
     store = _make_store(tmp_path)
 
-    import threading
     with rgc._GEN_LOCK:
         rgc._current_generation = 0
     rgc.reset_dirty_counter()
@@ -255,7 +254,6 @@ def test_long_horizon_drift_replay_fuse_trips(tmp_path, monkeypatch):
 
 def test_long_horizon_drift_max_age_trip(tmp_path):
     from iai_mcp import runtime_graph_cache as rgc
-    from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.community import CommunityAssignment
 
     store = _make_store(tmp_path)

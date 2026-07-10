@@ -4,15 +4,12 @@ import sys
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-import pytest
 
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.session import (
-    L0_RECORD_UUID,
     SessionStartPayload,
     _clean_surface,
     _compose_session_start_payload,
-    _recent_thread_segment,
     _session_state_hash,
     format_payload_as_markdown,
 )

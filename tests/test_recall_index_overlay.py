@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import sys
-import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from uuid import uuid4, UUID
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -12,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from test_store import _make
 
-from iai_mcp.types import EMBED_DIM, MemoryRecord
+from iai_mcp.types import EMBED_DIM
 
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch, tmp_path):
@@ -36,7 +35,6 @@ def _build_overlay_snapshot(store, *, generation: int, rebuild_ts: str | None = 
     from iai_mcp.community import CommunityAssignment
     from iai_mcp import runtime_graph_cache as rgc
 
-    import threading
     with rgc._GEN_LOCK:
         rgc._current_generation = generation - 1
     if rebuild_ts is not None:
@@ -61,7 +59,7 @@ def test_cache_version_bumped():
     assert rgc.CACHE_VERSION != "62-04-v4", (
         f"CACHE_VERSION must be bumped from 62-04-v4; got {rgc.CACHE_VERSION!r}"
     )
-    assert rgc.CACHE_VERSION == "62-02-v5"
+    assert rgc.CACHE_VERSION == "62-02-v6"
 
 def test_overlay_hit_serves_cached_o1(tmp_path, monkeypatch):
     from iai_mcp import runtime_graph_cache as rgc
@@ -69,7 +67,6 @@ def test_overlay_hit_serves_cached_o1(tmp_path, monkeypatch):
 
     store = _make_store(tmp_path)
 
-    import threading
     with rgc._GEN_LOCK:
         rgc._current_generation = 0
     rgc.reset_dirty_counter()
@@ -180,7 +177,6 @@ def test_epoch_mismatch_typed_bypass(tmp_path, monkeypatch):
 def test_invariant_failure_bypass(tmp_path, monkeypatch):
     from iai_mcp import runtime_graph_cache as rgc
     from iai_mcp.community import CommunityAssignment
-    import json
 
     store = _make_store(tmp_path)
 
@@ -245,7 +241,7 @@ def test_load_recall_structural_uses_overlay_hit(tmp_path, monkeypatch):
     with rgc._GEN_LOCK:
         rgc._rebuild_timestamp_override = ""
 
-    a, rc, md, source = rgc.load_recall_structural(store)
+    a, rc, md, source, _node_degrees = rgc.load_recall_structural(store)
     assert source == "overlay", (
         f"load_recall_structural must route via overlay HIT; got source={source!r}"
     )
@@ -288,7 +284,7 @@ def test_load_recall_structural_epoch_mismatch_falls_to_last_good(tmp_path, monk
     monkeypatch.setattr(_rc_mod, "rich_club_nodes", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("rich_club_nodes on hot path")))
     monkeypatch.setattr(_ret_mod, "build_runtime_graph", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("build_runtime_graph on hot path")))
 
-    a, rc, md, source = rgc.load_recall_structural(store)
+    a, rc, md, source, _node_degrees = rgc.load_recall_structural(store)
     assert source in ("last_good", "normal"), (
         f"On overlay bypass, must return last_good or normal (Layer-1); got {source!r}"
     )
@@ -299,7 +295,6 @@ def test_load_recall_structural_epoch_mismatch_falls_to_last_good(tmp_path, monk
 
 def test_recall_path_boost_does_not_bump_epoch(tmp_path, monkeypatch):
     from iai_mcp import runtime_graph_cache as rgc
-    from iai_mcp.store import MemoryStore
     from iai_mcp.community import CommunityAssignment
 
     store = _make_store(tmp_path)
@@ -388,7 +383,6 @@ def test_freshness_fuse_trips_on_max_age(tmp_path, monkeypatch):
     import iai_mcp.community as _cm
     import iai_mcp.richclub as _rc_mod
     import iai_mcp.retrieve as _ret_mod
-    from iai_mcp.store import MemoryStore
 
     store = _make_store(tmp_path)
 
@@ -579,7 +573,6 @@ def test_recall_index_rebuild_step_position():
 
 def test_recall_index_rebuild_step_stamps_fresh_generation(tmp_path, monkeypatch):
     from iai_mcp import runtime_graph_cache as rgc
-    from iai_mcp.store import MemoryStore
     from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
 
     store = _make_store(tmp_path)

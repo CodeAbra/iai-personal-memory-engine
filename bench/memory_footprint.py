@@ -4,6 +4,7 @@ import argparse
 import gc
 import json
 import os
+import resource
 import sys
 import tempfile
 import time
@@ -41,11 +42,6 @@ def _threshold_mb_for_n(n: int) -> float:
 
 
 def _rss_mb() -> float:
-    if sys.platform == "win32":
-        import psutil
-        mi = psutil.Process().memory_info()
-        return float(getattr(mi, "peak_wset", mi.rss)) / 1024.0 / 1024.0
-    import resource
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform == "darwin":
         return float(r) / 1024.0 / 1024.0
@@ -190,14 +186,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bench.memory_footprint",
         description=(
-            "RAM bench. Seeds N records, optionally builds "
-            "the runtime graph, reports peak RSS. Target: "
-            "<=1600 MB at N=1000 on a 16+ GB host."
+            "OPS-11 / M-03 RAM bench. Seeds N records, optionally builds "
+            "the runtime graph, reports peak RSS. Target (D26-01): "
+            "<=1600 MB at N=1000 on a 16+ GB host. The N=10k path is "
+            "deferred (DEF-25-F LanceDB native hang)."
         ),
     )
     parser.add_argument(
         "--n", "--n-records", dest="n", type=int, default=1_000,
-        help="record count to seed (default 1000)",
+        help="record count to seed (default 1000 per D26-01)",
     )
     parser.add_argument(
         "--dim", type=int, default=EMBED_DIM,
@@ -215,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Enable MemoryStore.enable_async_writes() before the "
             "seed loop so inserts go through the coalescing AsyncWriteQueue. "
-            "Target: amortise the ~0.3 MB/insert store buffer overhead by "
+            "Target: amortise the ~0.3 MB/insert LanceDB buffer overhead by "
             "batching 128 inserts per flush."
         ),
     )

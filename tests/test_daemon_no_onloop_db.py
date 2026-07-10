@@ -9,10 +9,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import pytest
 
 from iai_mcp.community import CommunityAssignment
-from iai_mcp.daemon import WATCHDOG_PROBE_TIMEOUT_SEC, _probe_status_roundtrip
+from iai_mcp.daemon import _probe_status_roundtrip
 from iai_mcp.hippea_cascade import (
     _install_warm,
     compute_and_fetch_warm,
@@ -518,7 +517,6 @@ def test_no_double_submit_under_burst(tmp_path, monkeypatch):
 
 def test_lifecycle_tick_no_onloop_store_block(tmp_path):
     from iai_mcp.daemon import _store_is_empty
-    import inspect
 
     store_root = tmp_path / ".iai-mcp"
     store_root.mkdir(parents=True, exist_ok=True)

@@ -4,13 +4,11 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import numpy as np
-import pytest
 
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
-
 
 class _FakeEmbedder:
 
@@ -24,7 +22,6 @@ class _FakeEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [list(self._vec) for _ in texts]
-
 
 def _make(vec: list[float], text: str = "rec", tier: str = "episodic") -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -50,9 +47,8 @@ def _make(vec: list[float], text: str = "rec", tier: str = "episodic") -> Memory
         language="en",
     )
 
-
 def _build_store_and_graph(tmp_path, n: int) -> tuple[MemoryStore, MemoryGraph, list[MemoryRecord]]:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs: list[MemoryRecord] = []
     for i in range(n):
         vec = [0.0] * EMBED_DIM
@@ -75,7 +71,6 @@ def _build_store_and_graph(tmp_path, n: int) -> tuple[MemoryStore, MemoryGraph, 
         })
     return store, graph, recs
 
-
 def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
     cid = uuid4()
     centroid = [1.0] + [0.0] * (EMBED_DIM - 1)
@@ -87,7 +82,6 @@ def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
         top_communities=[cid],
         mid_regions={cid: [r.id for r in recs]},
     )
-
 
 def _matmul_with_counter(counter: dict[str, int]):
     orig = np.matmul
@@ -109,7 +103,6 @@ def _matmul_with_counter(counter: dict[str, int]):
 
     return wrapped
 
-
 def test_recall_for_benchmark_runs_one_pool_cosine(tmp_path, monkeypatch):
     from iai_mcp.pipeline import recall_for_benchmark
 
@@ -128,11 +121,10 @@ def test_recall_for_benchmark_runs_one_pool_cosine(tmp_path, monkeypatch):
     )
 
     assert counter["count"] == 1, (
-        f"cue-vs-large-pool matmul fired "
+        f"Single-pass violation: cue-vs-large-pool matmul fired "
         f"{counter['count']} times via recall_for_benchmark; expected "
         "exactly 1 (the shared cosine pass at the top of _recall_core)."
     )
-
 
 def test_recall_for_response_runs_one_pool_cosine(tmp_path, monkeypatch):
     from iai_mcp.pipeline import recall_for_response
@@ -152,11 +144,10 @@ def test_recall_for_response_runs_one_pool_cosine(tmp_path, monkeypatch):
     )
 
     assert counter["count"] == 1, (
-        f"cue-vs-large-pool matmul fired "
+        f"Single-pass violation: cue-vs-large-pool matmul fired "
         f"{counter['count']} times via recall_for_response; expected "
         "exactly 1 (the shared cosine pass at the top of _recall_core)."
     )
-
 
 def test_l0_fastpath_runs_zero_pool_cosines(tmp_path, monkeypatch):
     import iai_mcp.gate as gate_mod

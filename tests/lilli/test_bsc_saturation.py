@@ -11,7 +11,6 @@ from iai_mcp.lilli.tiers.bsc import (
     _max_bundle_pairs,
     bundle,
     filler_hv,
-    role_hv,
 )
 
 def _open_store(tmpdir: str, monkeypatch: pytest.MonkeyPatch):
@@ -135,7 +134,7 @@ def test_telemetry_kind_string_matches_events_module() -> None:
     from iai_mcp import events
 
     if not hasattr(events, "TELEMETRY_ROLE_SATURATION"):
-        pytest.skip("events.TELEMETRY_ROLE_SATURATION not yet defined")
+        pytest.skip("events.TELEMETRY_ROLE_SATURATION not yet defined (46-10 has not shipped)")
 
     assert _TELEMETRY_ROLE_SATURATION_KIND == events.TELEMETRY_ROLE_SATURATION, (
         f"bsc._TELEMETRY_ROLE_SATURATION_KIND={_TELEMETRY_ROLE_SATURATION_KIND!r} "
@@ -164,3 +163,34 @@ def test_bundle_over_cap_emits_then_raises(tmp_path, monkeypatch) -> None:
         )
     finally:
         _close_store(store)
+
+
+def test_bundle_over_cap_no_store_logs_then_raises(caplog) -> None:
+    import logging
+
+    roles = [
+        "WHEN", "WHERE", "ROLE", "PROJECT", "COMMUNITY_ID",
+        "TEMPORAL_POSITION", "ACTOR", "OBJECT", "INTENT", "MODALITY", "LANG",
+    ]
+    assert len(roles) == 11
+    pairs = [(r, filler_hv(f"v{i}")) for i, r in enumerate(roles)]
+
+    with caplog.at_level(logging.ERROR, logger="iai_mcp.lilli.tiers.bsc"):
+        with pytest.raises(BundleCapacityError):
+            bundle(pairs)
+
+    # EMIT-THEN-RAISE contract: with store=None and n > max_pairs, the saturation
+    # signal must still be recorded (degraded to a log-only emit) before the raise.
+    saturation_logs = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR
+        and r.name == "iai_mcp.lilli.tiers.bsc"
+        and "saturation" in r.getMessage().lower()
+    ]
+    assert len(saturation_logs) >= 1, (
+        "EMIT-THEN-RAISE contract violated: with store=None and n > max_pairs, no "
+        "saturation log was recorded before BundleCapacityError. The saturation "
+        "signal is lost exactly in the failure case it exists to record."
+    )
+    msg = saturation_logs[0].getMessage()
+    assert "11" in msg and "10" in msg, msg

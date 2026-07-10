@@ -10,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// Load a float32 little-endian, C-order.npy file into a flat `Vec<f32>`.
+/// Load a float32 little-endian, C-order .npy file into a flat `Vec<f32>`.
 ///
 /// Returns `(data, shape)` where `data.len() == shape.iter().product()`.
 /// Errors on header parse failure or dtype mismatch.
@@ -70,7 +70,7 @@ pub fn load_npy_f32<P: AsRef<Path>>(path: P) -> io::Result<(Vec<f32>, Vec<usize>
         ));
     }
 
-    // Parse 'shape': (N, M,...)
+    // Parse 'shape': (N, M, ...)
     let shape_start = header.find("'shape':").ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "no shape key in header")
     })?;

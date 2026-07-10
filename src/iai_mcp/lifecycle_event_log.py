@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import gzip
 import json
 import os
 import shutil
 from datetime import datetime, timedelta, timezone
-
-from iai_mcp._filelock import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
 from typing import Any
 
@@ -74,12 +73,12 @@ class LifecycleEventLog:
             0o600,
         )
         try:
-            flock(fd, LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_EX)
             try:
                 os.write(fd, line.encode("utf-8"))
                 os.fsync(fd)
             finally:
-                flock(fd, LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -128,7 +127,7 @@ class LifecycleEventLog:
         if not target.exists():
             return []
         out: list[dict[str, Any]] = []
-        with target.open("r", encoding="utf-8") as f:
+        with target.open("r") as f:
             for line in f:
                 line = line.strip()
                 if not line:

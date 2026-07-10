@@ -11,19 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from iai_mcp._ipc import IS_WINDOWS
-
-# Heavy end-to-end integration test: builds the Node mcp-wrapper via npm and
-# drives it against an embedded AF_UNIX fake daemon, exercising the full
-# stdio<->unix-socket bridge and reconnect path. Both the npm subprocess
-# invocation and the AF_UNIX bridge are POSIX-stack-specific; a Windows port
-# needs the Node wrapper to speak TCP loopback (separate effort). The Windows
-# socket dispatch/reconnect behavior is covered by the ported _ipc unit tests.
-pytestmark = pytest.mark.skipif(
-    IS_WINDOWS,
-    reason="AF_UNIX + npm + Node-wrapper bridge integration; Windows path covered by _ipc unit tests",
-)
-
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "mcp-wrapper"
 
@@ -173,8 +160,8 @@ def _drop_fake_daemon_conn(proc: subprocess.Popen) -> None:
 
 @pytest.fixture
 def fake_daemon():
-    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
-    sock_dir = Path(sock_dir_ctx.name)
+    sock_dir = Path(f"/tmp/iai-mcp-disconnect-{os.getpid()}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
 
     proc = _spawn_fake_daemon(sock_path)
@@ -200,7 +187,6 @@ def fake_daemon():
         shutil.rmtree(sock_dir, ignore_errors=True)
     except OSError:
         pass
-    sock_dir_ctx.cleanup()
 
 def _spawn_wrapper(
     built_wrapper: Path,

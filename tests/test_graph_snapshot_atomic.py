@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest import mock
 from uuid import uuid4
 
 import pytest
@@ -29,7 +28,7 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    s = MemoryStore(path=tmp_path / "hippo")
+    s = MemoryStore(path=tmp_path / "lancedb")
     s.root = tmp_path
     return s
 
@@ -50,11 +49,7 @@ def _make_assignment(n_communities: int = 2) -> CommunityAssignment:
 
 
 class _CrashAfterTmpWrite(OSError):
-    """Sentinel exception class: a monkeypatched ``os.replace`` raises
-    this to simulate a kernel panic between the ``.tmp`` write and the
-    final rename. Production code catches ``OSError``, so the subclass
-    flows through the existing ``except OSError`` branch in
-    ``runtime_graph_cache.py``."""
+    pass
 
 
 def test_crash_after_tmp_write_leaves_previous_snapshot_intact(store, monkeypatch):
@@ -68,7 +63,7 @@ def test_crash_after_tmp_write_leaves_previous_snapshot_intact(store, monkeypatc
     v1_bytes = cache_path.read_bytes()
     v1_loaded = runtime_graph_cache.try_load(store)
     assert v1_loaded is not None
-    v1_assignment, v1_rich, _v1_payload, _v1_maxdeg = v1_loaded
+    v1_assignment, v1_rich, _v1_payload, _v1_maxdeg, _v1_node_degrees = v1_loaded
     assert v1_assignment.modularity == pytest.approx(0.42)
     assert set(v1_rich) == set(rich_club_v1)
 
@@ -92,7 +87,7 @@ def test_crash_after_tmp_write_leaves_previous_snapshot_intact(store, monkeypatc
     )
     after_crash = runtime_graph_cache.try_load(store)
     assert after_crash is not None
-    after_assignment, after_rich, _ap, _am = after_crash
+    after_assignment, after_rich, _ap, _am, _after_node_degrees = after_crash
     assert after_assignment.modularity == pytest.approx(0.42)
     assert set(after_rich) == set(rich_club_v1)
     assert not tmp_sidecar.exists(), (
@@ -154,7 +149,7 @@ def test_save_calls_fsync_before_replace(store, monkeypatch):
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None
-    loaded_assignment, loaded_rich, _np, _md = loaded
+    loaded_assignment, loaded_rich, _np, _md, _loaded_node_degrees = loaded
     assert loaded_assignment.modularity == pytest.approx(0.42)
     assert set(loaded_rich) == set(rich_club)
 

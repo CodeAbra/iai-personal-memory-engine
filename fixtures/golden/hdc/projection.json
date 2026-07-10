@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "f32",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_projection.py",
+  "name": "projection",
+  "payload": null,
+  "sha256": "df97cc72a960567da17edbba16107881340349bd47b69f9b58d3091d96eb4e4e",
+  "shape": [
+    384,
+    10000
+  ],
+  "source": "src/iai_mcp/lilli/core/projection.py",
+  "subsystem": "hdc"
+}

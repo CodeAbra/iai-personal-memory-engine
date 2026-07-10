@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from iai_mcp._ipc import IS_WINDOWS, cleanup_ipc_address, open_ipc_connection, shutdown_ipc, start_ipc_server
 from iai_mcp.concurrency import SOCKET_PATH, cleanup_stale_socket
 from iai_mcp.core import UnknownMethodError
 
@@ -21,25 +20,6 @@ ERR_INVALID_PARAMS = -32602
 ERR_PARSE_ERROR = -32700
 
 IDLE_SECS_DEFAULT = 1800
-RECALL_BUSY_REASON = "recall_busy"
-RECALL_CONCURRENCY_DEFAULT = 2
-RECALL_SLOT_WAIT_SEC_DEFAULT = 0.25
-
-
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    try:
-        value = int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, value)
-
-
-def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
-    try:
-        value = float(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, value)
 
 
 def _inherit_activated_socket() -> socket.socket | None:
@@ -92,43 +72,10 @@ class SocketServer:
         if idle_secs is None:
             idle_secs = IDLE_SECS_DEFAULT
         self.idle_secs = idle_secs
-        self._recall_slots = asyncio.Semaphore(
-            _env_int("IAI_MCP_RECALL_CONCURRENCY", RECALL_CONCURRENCY_DEFAULT)
-        )
-        self._recall_slot_wait_sec = _env_float(
-            "IAI_MCP_RECALL_SLOT_WAIT_SEC",
-            RECALL_SLOT_WAIT_SEC_DEFAULT,
-        )
         self.last_activity_ts: float = time.monotonic()
         self.active_connections: int = 0
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self._state = state
-
-    async def _dispatch_jsonrpc_method(self, method: str, params: dict) -> Any:
-        from iai_mcp.core import dispatch
-
-        if method != "memory_recall" or "cue" not in params:
-            return await asyncio.to_thread(dispatch, self.store, method, params)
-
-        try:
-            await asyncio.wait_for(
-                self._recall_slots.acquire(),
-                timeout=max(self._recall_slot_wait_sec, 0.001),
-            )
-        except asyncio.TimeoutError:
-            return {
-                "hits": [],
-                "anti_hits": [],
-                "activation_trace": [],
-                "budget_used": 0,
-                "_degraded": True,
-                "_reason": RECALL_BUSY_REASON,
-            }
-
-        try:
-            return await asyncio.to_thread(dispatch, self.store, method, params)
-        finally:
-            self._recall_slots.release()
 
     async def handle(
         self,
@@ -141,14 +88,6 @@ class SocketServer:
                 line = await reader.readline()
                 if not line:
                     break
-                # NB: last_activity_ts is intentionally NOT updated for every
-                # inbound line. It must track REAL memory traffic (recall/capture)
-                # only — never control-plane messages, in particular the watchdog's
-                # periodic {"type":"status"} liveness probe (every 7-30s). Counting
-                # those probes as activity kept _interrupt_check (daemon) perpetually
-                # True, so the sleep cycle never completed and never hibernated ->
-                # the 221% CPU churn. It is set below, only for dispatched JSON-RPC
-                # method calls.
                 req_id: Any = None
                 try:
                     req = json.loads(line)
@@ -190,6 +129,29 @@ class SocketServer:
                         await writer.drain()
                     continue
 
+                # A genuine external MCP memory operation. Only these count as
+                # "the user is actively working" for the sleep pipeline's
+                # interrupt-check -- internal health/liveness probes and other
+                # control-plane messages (handled above) must NOT, or the
+                # daemon's own liveness watchdog would perpetually reset this
+                # timestamp and starve consolidation. Dashboard READ verbs are
+                # observation, not work — a watching brain view polling every
+                # few seconds must not defer consolidation forever either.
+                _p = req.get("params") if isinstance(req, dict) else None
+                # The observation set is imported from brainview as the single
+                # source of truth — a hand-copied tuple here would drift and let
+                # a dashboard polling a read verb reset the activity clock,
+                # starving consolidation.
+                from iai_mcp.brainview import BRAIN_VIEW_OBSERVATION_VERBS
+                _is_observation = (
+                    isinstance(req, dict)
+                    and req.get("method") == "brain_view"
+                    and isinstance(_p, dict)
+                    and str(_p.get("verb")) in BRAIN_VIEW_OBSERVATION_VERBS
+                )
+                if not _is_observation:
+                    self.last_activity_ts = time.monotonic()
+
                 ok, err = _validate_jsonrpc_envelope(req)
                 req_id = req.get("id") if isinstance(req, dict) else None
                 if not ok:
@@ -203,13 +165,35 @@ class SocketServer:
                     continue
                 method = req["method"]
                 params = req.get("params") or {}
-                # Real memory traffic: mark activity only for dispatched JSON-RPC
-                # method calls so background consolidation defers while the user is
-                # actively recalling/capturing. Control/status probes never reach
-                # here, so they no longer keep the daemon awake.
-                self.last_activity_ts = time.monotonic()
                 try:
-                    result = await self._dispatch_jsonrpc_method(method, params)
+                    from iai_mcp.core import dispatch
+                    # Foreground-priority marker: while a live recall is in
+                    # flight, polite background loops (deferred-capture drain
+                    # and friends) yield the shared connection and the GIL.
+                    _fg = method in (
+                        "memory_recall",
+                        "memory_recall_structural",
+                        # A live search is foreground work too: a relayed
+                        # teach must yield to it, not just to recalls.
+                        "memory_search",
+                    )
+                    if _fg:
+                        try:
+                            from iai_mcp.concurrency import foreground_begin
+                            foreground_begin()
+                        except Exception:  # noqa: BLE001 -- beacon is advisory
+                            _fg = False
+                    try:
+                        result = await asyncio.to_thread(
+                            dispatch, self.store, method, params,
+                        )
+                    finally:
+                        if _fg:
+                            try:
+                                from iai_mcp.concurrency import foreground_end
+                                foreground_end()
+                            except Exception:  # noqa: BLE001 -- beacon is advisory
+                                pass
                     resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
                 except UnknownMethodError as e:
                     resp = {
@@ -243,6 +227,18 @@ class SocketServer:
                     }
                 writer.write((json.dumps(resp) + "\n").encode("utf-8"))
                 await writer.drain()
+        except ValueError:
+            # readline() raises when a single line exceeds the 64MB limit;
+            # reply with a parse error instead of dropping the task uncaught.
+            try:
+                writer.write((json.dumps({
+                    "jsonrpc": "2.0", "id": None,
+                    "error": {"code": ERR_PARSE_ERROR,
+                              "message": "request line exceeds size limit"},
+                }) + "\n").encode("utf-8"))
+                await writer.drain()
+            except (OSError, ConnectionError):
+                pass
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
         finally:
@@ -255,32 +251,35 @@ class SocketServer:
 
 
     async def serve(self, socket_path: Path | None = None) -> None:
-        if IS_WINDOWS:
-            # Windows: TCP server on loopback; socket_path is unused
-            server, actual_addr, needs_cleanup = await start_ipc_server(self.handle)
-            try:
-                async with server:
-                    await self.shutdown_event.wait()
-                    server.close()
-                    await server.wait_closed()
-            finally:
-                if needs_cleanup:
-                    shutdown_ipc(actual_addr)
-            return
-
         if socket_path is None:
             env_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
             socket_path = Path(env_path) if env_path else SOCKET_PATH
 
+        sig = inspect.signature(asyncio.start_unix_server)
+        supports_cleanup_socket = "cleanup_socket" in sig.parameters
+
+        # One JSON-RPC request is one line; a relayed document upload
+        # (base64, ≤25 MB raw) must fit the StreamReader line buffer.
+        _line_limit = 64 * 1024 * 1024
         inherited = _inherit_activated_socket()
         if inherited is not None:
-            server = await asyncio.start_unix_server(self.handle, sock=inherited)
-            needs_cleanup = False
-            actual_addr: Any = str(socket_path)
+            server = await asyncio.start_unix_server(
+                self.handle,
+                sock=inherited,
+                limit=_line_limit,
+            )
         else:
-            cleanup_ipc_address(socket_path)
+            cleanup_stale_socket(socket_path)
             socket_path.parent.mkdir(parents=True, exist_ok=True)
-            server, actual_addr, needs_cleanup = await start_ipc_server(self.handle, socket_path)
+            server_kwargs: dict[str, Any] = (
+                {"cleanup_socket": True} if supports_cleanup_socket else {}
+            )
+            server = await asyncio.start_unix_server(
+                self.handle,
+                path=str(socket_path),
+                limit=_line_limit,
+                **server_kwargs,
+            )
             try:
                 os.chmod(str(socket_path), 0o600)
             except OSError:
@@ -292,5 +291,8 @@ class SocketServer:
                 server.close()
                 await server.wait_closed()
         finally:
-            if inherited is None and needs_cleanup:
-                shutdown_ipc(actual_addr)
+            if inherited is None and not supports_cleanup_socket:
+                try:
+                    socket_path.unlink()
+                except (FileNotFoundError, OSError):
+                    pass

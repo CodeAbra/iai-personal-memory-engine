@@ -7,7 +7,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 def _make_episodic(text: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
@@ -31,7 +30,6 @@ def _make_episodic(text: str) -> MemoryRecord:
         tags=[],
         language="en",
     )
-
 
 def _make_schema(text: str, pattern: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -57,7 +55,6 @@ def _make_schema(text: str, pattern: str) -> MemoryRecord:
         language="en",
     )
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -72,11 +69,10 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 def _seed_mixed_tier_store(tmp_path):
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     episodic_records = [_make_episodic(f"episodic verbatim text {i}") for i in range(3)]
     schema_records = [
         _make_schema(f"schema record {i}", pattern=f"test:r7:{i}")
@@ -88,7 +84,6 @@ def _seed_mixed_tier_store(tmp_path):
         store.insert(r)
     return store, episodic_records, schema_records
 
-
 def test_baseline_recall_default_mode_is_verbatim_per_d14():
     import inspect
     from iai_mcp.retrieve import recall
@@ -99,7 +94,6 @@ def test_baseline_recall_default_mode_is_verbatim_per_d14():
         f"retrieve.recall default mode must be 'verbatim', "
         f"got {sig.parameters['mode'].default!r}"
     )
-
 
 def test_baseline_recall_verbatim_filters_to_episodic_only(tmp_path):
     from iai_mcp.retrieve import recall
@@ -126,7 +120,6 @@ def test_baseline_recall_verbatim_filters_to_episodic_only(tmp_path):
             f"verbatim mode hit {h.record_id} has tier {rec.tier!r}, expected 'episodic'"
         )
 
-
 def test_baseline_recall_concept_mode_returns_all_tiers(tmp_path):
     from iai_mcp.retrieve import recall
 
@@ -144,7 +137,6 @@ def test_baseline_recall_concept_mode_returns_all_tiers(tmp_path):
         f"concept mode baseline must include schema tier (no filter); "
         f"schema_ids={schema_id_set}, hit_ids={hit_ids}"
     )
-
 
 def test_dispatch_falls_back_to_baseline_on_graph_build_failure(tmp_path, monkeypatch):
     from iai_mcp import core
@@ -174,7 +166,6 @@ def test_dispatch_falls_back_to_baseline_on_graph_build_failure(tmp_path, monkey
             f"fallback path must apply verbatim filter; schema {h['record_id']} "
             f"appeared in hits despite graph build failure + verbatim cue"
         )
-
 
 def test_recall_topk_stability_smoke(tmp_path):
     import importlib

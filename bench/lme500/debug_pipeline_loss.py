@@ -1,7 +1,6 @@
 """Trace which pipeline stage drops the gold session in loss cases.
 
 Usage: python bench/lme500/debug_pipeline_loss.py <question_id> [<question_id> ...]
-
 """
 from __future__ import annotations
 
@@ -88,7 +87,7 @@ def trace_one(qid: str) -> dict:
     tmp_root = Path(tempfile.mkdtemp(prefix="lme_dbg_"))
     store_dir = tmp_root / f"row-{qid}"
     store_dir.mkdir(parents=True, exist_ok=True)
-    store = MemoryStore(path=store_dir / "hippo")
+    store = MemoryStore(path=store_dir / "lancedb")
     asyncio.run(store.enable_async_writes(coalesce_ms=50, max_batch=128))
     embedder = embedder_for_store(store)
 

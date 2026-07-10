@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import numpy as np
 import psutil
@@ -15,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_store import _make
 
 import iai_mcp.pipeline as _pipeline_mod
-from iai_mcp.embed import Embedder, embedder_for_store
+from iai_mcp.embed import Embedder
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 

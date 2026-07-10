@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import tempfile
-
-import hashlib
 import json
 import os
 import time
-from collections import deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import pytest
 
 
 def _deferred_dir(home: Path) -> Path:
@@ -31,7 +26,7 @@ def _write_live_file(
         "version": version,
         "deferred_at": datetime.now(timezone.utc).isoformat(),
         "session_id": session_id,
-        "cwd": str(Path(tempfile.gettempdir()) / "test"),
+        "cwd": "/tmp/test",
     }
     lines = [json.dumps(header, ensure_ascii=False)]
     for ev in events:

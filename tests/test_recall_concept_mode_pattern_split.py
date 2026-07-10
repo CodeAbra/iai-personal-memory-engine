@@ -9,7 +9,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _ControlledEmbedder:
     DIM = EMBED_DIM
 
@@ -33,7 +32,6 @@ class _ControlledEmbedder:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
 
-
 def _unit_vector_with_cosine(cue_vec: list[float], target_cos: float) -> list[float]:
     cue = np.asarray(cue_vec, dtype=np.float32)
     cue_norm = float(np.linalg.norm(cue))
@@ -56,7 +54,6 @@ def _unit_vector_with_cosine(cue_vec: list[float], target_cos: float) -> list[fl
     if n > 0:
         v = v / n
     return v.astype(np.float32).tolist()
-
 
 def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -82,7 +79,6 @@ def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
         language="en",
     )
 
-
 def _make_schema_hub_with_pattern(vec: list[float], text: str, pattern: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
@@ -107,7 +103,6 @@ def _make_schema_hub_with_pattern(vec: list[float], text: str, pattern: str) -> 
         language="en",
     )
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -122,7 +117,6 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 HUB_DEGREE = 8
 CONCEPT_CUE = "concept question about the project structure overall"
 
@@ -134,12 +128,11 @@ SCHEMA_PATTERNS = [
     "tags:domain:project+role:agent",
 ]
 
-
 def _seed_10_verbatim_plus_5_schema_hubs(tmp_path, hub_cos: float = 0.65):
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
 
     cue_vec = embedder.embed(CONCEPT_CUE)
@@ -178,7 +171,6 @@ def _seed_10_verbatim_plus_5_schema_hubs(tmp_path, hub_cos: float = 0.65):
         verbatim_ids, hub_records, CONCEPT_CUE,
     )
 
-
 def test_concept_mode_excludes_schemas_from_hits(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
@@ -210,7 +202,6 @@ def test_concept_mode_excludes_schemas_from_hits(tmp_path):
             f"tags={rec.tags}) but appeared in hits[]"
         )
 
-
 def test_concept_mode_patterns_observed_capped_at_three(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
@@ -229,7 +220,6 @@ def test_concept_mode_patterns_observed_capped_at_three(tmp_path):
         f"patterns_observed must be capped at 3 entries; got {len(resp.patterns_observed)}: "
         f"{resp.patterns_observed}"
     )
-
 
 def test_concept_mode_patterns_observed_evidence_count_matches_edges(tmp_path):
     from iai_mcp.pipeline import recall_for_response
@@ -264,7 +254,6 @@ def test_concept_mode_patterns_observed_evidence_count_matches_edges(tmp_path):
             f"expected one of (OR-count {true_count}, dst-only {dst_only_count}). "
             f"HUB_DEGREE seeded = {HUB_DEGREE}"
         )
-
 
 def test_concept_mode_patterns_observed_pattern_field_matches_tag(tmp_path):
     from iai_mcp.pipeline import recall_for_response

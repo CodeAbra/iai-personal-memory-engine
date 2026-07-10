@@ -4,7 +4,7 @@ import asyncio
 import threading
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -62,6 +62,23 @@ class TestCountRowsBaseline:
         db.close()
 
 
+@pytest.fixture(params=["stdlib", "lilli"])
+def storage_driver(request, monkeypatch):
+    """Select the storage driver before any HippoDB in the test is constructed.
+
+    The driver is read from the environment at connection-open time, so setting
+    it here ensures the concurrency bodies exercise BOTH the stdlib sqlite3 path
+    (current) and the vendored engine (post-fix serialization).
+    """
+    driver = request.param
+    if driver == "lilli":
+        monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    else:
+        monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    return driver
+
+
+@pytest.mark.usefixtures("storage_driver")
 class TestCountRowsConcurrentAccess:
 
     def test_count_rows_never_none_under_concurrent_writes(self, tmp_path: Path) -> None:
@@ -115,6 +132,7 @@ class TestCountRowsConcurrentAccess:
         )
 
 
+@pytest.mark.usefixtures("storage_driver")
 class TestCountRowsAsyncioToThread:
     def test_count_rows_stable_under_asyncio_to_thread_concurrency(
         self, tmp_path: Path
@@ -164,7 +182,8 @@ class TestCountRowsAsyncioToThread:
 class TestCountRowsDefensiveRaise:
 
     def _make_tbl_with_none_fetchone(self, tmp_path: Path):
-        from iai_mcp.hippo import HippoIntegrityError
+        from contextlib import contextmanager
+
         db = HippoDB(tmp_path)
         tbl = db.open_table("records")
 
@@ -174,7 +193,16 @@ class TestCountRowsDefensiveRaise:
         mock_conn.execute.return_value = mock_cursor
         mock_conn.in_transaction = False
 
+        # count_rows reads through the RO pool when a db is attached, and
+        # through _conn otherwise — poison BOTH paths so the None-row check
+        # is exercised regardless of which one the implementation takes.
         tbl._conn = mock_conn
+
+        @contextmanager
+        def _poisoned_ro_conn():
+            yield mock_conn
+
+        db.ro_conn = _poisoned_ro_conn
         return db, tbl
 
     def test_raises_hippo_integrity_error_not_type_error(self, tmp_path: Path) -> None:

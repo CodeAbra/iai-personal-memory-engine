@@ -6,7 +6,8 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent / "src" / "iai_mcp"
 
 DAEMON_REACHABLE: tuple[str, ...] = (
-    "daemon.py",
+    "daemon/__init__.py",
+    "daemon/_watchdog.py",
     "dream.py",
     "identity_audit.py",
     "hippea_cascade.py",
@@ -16,7 +17,6 @@ DAEMON_REACHABLE: tuple[str, ...] = (
     "maintenance.py",
 )
 
-# enforced by mypy/pyright type checks, not this fence)
 BLOCKING_NAMES: frozenset[str] = frozenset({
     "build_runtime_graph",
     "optimize_lance_storage",
@@ -26,14 +26,12 @@ BLOCKING_NAMES: frozenset[str] = frozenset({
 
 ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset()
 
-
 def _callable_name(func: ast.expr) -> str | None:
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):
         return func.attr
     return None
-
 
 class BareBlockingCallFinder(ast.NodeVisitor):
 
@@ -93,7 +91,6 @@ class BareBlockingCallFinder(ast.NodeVisitor):
             ))
         self.generic_visit(node)
 
-
 def test_no_bare_blocking_call_in_async_def() -> None:
     all_violations: list[tuple[str, str, str, int]] = []
     for filename in DAEMON_REACHABLE:
@@ -105,26 +102,39 @@ def test_no_bare_blocking_call_in_async_def() -> None:
         finder.visit(tree)
         all_violations.extend(finder.violations)
     assert not all_violations, (
-        "Regression fence: bare sync calls to blocking functions "
+        "R4 regression fence: bare sync calls to blocking functions "
         "inside `async def`. Each violation must be either (a) wrapped "
         "in `await asyncio.to_thread(...)` or (b) added to ALLOWLIST "
-        "and classified as `safe-fast` with measurement evidence. "
-        "Violations:\n"
+        "with a row in 07.2-BLOCKING-CALLS-AUDIT.md classifying it as "
+        "`safe-fast` with measurement evidence. Violations:\n"
         + "\n".join(
             f"  {f}:{ln} async def {fn} -> {callee}()"
             for f, fn, callee, ln in all_violations
         )
     )
 
+def test_daemon_file_is_actually_scanned() -> None:
+    """The async-blocking-call fence skips any listed file whose path does not
+    exist (`if not path.exists(): continue`), so it FAILS OPEN: a bad repath
+    drops daemon coverage with no error. Pin the daemon package file so the
+    scan is proven to visit it."""
+    daemon_path = SRC / "daemon" / "__init__.py"
+    assert daemon_path.exists(), "daemon package source not on disk"
+    reachable = [SRC / n for n in DAEMON_REACHABLE if (SRC / n).exists()]
+    assert reachable, "async-blocking-call scan resolved to an empty file list"
+    assert daemon_path in reachable, (
+        "daemon package source is not in the scanned reachable list — "
+        "the bare-sync-in-async fence would silently skip it"
+    )
+
 
 def test_blocking_names_set_is_non_empty() -> None:
     assert "build_runtime_graph" in BLOCKING_NAMES, (
         "BLOCKING_NAMES must contain 'build_runtime_graph' (the "
-        "smoking-gun call that drove the CPU saturation). Fence is useless "
-        "without this; the site is wrapped and the fence catches future "
+        "smoking-gun call that drove a 71-min CPU "
+        "saturation). Fence is useless without this; it catches future "
         "re-introduction."
     )
-
 
 def test_ast_walker_correctly_identifies_to_thread_exemption() -> None:
     snippet = '''
@@ -132,12 +142,10 @@ import asyncio
 from iai_mcp import retrieve
 
 async def good_path(store):
-    # Wrapped — fence MUST exempt this.
     g, a, r = await asyncio.to_thread(retrieve.build_runtime_graph, store)
     return g
 
 async def bad_path(store):
-    # Bare-sync — fence MUST flag this.
     g, a, r = retrieve.build_runtime_graph(store)
     return g
 '''

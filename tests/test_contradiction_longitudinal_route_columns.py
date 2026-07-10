@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import os
 from pathlib import Path
 
 import pytest
 
-from bench import contradiction_longitudinal as bench
+from bench import contradiction_longitudinal_claude as bench
 
 
 def test_probe_result_has_route_and_cue_hash_columns() -> None:

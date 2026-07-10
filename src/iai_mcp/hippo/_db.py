@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fcntl
 import logging
 import os
 import re
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,20 +21,127 @@ import hnswlib
 import numpy as np
 import pyarrow as pa
 
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, flock
 from iai_mcp.crypto import (
     decrypt_field,
     encrypt_field,
     is_encrypted,
 )
 
-# AccessMode is defined in __init__.py (DEFINE-IN-INIT).  It must be available
+# AccessMode is defined in __init__.py.  It must be available
 # at class-body execution time because HippoDB.__init__ uses it as a default
 # argument value.  Since __init__.py defines AccessMode before triggering this
 # sub-module import, the partially-initialised package module already carries it.
 from iai_mcp.hippo import AccessMode  # noqa: E402
 
 _log = logging.getLogger(__name__)
+
+
+# Every RO pool open on a store path, so a committed write through ANY writer
+# connection for that path invalidates ALL in-process pooled readers — not just
+# the pool owned by the HippoDB instance that issued the write.
+_RO_POOLS_BY_PATH: dict[str, "weakref.WeakSet"] = {}
+_RO_POOLS_LOCK = threading.Lock()
+
+
+def _register_ro_pool(db_path: str, pool: Any) -> None:
+    with _RO_POOLS_LOCK:
+        _RO_POOLS_BY_PATH.setdefault(db_path, weakref.WeakSet()).add(pool)
+
+
+def _mark_path_pools_stale(db_path: str) -> None:
+    with _RO_POOLS_LOCK:
+        pools = list(_RO_POOLS_BY_PATH.get(db_path, ()))
+    for pool in pools:
+        try:
+            pool.mark_stale()
+        except Exception as exc:  # noqa: BLE001 -- no-raise: staleness marking must never fail a write
+            _log.debug("mark_stale failed for pool on %s: %s", db_path, exc)
+
+
+class _MutationSignallingConn:
+    """Writer-connection proxy that reports mutations to the RO reader pools.
+
+    A pooled read-only reader is a snapshot-at-open; it never live-tracks the
+    writer. Without a staleness bump on EVERY mutating statement (not only
+    corpus-count-changing ones), a warm reader keeps serving pre-write field
+    values (e.g. an updated provenance_json) indefinitely.
+    """
+
+    _MUTATING_VERBS = frozenset(
+        {
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "REPLACE",
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "VACUUM",
+            "COMMIT",
+            "END",
+        }
+    )
+
+    def __init__(self, wrapped: Any, on_mutation: Callable[[], None]) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "_on_mutation", on_mutation)
+
+    def _signal_if_mutating(self, sql: Any) -> None:
+        try:
+            text = str(sql)
+            verb = text.lstrip().split(None, 1)[0].rstrip(";").upper()
+        except (AttributeError, IndexError):
+            return
+        mutating = verb in self._MUTATING_VERBS
+        if not mutating and verb == "WITH":
+            # A CTE-prefixed write (WITH ... UPDATE/DELETE/INSERT) does not
+            # start with a mutating verb; a missed signal here means warm RO
+            # slots serve pre-write values until an unrelated fence trips.
+            # Word-scan the statement — over-signalling a CTE read costs one
+            # cheap slot refresh; under-signalling a CTE write costs
+            # correctness.
+            upper = text.upper()
+            mutating = any(
+                re.search(rf"\b{v}\b", upper)
+                for v in ("INSERT", "UPDATE", "DELETE", "REPLACE")
+            )
+        if mutating:
+            try:
+                self._on_mutation()
+            except Exception as exc:  # noqa: BLE001 -- no-raise into the write path
+                _log.debug("RO-pool mutation signal failed: %s", exc)
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._wrapped.execute(*args, **kwargs)
+        if args:
+            self._signal_if_mutating(args[0])
+        return result
+
+    def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._wrapped.executemany(*args, **kwargs)
+        if args:
+            self._signal_if_mutating(args[0])
+        return result
+
+    def commit(self) -> Any:
+        result = self._wrapped.commit()
+        try:
+            self._on_mutation()
+        except Exception as exc:  # noqa: BLE001 -- no-raise into the write path
+            _log.debug("RO-pool mutation signal failed: %s", exc)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_wrapped"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(object.__getattribute__(self, "_wrapped"), name, value)
+
+    @property
+    def __class__(self) -> type:  # type: ignore[override]
+        # isinstance-transparent: callers type-checking the connection must
+        # see the engine class, not the signalling seam.
+        return type(object.__getattribute__(self, "_wrapped"))
 
 
 # Bounds for the deferred-embed pass driven by the wake sequence. The pass
@@ -44,6 +153,22 @@ _log = logging.getLogger(__name__)
 # operator-overridable; a non-positive / malformed value disables that bound.
 REEMBED_BATCH_SIZE_DEFAULT = 128
 REEMBED_RSS_SOFT_CAP_DEFAULT_BYTES = 2_684_354_560
+REEMBED_RSS_GROWTH_BUDGET_BYTES = 805_306_368
+# Absolute backstop over the growth-relative cap: the growth budget floats
+# with the pass's starting baseline, so a baseline creeping cycle-over-cycle
+# (allocator fragmentation) would otherwise never bound absolute RSS. Half of
+# physical memory is far above any legitimate daemon baseline; at that level
+# starving the backlog is the correct trade against an OS memory kill.
+REEMBED_RSS_HARD_CEILING_FRACTION = 0.5
+
+
+def _reembed_rss_hard_ceiling() -> int:
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().total * REEMBED_RSS_HARD_CEILING_FRACTION)
+    except Exception:  # noqa: BLE001 -- unknown total memory: no ceiling
+        return 0
 
 
 def _reembed_batch_size() -> int:
@@ -68,6 +193,11 @@ def _reembed_rss_soft_cap() -> int:
     return val if val > 0 else 0
 
 
+def _ro_pool_off() -> bool:
+    """Kill-switch: force ro_conn() onto the writer-lock fallback path."""
+    return os.environ.get("IAI_MCP_RO_POOL_OFF", "").strip() in ("1", "true", "TRUE", "yes")
+
+
 _txn_owners: dict[int, int] = {}
 _txn_owners_lock: threading.Lock = threading.Lock()
 
@@ -75,9 +205,14 @@ _txn_owners_lock: threading.Lock = threading.Lock()
 @contextlib.contextmanager  # type: ignore[misc]
 def _txn(conn: "sqlite3.Connection"):
     from iai_mcp.hippo import HippoIntegrityError
+    # Owner keys use the UNWRAPPED connection: two HippoDBs sharing one raw
+    # lilli connection wrap it in distinct signalling proxies, and keying on
+    # the proxy id would give each its own owner slot — the double-writer
+    # tripwire would silently yield instead of raising.
+    conn_id = id(getattr(conn, "_wrapped", conn))
     if conn.in_transaction:
         with _txn_owners_lock:
-            owner = _txn_owners.get(id(conn))
+            owner = _txn_owners.get(conn_id)
         if owner is None:
             yield
             return
@@ -89,7 +224,6 @@ def _txn(conn: "sqlite3.Connection"):
             f"observed by thread {threading.get_ident()} — a transactional "
             f"mutator site is missing _conn_lock serialization."
         )
-    conn_id = id(conn)
     with _txn_owners_lock:
         _txn_owners[conn_id] = threading.get_ident()
     try:
@@ -99,7 +233,11 @@ def _txn(conn: "sqlite3.Connection"):
         except BaseException:
             try:
                 conn.execute("ROLLBACK")
-            except sqlite3.Error:
+            except (sqlite3.Error, RuntimeError):
+                # sqlite3.Error covers stdlib driver rollback failures.
+                # RuntimeError covers the lilli engine's pager.rollback()
+                # when the transaction state is already cleared — suppress
+                # both so the original exception propagates unmasked.
                 pass
             raise
         conn.execute("COMMIT")
@@ -119,6 +257,146 @@ def _validate_table_name(name: str) -> str:
     return name
 
 
+def _resolve_effective_driver(db_path: str) -> str:
+    """Resolve the storage driver for a backing file, on-disk format first.
+
+    The ``LILLI_STORAGE_DRIVER`` environment variable expresses the *intended*
+    backend, but it is only visible to processes that inherit it (the daemon,
+    via its service manager). A short-lived client process — e.g. the ``iai
+    recall`` direct-store fallback — runs in a user shell where the variable is
+    unset and thus resolves to the ``"stdlib"`` default. Selecting the driver
+    from that env alone would open a native-engine store with the stdlib
+    ``sqlite3`` driver, which raises ``file is not a database`` and silently
+    yields zero results.
+
+    The on-disk file format is the authority. When a non-empty backing file
+    already exists, its full 16-byte header unambiguously identifies the
+    writer:
+
+    - a native-engine store begins with the engine magic (``DB_MAGIC``);
+    - a stdlib ``sqlite3`` store begins with the full SQLite header magic
+      (``b"SQLite format 3\\x00"``, also 16 bytes).
+
+    Detection wins over the env for an existing file: whichever process opens
+    the store reads it with the driver that wrote it, regardless of the ambient
+    variable. The env is honoured only when there is no file to sniff yet (a
+    fresh store), so a first open still creates the intended format.
+    """
+    from iai_mcp.lillibrain.constants import DB_MAGIC  # noqa: PLC0415
+
+    _SQLITE_MAGIC = b"SQLite format 3\x00"
+
+    env_driver = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower()
+
+    try:
+        with open(db_path, "rb") as fh:
+            header = fh.read(len(DB_MAGIC))
+    except OSError:
+        header = b""
+
+    if not header:
+        # No file yet (fresh store) or unreadable — honour the env intent.
+        return env_driver
+
+    if header[:len(DB_MAGIC)] == DB_MAGIC:
+        detected = "lilli"
+    elif header[:len(_SQLITE_MAGIC)] == _SQLITE_MAGIC:
+        detected = "stdlib"
+    else:
+        # Unknown/corrupt header: defer to the env so the writer that produced
+        # it (or the intended driver) reports its own error, unchanged.
+        return env_driver
+
+    if detected != env_driver:
+        _log.info(
+            "storage driver resolved from on-disk format: file=%s detected=%s "
+            "env=%s — using detected (on-disk format is authoritative)",
+            db_path,
+            detected,
+            env_driver,
+        )
+    return detected
+
+
+def _open_storage_connection(
+    db_path: str,
+    *,
+    embed_dim: int,
+    cached_statements: int,
+    driver: str | None = None,
+):
+    """Open the storage connection for the backing database file.
+
+    The backend is selected by ``driver`` when provided, else resolved from the
+    on-disk file format (falling back to the ``LILLI_STORAGE_DRIVER`` env for a
+    fresh store) via :func:`_resolve_effective_driver`:
+
+    - ``"stdlib"`` / any non-``"lilli"`` value → the stdlib ``sqlite3`` driver
+      (the default; the connection kwargs are byte-identical to a
+      direct ``sqlite3.connect`` call).
+    - ``"lilli"`` → the in-tree pager/B+tree/WAL engine. The engine connection
+      is registered under ``db_path`` so raw-access helpers can reach it without
+      opening a second pager on the same file.
+
+    The connection is the only seam through which the encrypted fields flow;
+    encryption is applied above this layer (in the table/crypto code), so no
+    crypto key or provider is ever threaded through here — the engine stores
+    ciphertext BLOBs and the plaintext embedding only. ``cached_statements`` is
+    honoured by the stdlib driver and accepted-and-ignored by the engine.
+    """
+    if driver is None:
+        driver = _resolve_effective_driver(db_path)
+    if driver == "lilli":
+        from iai_mcp.lillibrain.connection import (  # noqa: PLC0415
+            get_lilli_engine_conn,
+            register_lilli_conn,
+        )
+        from iai_mcp_native import engine  # noqa: PLC0415
+
+        # The engine holds an exclusive advisory file lock on the store for the
+        # life of the connection, so a single file admits exactly one open pager
+        # in-process (the single-writer durability invariant). A second open at
+        # the same path therefore reuses the already-registered live connection
+        # rather than opening a second pager — which would fail the lock. The
+        # in-process serialization that makes this safe lives one layer up in
+        # HippoDB (_PROCESS_LOCKS refcount + _conn_lock); the engine connection
+        # is shared, never duplicated. The borrower does not own the connection
+        # and must not close it (the owner — the first opener — closes it).
+        existing = get_lilli_engine_conn(db_path)
+        if existing is not None:
+            return existing, False
+
+        # First opener: the Rust engine opens the store, replays the persisted
+        # DDL + root mappings, and presents a sqlite3-shaped Connection. It is
+        # registered under db_path so the daemon-down raw path resolves it and
+        # calls conn.raw_conn(read_only=) on it for direct access.
+        # A just-closed pager releases its advisory lock a beat after close()
+        # returns; retry briefly so open-after-close does not fail on that
+        # lag. A lock held by a LIVE owner (the daemon) still fails after the
+        # bound — callers handle that honestly.
+        _deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                conn = engine.Connection.open(db_path, embed_dim)
+                break
+            except sqlite3.OperationalError as exc:
+                if (
+                    "store is locked" not in str(exc)
+                    or time.monotonic() >= _deadline
+                ):
+                    raise
+                time.sleep(0.05)
+        register_lilli_conn(db_path, conn)
+        return conn, True
+    conn = sqlite3.connect(
+        db_path,
+        check_same_thread=False,
+        isolation_level=None,
+        cached_statements=cached_statements,
+    )
+    return conn, True
+
+
 class HippoDB:
 
     def __init__(
@@ -128,12 +406,17 @@ class HippoDB:
         crypto_key_provider: Callable[[], bytes] | None = None,
         access_mode: AccessMode = AccessMode.EXCLUSIVE,
         read_only: bool = False,
+        persist_index: bool = True,
         _lock_timeout_override: float | None = None,
     ) -> None:
         from iai_mcp.hippo import _resolve_root, EMBED_DIM as _EMBED_DIM
         self._crypto_key_provider: Callable[[], bytes] | None = crypto_key_provider
         self._access_mode: AccessMode = access_mode
         self._read_only: bool = read_only
+        # Disk hnsw is derived data (SQLite is the source of truth); only the
+        # index-owning handle may persist it, or a stale in-RAM index from a
+        # concurrent SHARED client would clobber the owner's on-disk file.
+        self._persist_index: bool = persist_index
 
         root = _resolve_root(path)
         self._store_root: Path = root
@@ -151,17 +434,41 @@ class HippoDB:
             )
 
         db_path = self._hippo_dir / "brain.sqlite3"
+        self._db_path: str = str(db_path)
         _cached_stmts_raw = os.environ.get("IAI_MCP_SQLITE_CACHED_STATEMENTS", "128")
         try:
             _cached_stmts = max(0, int(_cached_stmts_raw))
         except ValueError:
             _cached_stmts = 128
-        self._conn: sqlite3.Connection = sqlite3.connect(
-            str(db_path),
-            check_same_thread=False,
-            isolation_level=None,
-            cached_statements=_cached_stmts,
+
+        # Resolved before the connection so the storage driver receives the
+        # embedding dimension (the engine sizes its vector column from it).
+        # The meta-table override below may refine this for an existing store.
+        _env_dim = os.environ.get("IAI_MCP_EMBED_DIM")
+        self._embed_dim: int = (
+            int(_env_dim) if _env_dim and _env_dim.isdigit() else _EMBED_DIM
         )
+
+        # Record the driver chosen at open-time so close() uses the same branch
+        # regardless of later env mutations (e.g. between open and close in tests).
+        # Resolved from the on-disk file format first (env only for a fresh
+        # store) so a process without LILLI_STORAGE_DRIVER — e.g. the user-shell
+        # `iai recall` direct-store fallback — still opens a native-engine store
+        # with the engine, never mis-opening it as stdlib sqlite3.
+        self._storage_driver: str = _resolve_effective_driver(self._db_path)
+        self._conn, self._owns_conn = _open_storage_connection(
+            self._db_path,
+            embed_dim=self._embed_dim,
+            cached_statements=_cached_stmts,
+            driver=self._storage_driver,
+        )
+        if self._storage_driver == "lilli":
+            # The registry keeps the RAW engine connection; only this
+            # instance's SQL surface goes through the signalling proxy.
+            self._conn = _MutationSignallingConn(
+                self._conn,
+                lambda _p=self._db_path: _mark_path_pools_stale(_p),
+            )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -171,35 +478,102 @@ class HippoDB:
         # let it drift unbounded across cycles. Negative values are KiB.
         # tracemalloc cannot see C-level allocations, so this cap is the
         # only explicit bound on the page cache footprint in process RSS.
-        _cache_kib = os.environ.get("IAI_MCP_SQLITE_CACHE_SIZE_KIB", "65536")
+        _DEFAULT_CACHE_KIB = 65536  # 64 MiB
+        _MIN_CACHE_KIB = 4096  # 4 MiB — below this the page cache thrashes
+        _cache_kib = os.environ.get("IAI_MCP_SQLITE_CACHE_SIZE_KIB", str(_DEFAULT_CACHE_KIB))
         try:
             _cache_kib_int = int(_cache_kib)
         except ValueError:
-            _cache_kib_int = 65536
-        self._conn.execute(f"PRAGMA cache_size=-{abs(_cache_kib_int)}")
+            _cache_kib_int = _DEFAULT_CACHE_KIB
+        # Non-positive → use default; sub-floor positive → clamp to floor.
+        # Never abs()-rewrite a negative env value; treat <=0 as "use default".
+        if _cache_kib_int <= 0:
+            _cache_kib_int = _DEFAULT_CACHE_KIB
+        elif _cache_kib_int < _MIN_CACHE_KIB:
+            _cache_kib_int = _MIN_CACHE_KIB
+        self._conn.execute(f"PRAGMA cache_size=-{_cache_kib_int}")
         if read_only:
             self._conn.execute("PRAGMA query_only=ON")
 
-        _env_dim = os.environ.get("IAI_MCP_EMBED_DIM")
-        self._embed_dim: int = (
-            int(_env_dim) if _env_dim and _env_dim.isdigit() else _EMBED_DIM
-        )
         self._closed: bool = False
         self._hnsw_path: Path = self._hippo_dir / "records.hnsw"
         self._hnsw_tmp_path: Path = self._hippo_dir / "records.hnsw.tmp"
         self._hnsw_lock: threading.RLock = threading.RLock()
         self._conn_lock: threading.RLock = threading.RLock()
+        # Single-writer invariant for ANN rebuilds: every rebuild entry point
+        # (wake sequence, mid-run reconcile, sleep-pipeline reconcile,
+        # migrations, child-worker swap in maintenance.py) MUST hold this lock
+        # across build->swap. Two unserialized builders mutating one hnswlib
+        # buffer is a C++ data race (GIL released inside add_items); two
+        # unserialized swaps can publish a stale buffer as active. Lock order:
+        # _rebuild_lock OUTER, then _hnsw_lock, then _conn_lock.
+        self._rebuild_lock: threading.RLock = threading.RLock()
+        # Journal of active-index mutations committed while a rebuild is in
+        # flight. Non-None only between snapshot and swap (set/cleared under
+        # _hnsw_lock by the rebuilder); writers holding _hnsw_lock append
+        # ("add", vec, label, rid) / ("del", None, label, rid) so the
+        # swapped-in buffer AND the off-lock-loaded label map replay them —
+        # without it a record add()-committed during the build window
+        # silently vanishes from ANN until the next rebuild.
+        self._ann_journal: "list[tuple[str, Any, int, str]] | None" = None
+        # Schema (including the records vec_label index) is persisted into engine
+        # meta ONLY by a read-write open — _ensure_tables runs the CREATE INDEX
+        # passthrough that meta.record_ddl stores. A read-only open reconstructs
+        # the catalog purely from previously-persisted DDL via meta.replay, so it
+        # sees the vec_label index only if some earlier read-write open already
+        # recorded it. A store upgraded on an older binary whose FIRST post-upgrade
+        # open is read-only therefore full-scans its vec_label lookups until a
+        # read-write open heals the meta — correct (scan-parity), just ~8s slow.
+        # In the normal daemon lifecycle a read-write boot precedes any read-only
+        # recall, so this window is transient. See _db._debug_log_readonly_index_gap
+        # for the operator-visible DEBUG signal on the read-only path.
         if not read_only:
             self._ensure_tables()
 
         if not read_only:
-            meta_dim = self._conn.execute(
-                "SELECT value FROM _hippo_meta WHERE key = 'embed_dim'"
-            ).fetchone()
+            with self._conn_lock:
+                meta_dim = self._conn.execute(
+                    "SELECT value FROM _hippo_meta WHERE key = 'embed_dim'"
+                ).fetchone()
             if meta_dim is not None:
                 self._embed_dim = int(meta_dim[0])
         self._label_map: dict[str, int] = {}
         self._write_counter: int = 0
+        # Observable counter for the reuse-path collision fallback (fresh
+        # C++ allocation on a rebuild). The zero-per-cycle-allocation invariant
+        # holds only while this stays near zero; consumers read it via
+        # rebuild results / doctor surfaces rather than grepping warnings.
+        self._reuse_collision_count: int = 0
+        # Recency buffer integration callbacks — registered by MemoryStore eagerly
+        # at construction time (before any lifecycle tick can fire a reembed or
+        # pending-row write that must be visible to the buffer).
+        # Both slots are None until a MemoryStore registers them; HippoDB never
+        # calls them if None, and fires them inside try/except so a callback
+        # failure never disrupts a write or the reembed pass.
+        self._recency_reconcile: "Callable[[str], None] | None" = None
+        self._recency_pending_feed: "Callable | None" = None
+        # Corpus-count invalidation callback — registered by MemoryStore eagerly
+        # at construction time (after _corpus_count_cache is built).  Fires with
+        # the affected count-cache key names so the caller invalidates only the
+        # counts that changed.  None until a MemoryStore registers it; HippoDB
+        # fires it hook-isolated (try/except) and never calls it when None.
+        self._corpus_count_invalidate: "Callable | None" = None
+        # Exact-cosine authority feed callback — registered by MemoryStore
+        # eagerly at construction time.  Fires with (record_id: str, vec) at
+        # the reembed pending->active flag flip so the resident matrix stays
+        # in sync without a rebuild.  None until a MemoryStore registers it;
+        # HippoDB fires it hook-isolated and never calls it when None.
+        self._exact_index_feed: "Callable | None" = None
+
+        # Pooled read-only reader substrate (lilli only, eager object / lazy
+        # fill — construction here pays nothing until the first ro_conn()
+        # borrow actually opens a slot). None on the stdlib driver: ro_conn()
+        # falls back to the shared writer connection unconditionally.
+        self._ro_pool: "Any | None" = None
+        if self._storage_driver == "lilli":
+            from iai_mcp.hippo._ro_pool import RoConnPool as _RoConnPool
+            self._ro_pool = _RoConnPool(self._db_path)
+            _register_ro_pool(self._db_path, self._ro_pool)
 
         if read_only:
             self._hnsw: hnswlib.Index | None = None  # type: ignore[assignment]
@@ -212,6 +586,41 @@ class HippoDB:
             self._repopulate_label_map_from_sqlite()
             self._initialize_hnsw_index()
 
+        # One-shot guard so the read-only-full-scan DEBUG signal fires at most
+        # once per connection instead of on every recall (hot path stays clean).
+        self._readonly_index_gap_logged: bool = False
+
+    def _debug_log_readonly_index_gap(self, conn: object) -> None:
+        """Emit a one-time DEBUG signal when a read-only open serves a
+        ``vec_label IN`` recall by full scan.
+
+        A store upgraded on an older binary whose first post-upgrade open is
+        read-only lacks the records vec_label index in engine meta (it is
+        persisted only by a read-write ``_ensure_tables``), so its recall
+        full-scans — correct but ~8s slow. A read-write boot heals it. This
+        signal lets an operator observe an un-upgraded store still on the slow
+        path rather than silently paying the latency; it never runs a check on
+        the hot path (only reads a counter the engine already maintains) and
+        logs at most once per connection.
+        """
+        if self._readonly_index_gap_logged or not self._read_only:
+            return
+        counter = getattr(conn, "full_scan_count", None)
+        if counter is None:  # stdlib driver has no engine scan counter
+            return
+        try:
+            scans = counter()
+        except Exception:  # noqa: BLE001
+            return
+        if scans > 0:
+            self._readonly_index_gap_logged = True
+            _log.debug(
+                "read-only open served a vec_label lookup by full scan "
+                "(records vec_label index absent from engine meta): a store "
+                "upgraded on an older binary whose first post-upgrade open is "
+                "read-only stays on the slow path until a read-write open "
+                "persists the index. A read-write daemon boot heals it."
+            )
 
     def _acquire_exclusive_lock(self) -> None:
         from iai_mcp.hippo import (
@@ -239,7 +648,7 @@ class HippoDB:
                 )
                 os.chmod(str(self._lock_path), 0o600)
                 try:
-                    flock(base_fd, LOCK_EX | LOCK_NB)
+                    fcntl.flock(base_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError as exc:
                     os.close(base_fd)
                     if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
@@ -261,8 +670,32 @@ class HippoDB:
             _SHARED_LOCK_TIMEOUT_S,
             _SHARED_RETRY_SLEEP_S,
             _SHARED_MAX_RETRIES,
+            _consolidation_intent_is_stale,
         )
         _intent_path = self._hippo_dir / ".consolidation-pending"
+
+        def _intent_blocks() -> bool:
+            # Honor the consolidation intent ONLY when a live holder owns it. An
+            # orphaned intent (PID dead / unreadable / past the time ceiling) is
+            # left behind by a crashed daemon — a dead daemon must NEVER gate a
+            # write, so self-heal by removing it and proceeding to acquire SH.
+            if not _intent_path.exists():
+                return False
+            if _consolidation_intent_is_stale(_intent_path):
+                try:
+                    _intent_path.unlink()
+                    _log.warning(
+                        "hippo_shared_lock: removed orphaned consolidation "
+                        "intent at %s (no live holder) — proceeding with "
+                        "daemon-free acquisition",
+                        _intent_path,
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    return True
+                return False
+            return True
 
         with _PROCESS_LOCKS_GUARD:
             if self._lock_key in _PROCESS_LOCKS:
@@ -292,14 +725,14 @@ class HippoDB:
         deadline = time.monotonic() + _timeout
         acquired = False
         for _ in range(_SHARED_MAX_RETRIES + 1):
-            if _intent_path.exists():
+            if _intent_blocks():
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(_SHARED_RETRY_SLEEP_S)
                 continue
 
             try:
-                flock(base_fd, LOCK_SH | LOCK_NB)
+                fcntl.flock(base_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except OSError as exc:
                 if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                     if time.monotonic() >= deadline:
@@ -309,8 +742,8 @@ class HippoDB:
                 os.close(base_fd)
                 raise
 
-            if _intent_path.exists():
-                flock(base_fd, LOCK_UN)
+            if _intent_blocks():
+                fcntl.flock(base_fd, fcntl.LOCK_UN)
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(_SHARED_RETRY_SLEEP_S)
@@ -326,7 +759,7 @@ class HippoDB:
         with _PROCESS_LOCKS_GUARD:
             held_sh = _PROCESS_LOCKS_SHARED.get(self._lock_key)
             if held_sh is not None:
-                flock(base_fd, LOCK_UN)
+                fcntl.flock(base_fd, fcntl.LOCK_UN)
                 os.close(base_fd)
                 base_fd2, refcount2 = held_sh
                 self._lock_fd = os.dup(base_fd2)
@@ -352,7 +785,7 @@ class HippoDB:
                 return
             base_fd, refcount = held
             try:
-                flock(base_fd, LOCK_SH)
+                fcntl.flock(base_fd, fcntl.LOCK_SH)
             except OSError:
                 return
             del _PROCESS_LOCKS[self._lock_key]
@@ -373,11 +806,26 @@ class HippoDB:
         )
         _intent_path = self._hippo_dir / ".consolidation-pending"
 
+        # Stamp the intent with the holder PID + timestamp so a daemon-free
+        # writer can tell a live in-progress consolidation (PID alive, holds the
+        # EX flock) from an orphan left by a SIGKILL'd daemon (PID dead). The
+        # write is atomic (temp file + rename) so a concurrent reader never sees
+        # a half-written PID. A pre-existing intent from a crashed daemon is
+        # reclaimed — the rename overwrites it with our own live PID.
+        _intent_payload = f"{os.getpid()}\n{time.time()}\n".encode()
+        _intent_tmp = self._hippo_dir / f".consolidation-pending.tmp.{os.getpid()}"
         try:
-            fd = os.open(str(_intent_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(fd)
-        except FileExistsError:
-            pass
+            fd = os.open(str(_intent_tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, _intent_payload)
+            finally:
+                os.close(fd)
+            os.replace(str(_intent_tmp), str(_intent_path))
+        except OSError:
+            try:
+                _intent_tmp.unlink()
+            except OSError:
+                pass
 
         if self._access_mode is AccessMode.EXCLUSIVE:
             return
@@ -393,7 +841,7 @@ class HippoDB:
         acquired = False
         while time.monotonic() < deadline:
             try:
-                flock(base_fd, LOCK_EX | LOCK_NB)
+                fcntl.flock(base_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
             except OSError as exc:
@@ -474,11 +922,13 @@ class HippoDB:
                 self._allocate_standby_index(cap)
                 return
 
-        hnsw_count = self._hnsw.get_current_count()
-        if hnsw_count != sqlite_count:
+        active_label_count = len(self._label_map)
+        hnsw_loaded_count = self._hnsw.get_current_count()
+        if active_label_count != sqlite_count or hnsw_loaded_count != sqlite_count:
             _log.info(
-                "Boot integrity check: hnsw count=%d != sqlite count=%d — rebuilding",
-                hnsw_count,
+                "Boot integrity check: labels=%d hnsw=%d sqlite=%d — rebuilding",
+                active_label_count,
+                hnsw_loaded_count,
                 sqlite_count,
             )
             self._rebuild_index_from_sqlite()
@@ -507,7 +957,11 @@ class HippoDB:
         standby.set_num_threads(1)
         self._hnsw_standby: hnswlib.Index | None = standby
 
-    def _repopulate_label_map_from_sqlite(self) -> None:
+    def _load_label_map_from_sqlite(self) -> "dict[str, int]":
+        """Fresh id->vec_label map for the live corpus. O(corpus) — callers
+        on the rebuild path run this OFF _hnsw_lock and commit the result by
+        an O(1) reference swap; holding the recall lock across this read
+        stalls every concurrent knn_query for the scan's duration."""
         _lock = getattr(self, "_conn_lock", None)
         if _lock is not None:
             with _lock:
@@ -522,11 +976,25 @@ class HippoDB:
                 " WHERE tombstoned_at IS NULL"
                 " AND COALESCE(embedding_pending, 0) = 0"
             ).fetchall()
+        return {row["id"]: int(row["vec_label"]) for row in rows}
+
+    def _repopulate_label_map_from_sqlite(self) -> None:
+        fresh = self._load_label_map_from_sqlite()
         self._label_map.clear()
-        for row in rows:
-            self._label_map[row["id"]] = int(row["vec_label"])
+        self._label_map.update(fresh)
 
     def _rebuild_index_from_sqlite(self) -> dict:
+        # All rebuild entry points serialize here — see _rebuild_lock's
+        # declaration for the invariant. The journal is cleared in the finally
+        # so an exception mid-build never leaves writers appending forever.
+        with self._rebuild_lock:
+            try:
+                return self._rebuild_index_impl()
+            finally:
+                with self._hnsw_lock:
+                    self._ann_journal = None
+
+    def _rebuild_index_impl(self) -> dict:
         from iai_mcp.hippo import (
             HNSW_INITIAL_CAPACITY,
             HNSW_EF_CONSTRUCTION,
@@ -534,6 +1002,12 @@ class HippoDB:
             HNSW_EF,
             RECALL_INDEX_EF,
         )
+        # Journal must open BEFORE the row snapshot: a write that lands after
+        # the snapshot is replayed from the journal at swap time; one that
+        # lands before is in the snapshot. A write in both is an idempotent
+        # in-place label update.
+        with self._hnsw_lock:
+            self._ann_journal = []
         with self._conn_lock:
             rows = self._conn.execute(
                 "SELECT vec_label, embedding FROM records"
@@ -577,30 +1051,221 @@ class HippoDB:
         # buffer swap under the recall lock.  Reusing the standby avoids
         # allocating a fresh C++ index every consolidation cycle.
         standby = self._hnsw_standby
-        if standby.get_current_count() > 0:
-            for label in list(standby.get_ids_list()):
-                standby.mark_deleted(label)
-        if n > 0:
-            if n > standby.get_max_elements():
-                standby.resize_index(n * 2)
-            standby.add_items(vecs, labels, replace_deleted=True)
+        self._refill_index_in_place(standby, vecs, labels)
+
+        # Correctness net for the reuse fast-path: verify every expected label
+        # is resolvable in the rebuilt standby before committing it; the check
+        # is cheap relative to the build and runs lock-free on the
+        # not-yet-published buffer. With the in-place refill this should never
+        # fire — a hit means a new drop mechanism, count it and fall back to
+        # the known-good fresh-allocation build.
+        commit_buffer = standby
+        if n > 0 and not self._standby_has_all_labels(standby, labels):
+            _log.warning(
+                "ANN reuse-path rebuild dropped live records (expected %d labels);"
+                " falling back to a fresh-allocation rebuild",
+                n,
+            )
+            self._reuse_collision_count += 1
+            commit_buffer = self._build_fresh_index(cap, vecs, labels)
+
+        # Everything O(corpus) happens OFF the recall lock: the fresh label
+        # map is loaded here, and the not-yet-published buffer is saved to
+        # disk here (it is private, so the save needs no lock). The disk file
+        # can miss journal rows landing before the swap — the boot integrity
+        # check (labels vs sqlite count) heals that with a rebuild, which is
+        # the pre-existing cold-boot path, not a new failure mode.
+        new_label_map = self._load_label_map_from_sqlite()
+        self._save_index_atomic(index=commit_buffer)
 
         # Publish the freshly-built buffer together with its label map under the
         # recall lock so a concurrent knn_query reader always sees a consistent
         # (buffer, label_map) pair — never a half-deleted or half-refilled index.
+        # The critical section is O(journal) + two reference swaps — a recall
+        # landing mid-swap does not stall behind a corpus scan or a disk
+        # write. Swap atomicity relies on the CPython GIL; a free-threaded
+        # build needs explicit synchronization at this site.
         with self._hnsw_lock:
-            self._hnsw, self._hnsw_standby = self._hnsw_standby, self._hnsw
-            self._repopulate_label_map_from_sqlite()
-            self._save_index_atomic()
+            journal = self._ann_journal
+            self._ann_journal = None
+            if journal:
+                self._apply_ann_journal(commit_buffer, journal, new_label_map)
+            if commit_buffer is standby:
+                self._hnsw, self._hnsw_standby = self._hnsw_standby, self._hnsw
+            else:
+                self._hnsw, self._hnsw_standby = commit_buffer, self._hnsw
+            self._label_map = new_label_map
 
-        return {"action": "rebuild", "rebuilt_count": n}
+        return {
+            "action": "rebuild",
+            "rebuilt_count": n,
+            "reuse_collisions_total": self._reuse_collision_count,
+        }
 
-    def _save_index_atomic(self) -> None:
+    @staticmethod
+    def _refill_index_in_place(
+        index: "hnswlib.Index", vecs: "np.ndarray | None", labels: "np.ndarray | None"
+    ) -> None:
+        """Bring a retired buffer to the snapshot state WITHOUT the
+        mark-all-deleted + replace_deleted dance. Re-adding an existing label
+        set through replace_deleted DROPS labels: hnswlib erases the replaced
+        slot's current external label from its lookup even when that label was
+        already re-homed to another slot earlier in the same refill — measured
+        ~48% of labels lost per cycle on a shuffled 200-label set, and the
+        cause of the fresh-allocation fallback firing on most production
+        rebuilds. Instead: survivors update IN PLACE (their slots never move),
+        stale labels are only marked deleted, and replace_deleted runs solely
+        for labels NEW to the buffer — the slot-label it erases is then always
+        a stale one, never a live re-homed one.
+        """
+        incoming: "dict[int, int]" = (
+            {int(l): i for i, l in enumerate(labels)} if labels is not None else {}
+        )
+        in_lookup = {int(x) for x in index.get_ids_list()}
+        for stale in in_lookup - set(incoming):
+            try:
+                index.mark_deleted(stale)
+            except RuntimeError:
+                # Already soft-deleted in a prior cycle — already the goal state.
+                pass
+        survivors = [l for l in incoming if l in in_lookup]
+        for l in survivors:
+            try:
+                index.unmark_deleted(l)
+            except RuntimeError:
+                # Not deleted — the common case; nothing to restore.
+                pass
+        if survivors:
+            index.add_items(
+                vecs[[incoming[l] for l in survivors]],
+                np.array(survivors, dtype=np.int64),
+            )
+        new = [l for l in incoming if l not in in_lookup]
+        if new:
+            needed = index.get_current_count() + len(new)
+            if needed > index.get_max_elements():
+                index.resize_index(max(needed * 2, 16))
+            index.add_items(
+                vecs[[incoming[l] for l in new]],
+                np.array(new, dtype=np.int64),
+                replace_deleted=True,
+            )
+
+    def _apply_ann_journal(
+        self,
+        buffer: "hnswlib.Index",
+        entries: "list[tuple[str, Any, int, str]]",
+        label_map: "dict[str, int] | None" = None,
+    ) -> None:
+        """Replay journaled active-index mutations into the about-to-publish
+        buffer (and, when given, the about-to-publish label map — it was
+        loaded off-lock BEFORE these writes landed). Held under _hnsw_lock by
+        the caller so no new entries land mid-replay. Adds never use
+        replace_deleted: a journaled label can already be live in the buffer
+        (committed pre-snapshot AND journaled), and the replace path would
+        re-home it, leaking its old slot as a duplicate ghost;
+        unmark-then-add updates in place or plain-inserts."""
+        for op, vec, label, rid in entries:
+            if op == "add":
+                try:
+                    buffer.unmark_deleted(label)
+                except RuntimeError:
+                    pass
+                try:
+                    needed = buffer.get_current_count() + 1
+                    if needed > buffer.get_max_elements():
+                        buffer.resize_index(max(needed * 2, 16))
+                    buffer.add_items(vec, np.array([label], dtype=np.int64))
+                except RuntimeError as exc:
+                    _log.warning(
+                        "ANN journal replay: add of label %d failed: %s", label, exc
+                    )
+                    continue
+                if label_map is not None and rid:
+                    label_map[rid] = int(label)
+            else:
+                try:
+                    buffer.mark_deleted(label)
+                except RuntimeError:
+                    # Not present in the snapshot-built buffer — already absent.
+                    pass
+                if label_map is not None and rid:
+                    label_map.pop(rid, None)
+
+    @staticmethod
+    def _standby_has_all_labels(index: "hnswlib.Index", labels: np.ndarray) -> bool:
+        """True iff every expected label is resolvable in the rebuilt index.
+
+        get_items raises when any label is missing (the slot-reuse drop), so a
+        single bulk lookup over the full label set is a complete check: it
+        succeeds only when all labels are present, and the active element count
+        must also equal the expected live count.
+        """
         try:
-            self._hnsw.save_index(str(self._hnsw_tmp_path))
-            os.replace(self._hnsw_tmp_path, self._hnsw_path)
+            if index.get_current_count() < len(labels):
+                return False
+            # get_items raises RuntimeError("Label not found") for a dropped
+            # label, so a successful bulk lookup proves all labels are present.
+            index.get_items(labels.tolist())
+        except RuntimeError:
+            return False
+        return True
+
+    def _build_fresh_index(
+        self, cap: int, vecs: np.ndarray, labels: np.ndarray
+    ) -> "hnswlib.Index":
+        """Allocate and fill a fresh ANN index — the boot-path build, reused as
+        the reuse-path correctness fallback. No slot reuse, so no overlap drop."""
+        from iai_mcp.hippo import (
+            HNSW_EF_CONSTRUCTION,
+            HNSW_M,
+            HNSW_EF,
+            RECALL_INDEX_EF,
+        )
+        fresh = hnswlib.Index(space="cosine", dim=self._embed_dim)
+        fresh.init_index(
+            max_elements=cap,
+            ef_construction=HNSW_EF_CONSTRUCTION,
+            M=HNSW_M,
+            allow_replace_deleted=True,
+        )
+        fresh.set_ef(max(HNSW_EF, RECALL_INDEX_EF))
+        fresh.set_num_threads(1)
+        fresh.add_items(vecs, labels)
+        return fresh
+
+    def _save_index_atomic(self, index: "hnswlib.Index | None" = None) -> None:
+        # Saving the ACTIVE index requires _hnsw_lock (concurrent add_items
+        # during save_index is a C++ race); the rebuild path instead passes
+        # its still-private commit buffer and saves lock-free. The temp file
+        # is UNIQUE per save (mkstemp): the off-lock rebuild save and the
+        # on-lock periodic savers would otherwise interleave on one shared
+        # temp name and publish a torn index file.
+        if not self._persist_index:
+            _log.debug("hnsw index save skipped: non-persisting handle")
+            return
+        import tempfile as _tempfile
+
+        target = index if index is not None else self._hnsw
+        tmp_name: "str | None" = None
+        try:
+            fd, tmp_name = _tempfile.mkstemp(
+                dir=str(self._hnsw_path.parent),
+                prefix=self._hnsw_path.name + ".",
+                suffix=".tmp",
+            )
+            os.close(fd)
+            target.save_index(tmp_name)
+            os.replace(tmp_name, self._hnsw_path)
+            tmp_name = None
         except OSError as exc:
             _log.warning("hnswlib index save failed: %s", exc)
+        finally:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
 
     def _maybe_resize(self) -> None:
         from iai_mcp.hippo import HNSW_RESIZE_HEADROOM
@@ -609,6 +1274,111 @@ class HippoDB:
         if max_el > 0 and current > HNSW_RESIZE_HEADROOM * max_el:
             self._hnsw.resize_index(max_el * 2)
 
+    # ------------------------------------------------------------------
+    # Recency buffer callback registration (set by MemoryStore at init time)
+    # ------------------------------------------------------------------
+
+    def register_recency_reconcile(self, cb: "Callable[[str], None]") -> None:
+        """Register the callback fired after each successful reembed flag-flip.
+
+        The callback receives the record id (str) and should flip the
+        ``embedding_pending`` flag on the in-process recency buffer entry for
+        that id.  Registered once and eagerly by MemoryStore at construction.
+        """
+        self._recency_reconcile = cb
+
+    def register_recency_pending_feed(self, cb: "Callable") -> None:
+        """Register the callback fired after each successful insert_pending_row.
+
+        The callback receives the same plaintext keyword arguments that were
+        passed to ``insert_pending_row`` (minus ``updated_at`` and ``tier``
+        which the buffer does not use).  Fired before the method returns so
+        the buffer is current for any reader that checks immediately after
+        the insert.  Registered once and eagerly by MemoryStore at construction.
+        """
+        self._recency_pending_feed = cb
+
+    def register_corpus_count_invalidate(self, cb: "Callable") -> None:
+        """Register the callback fired after each count-changing write in HippoDB.
+
+        The callback receives one or more cache-key names (``"active"``,
+        ``"pending"``) as positional strings.  HippoDB fires it inside
+        ``insert_pending_row`` (pending-only) and ``reembed_pending_rows``
+        (both active and pending).
+
+        Stored in a separate slot from the recency callbacks so the two concerns
+        remain independent.  Registered once and eagerly by MemoryStore at
+        construction.
+        """
+        self._corpus_count_invalidate = cb
+
+    def mark_ro_pool_stale(self) -> None:
+        """Bump the RO pool's staleness generation. No-raise, no-op on stdlib.
+
+        Called by the ``CorpusCountCache.on_invalidate`` hook (wired at
+        ``MemoryStore.__init__``) and directly at the ``insert_pending_row`` /
+        ``reembed_pending_rows`` fire sites so a bare ``HippoDB`` used without
+        a ``MemoryStore`` (no cache exists there) still bounds RO staleness.
+        Double-firing through both routes is harmless — the bump is an
+        idempotent int increment. Takes only the pool's own trivial lock,
+        never ``_conn_lock``/``_hnsw_lock`` — no new lock-ordering edge.
+        """
+        pool = getattr(self, "_ro_pool", None)
+        if pool is None:
+            return
+        try:
+            pool.mark_stale()
+        except Exception as exc:  # noqa: BLE001 -- no-raise contract
+            _log.debug("mark_ro_pool_stale failed: %s", exc)
+
+    @contextlib.contextmanager
+    def ro_conn(self):
+        """Yield a read-only connection for the recall read path.
+
+        On the lilli driver (pool healthy, kill-switch unset): yields a
+        borrowed pooled lock-free RO connection — acquisition never touches
+        ``_conn_lock``. On the stdlib driver, or when
+        ``IAI_MCP_RO_POOL_OFF=1``, or on any borrow/open failure: falls back
+        to today's exact behavior — enters ``_conn_lock`` and yields the
+        shared writer ``_conn``. The fallback IS the current code path, not a
+        new one, so every existing caller of this pattern stays correct even
+        when the pool is disabled or fails.
+
+        Callers write ``with self.db.ro_conn() as conn: conn.execute(...)``
+        uniformly regardless of which branch actually served the call. Only a
+        failure to ACQUIRE a pool slot triggers the writer-path fallback — an
+        exception raised by the caller's own use of the yielded connection
+        (e.g. a rejected write attempt) propagates unchanged, exactly as it
+        would from the shared writer connection.
+        """
+        pool = getattr(self, "_ro_pool", None)
+        borrowed = None
+        if pool is not None and not _ro_pool_off():
+            try:
+                borrowed = pool.borrow()
+            except Exception as exc:  # noqa: BLE001 -- fall back, never raise into recall
+                _log.debug("ro_conn: pool borrow failed, falling back to writer conn: %s", exc)
+                try:
+                    pool.writer_fallback_count += 1
+                except Exception:  # noqa: BLE001 -- counting must never break the fallback
+                    pass
+                borrowed = None
+        if borrowed is not None:
+            with borrowed as conn:
+                yield conn
+            return
+        with self._conn_lock:
+            yield self._conn
+
+    def register_exact_index_feed(self, cb: "Callable") -> None:
+        """Register the callback fired after each successful reembed flag-flip.
+
+        The callback receives the record id (str) and the newly-embedded
+        vector, so the resident exact-cosine matrix can upsert the row without
+        a full rebuild.  Registered once and eagerly by MemoryStore at
+        construction.
+        """
+        self._exact_index_feed = cb
 
     def insert_pending_row(
         self,
@@ -623,6 +1393,11 @@ class HippoDB:
     ) -> None:
         import struct as _struct
         zero_blob = _struct.pack(f"<{self._embed_dim}f", *([0.0] * self._embed_dim))
+        # Capture the plaintext surface before encryption so the recency buffer
+        # feed callback receives the human-readable text (the buffer holds
+        # already-decrypted plaintext in volatile RAM, never ciphertext).
+        _plaintext_surface = literal_surface
+        _plaintext_provenance = provenance_json
         # Encrypt the confidential columns at rest with the same key provider and
         # uuid-derived associated data the normal insert path uses, so a row in
         # the deferred-embed window is indistinguishable from a fully-embedded
@@ -630,6 +1405,21 @@ class HippoDB:
         # the values are stored as plaintext, unchanged.
         literal_surface = self._encrypt_for_uuid(record_id, literal_surface)
         provenance_json = self._encrypt_for_uuid(record_id, provenance_json)
+        # Derive the role value from the tags JSON so the role column is set
+        # at insert time. This mirrors the _derive_role helper in the store layer
+        # so write-time and read-time derivation are always identical.
+        import json as _json
+        _pending_role: str | None = None
+        try:
+            _tags_list = _json.loads(tags_json) if tags_json else []
+            for _t in (_tags_list or []):
+                if isinstance(_t, str) and _t.startswith("role:"):
+                    _pending_role = _t[len("role:"):]
+                    break
+        except Exception:  # noqa: BLE001 — tags parse failure must not abort insert
+            pass
+
+        from iai_mcp.hippo._table import _upsert_record_tags
         with self._conn_lock:
             self._conn.execute(
                 "INSERT INTO records"
@@ -638,9 +1428,9 @@ class HippoDB:
                 "  community_id, detail_level, centrality, stability, difficulty,"
                 "  pinned, never_decay, never_merge, s5_trust_score,"
                 "  schema_version, language,"
-                "  hv_tier, structure_hv_payload)"
+                "  hv_tier, structure_hv_payload, role, live)"
                 " VALUES (?, ?, ?, '', ?, 1, ?, ?, ?, ?, '', 1, 0.0, 0.0, 0.0,"
-                "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'')",
+                "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'', ?, 1)",
                 (
                     record_id,
                     tier,
@@ -650,14 +1440,59 @@ class HippoDB:
                     created_at,
                     updated_at,
                     tags_json,
+                    _pending_role,
                 ),
             )
+            _upsert_record_tags(self._conn, record_id, tags_json)
             self._conn.commit()
 
+        # Fire the recency buffer pending-feed callback (if registered) so the
+        # buffer is current for any reader that checks immediately after this
+        # insert — without requiring a boot rebuild.  Hook isolation: any
+        # failure must not disrupt the insert.
+        _rfeed = self._recency_pending_feed
+        if _rfeed is not None:
+            try:
+                _rfeed(
+                    record_id=record_id,
+                    literal_surface=_plaintext_surface,
+                    tags_json=tags_json,
+                    provenance_json=_plaintext_provenance,
+                    created_at=created_at,
+                    tier=tier,
+                )
+            except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                _log.debug(
+                    "recency_pending_feed callback failed id=%s: %s", record_id, _exc
+                )
+
+        # A new pending row increases the pending count while leaving the active
+        # count unchanged.  Invalidate only the pending key so the next
+        # pending_records_count() recomputes the live value.
+        _cci = self._corpus_count_invalidate
+        if _cci is not None:
+            try:
+                _cci("pending")
+            except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                _log.debug(
+                    "corpus_count_invalidate callback failed (pending) id=%s: %s",
+                    record_id,
+                    _exc,
+                )
+        # Direct RO-pool staleness bump for the bare-HippoDB case (no
+        # MemoryStore, so no CorpusCountCache.on_invalidate hook exists).
+        # Idempotent with the cache-hook route when a MemoryStore IS present.
+        self.mark_ro_pool_stale()
+
     def has_pending_rows(self) -> bool:
+        # MUST match reembed_pending_rows' predicate exactly: a tombstoned row
+        # keeps its pending flag forever, and a looser check here makes every
+        # wake-sequence pass fire (and rebuild the ANN) for rows the embed
+        # pass will never select.
         with self._conn_lock:
             row = self._conn.execute(
-                "SELECT 1 FROM records WHERE COALESCE(embedding_pending, 0) = 1 LIMIT 1"
+                "SELECT 1 FROM records WHERE COALESCE(embedding_pending, 0) = 1"
+                " AND tombstoned_at IS NULL LIMIT 1"
             ).fetchone()
         return row is not None
 
@@ -671,8 +1506,8 @@ class HippoDB:
         """Embed pending rows, optionally bounded by batch size and resident set.
 
         The deferred-embed pass of the two-phase capture drain. With the defaults
-        (both bounds 0) it embeds every pending row in one pass — the historical
-        behaviour direct-write recovery and the wake sequence rely on.
+        (both bounds 0) it embeds every pending row in one pass — the behaviour
+        direct-write recovery and the wake sequence rely on.
 
         When ``batch_size`` is positive the rows are embedded in windows of that
         size, each window committed before the next is read, with an allocator
@@ -699,7 +1534,20 @@ class HippoDB:
             return 0
 
         window = batch_size if batch_size and batch_size > 0 else len(ids)
+        # The cap must track the pass's own GROWTH, not an absolute number: a
+        # daemon whose legitimate resident baseline already exceeds an absolute
+        # cap would have every pass die on its first check and the backlog
+        # would starve forever. The hard ceiling (fraction of physical memory)
+        # backstops the float — a creeping baseline must not carry the "cap"
+        # toward an OS memory kill.
         soft_cap = rss_soft_cap_bytes if rss_soft_cap_bytes and rss_soft_cap_bytes > 0 else 0
+        if soft_cap > 0:
+            rss_start = self._reembed_rss_bytes()
+            if rss_start > 0:
+                soft_cap = max(soft_cap, rss_start + REEMBED_RSS_GROWTH_BUDGET_BYTES)
+            hard_ceiling = _reembed_rss_hard_ceiling()
+            if hard_ceiling > 0:
+                soft_cap = min(soft_cap, hard_ceiling)
         bounded = bool(batch_size and batch_size > 0)
 
         count = 0
@@ -721,26 +1569,32 @@ class HippoDB:
                     break
 
             window_ids = ids[start:start + window]
-            window_count = 0
+            # ONE lock acquisition reads the whole window: a per-row
+            # SELECT/UPDATE round-trip against a consolidating pipeline that
+            # holds _conn_lock for long stretches makes the pass crawl at
+            # lock-wait speed (observed ~1 row/40s on a live SLEEP daemon).
+            placeholders = ", ".join("?" for _ in window_ids)
+            with self._conn_lock:
+                surface_rows = self._conn.execute(
+                    "SELECT id, literal_surface FROM records"
+                    f" WHERE id IN ({placeholders})",  # nosemgrep: sql-injection
+                    tuple(window_ids),
+                ).fetchall()
+            surfaces = {r["id"]: (r["literal_surface"] or "") for r in surface_rows}
+
+            # Decrypt + embed OUTSIDE the lock. Decrypt mirrors the record-read
+            # path: plaintext store passes through, encrypted store recovers the
+            # message so the vector is never of the ciphertext. A row whose text
+            # is empty, undecryptable, or unembeddable is skipped — no vector is
+            # fabricated.
+            embedded: list[tuple[bytes, str]] = []
+            vecs: dict[str, list[float]] = {}
             for rid in window_ids:
-                with self._conn_lock:
-                    row = self._conn.execute(
-                        "SELECT literal_surface FROM records WHERE id = ?",
-                        (rid,),
-                    ).fetchone()
-                if row is None:
+                if rid not in surfaces:
                     continue
-                surface_raw = row["literal_surface"] or ""
-                # Decrypt the at-rest text before embedding, mirroring the
-                # record-read decrypt path. On an unencrypted store (no key
-                # provider) this returns the value unchanged; on an encrypted
-                # store it recovers the plaintext so the vector is of the message,
-                # never of the ciphertext. A row whose text is empty or
-                # undecryptable is skipped, never embedded — no vector is
-                # fabricated.
                 try:
                     surface = self._decrypt_record_field(
-                        rid, "literal_surface", surface_raw
+                        rid, "literal_surface", surfaces[rid]
                     )
                 except Exception as exc:  # noqa: BLE001 -- decrypt fail-safe, skip
                     _log.warning(
@@ -756,19 +1610,66 @@ class HippoDB:
                         "reembed_pending_rows: embed failed for id=%s: %s", rid, exc
                     )
                     continue
-                blob = _struct.pack(f"<{len(vec)}f", *vec)
+                embedded.append((_struct.pack(f"<{len(vec)}f", *vec), rid))
+                vecs[rid] = vec
+
+            window_count = len(embedded)
+            if window_count > 0:
+                # ONE lock acquisition writes + commits the whole window.
                 with self._conn_lock:
-                    self._conn.execute(
+                    self._conn.executemany(
                         "UPDATE records SET embedding = ?, embedding_pending = 0"
                         " WHERE id = ?",
-                        (blob, rid),
+                        embedded,
                     )
-                count += 1
-                window_count += 1
-
-            if window_count > 0:
-                with self._conn_lock:
                     self._conn.commit()
+                count += window_count
+
+            for _blob, rid in embedded:
+                # Notify the recency buffer that this row's pending flag has
+                # flipped 1→0 so the buffer can move the entry from the pending
+                # branch to the role branch without dropping or duplicating it.
+                _rr = self._recency_reconcile
+                if _rr is not None:
+                    try:
+                        _rr(str(rid))
+                    except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                        _log.debug(
+                            "recency_reconcile callback failed id=%s: %s", rid, _exc
+                        )
+                # Feed the newly-embedded row into the resident exact-cosine
+                # matrix so the flipped row is answerable without a rebuild.
+                _xf = self._exact_index_feed
+                if _xf is not None:
+                    try:
+                        _xf(str(rid), vecs[rid])
+                    except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                        _log.debug(
+                            "exact_index_feed callback failed id=%s: %s", rid, _exc
+                        )
+                # Invalidate BOTH the active and pending corpus-count cache keys:
+                # the row transitions from pending to active, so both counts change.
+                # Firing per-flip is correct and idempotent (invalidate is no-raise
+                # on subsequent calls for the same key).  Both keys MUST be cleared —
+                # invalidating only one leaves the other stale and the raw-pending
+                # rebuild trigger (runtime_graph_cache.py) misses the count change.
+                _cci = self._corpus_count_invalidate
+                if _cci is not None:
+                    try:
+                        _cci("active", "pending")
+                    except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                        _log.debug(
+                            "corpus_count_invalidate callback failed (active,pending)"
+                            " id=%s: %s",
+                            rid,
+                            _exc,
+                        )
+            if window_count > 0:
+                # Direct RO-pool staleness bump for the bare-HippoDB case (no
+                # MemoryStore, so no CorpusCountCache.on_invalidate hook
+                # exists). Idempotent with the cache-hook route when a
+                # MemoryStore IS present.
+                self.mark_ro_pool_stale()
 
             # Hand the per-window embedder/columnar transient back to the OS
             # between windows so the bounded pass does not build a warm plateau.
@@ -819,7 +1720,7 @@ class HippoDB:
                     _log.warning("ingest_pending_embeddings: malformed .npy %s, skipping", npy_path)
                     continue
                 vec = list(_struct.unpack(f"<{n_floats}f", vec_bytes))
-                meta = _json.loads(json_path.read_text(encoding="utf-8"))
+                meta = _json.loads(json_path.read_text())
                 vec_label = int(meta["vec_label"])
             except Exception as exc:  # noqa: BLE001
                 _log.warning("ingest_pending_embeddings: failed to load %s: %s", npy_path, exc)
@@ -828,10 +1729,13 @@ class HippoDB:
             import numpy as _np
             with self._hnsw_lock:
                 self._maybe_resize()
+                _ingest_vec = _np.array([vec], dtype=_np.float32)
                 self._hnsw.add_items(
-                    _np.array([vec], dtype=_np.float32),
+                    _ingest_vec,
                     _np.array([vec_label], dtype=_np.int64),
                 )
+                if self._ann_journal is not None:
+                    self._ann_journal.append(("add", _ingest_vec, vec_label, uuid_str))
                 self._label_map[uuid_str] = vec_label
                 self._save_index_atomic()
 
@@ -1000,10 +1904,11 @@ class HippoDB:
             _DDL_BUDGET_LEDGER_INDEXES,
             _DDL_RATELIMIT_LEDGER,
             _DDL_HIPPO_META,
+            _DDL_RECORD_TAGS,
+            _DDL_RECORD_TAGS_INDEXES,
         )
         conn = self._conn
-        conn.execute("BEGIN")
-        try:
+        with self._conn_lock, _txn(conn):
             conn.execute(_DDL_RECORDS)
             self._reconcile_columns(
                 "records",
@@ -1015,6 +1920,8 @@ class HippoDB:
                     ("hv_tier", "TEXT NOT NULL DEFAULT 'bsc'"),
                     ("structure_hv_payload", "BLOB NOT NULL DEFAULT x''"),
                     ("embedding_pending", "INTEGER NOT NULL DEFAULT 0"),
+                    ("role", "TEXT"),
+                    ("live", "INTEGER"),
                 ],
             )
             for idx in _DDL_RECORDS_INDEXES:
@@ -1043,10 +1950,10 @@ class HippoDB:
                 "INSERT OR IGNORE INTO _hippo_meta (key, value) VALUES (?, ?)",
                 ("embed_dim", str(self._embed_dim)),
             )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        conn.execute("COMMIT")
+
+            conn.execute(_DDL_RECORD_TAGS)
+            for idx in _DDL_RECORD_TAGS_INDEXES:
+                conn.execute(idx)
 
     def _reconcile_columns(
         self, table_name: str, expected: list[tuple[str, str]]
@@ -1175,20 +2082,57 @@ class HippoDB:
         if self._closed:
             return
         self._closed = True
+        _pool = getattr(self, "_ro_pool", None)
+        if _pool is not None:
+            try:
+                _pool.close()
+            except Exception:  # noqa: BLE001
+                pass
         if hasattr(self, "_hnsw"):
             try:
                 with self._hnsw_lock:
                     self._save_index_atomic()
             except Exception:  # noqa: BLE001
                 pass
-        try:
-            self._conn.commit()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            self._conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        # A borrowed (non-owned) engine connection is shared with the first
+        # opener and is closed by that owner, not here — committing or closing
+        # it would tear the owner's live handle. Only the owner commits + closes.
+        owns_conn = getattr(self, "_owns_conn", True)
+        if owns_conn:
+            try:
+                self._conn.commit()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            if getattr(self, "_storage_driver", "stdlib") == "lilli":
+                try:
+                    from iai_mcp.lillibrain.connection import (  # noqa: PLC0415
+                        deregister_lilli_conn,
+                    )
+
+                    _conn_for_dereg = getattr(self, "_conn", None)
+                    # The registry stores the raw engine connection; unwrap the
+                    # signalling proxy or the identity check never matches.
+                    _conn_for_dereg = getattr(_conn_for_dereg, "_wrapped", _conn_for_dereg)
+                    deregister_lilli_conn(self._db_path, _conn_for_dereg)
+                except Exception:  # noqa: BLE001
+                    pass
+        elif getattr(self, "_storage_driver", "stdlib") == "lilli":
+            # A borrowed (non-owned) lilli handle is a distinct shared holder of
+            # the backing store. Close it deterministically rather than waiting for
+            # garbage collection: the engine release is refcount-gated, so this
+            # frees the file/lock only when this borrow is the last live holder —
+            # while any other holder remains, it is a safe flush-only no-op on the
+            # release side. This restores last-reference release at close() time
+            # for the borrow case (no GC dependence) without risking a premature
+            # release under a live holder.
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         if self._lock_fd is not None:
             lock_key = getattr(self, "_lock_key", None)
             access_mode = getattr(self, "_access_mode", AccessMode.EXCLUSIVE)
@@ -1203,7 +2147,7 @@ class HippoDB:
                     base_fd, refcount = held
                     if refcount <= 1:
                         try:
-                            flock(base_fd, LOCK_UN)
+                            fcntl.flock(base_fd, fcntl.LOCK_UN)
                         except Exception:  # noqa: BLE001
                             pass
                         try:

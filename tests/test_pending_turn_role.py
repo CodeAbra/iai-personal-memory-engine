@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 
-import pytest
 
 from iai_mcp.store import _PendingTurn
 

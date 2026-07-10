@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import pytest
 
 
 def _insert_stale_edge(store, edge_type: str, weight: float, days_old: int):
-    import pandas as pd
 
     tbl = store.db.open_table("edges")
     old = datetime.now(timezone.utc) - timedelta(days=days_old)

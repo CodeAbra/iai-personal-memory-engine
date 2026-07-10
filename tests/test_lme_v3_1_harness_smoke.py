@@ -8,8 +8,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("huggingface_hub", reason="LongMemEval harness needs the hub client")
-
 REPO = Path(__file__).resolve().parent.parent
 
 PINNED_QID_FOR_SMOKE = "e47becba"

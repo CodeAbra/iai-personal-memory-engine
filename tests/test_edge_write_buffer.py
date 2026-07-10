@@ -21,7 +21,7 @@ def _clear_edge_buffer(store) -> None:
     store_mod._edge_last_flush_at.pop(id(store), None)
 
 
-def test_boost_edges_insert_buffers_rows_not_store(tmp_path):
+def test_boost_edges_insert_buffers_rows_not_lancedb(tmp_path):
     from iai_mcp import store as store_mod
     from iai_mcp.store import EDGES_TABLE, MemoryStore
 
@@ -42,7 +42,7 @@ def test_boost_edges_insert_buffers_rows_not_store(tmp_path):
         tbl = store.db.open_table(EDGES_TABLE)
         n_after = len(tbl.to_pandas())
         assert n_after == n_before, (
-            f"boost_edges insert changed store row count before flush: {n_before} -> {n_after}"
+            f"boost_edges insert changed LanceDB row count before flush: {n_before} -> {n_after}"
         )
 
 
@@ -204,7 +204,7 @@ def test_add_contradicts_edge_flushes_immediately(tmp_path):
 
         tbl = store.db.open_table(EDGES_TABLE)
         assert len(tbl.to_pandas()) == n_before + 1, (
-            "contradicts edge row did not land in the store on write"
+            "contradicts edge row did not land in LanceDB on write"
         )
 
 

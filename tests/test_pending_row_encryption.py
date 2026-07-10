@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from tests._store_raw import open_store_raw
+
 import pytest
 
 from iai_mcp.crypto import is_encrypted
@@ -65,7 +67,7 @@ def _brain_db_path(root: Path) -> Path:
 
 
 def _raw_col(db_path: Path, col: str, row_id: str) -> str | None:
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         row = conn.execute(
             f"SELECT {col} FROM records WHERE id = ?", (row_id,)
@@ -159,7 +161,7 @@ def test_encrypted_store_reembed_uses_plaintext_not_ciphertext(
 
     db_path = _brain_db_path(tmp_path)
     # Read the stored embedding blob and the cleared pending flag directly.
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         row = conn.execute(
             "SELECT embedding, embedding_pending FROM records WHERE id = ?",
@@ -214,7 +216,7 @@ def test_unencrypted_store_pending_row_plaintext_and_correct_vector(
     assert result["action"] == "wake_sequence"
     assert result["reembed_count"] == 1
 
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         row = conn.execute(
             "SELECT embedding, embedding_pending FROM records WHERE id = ?",

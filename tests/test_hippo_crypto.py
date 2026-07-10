@@ -7,14 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from tests._store_raw import open_store_raw
+
 import numpy as np
 import pytest
 
 from iai_mcp.hippo import (
     HippoDB,
     HippoDecryptError,
-    _ENCRYPTED_EVENTS_COLUMNS,
-    _ENCRYPTED_RECORD_COLUMNS,
 )
 from iai_mcp.types import EMBED_DIM
 
@@ -95,7 +95,7 @@ _EVENTS_UPDATE: dict[str, str] = {
 
 def _raw_records_col(db_path: Path, col: str, row_id: str) -> str | None:
     stmt = _RECORDS_SELECT[col]
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         row = conn.execute(stmt, (row_id,)).fetchone()
         return row[0] if row else None
@@ -105,7 +105,7 @@ def _raw_records_col(db_path: Path, col: str, row_id: str) -> str | None:
 
 def _raw_events_col(db_path: Path, col: str, row_id: str) -> str | None:
     stmt = _EVENTS_SELECT[col]
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         row = conn.execute(stmt, (row_id,)).fetchone()
         return row[0] if row else None
@@ -115,7 +115,7 @@ def _raw_events_col(db_path: Path, col: str, row_id: str) -> str | None:
 
 def _raw_records_set(db_path: Path, col: str, row_id: str, value: str) -> None:
     stmt = _RECORDS_UPDATE[col]
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         conn.execute(stmt, (value, row_id))
         conn.commit()
@@ -125,7 +125,7 @@ def _raw_records_set(db_path: Path, col: str, row_id: str, value: str) -> None:
 
 def _raw_events_set(db_path: Path, col: str, row_id: str, value: str) -> None:
     stmt = _EVENTS_UPDATE[col]
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     try:
         conn.execute(stmt, (value, row_id))
         conn.commit()
@@ -274,7 +274,7 @@ def test_plaintext_passthrough_on_decrypt(
 ) -> None:
     row_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(str(brain_db_path))
+    conn = open_store_raw(brain_db_path)
     embedding_blob = np.zeros(EMBED_DIM, dtype=np.float32).tobytes()
     try:
         conn.execute(
@@ -450,3 +450,52 @@ def test_update_non_id_keyed_encrypted_column_raises(
             where="tier = 'episodic'",
             values={"literal_surface": "danger zone"},
         )
+
+
+def test_compressed_aead_envelope_survives_store_round_trip_byte_identical(
+    hippo_with_key: HippoDB, brain_db_path: Path, test_key: bytes
+) -> None:
+    """A compressed-encrypted (zstd-in-AEAD) blob must round-trip through the
+    store byte-for-byte.
+
+    The store holds the ciphertext as an opaque value; it must never truncate
+    or alter the zstd frame. This is the constitutional verbatim/lossless
+    invariant for the compressed-AEAD envelope: the exact wire bytes written are
+    the exact wire bytes read back, and they still decrypt+decompress to the
+    original plaintext. A highly compressible, multi-kilobyte plaintext is used
+    so the zstd frame is non-trivial and any dropped/added byte would change the
+    decrypted result or fail the AEAD tag.
+    """
+    from iai_mcp.crypto import decrypt_field, encrypt_field
+
+    # Large, highly compressible plaintext with embedded control characters and
+    # multi-byte sequences so a single-byte drift is unambiguous.
+    plaintext = ("verbatim-block 🧠 " + "A" * 4096 + "\x00\x01\x02 日本語 ") * 8
+
+    # Build the compressed-AEAD envelope exactly as the store's encrypt path does,
+    # keyed by the row uuid (the associated data the store binds per row).
+    row_id = str(uuid4())
+    aad = row_id.encode("utf-8")
+    ciphertext = encrypt_field(plaintext, test_key, associated_data=aad)
+    assert ciphertext.startswith("iai:enc:v1:")
+
+    # Store the pre-built ciphertext as the record's literal_surface. The store's
+    # own encrypt path is idempotent on an already-encrypted value, so what lands
+    # on disk is exactly this ciphertext.
+    row = _record_row(rid=row_id, literal_surface=ciphertext)
+    hippo_with_key.open_table("records").add([row])
+
+    # Read the raw at-rest value back through the driver-aware raw open.
+    raw = _raw_records_col(brain_db_path, "literal_surface", row_id)
+    assert raw is not None
+    raw_str = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+
+    # BYTE-IDENTICAL: the stored ciphertext equals the written ciphertext exactly.
+    assert raw_str == ciphertext, (
+        "compressed-AEAD envelope was altered by the store round-trip — "
+        "the verbatim/lossless invariant is violated"
+    )
+
+    # And it still decrypts + decompresses back to the exact original plaintext.
+    recovered = decrypt_field(raw_str, test_key, associated_data=aad)
+    assert recovered == plaintext

@@ -8,7 +8,7 @@
 //! lives in a later wave.
 //!
 //! This file is the strongest correctness gate for the BertEmbedder forward
-//! pass: if any of the three pitfalls (wrong pooling, wrong GELU,
+//! pass: if any of the three RESEARCH.md pitfalls (wrong pooling, wrong GELU,
 //! wrong LayerNorm eps) regresses, cosine drops below 0.9999 and this test
 //! reports the failing indices.
 
@@ -43,7 +43,7 @@ fn hf_cache_present() -> bool {
 }
 
 #[test]
-fn baseline_sha256_matches_constitutional_value() {
+fn baseline_sha256_matches_frozen_value() {
     let path = baseline_dir().join("vectors.npy");
     // nosemgrep
     let bytes = std::fs::read(&path).expect("read vectors.npy");
@@ -53,7 +53,7 @@ fn baseline_sha256_matches_constitutional_value() {
     // SHA256 of the full on-disk vectors.npy file (magic + NPY header + raw bytes).
     // Note: this differs from `hashlib.sha256(np_array.tobytes())` by ~80 bytes
     // of NPY header. The capture script (bench/embedder_baseline.py) was patched
-    // hash the file after np.save, not vectors.tobytes() before.
+    // post-49-03 to hash the file after np.save, not vectors.tobytes() before.
     let expected = "31cc9bb0643835b872dbd21e0553b898e3de79cc28aebcf8c27814363ec5432b";
     assert_eq!(
         actual, expected,

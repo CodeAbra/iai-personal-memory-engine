@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 from contextlib import redirect_stdout
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 def _args(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**kwargs)

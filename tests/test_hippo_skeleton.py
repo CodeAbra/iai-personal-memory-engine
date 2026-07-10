@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +11,6 @@ import pytest
 
 from iai_mcp.hippo import (
     HippoDB,
-    HippoLockHeldError,
     HippoTableList,
     _validate_table_name,
 )
@@ -26,6 +23,7 @@ _CANONICAL_TABLES = sorted([
     "edges",
     "events",
     "ratelimit_ledger",
+    "record_tags",
     "records",
 ])
 
@@ -72,7 +70,7 @@ def test_foreign_keys_enabled(tmp_path: Path) -> None:
     assert result == 1
 
 
-def test_all_six_tables_exist(tmp_path: Path) -> None:
+def test_all_canonical_tables_exist(tmp_path: Path) -> None:
     with HippoDB(tmp_path) as db:
         names = sorted(db.table_names())
     assert names == _CANONICAL_TABLES
@@ -222,8 +220,7 @@ def test_lock_file_created_on_open(tmp_path: Path) -> None:
     with HippoDB(tmp_path):
         assert lock_path.exists()
         mode = stat.S_IMODE(lock_path.stat().st_mode)
-        if sys.platform != "win32":
-            assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
 
 
 def test_second_open_same_process_succeeds(tmp_path: Path) -> None:

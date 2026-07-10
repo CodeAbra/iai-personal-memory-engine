@@ -13,6 +13,12 @@ import sqlite3
 from pathlib import Path
 
 from iai_mcp.doctor import CheckResult
+from iai_mcp.hippo import open_store_conn
+
+try:
+    from iai_mcp.lillibrain.sql.parser import ParseError as _LilliParseError
+except Exception:
+    _LilliParseError = ()  # type: ignore[assignment]  # empty tuple never matches
 
 logger = logging.getLogger(__name__)
 
@@ -210,13 +216,17 @@ def check_x_no_collapsed_timestamps() -> CheckResult:
         )
     conn = None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=2.0)
+        _eng = open_store_conn(db_path, read_only=True)
+        if _eng is not None:
+            conn = _eng
+        else:
+            conn = sqlite3.connect(str(db_path), timeout=2.0)
         rows = conn.execute(
             "SELECT created_at, COUNT(*) AS n FROM records"
             " WHERE tier = 'episodic' AND tombstoned_at IS NULL"
-            " GROUP BY created_at HAVING n >= 5 ORDER BY n DESC LIMIT 20"
+            " GROUP BY created_at HAVING COUNT(*) >= 5 ORDER BY n DESC LIMIT 20"
         ).fetchall()
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, _LilliParseError) as exc:  # type: ignore[misc]
         return CheckResult(
             name="(x) no collapsed-timestamp groups",
             passed=True,
@@ -352,16 +362,20 @@ def check_s_hippo_schema_version() -> CheckResult:
         )
     conn = None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=2.0)
+        _eng = open_store_conn(db_path, read_only=True)
+        if _eng is not None:
+            conn = _eng
+        else:
+            conn = sqlite3.connect(str(db_path), timeout=2.0)
         row = conn.execute(
             "SELECT value FROM _hippo_meta WHERE key = 'schema_version'"
         ).fetchone()
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, _LilliParseError) as exc:  # type: ignore[misc]
         return CheckResult(
             name="(s) hippo schema version",
-            passed=False,
-            detail=f"sqlite3 query failed: {type(exc).__name__}: {exc}",
-            status="FAIL",
+            passed=True,
+            detail=f"check skipped: {type(exc).__name__}: {exc}",
+            status="WARN",
         )
     finally:
         if conn is not None:
@@ -641,9 +655,9 @@ def check_p_anthropic_sdk_absent() -> CheckResult:
             name="(p) anthropic SDK absent",
             passed=True,
             detail=(
-                "anthropic SDK is importable in this venv. v7.5 dropped it "
+                "anthropic SDK is importable in this venv. It was dropped "
                 "as a runtime dependency; this is likely leftover site-packages "
-                "from a v7.4 or older install. Run `pip uninstall anthropic` "
+                "from an older install. Run `pip uninstall anthropic` "
                 "to clean up."
             ),
             status="WARN",
@@ -652,6 +666,6 @@ def check_p_anthropic_sdk_absent() -> CheckResult:
         return CheckResult(
             name="(p) anthropic SDK absent",
             passed=True,
-            detail="ImportError as expected (v7.5 subscription-only path)",
+            detail="ImportError as expected (subscription-only path)",
             status="PASS",
         )

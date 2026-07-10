@@ -7,7 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
 
 
 SID = "last-dd-test-abc"

@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 
+from iai_mcp.lilli.core import hd_backend as backend
 from iai_mcp.lilli.core.seed import seed_from_str
 
 
@@ -51,6 +52,8 @@ def bind(a: bytes, b: bytes) -> bytes:
         raise ValueError(
             f"bind: length mismatch -- len(a)={len(a)}, len(b)={len(b)}"
         )
+    if backend.use_rust():
+        return bytes(backend.native().fhrr_bind(a, b))
     aa = np.frombuffer(a, dtype=np.uint8)
     bb = np.frombuffer(b, dtype=np.uint8)
     result = (aa.astype(np.uint16) + bb.astype(np.uint16)) & 0xFF
@@ -62,6 +65,8 @@ def unbind(bound: bytes, key: bytes) -> bytes:
         raise ValueError(
             f"unbind: length mismatch -- len(bound)={len(bound)}, len(key)={len(key)}"
         )
+    if backend.use_rust():
+        return bytes(backend.native().fhrr_unbind(bound, key))
     bb = np.frombuffer(bound, dtype=np.uint8)
     kk = np.frombuffer(key, dtype=np.uint8)
     result = (bb.astype(np.int16) - kk.astype(np.int16)) & 0xFF
@@ -74,6 +79,9 @@ def bundle(hvs: list[bytes]) -> bytes:
 
     if len(hvs) == 1:
         return hvs[0]
+
+    if backend.use_rust():
+        return bytes(backend.native().fhrr_bundle(list(hvs)))
 
     mat = np.frombuffer(b"".join(hvs), dtype=np.uint8).reshape(len(hvs), -1)
     D = mat.shape[1]
@@ -91,6 +99,8 @@ def bundle(hvs: list[bytes]) -> bytes:
 
 
 def permute(hv: bytes, shift: int) -> bytes:
+    if backend.use_rust():
+        return bytes(backend.native().fhrr_permute(hv, shift))
     arr = np.frombuffer(hv, dtype=np.uint8)
     return np.roll(arr, shift).tobytes()
 
@@ -98,6 +108,8 @@ def permute(hv: bytes, shift: int) -> bytes:
 def similarity(a: bytes, b: bytes) -> float:
     if len(a) != len(b):
         return 0.0
+    if backend.use_rust():
+        return float(backend.native().fhrr_similarity(a, b))
     aa_rad = (np.frombuffer(a, dtype=np.uint8).astype(np.float64) / 256.0) * _TWO_PI
     bb_rad = (np.frombuffer(b, dtype=np.uint8).astype(np.float64) / 256.0) * _TWO_PI
     diff = aa_rad - bb_rad

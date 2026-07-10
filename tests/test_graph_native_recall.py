@@ -73,7 +73,7 @@ def _make_record(vec: list[float], text: str) -> MemoryRecord:
 
 @pytest.fixture
 def seeded_store(tmp_path: Path) -> tuple[MemoryStore, _DetEmbedder, list[MemoryRecord]]:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     store.root = tmp_path
     emb = _DetEmbedder(dim=store.embed_dim)
     recs = []

@@ -6,27 +6,19 @@ import os
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from _socket_test_helpers import (
-    daemon_endpoint,
-    daemon_endpoint_ready_path,
-    new_daemon_client_socket,
-)
-
 
 @pytest.fixture
 def iai_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() reads USERPROFILE on Windows
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-crash-loop-passphrase")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "hippo"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
     import keyring.core
 
     keyring.core._keyring_backend = None
@@ -204,16 +196,16 @@ def test_failed_attempt_retry_policy_still_holds(iai_home, monkeypatch):
     aged = time.time() - 1000
     os.utime(attempt_3, (aged, aged))
 
+    # Inject the failure at the live drain path: the backlog drain routes new
+    # events through `_drain_write_pending`, not the synchronous `capture_turn`,
+    # so the `insert-failed:` reason that drives the failed-path promotion must
+    # come from there.
     def _stub(*_args: Any, **_kwargs: Any) -> dict:
-        return {"status": "skipped", "reason": "insert-failed:test"}
+        return {"status": "skipped", "record_id": None, "reason": "insert-failed:test"}
 
     import iai_mcp.capture as capture_mod
 
-    # The two-phase backlog drain inserts via `_drain_write_pending` (pending row
-    # first, embed later); the live path uses `capture_turn`. Force both to report
-    # an insert failure so the attempt/permanent-failure policy is exercised.
     monkeypatch.setattr(capture_mod, "_drain_write_pending", _stub)
-    monkeypatch.setattr(capture_mod, "capture_turn", _stub)
 
     store = _open_isolated_store()
     counts = drain_deferred_captures(store)
@@ -229,27 +221,21 @@ def test_failed_attempt_retry_policy_still_holds(iai_home, monkeypatch):
 
 def test_socket_binds_before_drain_completes(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() reads USERPROFILE on Windows
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-bind-first-passphrase")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "hippo"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
     monkeypatch.setenv("IAI_DAEMON_IDLE_SHUTDOWN_SECS", "3600")
     import keyring.core
 
     keyring.core._keyring_backend = None
 
-    sock_dir = Path(tempfile.mkdtemp(prefix="iai-sock-"))
-    tmp_socket = sock_dir / f"iai-test-{os.getpid()}.sock"
+    tmp_socket = Path(f"/tmp/iai-test-{os.getpid()}-{int(time.time()*1000)}.sock")
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_socket))
 
     def _cleanup_socket():
         try:
             tmp_socket.unlink()
         except (FileNotFoundError, OSError):
-            pass
-        try:
-            sock_dir.rmdir()
-        except OSError:
             pass
 
     request.addfinalizer(_cleanup_socket)
@@ -288,11 +274,11 @@ def test_socket_binds_before_drain_completes(tmp_path, monkeypatch, request):
                     if exc is not None:
                         raise exc
                     return False
-                if daemon_endpoint_ready_path(tmp_socket).exists():
+                if tmp_socket.exists():
                     try:
-                        s = new_daemon_client_socket()
+                        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                         s.settimeout(1.0)
-                        await asyncio.to_thread(s.connect, daemon_endpoint(tmp_socket))
+                        await asyncio.to_thread(s.connect, str(tmp_socket))
                         s.close()
                         snapshot["bound_at"] = time.monotonic()
                         snapshot["drain_started"] = drain_state["started"]
@@ -331,10 +317,9 @@ def test_socket_binds_before_drain_completes(tmp_path, monkeypatch, request):
 
 def test_atomic_claim_logs_generic_oserror(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() reads USERPROFILE on Windows
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "p6-1-fix-a-test-passphrase")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "hippo"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
     import keyring.core
 
     keyring.core._keyring_backend = None
@@ -349,16 +334,14 @@ def test_atomic_claim_logs_generic_oserror(tmp_path, monkeypatch):
 
     import pathlib as _pathlib
 
-    real_replace = _pathlib.Path.replace
+    real_rename = _pathlib.Path.rename
 
     def boom(self, target):
         if ".processing-" in str(target) and self == fpath:
             raise PermissionError("simulated EACCES on atomic claim")
-        return real_replace(self, target)
+        return real_rename(self, target)
 
-    # The atomic claim uses Path.replace (os.replace) — not rename — so the
-    # claim survives a pre-existing dest on Windows. Patch what the code calls.
-    monkeypatch.setattr(_pathlib.Path, "replace", boom)
+    monkeypatch.setattr(_pathlib.Path, "rename", boom)
 
     from iai_mcp.capture import drain_deferred_captures
     from iai_mcp.store import MemoryStore
@@ -369,9 +352,9 @@ def test_atomic_claim_logs_generic_oserror(tmp_path, monkeypatch):
     finally:
         keyring.core._keyring_backend = None
 
-    assert fpath.exists(), "regression: file should remain after claim failure"
+    assert fpath.exists(), "FIX A regression: file should remain after claim failure"
     assert ".processing-" not in fpath.name, (
-        f"regression: file basename should NOT have a .processing- segment, "
+        f"FIX A regression: file basename should NOT have a .processing- segment, "
         f"got {fpath.name}"
     )
     assert ".crash-" not in fpath.name
@@ -384,10 +367,10 @@ def test_atomic_claim_logs_generic_oserror(tmp_path, monkeypatch):
     assert log_path.exists(), "deferred-drain log should be created"
     log_text = log_path.read_text()
     assert "claim-failed" in log_text, (
-        f"regression: log should contain 'claim-failed', got: {log_text!r}"
+        f"FIX A regression: log should contain 'claim-failed', got: {log_text!r}"
     )
     assert "PermissionError" in log_text, (
-        f"regression: log should name PermissionError, got: {log_text!r}"
+        f"FIX A regression: log should name PermissionError, got: {log_text!r}"
     )
 
     assert counts["files_drained"] == 0
@@ -408,8 +391,7 @@ def test_strip_processing_marker_returns_false_on_rename_failure(
     def boom(self, target):
         raise PermissionError("simulated")
 
-    # _strip_processing_marker uses Path.replace (os.replace), not rename.
-    monkeypatch.setattr(_pathlib.Path, "replace", boom)
+    monkeypatch.setattr(_pathlib.Path, "rename", boom)
 
     new_path, ok = _strip_processing_marker(src, log_path=log_path)
     assert ok is False, "strip MUST report failure"

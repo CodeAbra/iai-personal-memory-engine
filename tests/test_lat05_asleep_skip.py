@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
+import json as _json
 import os
 import socket
 import sys
@@ -15,10 +15,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_store import _make
-from _socket_test_helpers import bind_fake_daemon_socket
 
 
-SLEEP_SKIP_CEILING_S = 1.5
+READ_TIMEOUT_S = 1.5
+FALLBACK_LOWER_S = READ_TIMEOUT_S
+FALLBACK_CEILING_S = 3.5
 
 WAKE_FAILFAST_LOWER_S = 1.8
 WAKE_FAILFAST_CEILING_S = 3.5
@@ -57,7 +58,15 @@ def _start_stall_server(sock_path: str, stall_seconds: float = 60.0) -> threadin
     ready = threading.Event()
 
     def _server():
-        srv = bind_fake_daemon_socket(sock_path)
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(sock_path)
+        srv.listen(5)
         ready.set()
         srv.settimeout(120.0)
         try:
@@ -115,7 +124,15 @@ def _stub_embedder(monkeypatch):
     _sr._WARM_LOCAL_STORE = None
 
 
-def test_sleep_skip_avoids_2s_rpc(monkeypatch, tmp_path):
+def test_hung_daemon_falls_back_within_read_timeout(monkeypatch, tmp_path, capsys):
+    """A genuinely stalled daemon (SLEEP lifecycle state, socket accepts but
+    never replies) must still be tried first -- lifecycle state is never a
+    pre-emptive skip (see test_iai_cli_recall.py::
+    test_recall_contacts_daemon_while_lifecycle_state_is_sleep for the healthy
+    SLEEP-daemon path). Latency is bounded by IAI_RECALL_READ_TIMEOUT, then
+    cmd_recall falls back to direct-store recall -- never an instant skip,
+    never an unbounded hang.
+    """
     store_root = _make_hermetic_store(tmp_path)
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
 
@@ -126,22 +143,31 @@ def test_sleep_skip_avoids_2s_rpc(monkeypatch, tmp_path):
     assert ready.is_set(), "Stall server failed to bind"
 
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", sock_path)
-
-    monkeypatch.setenv("IAI_RECALL_READ_TIMEOUT", "1.5")
+    monkeypatch.setenv("IAI_RECALL_READ_TIMEOUT", str(READ_TIMEOUT_S))
 
     import iai_mcp.iai_cli as _iai_cli
 
     args = argparse.Namespace(cue="test recall cue", limit=5, json=True)
 
     t0 = time.perf_counter()
-    _iai_cli.cmd_recall(args)
+    rc = _iai_cli.cmd_recall(args)
     elapsed = time.perf_counter() - t0
 
-    assert elapsed < SLEEP_SKIP_CEILING_S, (
-        f"iai recall against a confidently-SLEEP daemon took {elapsed:.2f}s "
-        f"(expected < {SLEEP_SKIP_CEILING_S}s after asleep-skip). "
-        "Today this fails because the ~2s RPC is still issued. "
-        "Goes GREEN once the lifecycle-state-based skip ships."
+    assert rc == 0
+    assert elapsed >= FALLBACK_LOWER_S, (
+        f"iai recall against a stalled daemon returned in {elapsed:.2f}s -- "
+        f"too fast; expected >= {FALLBACK_LOWER_S}s (the daemon must still be "
+        "tried, bounded by IAI_RECALL_READ_TIMEOUT, not pre-emptively skipped)."
+    )
+    assert elapsed < FALLBACK_CEILING_S, (
+        f"iai recall against a stalled daemon took {elapsed:.2f}s -- expected "
+        f"< {FALLBACK_CEILING_S}s (bounded read-timeout, then store fallback)."
+    )
+
+    out = capsys.readouterr().out
+    payload = _json.loads(out)
+    assert payload["_source"] != "daemon", (
+        f"expected the stalled daemon to be bypassed via fallback, got _source={payload['_source']!r}"
     )
 
 

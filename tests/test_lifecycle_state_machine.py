@@ -10,13 +10,11 @@ from typing import Any
 
 import pytest
 
-from unittest.mock import patch
 
 from iai_mcp.lifecycle import (
     DEFAULT_LOCK_PATH,  # noqa: F401  -- import sanity
     LifecycleEvent,
     LifecycleState,
-    LifecycleStateLocked,
     LifecycleStateMachine,
     _lifecycle_lock,
     compute_transition,

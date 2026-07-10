@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
 import pytest
 
@@ -32,7 +30,6 @@ def _sample_edge_row(src_id: str, dst_id: str) -> dict:
 
 
 def _edge_arrow(rows: list[dict]) -> pa.Table:
-    from datetime import timezone
     import pyarrow as pa
     return pa.Table.from_pylist(
         rows,

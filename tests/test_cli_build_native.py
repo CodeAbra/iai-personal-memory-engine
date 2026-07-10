@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from unittest.mock import Mock
 
-import pytest
 
 from iai_mcp.cli import cmd_build_native
 

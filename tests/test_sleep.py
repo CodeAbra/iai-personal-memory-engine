@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 

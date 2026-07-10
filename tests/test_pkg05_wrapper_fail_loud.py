@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,6 @@ def test_missing_wrapper_raises_actionable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_cli_module, "iai_mcp", _pkg, raising=False)  # type: ignore[attr-defined]
 
-    from importlib.resources.abc import Traversable  # type: ignore[import]
 
     class _FakeTraversable:
 
@@ -45,7 +43,6 @@ def test_missing_wrapper_raises_actionable(tmp_path, monkeypatch):
         def exists(self) -> bool:
             return self._base.exists()
 
-    import iai_mcp.cli as _cli
 
     original_res_files = None
     try:

@@ -1,8 +1,7 @@
 {
   "name": "iai-mcp-wrapper",
-  "version": "1.0.0",
-  "description": "TypeScript MCP wrapper for the IAI-MCP Python core",
-  "license": "MIT",
+  "version": "2.0.0",
+  "description": "TypeScript MCP wrapper for IAI-MCP Python core",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

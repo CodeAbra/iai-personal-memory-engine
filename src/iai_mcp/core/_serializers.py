@@ -6,18 +6,9 @@ from __future__ import annotations
 def _hit_to_json(h) -> dict:
     _vf = getattr(h, "valid_from", None)
     _vt = getattr(h, "valid_to", None)
-    # Clamp the *displayed* score to [0,1]. Multiplicative boosts (trigram*2,
-    # FTS*3, valence) can drive the internal score past 1.0; that raw value stays
-    # in `sort_score` for ordering, but the client must never see a "confidence"
-    # > 1 (or < 0). Ordering is unaffected: this only touches the serialized
-    # number, never the rank.
-    try:
-        _display_score = max(0.0, min(1.0, float(h.score)))
-    except (TypeError, ValueError):
-        _display_score = 0.0
     return {
         "record_id": str(h.record_id),
-        "score": _display_score,
+        "score": float(h.score),
         "reason": h.reason,
         "literal_surface": h.literal_surface,
         "adjacent_suggestions": [str(x) for x in h.adjacent_suggestions],

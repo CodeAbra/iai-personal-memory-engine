@@ -10,7 +10,6 @@ from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord, RecallResponse
 
-
 class _FakeEmbedder:
 
     DIM = EMBED_DIM
@@ -23,7 +22,6 @@ class _FakeEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [list(self._vec) for _ in texts]
-
 
 def _make(
     vec: list[float], text: str = "rec", aaak: str = "", tier: str = "episodic",
@@ -51,11 +49,10 @@ def _make(
         language="en",
     )
 
-
 def _build_store_and_graph(
     tmp_path, n: int, surface_len: int = 4,
 ) -> tuple[MemoryStore, MemoryGraph, list[MemoryRecord]]:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs: list[MemoryRecord] = []
     for i in range(n):
         vec = [0.0] * EMBED_DIM
@@ -79,7 +76,6 @@ def _build_store_and_graph(
         })
     return store, graph, recs
 
-
 def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
     cid = uuid4()
     centroid = [1.0] + [0.0] * (EMBED_DIM - 1)
@@ -91,7 +87,6 @@ def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
         top_communities=[cid],
         mid_regions={cid: [r.id for r in recs]},
     )
-
 
 def test_recall_for_response_no_k_hits_param(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_response
@@ -106,7 +101,6 @@ def test_recall_for_response_no_k_hits_param(tmp_path) -> None:
             cue="test", session_id="s1",
             k_hits=10,
         )
-
 
 def test_recall_for_response_returns_recall_response_type(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_response
@@ -129,7 +123,6 @@ def test_recall_for_response_returns_recall_response_type(tmp_path) -> None:
     assert isinstance(resp.cue_mode, str)
     assert isinstance(resp.patterns_observed, list)
 
-
 def test_recall_for_response_packs_under_budget(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_response
 
@@ -145,7 +138,6 @@ def test_recall_for_response_packs_under_budget(tmp_path) -> None:
     assert len(resp.hits) == 2
     assert resp.budget_used == 100
 
-
 def test_recall_for_response_returns_all_with_unlimited_budget(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_response
 
@@ -160,7 +152,6 @@ def test_recall_for_response_returns_all_with_unlimited_budget(tmp_path) -> None
 
     assert len(resp.hits) == 5
 
-
 def test_recall_for_response_minimum_one_hit(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_response
 
@@ -174,7 +165,6 @@ def test_recall_for_response_minimum_one_hit(tmp_path) -> None:
     )
 
     assert len(resp.hits) == 1
-
 
 def test_recall_for_response_threads_mode_to_core(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_response
@@ -200,7 +190,6 @@ def test_recall_for_response_threads_mode_to_core(tmp_path) -> None:
     )
     assert resp_c.cue_mode == "concept"
 
-
 def test_recall_for_response_signature_has_no_k_hits_param() -> None:
     import inspect
     from iai_mcp.pipeline import recall_for_response
@@ -210,10 +199,9 @@ def test_recall_for_response_signature_has_no_k_hits_param() -> None:
     assert "mode" in sig.parameters
     assert "k_hits" not in sig.parameters, (
         "recall_for_response signature must NOT carry a k_hits parameter "
-        "(the entry-point split exists so the two "
+        "(contract split — the entry-point split exists so the two "
         "response shapes can never silently swap via an optional kwarg)."
     )
-
 
 def test_recall_for_response_default_budget_tokens_1500() -> None:
     import inspect
@@ -221,7 +209,6 @@ def test_recall_for_response_default_budget_tokens_1500() -> None:
 
     sig = inspect.signature(recall_for_response)
     assert sig.parameters["budget_tokens"].default == 1500
-
 
 def test_recall_for_response_shares_core_with_benchmark(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark, recall_for_response
@@ -255,10 +242,8 @@ def test_recall_for_response_shares_core_with_benchmark(tmp_path) -> None:
         f"  benchmark only: {b_set - r_set}"
     )
 
-
 def test_recall_for_response_budget_enforced_over_pending_markers(tmp_path, monkeypatch) -> None:
     from iai_mcp.pipeline import recall_for_response
-    from iai_mcp.types import MemoryRecord
 
     store, graph, recs = _build_store_and_graph(tmp_path, n=5, surface_len=4)
     assignment = _flat_assignment(recs)

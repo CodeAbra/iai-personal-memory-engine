@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -9,7 +10,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_UN, flock
 from iai_mcp.lifecycle_event_log import LifecycleEventLog
 from iai_mcp.lifecycle_state import (
     LIFECYCLE_STATE_PATH,
@@ -76,6 +76,10 @@ def compute_transition(
     if state is LifecycleState.SLEEP:
         if event is LifecycleEvent.SLEEP_CYCLE_DONE and payload.get("still_idle"):
             return LifecycleState.HIBERNATION
+        if event is LifecycleEvent.WAKE_SIGNAL:
+            # Morning wake: the consolidation window closed (or a boot
+            # restored SLEEP out of hours) — sleep yields to the day.
+            return LifecycleState.WAKE
         return None
 
     if state is LifecycleState.HIBERNATION:
@@ -92,7 +96,7 @@ def _lifecycle_lock(lock_path: Path) -> Iterator[int]:
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
-            flock(fd, LOCK_EX | LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 raise LifecycleStateLocked(
@@ -103,7 +107,7 @@ def _lifecycle_lock(lock_path: Path) -> Iterator[int]:
             yield fd
         finally:
             try:
-                flock(fd, LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
     finally:

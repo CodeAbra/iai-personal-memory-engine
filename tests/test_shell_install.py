@@ -8,16 +8,13 @@ from pathlib import Path
 
 import pytest
 
-
 SHELL_DIR = Path(__file__).resolve().parent / "shell"
 LAUNCHD_SCRIPT = SHELL_DIR / "test_launchd_install.sh"
 SYSTEMD_SCRIPT = SHELL_DIR / "test_systemd_install.sh"
 RUN_SHELL = os.environ.get("IAI_MCP_RUN_SHELL_INSTALL_TESTS") == "1"
 
-
 def _bash_available() -> bool:
     return shutil.which("bash") is not None
-
 
 @pytest.mark.skipif(not RUN_SHELL, reason="set IAI_MCP_RUN_SHELL_INSTALL_TESTS=1 to run real launchctl bootstrap test")
 @pytest.mark.skipif(not LAUNCHD_SCRIPT.exists(), reason="launchd shell test missing")
@@ -37,7 +34,6 @@ def test_launchd_install_idempotency() -> None:
     )
     assert "PASS" in result.stdout or "SKIP" in result.stdout, result.stdout
 
-
 @pytest.mark.skipif(not RUN_SHELL, reason="set IAI_MCP_RUN_SHELL_INSTALL_TESTS=1 to run real systemctl --user enable test")
 @pytest.mark.skipif(not SYSTEMD_SCRIPT.exists(), reason="systemd shell test missing")
 @pytest.mark.skipif(not _bash_available(), reason="bash unavailable")
@@ -56,7 +52,6 @@ def test_systemd_install_idempotency() -> None:
     )
     assert "PASS" in result.stdout or "SKIP" in result.stdout, result.stdout
 
-
 @pytest.mark.skipif(not LAUNCHD_SCRIPT.exists(), reason="launchd shell test missing")
 @pytest.mark.skipif(not _bash_available(), reason="bash unavailable")
 def test_launchd_script_skips_on_non_macos_platform() -> None:
@@ -70,7 +65,6 @@ def test_launchd_script_skips_on_non_macos_platform() -> None:
     )
     assert result.returncode == 0
     assert "SKIP: not macOS" in result.stdout
-
 
 @pytest.mark.skipif(not SYSTEMD_SCRIPT.exists(), reason="systemd shell test missing")
 @pytest.mark.skipif(not _bash_available(), reason="bash unavailable")
@@ -86,7 +80,6 @@ def test_systemd_script_skips_on_non_linux_platform() -> None:
     assert result.returncode == 0
     assert "SKIP: not Linux" in result.stdout
 
-
 def test_shell_scripts_are_executable() -> None:
     import os
     if LAUNCHD_SCRIPT.exists():
@@ -98,7 +91,6 @@ def test_shell_scripts_are_executable() -> None:
             f"{SYSTEMD_SCRIPT} not executable"
         )
 
-
 def test_shell_scripts_have_skip_branch() -> None:
     if LAUNCHD_SCRIPT.exists():
         text = LAUNCHD_SCRIPT.read_text()
@@ -107,12 +99,12 @@ def test_shell_scripts_have_skip_branch() -> None:
         text = SYSTEMD_SCRIPT.read_text()
         assert "SKIP: not Linux" in text, "systemd script missing Linux skip branch"
 
-
-def test_shell_scripts_check_cleanup_invariant() -> None:
+def test_shell_scripts_check_c4_invariant() -> None:
     for script in (LAUNCHD_SCRIPT, SYSTEMD_SCRIPT):
         if not script.exists():
             continue
         text = script.read_text()
+        assert "C4" in text, f"{script.name} missing C4 reference"
         assert ".lock" in text, f"{script.name} does not check lock file removal"
         assert ".daemon.sock" in text or "SOCK" in text, (
             f"{script.name} does not check socket file removal"

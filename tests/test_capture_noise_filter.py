@@ -20,7 +20,7 @@ def test_command_message_dropped():
 
 
 def test_skill_injection_dropped():
-    line = _user_line("Base directory for this skill: /Users/you/project")
+    line = _user_line("Base directory for this skill: /Users/alice/skills")
     result = _parse_transcript_line(line)
     assert result is None, (
         f"skill-injection line should be filtered (got {result!r}); "

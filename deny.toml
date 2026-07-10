@@ -1,0 +1,75 @@
+# cargo-deny policy for the iai_mcp Rust workspace.
+#
+# Subsumes the legacy hand-rolled `cargo tree | grep` audit. License + ban
+# policy is now declarative and consumed by `cargo deny check licenses bans`.
+#
+# Run from the workspace root:
+#   cargo deny check licenses bans
+
+[graph]
+# Restrict transitive resolution to macOS + Linux. Without this, cargo-deny
+# also walks the aarch64-pc-windows-msvc graph, which can pull windows-sys /
+# windows as target-conditional deps from pyo3-stub-gen or the tokenizer
+# crate's transitives — firing the ban check spuriously on a clean macOS
+# workstation where those crates are never actually compiled.
+targets = [
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+
+[licenses]
+allow = [
+    # Permissive baseline — the bulk of the Rust ecosystem.
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "Apache-2.0 WITH LLVM-exception",
+    # MPL-2.0 is file-level copyleft (OSI-approved); applies only to
+    # modifications of the MPL-licensed files themselves, not to the
+    # rest of a combined work. Pulled by hf-hub's dirs transitive
+    # (`option-ext`) and by rustworkx-core (`priority-queue`, dual-
+    # licensed MPL-2.0 OR LGPL-3.0). We accept MPL but NOT LGPL — the
+    # SPDX resolver picks MPL when both are offered.
+    "MPL-2.0",
+    # CDLA-Permissive-2.0 is a Linux Foundation permissive data license
+    # used by Mozilla's webpki-roots crate. Equivalent practical scope
+    # to BSD-3 for compiled code consumption.
+    "CDLA-Permissive-2.0",
+]
+# GPL / AGPL / LGPL are NOT in the allow-list; cargo-deny rejects any
+# crate whose declared SPDX expression resolves only to a non-allowed
+# license. (Dual-licensed crates like priority-queue resolve to the
+# first matching allowed license.)
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    # Microsoft-owned ONNX Runtime bindings — banned by the workspace's
+    # vendor-independence invariant.
+    { name = "ort" },
+    { name = "ort-sys" },
+    { name = "onnxruntime" },
+    # PyTorch Rust bindings — banned by the same invariant (the workspace
+    # uses Candle, not PyTorch).
+    { name = "tch" },
+    { name = "tch-sys" },
+    { name = "torch-sys" },
+    # Microsoft-vendored Windows API bindings — the workspace builds only
+    # on macOS and Linux; pulling these in would mean a transitive dep
+    # has Windows-only code paths we did not vet.
+    { name = "windows-sys" },
+    { name = "windows" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []

@@ -142,7 +142,7 @@ def _build_markdown(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "arousal_budget A/B ship-gate analyzer. Reads a "
+            "Ship-gate analyzer. Reads a "
             "contradiction_longitudinal_*.csv and emits AROUSAL-AB-SUMMARY.{json,md} "
             "next to it. Exit 0 = ship gate hit (keep), 1 = miss (remove or "
             "consilium-resolve), 2 = setup error."
@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summary: dict = {
         "phase": "25",
-        "plan": "arousal-ab",
+        "plan": "14-01",
         "csv_path": str(csv_path),
         "n_rows": n_attributable,
         "n_seeds": n_seeds,

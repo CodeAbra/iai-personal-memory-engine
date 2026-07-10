@@ -1,5 +1,4 @@
 
-import pytest
 from setproctitle import getproctitle
 
 

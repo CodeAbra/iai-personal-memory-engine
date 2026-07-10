@@ -9,7 +9,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _ControlledEmbedder:
     DIM = EMBED_DIM
 
@@ -33,7 +32,6 @@ class _ControlledEmbedder:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
 
-
 def _unit_vector_with_cosine(cue_vec: list[float], target_cos: float) -> list[float]:
     cue = np.asarray(cue_vec, dtype=np.float32)
     cue_norm = float(np.linalg.norm(cue))
@@ -56,7 +54,6 @@ def _unit_vector_with_cosine(cue_vec: list[float], target_cos: float) -> list[fl
     if n > 0:
         v = v / n
     return v.astype(np.float32).tolist()
-
 
 def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -82,7 +79,6 @@ def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
         language="en",
     )
 
-
 def _make_schema_hub(vec: list[float], text: str, pattern: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
@@ -107,7 +103,6 @@ def _make_schema_hub(vec: list[float], text: str, pattern: str) -> MemoryRecord:
         language="en",
     )
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -121,7 +116,6 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
         _keyring, "delete_password", lambda s, u: fake.pop((s, u), None)
     )
     yield fake
-
 
 HUB_DEGREE = 8
 HUB_COUNT = 10
@@ -142,12 +136,11 @@ VERBATIM_TEXTS = [
     "verbatim record schema_reinforced event payload exact wording five",
 ]
 
-
 def _seed_5_verbatim_plus_10_hubs(tmp_path):
     from iai_mcp.retrieve import build_runtime_graph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
 
     verbatim_ids_per_cue: dict[str, "uuid.UUID"] = {}
@@ -184,7 +177,6 @@ def _seed_5_verbatim_plus_10_hubs(tmp_path):
         verbatim_ids_per_cue, hub_ids, VERBATIM_CUES,
     )
 
-
 def test_recall_response_back_compat_defaults():
     from iai_mcp.types import RecallResponse
 
@@ -196,9 +188,8 @@ def test_recall_response_back_compat_defaults():
     )
     assert r.cue_mode == "concept", "cue_mode default must be 'concept'"
     assert r.patterns_observed == [], (
-        "patterns_observed default must be [] (back-compat)"
+        "patterns_observed default must be [] for back-compat"
     )
-
 
 def test_recall_for_response_signature_has_mode_kwarg_default_concept():
     import inspect
@@ -211,7 +202,6 @@ def test_recall_for_response_signature_has_mode_kwarg_default_concept():
         f"got {sig.parameters['mode'].default!r}"
     )
 
-
 def test_retrieve_recall_signature_has_mode_kwarg_default_verbatim():
     import inspect
     from iai_mcp.retrieve import recall
@@ -222,7 +212,6 @@ def test_retrieve_recall_signature_has_mode_kwarg_default_verbatim():
         f"retrieve.recall mode default must be 'verbatim', "
         f"got {sig.parameters['mode'].default!r}"
     )
-
 
 def test_verbatim_mode_response_carries_cue_mode_and_empty_patterns(tmp_path):
     from iai_mcp.pipeline import recall_for_response
@@ -244,7 +233,6 @@ def test_verbatim_mode_response_carries_cue_mode_and_empty_patterns(tmp_path):
         f"verbatim mode must emit no hints (S4/curiosity/schema all suppressed), "
         f"got {resp.hints!r}"
     )
-
 
 def test_verbatim_mode_hits_are_episodic_only(tmp_path):
     from iai_mcp.pipeline import recall_for_response
@@ -269,7 +257,6 @@ def test_verbatim_mode_hits_are_episodic_only(tmp_path):
         assert rec.tier == "episodic", (
             f"verbatim mode hit {h.record_id} has tier {rec.tier!r}, expected 'episodic'"
         )
-
 
 def test_verbatim_mode_five_cue_variance_window_position_1_to_3(tmp_path):
     from iai_mcp.pipeline import recall_for_response
@@ -300,7 +287,6 @@ def test_verbatim_mode_five_cue_variance_window_position_1_to_3(tmp_path):
     assert len(positions) == 5
     print(f"R5 variance positions across 5 cues: {positions}")
 
-
 def test_verbatim_mode_position_1_strict_on_diagnostic_cue(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
@@ -321,7 +307,6 @@ def test_verbatim_mode_position_1_strict_on_diagnostic_cue(tmp_path):
         f"matching verbatim {verbatim_id} at pos "
         f"{[h.record_id for h in resp.hits].index(verbatim_id) if verbatim_id in [h.record_id for h in resp.hits] else 'MISSING'}"
     )
-
 
 def test_verbatim_mode_overrides_loose_knob_setting(tmp_path):
     from iai_mcp.pipeline import recall_for_response
@@ -350,7 +335,6 @@ def test_verbatim_mode_overrides_loose_knob_setting(tmp_path):
             f"hub {h.record_id} leaked into hits despite verbatim mode override of loose knob"
         )
 
-
 def test_concept_mode_default_preserves_phase_5_baseline(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
@@ -365,7 +349,6 @@ def test_concept_mode_default_preserves_phase_5_baseline(tmp_path):
     assert resp_default.cue_mode == "concept", (
         "recall_for_response default mode must be 'concept'"
     )
-
 
 def test_dispatch_verbatim_5_cue_variance_window(tmp_path, monkeypatch):
     from iai_mcp import core
@@ -400,7 +383,6 @@ def test_dispatch_verbatim_5_cue_variance_window(tmp_path, monkeypatch):
     assert len(positions) == 5
     print(f"R5 dispatch variance positions across 5 cues: {positions}")
 
-
 def test_dispatch_verbatim_position_1_strict_diagnostic_cue(tmp_path, monkeypatch):
     from iai_mcp import core
     from iai_mcp import embed as _embed_mod
@@ -422,7 +404,6 @@ def test_dispatch_verbatim_position_1_strict_diagnostic_cue(tmp_path, monkeypatc
         f"verbatim must be at hits[0] (position-1 strict via dispatch); "
         f"got {response['hits'][0]['record_id']} at pos 0"
     )
-
 
 def test_dispatch_verbatim_overrides_loose_knob_setting(tmp_path, monkeypatch):
     from iai_mcp import core

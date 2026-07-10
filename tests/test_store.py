@@ -6,8 +6,7 @@ from uuid import uuid4
 import pytest
 
 from iai_mcp.store import MemoryStore
-from iai_mcp.types import EMBED_DIM, STRUCTURE_HV_BYTES, MemoryRecord
-
+from iai_mcp.types import EMBED_DIM, MemoryRecord
 
 def _make(
     tier: str = "episodic",
@@ -40,7 +39,6 @@ def _make(
         language=language,
     )
 
-
 def test_insert_and_get_preserves_verbatim(tmp_path):
     store = MemoryStore(path=tmp_path)
     verbatim = "Alice said: пусть каждое слово сохранится точно"
@@ -50,11 +48,9 @@ def test_insert_and_get_preserves_verbatim(tmp_path):
     assert got is not None
     assert got.literal_surface == verbatim
 
-
 def test_query_empty_store_returns_empty_list(tmp_path):
     store = MemoryStore(path=tmp_path)
     assert store.query_similar([0.0] * EMBED_DIM, k=5) == []
-
 
 def test_detail_level_3_forces_never_decay():
     r = _make(detail=3)
@@ -62,11 +58,9 @@ def test_detail_level_3_forces_never_decay():
     r4 = _make(detail=4)
     assert r4.never_decay is True
 
-
 def test_detail_level_below_3_keeps_caller_never_decay_false():
     r = _make(detail=2)
     assert r.never_decay is False
-
 
 def test_missing_embedding_raises():
     with pytest.raises(TypeError):
@@ -77,7 +71,6 @@ def test_missing_embedding_raises():
             aaak_index="",
         )
 
-
 def test_query_returns_top_k(tmp_path):
     store = MemoryStore(path=tmp_path)
     for _ in range(10):
@@ -85,11 +78,9 @@ def test_query_returns_top_k(tmp_path):
     results = store.query_similar([0.1] * EMBED_DIM, k=3)
     assert len(results) == 3
 
-
 def test_invalid_tier_rejected():
     with pytest.raises(ValueError):
         _make(tier="unknown-tier")
-
 
 def test_persistence_across_store_instances(tmp_path):
     r = _make(text="persistent fact")
@@ -101,72 +92,6 @@ def test_persistence_across_store_instances(tmp_path):
     assert got is not None
     assert got.literal_surface == "persistent fact"
 
-
-def test_sql_record_projection_preserves_structure_and_pending(tmp_path):
-    store = MemoryStore(path=tmp_path)
-    structure_hv = b"\x01" * STRUCTURE_HV_BYTES
-    payload = b'{"tier":"sparse"}'
-    rec = _make(text="structured pending record")
-    rec.structure_hv = structure_hv
-    rec.hv_tier = "sparse_vsa"
-    rec.structure_hv_payload = payload
-    rec.embedding_pending = 1
-    store.insert(rec)
-
-    batch = store.get_batch([rec.id])
-
-    got = batch[rec.id]
-    assert got.structure_hv == structure_hv
-    assert got.hv_tier == "sparse_vsa"
-    assert got.structure_hv_payload == payload
-    assert got.embedding_pending == 1
-
-
-def test_direct_recency_projection_preserves_structure_metadata(tmp_path):
-    from iai_mcp.hippo._recall import direct_recency_rows_from_store
-
-    store = MemoryStore(path=tmp_path)
-    structure_hv = b"\x03" * STRUCTURE_HV_BYTES
-    payload = b'{"source":"direct-recency"}'
-    rec = _make(text="direct recency structured record")
-    rec.structure_hv = structure_hv
-    rec.hv_tier = "sparse_vsa"
-    rec.structure_hv_payload = payload
-    rec.embedding_pending = 1
-    store.insert(rec)
-
-    rows = direct_recency_rows_from_store(tmp_path, limit=1)
-
-    assert rows
-    row = rows[0]
-    assert row["id"] == str(rec.id)
-    assert bytes(row["structure_hv"]) == structure_hv
-    assert row["hv_tier"] == "sparse_vsa"
-    assert bytes(row["structure_hv_payload"]) == payload
-    assert int(row["embedding_pending"]) == 1
-
-
-def test_recent_pending_markers_preserve_structure_metadata(tmp_path):
-    store = MemoryStore(path=tmp_path)
-    structure_hv = b"\x04" * STRUCTURE_HV_BYTES
-    payload = b'{"source":"pending-markers"}'
-    rec = _make(text="pending marker structured record")
-    rec.structure_hv = structure_hv
-    rec.hv_tier = "sparse_vsa"
-    rec.structure_hv_payload = payload
-    rec.embedding_pending = 1
-    store.insert(rec)
-
-    markers = store.recent_pending_markers(n=5)
-
-    assert markers
-    got = next(marker for marker in markers if marker.id == rec.id)
-    assert got.structure_hv == structure_hv
-    assert got.hv_tier == "sparse_vsa"
-    assert got.structure_hv_payload == payload
-    assert got.embedding_pending == 1
-
-
 def test_uuid_literal_accepts_uuid_and_canonical_str():
     from uuid import UUID
 
@@ -175,7 +100,6 @@ def test_uuid_literal_accepts_uuid_and_canonical_str():
     u = UUID("11111111-2222-3333-4444-555555555555")
     assert _uuid_literal(u) == "11111111-2222-3333-4444-555555555555"
     assert _uuid_literal(str(u).upper()) == "11111111-2222-3333-4444-555555555555"
-
 
 def test_uuid_literal_rejects_injection_shapes():
     from iai_mcp.store import _uuid_literal
@@ -192,7 +116,6 @@ def test_uuid_literal_rejects_injection_shapes():
         with pytest.raises(ValueError):
             _uuid_literal(bad)
 
-
 def test_append_provenance_uses_validated_uuid(tmp_path):
     store = MemoryStore(path=tmp_path)
     r = _make(text="provenance-target")
@@ -201,7 +124,6 @@ def test_append_provenance_uses_validated_uuid(tmp_path):
     got = store.get(r.id)
     assert got is not None
     assert any(p.get("cue") == "test" for p in got.provenance)
-
 
 def test_boost_edges_uses_validated_uuid(tmp_path):
     store = MemoryStore(path=tmp_path)

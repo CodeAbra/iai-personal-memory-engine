@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "fhrr_ops",
+  "payload": null,
+  "sha256": "a1d56366af6a8e2819fe4e87c0a8d1520ceac7c701b98d754631c8a543bddb50",
+  "shape": [
+    27,
+    10000
+  ],
+  "source": "src/iai_mcp/lilli/tiers/fhrr.py D=10000 op table: rows[0:10]=bind(role_i, filler_i); rows[10:20]=unbind(bound_i, role_i); row[20]=bundle([bound_0]) (passthrough); rows[21:24]=bundle(bound[:n]) for n in (2,3,5); rows[24:27]=permute(bound_0, shift) for shift in (1,13,9999)",
+  "subsystem": "hdc"
+}

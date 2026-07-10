@@ -4,10 +4,11 @@ from __future__ import annotations
 def _require_native() -> None:
     try:
         import iai_mcp_native  # noqa: F401
-        from iai_mcp_native import embed as _e, graph as _g
+        from iai_mcp_native import embed as _e, graph as _g, hd as _h
 
         assert callable(_g.is_connected), "iai_mcp_native.graph.is_connected not callable"
         assert callable(_e.Embedder), "iai_mcp_native.embed.Embedder not callable"
+        assert callable(_h.project), "iai_mcp_native.hd.project not callable"
     except Exception as exc:
         raise RuntimeError(
             "iai_mcp_native (the Rust native extension) is not available.\n"
