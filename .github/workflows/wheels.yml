@@ -25,7 +25,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.21
         env:
           CIBW_BUILD: "cp311-* cp312-*"
-          CIBW_SKIP: "*-musllinux_* *_i686 *_ppc64le *_s390x"
+          CIBW_SKIP: "*-musllinux_* *_i686 *_ppc64le *_s390x *-win32 *-win_arm64"
           CIBW_ARCHS_MACOS: "arm64 x86_64"
           # The manylinux build container has no Rust toolchain; install it
           # (pinned to the repo's rust-toolchain.toml channel) plus the OpenSSL
