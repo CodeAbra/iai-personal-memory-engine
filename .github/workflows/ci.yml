@@ -29,7 +29,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Correctness gate
-        run: pytest -n auto --dist loadscope --timeout=600 -m "not perf and not slow and not live"
+        run: pytest --timeout=600 -m "not perf and not slow and not live"
       - name: Build wheel
         run: pip wheel . --no-deps -w dist
 

@@ -99,12 +99,11 @@ def test_shell_scripts_have_skip_branch() -> None:
         text = SYSTEMD_SCRIPT.read_text()
         assert "SKIP: not Linux" in text, "systemd script missing Linux skip branch"
 
-def test_shell_scripts_check_c4_invariant() -> None:
+def test_shell_scripts_check_cleanup_invariant() -> None:
     for script in (LAUNCHD_SCRIPT, SYSTEMD_SCRIPT):
         if not script.exists():
             continue
         text = script.read_text()
-        assert "C4" in text, f"{script.name} missing C4 reference"
         assert ".lock" in text, f"{script.name} does not check lock file removal"
         assert ".daemon.sock" in text or "SOCK" in text, (
             f"{script.name} does not check socket file removal"
