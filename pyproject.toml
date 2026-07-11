@@ -46,6 +46,8 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
+  "pytest-xdist>=3.5",
+  "pytest-timeout>=2.3",
   "reportlab>=4.0",  # builds a 1-page PDF fixture on demand inside the ingestion test suite; never imported at runtime by the production package.
   "ruff>=0.5.0",
   # networkx is the σ-baseline oracle in tests/fixtures/sigma_baseline.json
