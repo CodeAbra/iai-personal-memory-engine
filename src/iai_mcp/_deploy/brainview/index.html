@@ -201,6 +201,16 @@
   .lg-tier.focused { color: var(--text); }
   .lg-tier.focused b { color: var(--epi); }
 
+  #btn-home { position: fixed; right: 34px; bottom: 108px; z-index: 20;
+    background: rgba(9,7,18,.78); color: var(--dim); cursor: pointer;
+    border: 1px solid rgba(186,220,240,.28); border-radius: 999px;
+    padding: 8px 18px; font: 300 10.5px "Avenir Next", Futura, system-ui, sans-serif;
+    letter-spacing: .22em; text-transform: uppercase;
+    opacity: 0; pointer-events: none; transition: opacity .25s; }
+  #btn-home.show { opacity: 1; pointer-events: auto; }
+  #btn-home:hover { color: var(--text); border-color: var(--epi);
+    box-shadow: 0 0 28px rgba(143,231,255,.14); }
+
   #toast { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 30;
     color: var(--epi); font-size: 13px; letter-spacing: .06em; display: none;
     text-shadow: 0 0 20px rgba(143,231,255,.6); }
@@ -349,6 +359,7 @@
 </div>
 <div id="toast"></div>
 <div id="tip"></div>
+<button id="btn-home">⌖ center the brain</button>
 <div id="hint">grab &amp; spin freely · scroll to zoom · double-click to reset · click a memory or a folder · drop a file to teach</div>
 
 <script>
@@ -524,16 +535,15 @@ function frontality() {
   // how face-on the view is: 1 when the depth axis is unrotated, →0 edge-on
   return Math.abs(ROT.m[8]);
 }
+// The organ is pinned to screen center: zoom scales AROUND the brain (never
+// toward the cursor — cursor-anchored zoom is how residual pan used to park
+// it off-center), and any drag-pan springs back home on release.
+let HOMING = false;
 canvas.addEventListener("wheel", e => {
   e.preventDefault();
+  HOMING = false;
   const factor = Math.exp(-e.deltaY * 0.0016);
-  const k2 = Math.min(7, Math.max(0.5, VIEW.k * factor));
-  const f = k2 / VIEW.k;
-  // keep the point under the cursor fixed while zooming
-  const cxs = e.clientX - W / 2, cys = e.clientY - H / 2;
-  VIEW.ox = cxs - (cxs - VIEW.ox) * f;
-  VIEW.oy = cys - (cys - VIEW.oy) * f;
-  VIEW.k = k2;
+  VIEW.k = Math.min(7, Math.max(0.5, VIEW.k * factor));
   dismissHint(false);
 }, { passive: false });
 let panDrag = null;
@@ -543,15 +553,31 @@ canvas.addEventListener("mousedown", e => {
               ox: VIEW.ox, oy: VIEW.oy, moved: false,
               pan: e.shiftKey || e.button === 1 };
   ROT.vx = 0; ROT.vy = 0;                       // grab kills any leftover spin
+  HOMING = false;                                // ...and any homing in flight
   canvas.style.cursor = "grabbing";
 });
 window.addEventListener("mouseup", () => { panDrag = null; canvas.style.cursor = "grab"; });
+// The ambient idle turntable also rotates the organ, so raw orientation says
+// nothing about intent: only a USER-caused turn makes the view "not home".
+let USER_TURNED = false;
+function goHome() {
+  HOMING = true;
+  ROT.vx = 0; ROT.vy = 0;
+}
 canvas.addEventListener("dblclick", e => {
-  if (!pick(e.clientX, e.clientY)) {
-    VIEW.k = 1; VIEW.ox = 0; VIEW.oy = 0;
-    ROT.m = [1,0,0, 0,1,0, 0,0,1]; ROT.vx = 0; ROT.vy = 0;
-  }
+  if (!pick(e.clientX, e.clientY)) goHome();
 });
+const HOME_BTN = document.getElementById("btn-home");
+HOME_BTN.addEventListener("click", goHome);
+const IDENT = [1,0,0, 0,1,0, 0,0,1];
+function viewIsHome() {
+  if (Math.abs(VIEW.k - 1) > 0.01) return false;
+  if (Math.abs(VIEW.ox) > 0.5 || Math.abs(VIEW.oy) > 0.5) return false;
+  return !USER_TURNED;
+}
+function rotNearIdentity() {
+  return ROT.m[0] > 0.9995 && ROT.m[4] > 0.9995 && ROT.m[8] > 0.9995;
+}
 
 /* ---------- luminous sprites (cheap, soft glow) ---------- */
 function makeSprite(color, size) {
@@ -987,6 +1013,10 @@ for (const ev of ["pointermove", "pointerdown", "wheel", "keydown", "touchstart"
 
 function loop(now) {
   if (document.hidden) { setTimeout(() => requestAnimationFrame(loop), 900); return; }
+  // A webview can finish its first layout AFTER the boot-time resize() ran,
+  // or swallow the resize event entirely — a stale W/H bakes the organ into a
+  // wrong-sized viewport (off-center, wrong scale) until a manual resize.
+  if (W !== window.innerWidth || H !== window.innerHeight) resize();
   // Watching without touching the mouse is a real mode: ambient stays a
   // smooth ~30fps (half the cost of active), near-zero only when hidden.
   const idle = now - lastInteract > 6000;
@@ -996,11 +1026,32 @@ function loop(now) {
       if (Math.abs(ROT.vx) > 0.01 || Math.abs(ROT.vy) > 0.01) {
         tumble(ROT.vy * ROT_SPEED, ROT.vx * ROT_SPEED);  // flick keeps spinning
         ROT.vx *= 0.90; ROT.vy *= 0.90;
-      } else if (idle) {
+      } else if (idle && !HOMING) {
         tumble(0, 0.0022);                                // slow turntable while idle
       }
     }
   }
+  // The organ always finds its way home: a released drag-pan springs back to
+  // dead center at any zoom, and homing (button / double-click) additionally
+  // eases zoom and orientation back to the default view.
+  if (!panDrag) {
+    if (VIEW.ox !== 0 || VIEW.oy !== 0) {
+      VIEW.ox *= 0.88; VIEW.oy *= 0.88;
+      if (Math.abs(VIEW.ox) < 0.4) VIEW.ox = 0;
+      if (Math.abs(VIEW.oy) < 0.4) VIEW.oy = 0;
+    }
+    if (HOMING) {
+      VIEW.k += (1 - VIEW.k) * 0.16;
+      const m = ROT.m, t = 0.18;
+      ROT.m = rotOrtho(m.map((v, i) => v + (IDENT[i] - v) * t));
+      if (Math.abs(VIEW.k - 1) < 0.01 && rotNearIdentity()) {
+        VIEW.k = 1; VIEW.ox = 0; VIEW.oy = 0;
+        ROT.m = IDENT.slice();
+        HOMING = false; USER_TURNED = false;
+      }
+    }
+  }
+  HOME_BTN.classList.toggle("show", !viewIsHome());
   const rate = idle ? 0.04 : Math.min(0.5, 0.06 + edges.length / 350);
   if (!REDUCED && Math.random() < rate) spawnPulse(false);
   draw(now);
@@ -1031,6 +1082,7 @@ canvas.addEventListener("mousemove", ev => {
     if (Math.abs(dx) + Math.abs(dy) > 4) panDrag.moved = true;
     if (panDrag.moved && !panDrag.pan) {
       const ix = ev.clientX - panDrag.lx, iy = ev.clientY - panDrag.ly;  // step since last frame
+      USER_TURNED = true;
       tumble(iy * ROT_SPEED, ix * ROT_SPEED);
       ROT.vx = ix; ROT.vy = iy;                    // carry velocity for the flick
       panDrag.lx = ev.clientX; panDrag.ly = ev.clientY;
