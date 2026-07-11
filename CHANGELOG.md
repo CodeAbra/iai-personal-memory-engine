@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] — 2026-07-11
+
+### Fixed
+
+- **Windows daemon compatibility.** The background daemon now starts, stops, and
+  reports its own liveness correctly on Windows — shutdown terminates the whole
+  process tree so the store lock is released, the encryption key file is written
+  in binary mode and replaced atomically, and file locking uses a Windows-native
+  region lock so the store package imports and runs.
+- **Duplicate-daemon race.** The lifecycle lock is now claimed atomically, so two
+  processes starting at the same time can no longer both become the daemon.
+- **Schema confidence gate.** Mid-confidence memory-schema patterns now correctly
+  reach the user-approval path instead of being dropped.
+
 ## [2.0.2] — 2026-07-11
 
 ### Added

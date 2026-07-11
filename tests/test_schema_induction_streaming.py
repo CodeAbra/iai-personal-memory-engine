@@ -138,7 +138,6 @@ def test_induce_schemas_tier0_byte_identical_to_pre_d26_implementation(
         AUTO_INDUCT_CONFIDENCE,
         AUTO_INDUCT_COOCCURRENCE,
         MAX_EVIDENCE_PER_SCHEMA,
-        USER_APPROVAL_CONFIDENCE,
         USER_APPROVAL_COOCCURRENCE,
     )
     from iai_mcp.lilli.cycle.schema import _tag_cooccurrence
@@ -151,10 +150,7 @@ def test_induce_schemas_tier0_byte_identical_to_pre_d26_implementation(
         confidence = min(1.0, count / 10.0)
         if count >= AUTO_INDUCT_COOCCURRENCE and confidence >= AUTO_INDUCT_CONFIDENCE:
             status = "auto"
-        elif (
-            USER_APPROVAL_COOCCURRENCE <= count < AUTO_INDUCT_COOCCURRENCE
-            and confidence >= USER_APPROVAL_CONFIDENCE
-        ):
+        elif count >= USER_APPROVAL_COOCCURRENCE:
             status = "pending_user_approval"
         else:
             continue

@@ -75,12 +75,14 @@ def induce_schemas_tier0(store: MemoryStore) -> list[SchemaCandidate]:
         count = len(evidence)
         confidence = min(1.0, count / 10.0)
         pattern = f"tags:{'+'.join(sorted(pair))}"
+        # Confidence IS count/10 — re-checking both in one band anchors the
+        # gate to itself: the approval tier demanded confidence >= 0.65 of
+        # counts capped below 5 (max 0.4), so it could never fire, and counts
+        # between the bands dropped entirely. Auto keeps the double gate;
+        # everything else with enough co-occurrence goes to the human.
         if count >= AUTO_INDUCT_COOCCURRENCE and confidence >= AUTO_INDUCT_CONFIDENCE:
             status = "auto"
-        elif (
-            USER_APPROVAL_COOCCURRENCE <= count < AUTO_INDUCT_COOCCURRENCE
-            and confidence >= USER_APPROVAL_CONFIDENCE
-        ):
+        elif count >= USER_APPROVAL_COOCCURRENCE:
             status = "pending_user_approval"
         else:
             continue

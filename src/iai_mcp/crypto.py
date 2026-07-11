@@ -221,14 +221,18 @@ class CryptoKey:
             except OSError:
                 pass
         tmp = final.parent / f"{final.name}.tmp.{os.getpid()}"
-        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        # O_BINARY: without it the Windows CRT opens the fd in text mode and
+        # rewrites any 0x0A key byte as 0x0D0A — a silently corrupted AES key.
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+        fd = os.open(str(tmp), flags, 0o600)
         try:
-            os.fchmod(fd, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             os.write(fd, key)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.rename(str(tmp), str(final))
+        os.replace(str(tmp), str(final))
 
 
     def get_or_create(self) -> bytes:

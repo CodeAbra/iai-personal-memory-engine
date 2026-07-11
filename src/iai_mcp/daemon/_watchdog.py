@@ -620,7 +620,11 @@ def _self_kill(reason: str, kind: str) -> None:
         _write_breadcrumb(line)
     except Exception:  # noqa: BLE001 -- breadcrumb is best-effort ONLY
         pass
-    os.kill(os.getpid(), signal.SIGKILL)
+    if hasattr(signal, "SIGKILL"):
+        os.kill(os.getpid(), signal.SIGKILL)
+    # No SIGKILL on this platform (Windows): os.kill from a background thread
+    # cannot deliver it, so a wedged daemon would never die — hard-exit.
+    os._exit(1)
 
 
 def _capture_blackbox(

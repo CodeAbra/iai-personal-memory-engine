@@ -211,3 +211,34 @@ def test_autistic_threshold_stricter_than_nt():
     assert AUTO_INDUCT_CONFIDENCE >= 0.85
     assert USER_APPROVAL_COOCCURRENCE == 3
     assert USER_APPROVAL_CONFIDENCE == 0.65
+
+
+def test_user_approval_tier_is_reachable(tmp_path):
+    """Moderate co-occurrence (3-4) must land in pending_user_approval, and
+    the band between approval and auto (5-8) must not vanish: confidence is
+    count/10, so a confidence gate re-checked inside the approval band could
+    never pass and the tier was dead code."""
+    from iai_mcp.lilli.cycle.schema import induce_schemas_tier0
+    from iai_mcp.store import flush_record_buffer
+
+    store = MemoryStore(path=tmp_path)
+    try:
+        for _ in range(3):
+            store.insert(_rec(text="approval band row", tags=["alpha", "beta"]))
+        for _ in range(6):
+            store.insert(_rec(text="gap band row", tags=["gamma", "delta"]))
+        for _ in range(10):
+            store.insert(_rec(text="auto band row", tags=["epsi", "zeta"]))
+        flush_record_buffer(store)
+
+        by_pattern = {
+            c.pattern: c.status for c in induce_schemas_tier0(store)
+        }
+        assert by_pattern.get("tags:alpha+beta") == "pending_user_approval"
+        assert by_pattern.get("tags:delta+gamma") == "pending_user_approval", (
+            "counts between the approval and auto bands must reach the human, "
+            "not vanish"
+        )
+        assert by_pattern.get("tags:epsi+zeta") == "auto"
+    finally:
+        store.close()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
+from iai_mcp import _flock as fcntl
 import logging
 import os
 import re
@@ -788,10 +788,17 @@ class HippoDB:
             if held is None:
                 return
             base_fd, refcount = held
-            try:
-                fcntl.flock(base_fd, fcntl.LOCK_SH)
-            except OSError:
-                return
+            if fcntl.SHARED_IS_EXCLUSIVE:
+                # No shared locks on this platform: a re-lock of the region
+                # this process already owns raises (and a blocking one polls
+                # forever against itself) — keep the held exclusive region and
+                # change only the bookkeeping label.
+                pass
+            else:
+                try:
+                    fcntl.flock(base_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except OSError:
+                    return
             del _PROCESS_LOCKS[self._lock_key]
             _PROCESS_LOCKS_SHARED[self._lock_key] = (base_fd, refcount)
         self._access_mode = AccessMode.SHARED
@@ -843,7 +850,11 @@ class HippoDB:
 
         deadline = time.monotonic() + intent_budget_ms / 1000.0
         acquired = False
-        while time.monotonic() < deadline:
+        if held is not None and fcntl.SHARED_IS_EXCLUSIVE:
+            # The "shared" label on this platform already holds the exclusive
+            # region — re-locking it would fail against ourselves. Relabel.
+            acquired = True
+        while not acquired and time.monotonic() < deadline:
             try:
                 fcntl.flock(base_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True

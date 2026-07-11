@@ -284,10 +284,10 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
     except (OSError, ValueError, RuntimeError) as exc:
         logger.debug("sentinel write failed (non-blocking): %s", exc)
 
-    uid = os.getuid()
     if _cli._is_macos():
         from iai_mcp.lifecycle_lock import LifecycleLock, _is_pid_alive
 
+        uid = os.getuid()
         payload = LifecycleLock().read()
         pid = payload["pid"] if payload else None
 
@@ -324,6 +324,19 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
             ["systemctl", "--user", "stop", _cli.SERVICE_NAME],
             check=False,
         )
+    elif os.name == "nt":
+        # Windows: signals cannot stop the tree — a plain terminate orphans
+        # the child that still holds the hippo lock. taskkill /T fells the
+        # whole process tree; /F because there is no SIGTERM grace concept.
+        from iai_mcp.lifecycle_lock import LifecycleLock, _is_pid_alive
+
+        payload = LifecycleLock().read()
+        pid = payload["pid"] if payload else None
+        if pid is not None and _is_pid_alive(pid):
+            _cli.subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                check=False, capture_output=True,
+            )
     else:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)
         return 1

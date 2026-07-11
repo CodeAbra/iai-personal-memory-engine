@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import errno
-import fcntl
+from iai_mcp import _flock as fcntl
 import logging
 import os
 from pathlib import Path
