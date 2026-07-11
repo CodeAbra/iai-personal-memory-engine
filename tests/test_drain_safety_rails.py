@@ -101,10 +101,15 @@ def test_rss_soft_cap_stops_drain_early(drain_env, monkeypatch):
     f3 = _write_file(deferred, "sess-c", n_events=3, ts_suffix=1700000003)
 
     monkeypatch.setenv("IAI_MCP_DRAIN_RSS_SOFT_CAP_BYTES", "1000")
+    monkeypatch.setenv("IAI_MCP_DRAIN_RSS_GROWTH_BUDGET_BYTES", "500")
 
-    # Report over-threshold RSS on the very first sample (before any file is
-    # claimed): the drain must stop immediately with zero files processed.
-    monkeypatch.setattr(capture_mod, "_drain_rss_bytes", lambda: 2000)
+    # The threshold is baseline-relative: baseline 2000 + budget 500 = 2500.
+    # The first per-file sample reports 9000 — over threshold before any file
+    # is claimed: the drain must stop immediately with zero files processed.
+    samples = iter([2000])
+    monkeypatch.setattr(
+        capture_mod, "_drain_rss_bytes", lambda: next(samples, 9000)
+    )
 
     relief_calls: list[str] = []
     import iai_mcp.lilli.cycle.sleep_pipeline._memory_relief as relief_mod
@@ -148,10 +153,12 @@ def test_rss_soft_cap_partial_then_stop(drain_env, monkeypatch):
     _write_file(deferred, "sess-c", n_events=2, ts_suffix=1700000003)
 
     monkeypatch.setenv("IAI_MCP_DRAIN_RSS_SOFT_CAP_BYTES", "1000")
+    monkeypatch.setenv("IAI_MCP_DRAIN_RSS_GROWTH_BUDGET_BYTES", "500")
 
-    # Under threshold for the first file, over threshold afterwards: exactly one
-    # file drains, the rest stay on disk.
-    samples = iter([500, 5000, 5000, 5000])
+    # Baseline 500 + budget 500 = threshold 1000 (equals the floor). Under it
+    # for the first file, far over afterwards: exactly one file drains, the
+    # rest stay on disk.
+    samples = iter([500, 800, 5000, 5000])
     monkeypatch.setattr(capture_mod, "_drain_rss_bytes", lambda: next(samples, 5000))
 
     import iai_mcp.lilli.cycle.sleep_pipeline._memory_relief as _relief_mod

@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import log
@@ -131,6 +132,16 @@ class _RecallCoreResult:
 PROFILE_SENTINEL_UUID = UUID("00000000-0000-0000-0000-0000000000f1")
 
 
+def _sanitize_vec(v: "np.ndarray") -> "np.ndarray":
+    """Return a finite float32 view of v (NaN/inf replaced with 0.0).
+
+    This is a no-op on already-finite vectors (nan_to_num is cheap and
+    returns the same values unchanged), so calling it on the common/healthy
+    path incurs no correctness cost.
+    """
+    return np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _trigram_jaccard(a: str, b: str) -> float:
     if len(a) < 3 or len(b) < 3:
         return 0.0
@@ -144,8 +155,8 @@ def _trigram_jaccard(a: str, b: str) -> float:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    av = np.asarray(a, dtype=np.float32)
-    bv = np.asarray(b, dtype=np.float32)
+    av = _sanitize_vec(np.asarray(a, dtype=np.float32))
+    bv = _sanitize_vec(np.asarray(b, dtype=np.float32))
     na = float(np.linalg.norm(av))
     nb = float(np.linalg.norm(bv))
     if na == 0 or nb == 0:
@@ -163,18 +174,13 @@ def _aaak_overlap(cue_text: str, aaak_index: str) -> float:
     return len(cue_set & idx_set) / len(cue_set | idx_set)
 
 
-def _age_penalty(created_at: datetime, now: datetime) -> float:
+def _age_penalty(created_at: datetime) -> float:
+    now = datetime.now(timezone.utc)
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
-    # Round to whole seconds: AGE_HALF_LIFE_DAYS is a days-scale constant, so
-    # sub-second creation-time jitter (e.g. between records seeded in a tight
-    # loop) carries no real signal here but is fine-grained enough to break
-    # float-equality ties between otherwise-identical records, non-reproducibly,
-    # since it depends on the exact instant `now` happens to be read.
-    seconds = round((now - created_at).total_seconds())
-    if seconds < 0:
+    days = (now - created_at).total_seconds() / 86400.0
+    if days < 0:
         return 0.0
-    days = seconds / 86400.0
     return min(1.0, days / AGE_HALF_LIFE_DAYS)
 
 
@@ -184,29 +190,45 @@ def _community_gate(
     top_n: int = 3,
     member_embeddings: dict[UUID, list[float]] | None = None,
 ) -> list[UUID]:
-    cue_vec = np.asarray(cue_emb, dtype=np.float32)
+    gated, _community_scores = _community_gate_scored(
+        cue_emb, assignment, top_n, member_embeddings,
+    )
+    return gated
+
+
+def _community_gate_scored(
+    cue_emb: list[float],
+    assignment: CommunityAssignment,
+    top_n: int = 3,
+    member_embeddings: dict[UUID, list[float]] | None = None,
+) -> tuple[list[UUID], dict[UUID, float]]:
+    """Same ranking as ``_community_gate``, also returning the continuous
+    per-community cue-centroid score for the graded soft-gate bonus."""
+    cue_vec = _sanitize_vec(np.asarray(cue_emb, dtype=np.float32))
     cue_norm = float(np.linalg.norm(cue_vec))
     if cue_norm > 0.0:
         cue_vec = cue_vec / cue_norm
 
     if member_embeddings is not None:
-        return _community_gate_max_node(
+        return _community_gate_max_node_scored(
             cue_vec, assignment, top_n, member_embeddings,
         )
 
     centroids = assignment.community_centroids
     if not centroids:
-        return []
+        return [], {}
     cids = list(centroids.keys())
     mat = np.asarray(
         [centroids[c] for c in cids], dtype=np.float32
     )
+    mat = _sanitize_vec(mat)
     norms = np.linalg.norm(mat, axis=1)
     norms[norms == 0.0] = 1.0
     mat = mat / norms[:, None]
     scores = mat @ cue_vec
     order = np.argsort(-scores, kind="stable")
-    return [cids[int(i)] for i in order[:top_n]]
+    community_scores = {cids[int(i)]: float(scores[int(i)]) for i in range(len(cids))}
+    return [cids[int(i)] for i in order[:top_n]], community_scores
 
 
 def _community_gate_max_node(
@@ -215,9 +237,25 @@ def _community_gate_max_node(
     top_n: int,
     member_embeddings: dict[UUID, list[float] | np.ndarray],
 ) -> list[UUID]:
+    gated, _community_scores = _community_gate_max_node_scored(
+        cue_vec, assignment, top_n, member_embeddings,
+    )
+    return gated
+
+
+def _community_gate_max_node_scored(
+    cue_vec: np.ndarray,
+    assignment: CommunityAssignment,
+    top_n: int,
+    member_embeddings: dict[UUID, list[float] | np.ndarray],
+) -> tuple[list[UUID], dict[UUID, float]]:
+    """Same ranking as ``_community_gate_max_node``, also returning the
+    continuous per-community max-member score (``comm_max``) for the graded
+    soft-gate bonus. No new corpus pass — reuses the scores already computed
+    for the top-n slice."""
     mid_regions = assignment.mid_regions
     if not mid_regions:
-        return _community_gate(
+        return _community_gate_scored(
             cue_vec.tolist(), assignment, top_n, member_embeddings=None,
         )
 
@@ -242,13 +280,20 @@ def _community_gate_max_node(
         rows.extend(valid)
 
     if not rows:
-        return []
+        return [], {}
 
     mat = np.stack(rows).astype(np.float32, copy=False)
-    mat = np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
-    norms = np.linalg.norm(mat, axis=1)
-    norms[norms == 0.0] = 1.0
-    mat = mat / norms[:, None]
+    # The gate ranks members by cosine against the cue. On the recall path the
+    # member vectors are already the once-sanitized + L2-normalized pool rows, so
+    # the full nan_to_num + per-row renorm is repeated waste. Keep only a cheap
+    # finite-check: sanitize + renorm once when a non-finite value sneaks in,
+    # otherwise use the already-normalized rows directly. Cosine scores are
+    # unchanged because the rows are unit vectors.
+    if not np.isfinite(mat).all():
+        mat = np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
+        norms = np.linalg.norm(mat, axis=1)
+        norms[norms == 0.0] = 1.0
+        mat = mat / norms[:, None]
     member_scores = mat @ cue_vec
 
     comm_max = np.maximum.reduceat(member_scores, breaks)
@@ -257,7 +302,10 @@ def _community_gate_max_node(
     lex_sorted_cids = [cids[i] for i in str_order]
     lex_sorted_scores = comm_max[str_order]
     score_order = np.argsort(-lex_sorted_scores, kind="stable")
-    return [lex_sorted_cids[int(i)] for i in score_order[:top_n]]
+    community_scores = {
+        lex_sorted_cids[i]: float(lex_sorted_scores[i]) for i in range(len(lex_sorted_cids))
+    }
+    return [lex_sorted_cids[int(i)] for i in score_order[:top_n]], community_scores
 
 
 def _pick_seeds(
@@ -292,32 +340,112 @@ def _collect_graph_pool(
     records_cache: dict[UUID, "object"] | None,
     store: MemoryStore,
 ) -> tuple[list[UUID], np.ndarray]:
+    # The pool (id sequence + embedding matrix) is a pure function of the graph's
+    # node embeddings, which are versioned by ``_pool_content_version`` (bumped by
+    # every embedding-affecting mutator). When every node carries its embedding on
+    # the graph — the steady state once a build is warm — the result is reused
+    # across recalls over the same build instead of re-iterating the whole node
+    # set and rebuilding the N x D matrix every recall. The cache is only served
+    # when no node needed a store fallback, so it can never depend on store state
+    # that changed without bumping the graph version.
+    _pool_version = getattr(graph, "_pool_content_version", None)
+    _cached_pool = getattr(graph, "_collected_pool", None)
+    if (
+        _pool_version is not None
+        and _cached_pool is not None
+        and _cached_pool[0] == _pool_version
+    ):
+        return _cached_pool[1], _cached_pool[2]
+
     pool_ids: list[UUID] = []
     pool_embs_rows: list[list[float]] = []
-    for rid in graph.iter_nodes():
-        emb: list[float] | None = None
+
+    # The graph may be the process-wide warm bundle, mutated live by the
+    # store's graph_sync_hook on a concurrent write; a dict resize mid-iteration
+    # raises RuntimeError. One retry re-snapshots — the second pass sees the
+    # post-mutation dict and the bumped _pool_content_version keys the cache.
+    try:
+        node_ids = list(graph.iter_nodes())
+    except RuntimeError:
+        node_ids = list(graph.iter_nodes())
+
+    # Resolve which nodes lack an embedding on the graph node and in the cache;
+    # those (and only those) fall through to the store, batched in one fetch.
+    def _node_emb(rid: UUID) -> "list[float] | None":
         node_emb = graph.get_embedding(rid)
         if node_emb:
-            emb = list(node_emb)
-        if not emb and records_cache is not None and rid in records_cache:
-            rec = records_cache[rid]
-            cached_emb = getattr(rec, "embedding", None)
+            return list(node_emb)
+        if records_cache is not None and rid in records_cache:
+            cached_emb = getattr(records_cache[rid], "embedding", None)
             if cached_emb:
-                emb = list(cached_emb)
+                return list(cached_emb)
+        return None
+
+    _fallback_ids = [rid for rid in node_ids if _node_emb(rid) is None]
+    _fallback_batch: dict = {}
+    if _fallback_ids:
+        try:
+            _fallback_batch = store.get_batch(_fallback_ids)
+        except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
+            logger.debug("collect_graph_pool_store_fallback_failed: %s", exc)
+            _fallback_batch = {}
+
+    for rid in node_ids:
+        emb = _node_emb(rid)
         if not emb:
-            try:
-                rec = store.get(rid)
-                if rec is not None and rec.embedding:
-                    emb = list(rec.embedding)
-            except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
-                logger.debug("collect_graph_pool_store_fallback_failed rid=%s: %s", rid, exc)
-                emb = None
+            rec = _fallback_batch.get(rid)
+            if rec is not None and rec.embedding:
+                emb = list(rec.embedding)
         if emb:
             pool_ids.append(rid)
             pool_embs_rows.append(emb)
     if not pool_ids:
         return [], np.zeros((0, store.embed_dim), dtype=np.float32)
-    return pool_ids, np.asarray(pool_embs_rows, dtype=np.float32)
+    pool_embs = np.asarray(pool_embs_rows, dtype=np.float32)
+    # Cache only when the pool was fully resolved from the graph (no store
+    # fallback), so a later store-only change can never serve a stale pool.
+    if not _fallback_ids and _pool_version is not None:
+        try:
+            graph._collected_pool = (_pool_version, pool_ids, pool_embs)
+        except AttributeError:
+            pass
+    return pool_ids, pool_embs
+
+
+def _normalize_pool_cached(
+    graph: MemoryGraph,
+    pool_ids: list[UUID],
+    pool_embs: np.ndarray,
+) -> np.ndarray:
+    """Return the sanitized + L2-normalized pool matrix, computed once per build.
+
+    The normalized matrix is cached on the graph keyed to the pool id sequence
+    AND a monotonic content version. Subsequent recalls over the same build reuse
+    it instead of re-running nan_to_num + norm + divide over the whole N x D
+    matrix. The cache is dropped by every graph mutator (and clear_and_rebuild),
+    which also bumps the content version, so a content change that leaves the
+    id-sequence unchanged still misses the cache — a stale pool can never be
+    served. The only per-recall work on the warm path is a cheap finite-check;
+    the full sanitize runs once, or again only if the pool is non-finite.
+    """
+    pool_key = (
+        tuple(str(rid) for rid in pool_ids),
+        getattr(graph, "_pool_content_version", 0),
+    )
+    cached = getattr(graph, "_normalized_pool", None)
+    if cached is not None and cached[0] == pool_key:
+        return cached[1]
+
+    if not np.isfinite(pool_embs).all():
+        pool_embs = np.nan_to_num(pool_embs, nan=0.0, posinf=0.0, neginf=0.0)
+    pool_norms = np.linalg.norm(pool_embs, axis=1)
+    pool_norms[pool_norms == 0.0] = 1.0
+    normalized = pool_embs / pool_norms[:, None]
+    try:
+        graph._normalized_pool = (pool_key, normalized)
+    except AttributeError:
+        pass
+    return normalized
 
 
 def _log_malformed_anti_edges(store: MemoryStore, hit_ids: "list[UUID]") -> None:
@@ -330,8 +458,8 @@ def _log_malformed_anti_edges(store: MemoryStore, hit_ids: "list[UUID]") -> None
             f" AND edge_type = 'contradicts'"
         )
         params: list = str_ids + str_ids
-        with store.db._conn_lock:
-            rows = store.db._conn.execute(sql, params).fetchall()
+        with store.db.ro_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
         for row in rows:
             src_s = str(row[0])
             dst_s = str(row[1])
@@ -383,10 +511,16 @@ def _find_anti_hits(
             break
 
     out: list[MemoryHit] = []
-    for aid in anti_ids[:k]:
+    _anti_slice = anti_ids[:k]
+    _missing_anti = [
+        aid for aid in _anti_slice
+        if not (records_cache is not None and aid in records_cache)
+    ]
+    _anti_batch: dict = store.get_batch(_missing_anti) if _missing_anti else {}
+    for aid in _anti_slice:
         rec = records_cache.get(aid) if records_cache is not None else None
         if rec is None:
-            rec = store.get(aid)
+            rec = _anti_batch.get(aid)
         if rec is None:
             continue
         _prov = (rec.provenance or [{}])[0]
@@ -405,6 +539,115 @@ def _find_anti_hits(
 
 
 _last_recall_latency_ms: float = 0.0
+
+
+ADAPTIVE_ESCALATION_CAP: int = 2000
+"""Hard ceiling for the widened candidate count on a low-confidence escalation.
+
+A bounded single widened index read — never a loop, never store.all_records.
+A deterministic cap that keeps worst-case widened-read latency below the
+full-scan regime. Must remain ≤ 2000 to satisfy the bounded-escalation
+invariant.
+"""
+
+_CONF_HIGH_COSINE_THRESHOLD: float = 0.75
+"""Top-hit cosine above which the signal is considered high-confidence."""
+
+_CONF_HIGH_HIT_COUNT_MIN: int = 3
+"""Minimum hits above the score threshold for high-confidence classification."""
+
+_CONF_SCORE_THRESHOLD: float = 0.5
+"""Score threshold used when counting hits for the confidence signal."""
+
+MULTI_SEED_CAP: int = 6
+"""Hard ceiling on the total seed count (base + fts_hits union) once widened
+on a low-confidence recall. Seed count directly multiplies 2-hop spread
+cost, so this cap must never be relaxed without re-measuring spread latency.
+"""
+
+
+def compute_spread_depth(
+    top_cosine: float,
+    hit_count_above_threshold: int,
+) -> int:
+    """Return the recommended spread depth based on confidence scalars.
+
+    Parameters
+    ----------
+    top_cosine:
+        Cosine similarity of the top-scoring hit.  Higher = more certain the
+        cue resolved to the right memory cluster.
+    hit_count_above_threshold:
+        Number of hits whose score exceeds the confidence threshold.  Higher =
+        more evidence the cluster is dense and the spread is productive.
+
+    Returns
+    -------
+    int
+        0 for high-confidence (shallow: the cluster is dense, fast path).
+        1 for low-confidence (one escalation step to reach fringe/island).
+
+    Notes
+    -----
+    The depth signal is purely a function of the confidence scalars — wall-clock
+    latency is never an input.  The kill-switch (IAI_MCP_ADAPTIVE_DEPTH_OFF=1)
+    is applied by the caller, not here.
+    """
+    high_confidence = (
+        top_cosine >= _CONF_HIGH_COSINE_THRESHOLD
+        and hit_count_above_threshold >= _CONF_HIGH_HIT_COUNT_MIN
+    )
+    return 0 if high_confidence else 1
+
+
+def escalate_recall_candidates(
+    store: "MemoryStore",
+    base_candidate_ids: "list[UUID]",
+    cue_vec: "list[float]",
+    cap: int = ADAPTIVE_ESCALATION_CAP,
+) -> "dict[UUID, object]":
+    """Widen the candidate set in a single bounded step when confidence is low.
+
+    This is a one-shot widening of the index query — NOT a loop, NOT a call to
+    store.all_records().  The widened read stays an ANN index query bounded by
+    *cap*, which hard-limits the worst-case latency and keeps this path within
+    the sub-second budget for corpora up to tens of thousands of records.
+
+    Parameters
+    ----------
+    store:
+        The memory store owning the ANN index.
+    base_candidate_ids:
+        Ids already gathered in the first-pass candidate set (may be empty on a
+        cold store).
+    cue_vec:
+        Embedding of the recall cue (used for the widened ANN query).
+    cap:
+        Hard ceiling for the total widened candidate count.  Must be ≤
+        ADAPTIVE_ESCALATION_CAP.
+
+    Returns
+    -------
+    dict mapping UUID → MemoryRecord for the widened candidate set.
+    Records already in *base_candidate_ids* are included without re-fetching.
+    """
+    import numpy as _np
+
+    effective_cap = min(int(cap), ADAPTIVE_ESCALATION_CAP)
+
+    cue_arr = _np.array(cue_vec, dtype=_np.float32)
+    norm = float(_np.linalg.norm(cue_arr))
+    if norm > 0:
+        cue_arr = cue_arr / norm
+
+    # Single widened ANN query — index read only, never a full-corpus scan.
+    ann_pairs = store.query_similar(cue_arr.tolist(), k=effective_cap)
+
+    result: dict = {}
+    for rec, _ in ann_pairs:
+        result[rec.id] = rec
+
+    return result
 
 
 _VERBATIM_FILTER_DEBUG: dict | None = None
@@ -427,6 +670,7 @@ def _recall_core(
     spread_hops: int = 2,
     cue_intent: str | None = None,
     contradicts_outgoing: dict[str, list[str]] | None = None,
+    trace_mark: Callable[[str], None] | None = None,
 ) -> _RecallCoreResult:
     profile_state = profile_state or {}
 
@@ -528,7 +772,18 @@ def _recall_core(
         logger.debug("records_cache_graph_build_failed: %s", exc)
         records_cache = {}
     if not records_cache:
-        records_cache = {r.id: r for r in store.all_records()}
+        # Bounded fallback: an empty candidate graph must not trigger a
+        # full-corpus materialization on the recall path. 1024 recent live
+        # records give the ranking a working pool; the primary path never
+        # lands here.
+        import itertools as _it
+
+        records_cache = {
+            r.id: r
+            for r in _it.islice(
+                store.iter_records(where="tombstoned_at IS NULL"), 1024,
+            )
+        }
 
     episodic_ids: set | None = None
     if mode == "verbatim":
@@ -537,18 +792,24 @@ def _recall_core(
             if getattr(rec, "tier", "episodic") == "episodic"
         }
 
+    # Computed here so it is available to the multi-seed widening block below
+    # as well as the ranking boost later in the function.
+    fts_hits: set[UUID] = set()
+    if cue and len(cue) >= 4:
+        cue_lower = cue.lower()
+        for rid, rec in records_cache.items():
+            if rec.literal_surface and cue_lower in rec.literal_surface.lower():
+                fts_hits.add(rid)
+
     _pool_t0 = time.perf_counter()
     pool_ids, pool_embs = _collect_graph_pool(graph, records_cache, store)
     _recall_pool_collection_ms = (time.perf_counter() - _pool_t0) * 1000.0
-    cue_vec = np.asarray(cue_emb, dtype=np.float32)
+    cue_vec = _sanitize_vec(np.asarray(cue_emb, dtype=np.float32))
     cnorm = float(np.linalg.norm(cue_vec))
     if cnorm > 0.0:
         cue_vec = cue_vec / cnorm
     if pool_embs.size:
-        pool_embs = np.nan_to_num(pool_embs, nan=0.0, posinf=0.0, neginf=0.0)
-        pool_norms = np.linalg.norm(pool_embs, axis=1)
-        pool_norms[pool_norms == 0.0] = 1.0
-        pool_embs = pool_embs / pool_norms[:, None]
+        pool_embs = _normalize_pool_cached(graph, pool_ids, pool_embs)
         shared_cos = np.matmul(pool_embs, cue_vec).astype(np.float32)
     else:
         shared_cos = np.empty(0, dtype=np.float32)
@@ -558,6 +819,82 @@ def _recall_core(
     else:
         shared_order = np.empty(0, dtype=np.int64)
         cosine_top_indices = np.empty(0, dtype=np.int64)
+
+    # Confidence-gated escalation: only widen the cosine frontier when the
+    # first pass is uncertain. High confidence stays on the cheap path.
+    top_cosine = float(shared_cos.max()) if shared_cos.size else 0.0
+    hit_count_above_threshold = int(
+        (shared_cos >= _CONF_HIGH_COSINE_THRESHOLD).sum()
+    ) if shared_cos.size else 0
+    # Bench-only kill-switch: allows a strict baseline measurement to be taken
+    # against the shipped mechanism-on default. The env-var ON-value is "true"
+    # by convention for these toggles; the older IAI_MCP_EXACT_AUTHORITY_OFF
+    # kill-switch uses "1" -- both are honored in their respective sites.
+    if (
+        compute_spread_depth(top_cosine, hit_count_above_threshold) > 0
+        and os.environ.get("IAI_MCP_CONF_ESCALATE_OFF") != "true"
+    ):
+        try:
+            widened_records = escalate_recall_candidates(
+                store, list(pool_ids), cue_vec.tolist(), cap=ADAPTIVE_ESCALATION_CAP,
+            )
+        except Exception as exc:  # noqa: BLE001 -- escalation is a best-effort widen
+            logger.debug("confidence_escalation_failed: %s", exc)
+            widened_records = {}
+        # The widened ANN query reads the raw store, which carries records the
+        # graph topology deliberately excludes (e.g. a contradicted/superseded
+        # record that is only ever surfaced via the anti-hits path, never as a
+        # regular hit). Restrict the widen to ids the graph already recognizes
+        # as nodes — this only extends WHICH graph-known ids clear the cosine
+        # frontier, it never introduces a record the graph excluded.
+        _graph_node_ids = set(graph.iter_nodes())
+        widened_records = {
+            rid: rec for rid, rec in widened_records.items() if rid in _graph_node_ids
+        }
+        _existing_pool_ids = set(pool_ids)
+        _new_ids = [rid for rid in widened_records if rid not in _existing_pool_ids]
+        if _new_ids:
+            _new_embs_rows = [
+                list(getattr(widened_records[rid], "embedding", []) or [])
+                for rid in _new_ids
+            ]
+            _new_ids = [
+                rid for rid, row in zip(_new_ids, _new_embs_rows) if row
+            ]
+            _new_embs_rows = [row for row in _new_embs_rows if row]
+            if _new_ids:
+                _new_embs = np.asarray(_new_embs_rows, dtype=np.float32)
+                _new_norms = np.linalg.norm(_new_embs, axis=1, keepdims=True)
+                _new_norms[_new_norms == 0.0] = 1.0
+                _new_embs = _new_embs / _new_norms
+                _new_cos = np.matmul(_new_embs, cue_vec).astype(np.float32)
+
+                pool_ids = list(pool_ids) + _new_ids
+                pool_embs = (
+                    np.concatenate([pool_embs, _new_embs], axis=0)
+                    if pool_embs.size else _new_embs
+                )
+                shared_cos = np.concatenate([shared_cos, _new_cos])
+                for rid, rec in widened_records.items():
+                    if rid in _existing_pool_ids:
+                        continue
+                    if records_cache is not None and rid not in records_cache:
+                        records_cache[rid] = rec
+
+        # The widen also surfaces ids ALREADY in the pool but ranked beyond the
+        # K_CANDIDATES cutoff — union their indices into the frontier directly,
+        # rather than relying solely on the (fixed-size) top-K slice.
+        _id_to_pos = {rid: i for i, rid in enumerate(pool_ids)}
+        _widened_indices = np.array(
+            [_id_to_pos[rid] for rid in widened_records if rid in _id_to_pos],
+            dtype=np.int64,
+        )
+        if _widened_indices.size:
+            cosine_top_indices = np.union1d(
+                cosine_top_indices, _widened_indices,
+            ).astype(np.int64)
+        if trace_mark is not None:
+            trace_mark("conf_escalate")
 
     _arousal_cue_hash_bytes = hashlib.md5(str(cue).encode("utf-8")).digest()
     _arousal_cue_hash_hex = _arousal_cue_hash_bytes[:4].hex()
@@ -607,20 +944,21 @@ def _recall_core(
         pool_ids[i]: pool_embs[i]
         for i in range(len(pool_ids))
     }
-    gated = _community_gate(
+    _gated_top_n, community_scores = _community_gate_scored(
         cue_emb, assignment, top_n=k_communities,
         member_embeddings=gate_member_embeddings,
     )
-    gated_set: set[UUID] = set()
-    for gc in gated:
+    max_community_score = max(community_scores.values()) if community_scores else 0.0
+    community_id_by_member: dict[UUID, UUID] = {}
+    for gc in community_scores:
         for rid in assignment.mid_regions.get(gc, []):
-            gated_set.add(rid)
+            community_id_by_member[rid] = gc
 
     _centrality_t0 = time.perf_counter()
     centrality_arr = np.zeros(len(pool_ids), dtype=np.float32)
     for i, rid in enumerate(pool_ids):
         centrality_arr[i] = float(graph.get_centrality(rid))
-    if not np.any(centrality_arr) and pool_ids:
+    if not getattr(graph, "_centrality_resolved", False) and pool_ids:
         try:
             from iai_mcp.centrality_approx import centrality_for_runtime
 
@@ -644,6 +982,25 @@ def _recall_core(
         cosine_top_indices, shared_cos, centrality_arr, n=3,
     )
     seed_ids = [pool_ids[int(i)] for i in seed_indices]
+
+    # Multi-seed widening: confidence-gated, capped union
+    # of fts_hits ids into the seed set, so 2-hop spread also fans out from an
+    # exact-substring match the cosine+centrality blend alone would miss. The
+    # mark fires on the branch (low confidence), whether or not fts_hits was
+    # non-empty -- mirrors conf_escalate's own "branch fired" semantics.
+    # Bench-only kill-switch matching the conf_escalate site above.
+    if (
+        compute_spread_depth(top_cosine, hit_count_above_threshold) > 0
+        and os.environ.get("IAI_MCP_MULTI_SEED_OFF") != "true"
+    ):
+        if fts_hits:
+            _fts_seed_ids = [
+                rid for rid in fts_hits if rid in id_to_idx and rid not in seed_ids
+            ]
+            remaining = max(0, MULTI_SEED_CAP - len(seed_ids))
+            seed_ids = list(dict.fromkeys(seed_ids + _fts_seed_ids[:remaining]))
+        if trace_mark is not None:
+            trace_mark("multi_seed")
 
     spread_ids = graph.two_hop_neighborhood(seed_ids, top_k=5) if spread_hops > 0 else []
     spread_indices = np.array(
@@ -727,24 +1084,30 @@ def _recall_core(
     mode_bias = _gate_bias_for_mode(mode)
     mode_bias = mode_bias + _arousal_mode_bias_adjust
 
-    fts_hits: set[UUID] = set()
-    if cue and len(cue) >= 4:
-        cue_lower = cue.lower()
-        for rid, rec in records_cache.items():
-            if rec.literal_surface and cue_lower in rec.literal_surface.lower():
-                fts_hits.add(rid)
-
     contradicts_dst_set: set[str] = set()
     if cue_intent == "historical_verbatim":
         contradicts_dst_set = _build_contradicts_dst_set(contradicts_outgoing)
 
     corrector_base_score: dict[str, float] = {}
 
-    _scoring_now = datetime.now(timezone.utc)
+    # Cleanup-attractor: a bounded shortlist of the
+    # current candidates' structural HVs, used to snap a noisy structural HV
+    # to its nearest codebook entry ONLY within a rejection threshold, before
+    # the structural-similarity score is computed. Bounded to <=200 entries
+    # regardless of how far the confidence widen grew reachable_indices.
+    _cleanup_shortlist_hvs: list[bytes] = [
+        records_cache[pool_ids[int(i)]].structure_hv
+        for i in reachable_indices[:200]
+        if pool_ids[int(i)] in records_cache
+        and getattr(records_cache[pool_ids[int(i)]], "structure_hv", None)
+    ]
+    if trace_mark is not None:
+        trace_mark("cleanup_attractor")
 
     scored: list[tuple[float, UUID, float, float, float, float, float, float]] = []
     if reachable_indices.size:
         from iai_mcp.hebbian_structure import structural_similarity
+        from iai_mcp.lilli.ops.cleanup import _cleanup_if_confident
         for idx in reachable_indices:
             i = int(idx)
             cid = pool_ids[i]
@@ -754,7 +1117,7 @@ def _recall_core(
             cos = float(shared_cos[i])
             aaak = _aaak_overlap(cue, rec.aaak_index)
             deg = float(degree.get(str(cid), 0))
-            age = _age_penalty(rec.created_at, _scoring_now)
+            age = _age_penalty(rec.created_at)
             if log_max_deg > 0.0:
                 deg_norm = log(1.0 + deg) / log_max_deg
             else:
@@ -765,16 +1128,23 @@ def _recall_core(
                 + effective_w_degree * deg_norm
                 - W_AGE * age
             )
-            if cid in gated_set:
-                base_s += mode_bias * cos
+            cand_community = community_id_by_member.get(cid)
+            if cand_community is not None and max_community_score > 0.0:
+                graded_weight = max(
+                    0.0, community_scores.get(cand_community, 0.0) / max_community_score,
+                )
+                base_s += mode_bias * cos * graded_weight
             structural_score = 0.0
             if (
                 structural_weight > 0.0
                 and cue_structure_hv is not None
                 and rec.structure_hv
             ):
+                _cleaned_structure_hv = _cleanup_if_confident(
+                    rec.structure_hv, _cleanup_shortlist_hvs, max_hamming_frac=0.15,
+                )
                 structural_score = structural_similarity(
-                    cue_structure_hv, rec.structure_hv,
+                    cue_structure_hv, _cleaned_structure_hv,
                 )
             if structural_weight > 0.0:
                 base_s = (
@@ -841,6 +1211,8 @@ def _recall_core(
                     scored[j] = (tgt,) + row[1:]
 
     scored.sort(key=lambda x: (-x[0], str(x[1])))
+    if trace_mark is not None:
+        trace_mark("soft_gate")
 
     scored_hits: list[MemoryHit] = []
     budget_used = 0
@@ -868,10 +1240,6 @@ def _recall_core(
             MemoryHit(
                 record_id=cid,
                 score=float(s),
-                # Keep the raw, unclamped score as the internal ranking key so
-                # post-rank re-sorts preserve engine order even when the
-                # displayed score is later clamped to [0,1] at serialization.
-                sort_score=float(s),
                 reason=reason,
                 literal_surface=rec.literal_surface,
                 adjacent_suggestions=suggestions,
@@ -1120,6 +1488,7 @@ def recall_for_response(
     knobs_applied: dict | None = None,
     arousal_state: dict | None = None,
     tv_maps: "tuple[dict, dict] | None" = None,
+    trace_mark: Callable[[str], None] | None = None,
 ) -> RecallResponse:
     import time as _time
     global _last_recall_latency_ms
@@ -1133,8 +1502,11 @@ def recall_for_response(
             budget_tokens,
         )
 
-    _k_com = 1 if _last_recall_latency_ms > 2000 else 3
-    _s_hops = 0 if _last_recall_latency_ms > 2000 else 2
+    # Bounded full-quality spread — the default fast-inner-loop parameters.
+    # Wall-clock latency is never a control input; it is written at the end
+    # of this function for telemetry/probe use only.
+    _k_com = 3
+    _s_hops = 2
 
     from iai_mcp.cue_router import _classify_cue
     from iai_mcp.retrieve import (
@@ -1158,28 +1530,21 @@ def recall_for_response(
         spread_hops=_s_hops,
         cue_intent=_cue_intent,
         contradicts_outgoing=_tv_outgoing,
+        trace_mark=trace_mark,
     )
 
+    # store is passed for the bounded hit-timestamp fill: the maps carry only
+    # contradiction-involved timestamps, and each hit's own valid_from comes
+    # from one <=k-id lookup.
     derive_temporal_validity(
-        None, core.scored_hits, outgoing=_tv_outgoing, ts_by_id=_tv_ts,
+        store, core.scored_hits, outgoing=_tv_outgoing, ts_by_id=_tv_ts,
     )
     derive_temporal_validity(
-        None, core.anti_hits, outgoing=_tv_outgoing, ts_by_id=_tv_ts,
+        store, core.anti_hits, outgoing=_tv_outgoing, ts_by_id=_tv_ts,
     )
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
-    # Rank on the internal unclamped key (falls back to score when a hit was
-    # built without sort_score), so ordering is preserved across the display
-    # clamp applied at serialization. Tie-break on record_id so equal-scoring
-    # hits resolve deterministically -- two code paths that produce the same
-    # score via different summation orders (e.g. empty profile_state falling
-    # back to the medium scale) must yield byte-identical orderings.
-    core.scored_hits.sort(
-        key=lambda h: (
-            -(h.sort_score if h.sort_score is not None else h.score),
-            str(h.record_id),
-        ),
-    )
+    core.scored_hits.sort(key=lambda h: h.score, reverse=True)
 
     if (
         len(core.scored_hits) == 1
@@ -1206,40 +1571,74 @@ def recall_for_response(
         hits.append(hit)
         budget_used += tokens
 
+    # Fold the pending-recency markers THROUGH the same token budget that
+    # capped the regular hits above, instead of appending them past the cap.
+    # The freshness markers (score=0.0) are the lowest-priority surfaces, so a
+    # marker that would push past budget trims the lowest-priority *regular*
+    # hit to make room; only if no regular hit can be reclaimed does the marker
+    # get dropped. This keeps the markers represented while honouring the cap.
     try:
         _pending_n = max(10, len(hits))
         _pending_markers = store.recent_pending_markers(n=_pending_n)
         _ranked_ids: set = {h.record_id for h in hits}
         for _pm in _pending_markers:
-            if _pm.id not in _ranked_ids:
-                _ranked_ids.add(_pm.id)
-                hits.append(MemoryHit(
-                    record_id=_pm.id,
-                    score=0.0,
-                    reason="pending-recency",
-                    literal_surface=_pm.literal_surface or "",
-                    adjacent_suggestions=[],
-                    session_id=(_pm.provenance[0].get("session_id") if _pm.provenance else None),
-                    captured_at=(
-                        _pm.created_at.isoformat() if _pm.created_at else None
+            if _pm.id in _ranked_ids:
+                continue
+            _pm_tokens = len(_pm.literal_surface or "") // 4
+            # Reclaim budget from the lowest-priority regular (non-marker) hit
+            # when this marker would overflow. Regular hits keep score order
+            # (highest first), so the last regular hit is the cheapest to drop.
+            while budget_used + _pm_tokens > budget_tokens and hits:
+                _regular_idx = next(
+                    (
+                        _i
+                        for _i in range(len(hits) - 1, -1, -1)
+                        if hits[_i].reason != "pending-recency"
                     ),
-                ))
+                    None,
+                )
+                if _regular_idx is None:
+                    break
+                _dropped = hits.pop(_regular_idx)
+                budget_used -= len(_dropped.literal_surface) // 4
+            if budget_used + _pm_tokens > budget_tokens and hits:
+                # No regular hit left to reclaim and the marker still overflows;
+                # skip it rather than exceed budget.
+                continue
+            _ranked_ids.add(_pm.id)
+            hits.append(MemoryHit(
+                record_id=_pm.id,
+                score=0.0,
+                reason="pending-recency",
+                literal_surface=_pm.literal_surface or "",
+                adjacent_suggestions=[],
+                session_id=(_pm.provenance[0].get("session_id") if _pm.provenance else None),
+                captured_at=(
+                    _pm.created_at.isoformat() if _pm.created_at else None
+                ),
+            ))
+            budget_used += _pm_tokens
     except Exception as _pm_exc:  # noqa: BLE001 -- recency union is additive; never crash recall
         logger.debug("pending_markers_union_failed: %s", _pm_exc)
 
+    _enrich_ids = [_h.record_id for _h in hits if _h.session_id is None]
+    _enrich_batch: dict = {}
+    if _enrich_ids:
+        try:
+            _enrich_batch = store.get_batch(_enrich_ids)
+        except Exception as _exc:  # noqa: BLE001 -- additive enrichment, never crash recall
+            logger.debug("hit_provenance_enrich_batch_failed: %s", _exc)
+            _enrich_batch = {}
     for _h in hits:
         if _h.session_id is None:
-            try:
-                _full_rec = store.get(_h.record_id)
-                if _full_rec is not None:
-                    _h_prov = (_full_rec.provenance or [{}])[0]
-                    _h.session_id = _h_prov.get("session_id")
-                    _h.captured_at = (
-                        _full_rec.created_at.isoformat()
-                        if _full_rec.created_at else None
-                    )
-            except Exception as _exc:  # noqa: BLE001 -- additive enrichment, never crash recall
-                logger.debug("hit_provenance_enrich_failed rid=%s: %s", _h.record_id, _exc)
+            _full_rec = _enrich_batch.get(_h.record_id)
+            if _full_rec is not None:
+                _h_prov = (_full_rec.provenance or [{}])[0]
+                _h.session_id = _h_prov.get("session_id")
+                _h.captured_at = (
+                    _full_rec.created_at.isoformat()
+                    if _full_rec.created_at else None
+                )
 
     hits, anti_hits, hints, patterns_observed = _apply_post_rank_pipeline(
         hits,
@@ -1252,14 +1651,45 @@ def recall_for_response(
     )
 
     if hits:
+        # Final budget pack after the post-rank pipeline may have reordered the
+        # list. Pack regular hits in their post-rank order up to budget, then
+        # fold the recency markers back in within whatever budget remains,
+        # trimming the lowest-priority regular hit when a marker needs room.
+        # This guarantees the freshness markers survive the cap instead of
+        # being silently dropped when they sort last, while keeping the total
+        # emitted token cost at or under budget_tokens.
+        _regular = [h for h in hits if h.reason != "pending-recency"]
+        _markers = [h for h in hits if h.reason == "pending-recency"]
+
         _final_hits: list[MemoryHit] = []
         _final_budget = 0
-        for _fh in hits:
+        for _fh in _regular:
             _fh_tokens = len(_fh.literal_surface) // 4
             if _final_budget + _fh_tokens > budget_tokens and _final_hits:
                 break
             _final_hits.append(_fh)
             _final_budget += _fh_tokens
+
+        for _mk in _markers:
+            _mk_tokens = len(_mk.literal_surface) // 4
+            while _final_budget + _mk_tokens > budget_tokens and _final_hits:
+                _regular_idx = next(
+                    (
+                        _i
+                        for _i in range(len(_final_hits) - 1, -1, -1)
+                        if _final_hits[_i].reason != "pending-recency"
+                    ),
+                    None,
+                )
+                if _regular_idx is None:
+                    break
+                _dropped = _final_hits.pop(_regular_idx)
+                _final_budget -= len(_dropped.literal_surface) // 4
+            if _final_budget + _mk_tokens > budget_tokens and _final_hits:
+                continue
+            _final_hits.append(_mk)
+            _final_budget += _mk_tokens
+
         hits = _final_hits
         budget_used = _final_budget
 
@@ -1279,6 +1709,75 @@ def recall_for_response(
         cue_mode=core.cue_mode,
         patterns_observed=patterns_observed,
     )
+
+
+def merge_authority_hits(
+    pipeline_hits: list[MemoryHit],
+    authority_hits: list[MemoryHit],
+    budget_tokens: int,
+    max_hits: int = _POST_RANK_MAX_HITS,
+) -> tuple[list[MemoryHit], int]:
+    """Union exact-similarity authority hits (head) with the pipeline's
+    associative hits (tail), re-packed to the token budget.
+
+    The head is exact-similarity hits in the given order, deduped against the
+    tail by record id. The tail is the pipeline hits not already in the head,
+    in their existing order — this preserves graph rank order and any
+    pending-recency markers exactly where the pipeline placed them. The union
+    is packed head-then-tail with the same token-budget semantics as the
+    pipeline's own pack loop: token cost is ``len(literal_surface) // 4``,
+    packing stops at ``max_hits``, and stops on overflow once at least one hit
+    is packed. Because the head packs first, no tail hit can ever consume
+    budget before a head hit — ranking may only reorder the tail.
+
+    The authority guarantee is INCLUSION in the packed response (no false
+    negatives), not a frozen head order. This function fixes membership and
+    budget only; a caller applying a correctness-driven re-rank afterward
+    (e.g. temporal-validity downweight for stale/contradicted records) is
+    expected to reorder the returned list freely as long as it never drops an
+    authority hit that was packed here.
+
+    This plain pack loop does not run the pipeline's separate marker-reclaim
+    fold, so a pending-recency marker (score 0.0, placed at the tail end) is
+    the first casualty of head budget consumption here rather than getting
+    the reclaim protection it has on the pipeline-only path. This is an
+    accepted trade-off of authority-first ranking, not a bug: authority
+    (guaranteed-correct exact matches) outranks freshness markers under
+    budget pressure.
+
+    An empty authority list is an identity fast path: the pipeline hits and
+    their caller-supplied budget accounting are returned unchanged, so
+    disabling or omitting the authority produces zero behavioral drift.
+
+    When a record appears in both head and tail, the displaced tail hit's
+    ``adjacent_suggestions`` (graph-derived, absent on a fresh authority hit)
+    are copied onto the surviving head hit before the tail hit is dropped, so
+    the association data is not silently lost to the authority promotion.
+    """
+    if not authority_hits:
+        return pipeline_hits, sum(len(h.literal_surface) // 4 for h in pipeline_hits)
+
+    pipeline_by_id = {h.record_id: h for h in pipeline_hits}
+    for h in authority_hits:
+        displaced = pipeline_by_id.get(h.record_id)
+        if displaced is not None and displaced.adjacent_suggestions and not h.adjacent_suggestions:
+            h.adjacent_suggestions = list(displaced.adjacent_suggestions)
+    head_ids = {h.record_id for h in authority_hits}
+    tail = [h for h in pipeline_hits if h.record_id not in head_ids]
+    union = list(authority_hits) + tail
+
+    packed: list[MemoryHit] = []
+    budget_used = 0
+    for hit in union:
+        if len(packed) >= max_hits:
+            break
+        tokens = len(hit.literal_surface) // 4
+        if budget_used + tokens > budget_tokens and len(packed) >= 1:
+            break
+        packed.append(hit)
+        budget_used += tokens
+
+    return packed, budget_used
 
 
 def recall_for_benchmark(

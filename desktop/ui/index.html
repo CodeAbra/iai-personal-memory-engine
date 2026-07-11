@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IAI Brain</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #07050f; color: #9db4d0;
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    display: grid; place-items: center; overflow: hidden;
+  }
+  #stage { position: relative; text-align: center; }
+  canvas { display: block; margin: 0 auto 26px; }
+  #msg { letter-spacing: .18em; text-transform: uppercase; font-size: 11px;
+         color: #5d738f; min-height: 1.5em; }
+  #msg.err { color: #d08a8a; text-transform: none; letter-spacing: .02em;
+             max-width: 46ch; }
+  @media (prefers-reduced-motion: reduce) { canvas { display: none; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c" width="360" height="260"></canvas>
+  <div id="msg">waking the brain</div>
+</div>
+<script>
+  const msg = document.getElementById("msg");
+  window.showError = (text) => { msg.textContent = text; msg.className = "err"; };
+
+  const cv = document.getElementById("c"), cx2 = cv.getContext("2d");
+  const DOTS = [];
+  for (let i = 0; i < 900; i++) {
+    const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random());
+    const x = 180 + Math.cos(a) * 150 * r, y = 125 + Math.sin(a) * 100 * r;
+    const fold = Math.sin(Math.hypot((x - 180) / 150, (y - 125) / 100) * 24
+                 + 2.2 * Math.sin(Math.atan2(y - 125, x - 180) * 3));
+    if (Math.abs(fold) < 0.35) continue;
+    DOTS.push({ x, y, p: Math.random() * Math.PI * 2, s: .5 + Math.random() });
+  }
+  let t = 0;
+  (function tick() {
+    t += 0.02;
+    cx2.clearRect(0, 0, 360, 260);
+    for (const d of DOTS) {
+      const a = 0.25 + 0.55 * (0.5 + 0.5 * Math.sin(t * d.s + d.p));
+      cx2.fillStyle = `rgba(120, 210, 255, ${a})`;
+      cx2.beginPath();
+      cx2.arc(d.x, d.y, 1.4, 0, 7);
+      cx2.fill();
+    }
+    requestAnimationFrame(tick);
+  })();
+
+  let dots = 0;
+  setInterval(() => {
+    if (msg.className === "err") return;
+    dots = (dots + 1) % 4;
+    msg.textContent = "waking the brain" + ".".repeat(dots);
+  }, 500);
+</script>
+</body>
+</html>

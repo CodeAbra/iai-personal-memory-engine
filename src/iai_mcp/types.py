@@ -14,13 +14,15 @@ SCHEMA_VERSION_V2 = 2
 SCHEMA_VERSION_V3 = 3
 SCHEMA_VERSION_V4 = 4
 SCHEMA_VERSION_V5 = 5
-SCHEMA_VERSION_CURRENT = SCHEMA_VERSION_V5
+SCHEMA_VERSION_V6 = 6
+SCHEMA_VERSION_CURRENT = SCHEMA_VERSION_V6
 SCHEMA_VERSION_ACCEPTED = frozenset({
     SCHEMA_VERSION_LEGACY,
     SCHEMA_VERSION_V2,
     SCHEMA_VERSION_V3,
     SCHEMA_VERSION_V4,
     SCHEMA_VERSION_V5,
+    SCHEMA_VERSION_V6,
 })
 
 STRUCTURE_HV_DIM: int = 10000
@@ -76,6 +78,7 @@ class MemoryRecord:
     hv_tier: str = "bsc"
     structure_hv_payload: bytes = field(default=b"")
     embedding_pending: int = 0
+    role: str | None = None  # denormalized projection of the role:<x> tag; None when absent
 
     def __post_init__(self) -> None:
         if self.detail_level >= 3:
@@ -131,11 +134,6 @@ class MemoryHit:
     valid_to: datetime | None = None
     session_id: str | None = None
     captured_at: str | None = None
-    # Internal ranking key, unclamped. `score` is the *displayed* value (clamped
-    # to [0,1] at serialization); `sort_score` preserves the raw engine ordering
-    # after multiplicative boosts (trigram*2, FTS*3, valence) push it past 1.0.
-    # When None, callers fall back to `score` (backward compatible).
-    sort_score: float | None = None
 
 
 @dataclass

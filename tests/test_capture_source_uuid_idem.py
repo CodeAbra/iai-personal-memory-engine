@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import tempfile
-
 import json
 import platform
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -242,7 +239,7 @@ def test_drain_deferred_deduplicates_already_inserted_uuid(iai_home):
         "version": 1,
         "deferred_at": "2026-05-31T18:00:00.000Z",
         "session_id": SESSION,
-        "cwd": str(Path(tempfile.gettempdir()) / "test"),
+        "cwd": "/tmp/test",
     }
     event = {
         "text": TEXT,
@@ -282,10 +279,9 @@ def test_dedup_with_ts_microsecond_normalization(iai_home):
         read_pending_live_events,
         write_deferred_event,
     )
-    from iai_mcp.store import MemoryStore
 
     session = "ts-norm-session-60h5"
-    text = "ts microsecond normalization dedup test turn content phase60 long enough"
+    text = "ts microsecond normalization dedup test turn content long enough"
     ts_microsec = "2026-05-31T12:00:00.000000+00:00"
 
     store = _open_store()

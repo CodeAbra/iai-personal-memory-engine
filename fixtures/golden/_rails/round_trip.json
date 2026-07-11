@@ -1,0 +1,14 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_rails.py",
+  "name": "round_trip",
+  "payload": null,
+  "sha256": "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991",
+  "shape": [
+    16
+  ],
+  "source": "synthetic",
+  "subsystem": "_rails"
+}

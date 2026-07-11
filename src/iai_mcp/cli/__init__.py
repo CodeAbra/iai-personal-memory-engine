@@ -23,7 +23,6 @@ SYSTEMD_TARGET: Path = Path.home() / ".config" / "systemd" / "user" / "iai-mcp-d
 
 DAEMON_LABEL: str = "com.iai-mcp.daemon"
 SERVICE_NAME: str = "iai-mcp-daemon.service"
-SCHTASKS_TASK_NAME: str = "iai-mcp-daemon"
 
 CONSENT_BANNER: str = """\
 ==============================================================================
@@ -57,10 +56,6 @@ def _is_linux() -> bool:
     return platform.system() == "Linux"
 
 
-def _is_windows() -> bool:
-    return platform.system() == "Windows"
-
-
 def _ensure_crypto_key_present():
     if os.environ.get("IAI_MCP_CRYPTO_PASSPHRASE"):
         return None
@@ -77,17 +72,15 @@ def _ensure_crypto_key_present():
 
 
 def _try_short_timeout_connect(timeout_ms: int = 250) -> bool:
-    from iai_mcp._ipc import make_sync_ipc_socket, send_sync_auth_token
-    try:
-        s, addr = make_sync_ipc_socket()
-    except (FileNotFoundError, OSError):
-        return False
+    import socket as _socket
+
+    sock_path = os.environ.get("IAI_DAEMON_SOCKET_PATH") or str(SOCKET_PATH)
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     s.settimeout(timeout_ms / 1000.0)
     try:
-        s.connect(addr)
-        send_sync_auth_token(s)
+        s.connect(sock_path)
         return True
-    except (FileNotFoundError, ConnectionRefusedError, OSError):
+    except (FileNotFoundError, ConnectionRefusedError, OSError, _socket.timeout):
         return False
     finally:
         try:
@@ -106,14 +99,18 @@ def _send_jsonrpc_request(
     read_timeout: float = 30.0,
 ) -> dict | None:
     import asyncio
-    from iai_mcp._ipc import open_ipc_connection
     from iai_mcp.cli._capture import _is_custom_store as _isc
     if not os.environ.get("IAI_DAEMON_SOCKET_PATH") and _isc():
         return None
 
+    sock_path = os.environ.get("IAI_DAEMON_SOCKET_PATH") or str(SOCKET_PATH)
+
     async def _runner() -> dict | None:
         try:
-            reader, writer = await open_ipc_connection(timeout=connect_timeout)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(sock_path),
+                timeout=connect_timeout,
+            )
         except (FileNotFoundError, ConnectionRefusedError, OSError, asyncio.TimeoutError):
             return None
         try:
@@ -130,8 +127,8 @@ def _send_jsonrpc_request(
         finally:
             try:
                 writer.close()
-                await asyncio.wait_for(writer.wait_closed(), timeout=0.25)
-            except (OSError, asyncio.TimeoutError):
+                await writer.wait_closed()
+            except OSError:
                 pass
 
     try:
@@ -145,12 +142,17 @@ def _send_jsonrpc_request(
 
 def _send_socket_request(req: dict, *, timeout: float = 30.0) -> dict | None:
     import asyncio
-    from iai_mcp._ipc import open_ipc_connection
 
     async def _runner() -> dict | None:
+        _sock = os.environ.get("IAI_DAEMON_SOCKET_PATH") or str(SOCKET_PATH)
         try:
-            reader, writer = await open_ipc_connection(timeout=5.0)
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(_sock),
+                timeout=5.0,
+            )
+        except (FileNotFoundError, ConnectionRefusedError):
+            return None
+        except OSError:
             return None
         try:
             writer.write((json.dumps(req) + "\n").encode("utf-8"))
@@ -162,8 +164,8 @@ def _send_socket_request(req: dict, *, timeout: float = 30.0) -> dict | None:
         finally:
             try:
                 writer.close()
-                await asyncio.wait_for(writer.wait_closed(), timeout=0.25)
-            except (OSError, asyncio.TimeoutError):
+                await writer.wait_closed()
+            except OSError:
                 pass
 
     return asyncio.run(_runner())
@@ -249,6 +251,7 @@ from ._analytics import (
     cmd_bank_recall,
     cmd_build_native,
     cmd_migrate,
+    cmd_migrate_to_lilli,
     cmd_deferred_unlock_dead_pids,
 )
 
@@ -261,6 +264,7 @@ from ._maintenance import (
     cmd_lifecycle_status,
     cmd_maintenance_sleep_cycle,
     cmd_drain_permanent_failed,
+    cmd_deferred_drain,
     _maintenance_compact_preflight_daemon_alive,
     _maintenance_compact_dry_run,
     _maintenance_compact_apply,
@@ -318,11 +322,11 @@ from ._daemon import (
     cmd_daemon_pause,
     cmd_daemon_resume,
     cmd_daemon_stats,
+    cmd_daemon_rss_stats,
     cmd_daemon_configure,
     _launchd_template,
     _render_launchd_plist,
     _render_systemd_unit,
-    _render_schtasks_xml,
     _prompt_consent,
     _record_consent_receipt,
     _remove_state_files,
@@ -422,6 +426,47 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     m.set_defaults(func=cmd_migrate)
 
+    mtl = sub.add_parser(
+        "migrate-to-lilli",
+        help=(
+            "copy a SQLite Hippo store verbatim into a fresh lilli store, then "
+            "verify equality (does NOT swap the live store)"
+        ),
+    )
+    mtl.add_argument(
+        "--src",
+        required=True,
+        help=(
+            "source SQLite store db file "
+            "(e.g. /path/to/alice-store/hippo/brain.sqlite3)"
+        ),
+    )
+    mtl.add_argument(
+        "--dst",
+        required=True,
+        help=(
+            "NEW destination store root (must not be the live store; the lilli "
+            "schema is auto-created there)"
+        ),
+    )
+    mtl.add_argument(
+        "--batch",
+        type=int,
+        default=500,
+        help="rows per streamed batch (default 500).",
+    )
+    mtl.add_argument(
+        "--prune-telemetry-before",
+        dest="prune_telemetry_before",
+        default=None,
+        help=(
+            "skip events older than this UTC datetime string (telemetry only; "
+            "off by default -- lossless, every event copied)."
+        ),
+    )
+    mtl.add_argument("--verbose", "-v", action="store_true")
+    mtl.set_defaults(func=cmd_migrate_to_lilli)
+
     udp = sub.add_parser(
         "deferred-unlock-dead-pids",
         help=(
@@ -433,6 +478,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     udp.add_argument("--dry-run", action="store_true")
     udp.add_argument("--json", action="store_true", help="emit a JSON result")
+    udp.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "proceed even when a live daemon is detected; "
+            "use only when you are certain no daemon is writing to the drain"
+        ),
+    )
     udp.set_defaults(func=cmd_deferred_unlock_dead_pids)
 
     c = sub.add_parser(
@@ -607,23 +660,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="install/uninstall/status the Claude Code Stop hook for ambient session capture",
     )
     ch_sub = ch.add_subparsers(dest="capture_hooks_cmd", required=True)
-    ch_install = ch_sub.add_parser(
-        "install",
-        help="copy capture hooks to ~/.claude/hooks/ and register in settings.json",
-    )
-    ch_install.add_argument(
-        "--components",
-        default="stop,turn,recall",
-        metavar="LIST",
-        help=(
-            "comma-separated capture components to install (default: all). "
-            "Choices: stop (end-of-session capture), turn (per-prompt capture), "
-            "recall (SessionStart prefix injection). "
-            "e.g. --components=stop,turn installs capture WITHOUT the SessionStart "
-            "recall hook."
-        ),
-    )
-    ch_install.set_defaults(func=cmd_capture_hooks_install)
+    ch_sub.add_parser("install",
+                      help="copy Stop hook to ~/.claude/hooks/ and register in settings.json"
+                      ).set_defaults(func=cmd_capture_hooks_install)
     ch_sub.add_parser("uninstall",
                       help="remove the Stop hook and its settings.json entry"
                       ).set_defaults(func=cmd_capture_hooks_uninstall)
@@ -671,17 +710,14 @@ def _build_parser() -> argparse.ArgumentParser:
     di = daemon_sub.add_parser(
         "install",
         help=(
-            "install launchd plist (macOS) / systemd user unit (Linux) / "
-            "Task Scheduler job (Windows); first-run consent banner unless --yes"
+            "install launchd plist (macOS) / systemd user unit (Linux); "
+            "first-run consent banner unless --yes"
         ),
     )
     di.add_argument(
         "--dry-run",
         action="store_true",
-        help=(
-            "print service definition (plist / unit / schtasks XML) without "
-            "writing or invoking launchctl/systemctl/schtasks"
-        ),
+        help="print plist/unit contents without writing or invoking launchctl/systemctl",
     )
     di.add_argument(
         "--yes", "-y",
@@ -692,19 +728,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     du = daemon_sub.add_parser(
         "uninstall",
-        help="C4 clean uninstall: remove plist/unit/scheduled task + 3 state files",
+        help="C4 clean uninstall: remove plist/unit + 3 state files",
     )
     du.add_argument("--yes", "-y", action="store_true")
     du.set_defaults(func=cmd_daemon_uninstall)
 
     daemon_sub.add_parser(
-        "start",
-        help="launchctl kickstart / systemctl --user start / schtasks /Run",
+        "start", help="launchctl kickstart / systemctl --user start",
     ).set_defaults(func=cmd_daemon_start)
 
     daemon_sub.add_parser(
-        "stop",
-        help="launchctl kill SIGTERM / systemctl --user stop / schtasks /End",
+        "stop", help="launchctl kill SIGTERM / systemctl --user stop",
     ).set_defaults(func=cmd_daemon_stop)
 
     daemon_sub.add_parser(
@@ -717,10 +751,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dlogs = daemon_sub.add_parser(
         "logs",
-        help=(
-            "tail daemon log file (macOS Library/Logs, "
-            "Linux journalctl, Windows %%APPDATA%%\\iai-mcp\\logs)"
-        ),
+        help="tail daemon log file (macOS ~/.iai-mcp/logs) or journalctl (Linux)",
     )
     dlogs.add_argument("-f", "--follow", action="store_true")
     dlogs.add_argument("-n", "--lines", type=int, default=50)
@@ -748,6 +779,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "most recent 100 session_started events (persisted in the events table)"
         ),
     ).set_defaults(func=cmd_daemon_stats)
+
+    daemon_sub.add_parser(
+        "rss-stats",
+        help=(
+            "print the current resident-set picture (RSS, vmmap regions, "
+            "allocator pools) plus the most recent per-step resident-set deltas"
+        ),
+    ).set_defaults(func=cmd_daemon_rss_stats)
 
     dconf = daemon_sub.add_parser(
         "configure",
@@ -1064,26 +1103,49 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     dpf.set_defaults(func=cmd_drain_permanent_failed)
 
+    dd = sub.add_parser(
+        "deferred-drain",
+        help=(
+            "recover the full deferred-capture backlog offline — plain, crash, "
+            "and quarantined capture files — into the store. Runs one "
+            "byte-bounded subprocess per batch so memory is reclaimed between "
+            "batches. Requires the daemon stopped (single-writer). "
+            "Permanently-failed files are recovered separately via "
+            "drain-permanent-failed. --dry-run reports the plan without "
+            "mutating."
+        ),
+    )
+    dd.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="report the file list, event counts and batch plan without "
+             "inserting or removing anything",
+    )
+    dd.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a JSON result",
+    )
+    dd.add_argument(
+        "--batch-bytes",
+        type=int,
+        default=100 * 1024 * 1024,
+        help="maximum cumulative bytes of capture files per subprocess batch "
+             "(default ~100 MB)",
+    )
+    dd.add_argument(
+        "--force",
+        action="store_true",
+        help="proceed even if a live daemon is detected — relies on the store "
+             "lock as the real guard",
+    )
+    dd.set_defaults(func=cmd_deferred_drain)
+
     return parser
 
 
-def _force_utf8_streams() -> None:
-    """Recalled memory is arbitrary UTF-8 (emoji, CJK, smart quotes, em-dashes).
-    The session-recall hook reads this CLI's stdout, but on Windows — and under
-    a POSIX C/POSIX locale — stdout/stderr default to a non-UTF-8 codepage, so
-    writing recalled memory would raise UnicodeEncodeError and the hook would
-    silently produce no context. Force UTF-8 on the std streams."""
-    for _stream in (sys.stdout, sys.stderr):
-        _reconfigure = getattr(_stream, "reconfigure", None)
-        if _reconfigure is not None:
-            try:
-                _reconfigure(encoding="utf-8")
-            except (ValueError, OSError):
-                pass
-
-
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_streams()
     parser = _build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

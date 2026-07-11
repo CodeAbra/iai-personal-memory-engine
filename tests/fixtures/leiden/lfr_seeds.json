@@ -52,16 +52,16 @@
     ],
     "calibration_notes": {
         "lfr_substitute_used": true,
-        "rationale": "Ships a planted-partition + clipped-power-law-degree generator instead of canonical Lancichinetti 2008 LFR. Canonical LFR depends on `python-igraph` (a copyleft-licensed dependency). The substitute is calibrated to deliver comparable difficulty to canonical LFR at the same mu (mixing parameter). Threshold relaxations (if any) are recorded below by variant.",
+        "rationale": "Plan 21-06 ships a planted-partition + clipped-power-law-degree generator instead of canonical Lancichinetti 2008 LFR. Canonical LFR depends on `python-igraph` which is GPL. The substitute is calibrated to deliver comparable difficulty to canonical LFR at the same mu (mixing parameter). Threshold relaxations (if any) are recorded below by variant.",
         "thresholds_relaxed_from_canonical": false,
         "reference_paper": "Lancichinetti, Fortunato, Radicchi 2008 PRE 78 046110 (DOI 10.1103/PhysRevE.78.046110)"
     },
     "karate_disposition": {
         "ground_truth_nmi_min": 0.50,
-        "rationale": "Karate Club NMI(custom_leiden, Zachary-2-comm ground-truth) measured 0.5369 before super-merge, 0.6772 after super-merge (tuner picks gamma=0.5 -> 4 comms pre-merge -> 2 comms post-merge, matching leidenalg parity perfectly at NMI=1.0000). Ground truth is the 2-faction sociological split which is NOT CPM-Q-optimal -- leidenalg itself only hits NMI=0.6772 vs ground at gamma=0.5. nmi_min=0.50 is the regression-guard floor below post-merge measured value (0.6772); ground-truth alignment is bounded by leidenalg parity, which is the leidenalg-parity requirement."
+        "rationale": "Karate Club NMI(custom_leiden, Zachary-2-comm ground-truth) measured 0.5369 pre-22-01, 0.6772 post-22-01 super-merge (tuner picks gamma=0.5 -> 4 comms pre-merge -> 2 comms post-merge, matching leidenalg parity perfectly at NMI=1.0000). Ground truth is the 2-faction sociological split which is NOT CPM-Q-optimal -- leidenalg itself only hits NMI=0.6772 vs ground at gamma=0.5. nmi_min=0.50 is the regression-guard floor below post-merge measured value (0.6772); ground-truth alignment is bounded by leidenalg parity, which is what CONTEXT.md Section 6.1 actually requires."
     },
     "football_disposition": {
         "ground_truth_nmi_min": 0.70,
-        "rationale": "Football NMI(custom_leiden, Girvan-Newman-12-conf ground-truth) at tuner-pick gamma=0.5: measured 0.9111 before super-merge (13 communities, gamma-coincidence with 12 conferences), 0.7874 after super-merge (5 communities, canonical CPM-Q maximum at gamma=0.5). At gamma=0.5 leidenalg also produces 5 communities (NMI vs ground = 0.6989). Ground-truth (12 conferences) is only well-matched at gamma >= 1.25 per leidenalg sweep; tuner picks gamma=0.5 by composite Q-singleton score, not ground-truth alignment. nmi_min=0.70 is the regression-guard floor above post-merge measured (0.7874) and well above leidenalg parity (0.6989) at the same gamma."
+        "rationale": "Football NMI(custom_leiden, Girvan-Newman-12-conf ground-truth) at tuner-pick gamma=0.5: measured 0.9111 pre-22-01 (13 communities, gamma-coincidence with 12 conferences), 0.7874 post-22-01 super-merge (5 communities, canonical CPM-Q maximum at gamma=0.5). At gamma=0.5 leidenalg also produces 5 communities (NMI vs ground = 0.6989). Ground-truth (12 conferences) is only well-matched at gamma >= 1.25 per leidenalg sweep; tuner picks gamma=0.5 by composite Q-singleton score, not ground-truth alignment. nmi_min=0.70 is the regression-guard floor above post-merge measured (0.7874) and well above leidenalg parity (0.6989) at the same gamma."
     }
 }

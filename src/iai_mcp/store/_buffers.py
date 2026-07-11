@@ -22,30 +22,74 @@ def flush_record_buffer(store: "MemoryStore") -> int:
 
     with _BUFFER_LOCK:
         store_id = id(store)
-        pending = _record_buffer.pop(store_id, [])
-        if not pending:
+        # Snapshot WITHOUT removing: records carry verbatim literal_surface and
+        # must never be dropped on a write fault. The batch is removed from the
+        # buffer ONLY after the write succeeds (clear-after-success); on failure
+        # it stays buffered so the next flush retries instead of losing content.
+        buffered = _record_buffer.get(store_id)
+        if not buffered:
             return 0
+        pending = list(buffered)
+        n_pending = len(pending)
         try:
             store.db.open_table(RECORDS_TABLE).add(pending)
-            _record_last_flush_at[store_id] = datetime.now(timezone.utc)
         except (OSError, RuntimeError, ValueError) as exc:
+            # Leave the snapshotted batch in the buffer (do not drop verbatim
+            # content). A transient fault is retried by the next flush; a
+            # persistent fault keeps the records and stays visible via the log.
             logger.warning(
                 "flush_record_buffer_failed",
-                extra={"n": len(pending), "err": str(exc)[:120]},
+                extra={"n": n_pending, "err": str(exc)[:120]},
             )
-        if pending:
-            try:
-                from iai_mcp.events import write_event
-                write_event(
-                    store,
-                    "lance_buffer_flush",
-                    {"table": "records", "count": len(pending)},
-                    severity="info",
-                    buffered=False,
-                )
-            except Exception as exc:  # noqa: BLE001 -- telemetry MUST NOT crash flush
-                logger.debug("lance_buffer_flush telemetry failed: %s", str(exc)[:120])
-        return len(pending)
+            return 0
+        # Write succeeded: remove exactly the snapshotted records by identity,
+        # leaving any concurrently-appended record untouched.
+        flushed_ids = {id(p) for p in pending}
+        remaining = [r for r in _record_buffer.get(store_id, []) if id(r) not in flushed_ids]
+        if remaining:
+            _record_buffer[store_id] = remaining
+        else:
+            _record_buffer.pop(store_id, None)
+        _record_last_flush_at[store_id] = datetime.now(timezone.utc)
+        # Invalidate the store-level corpus-count cache so the next call to
+        # active_records_count() recomputes the live SQL count rather than
+        # serving a pre-flush stale value.  Guarded against a missing or not-yet-
+        # constructed cache (e.g. a bare HippoDB access without a MemoryStore).
+        try:
+            _cc = getattr(store, "_corpus_count_cache", None)
+            if _cc is not None:
+                _cc.invalidate("active")
+        except Exception:  # noqa: BLE001 -- cache invalidation MUST NOT crash flush
+            pass
+        # Upsert each flushed row into the resident exact-cosine matrix. The
+        # flushed items are DICTS (the same shape written to SQL above), not
+        # record objects, so fields are read by key, never by attribute.
+        # Pending rows (embedding_pending == 1) are excluded from the matrix by
+        # design and skipped here. Per-item isolation (mirroring the reembed
+        # feed): one malformed item must skip only itself, never abort the
+        # rest of the batch — the matrix would otherwise silently miss the
+        # freshest captures until the next destructive-write invalidate.
+        _feed_exact = getattr(store, "_feed_exact_index", None)
+        if _feed_exact is not None:
+            for _item in pending:
+                try:
+                    if int(_item.get("embedding_pending", 0) or 0) == 1:
+                        continue
+                    _feed_exact(_item["id"], _item["embedding"])
+                except Exception:  # noqa: BLE001 -- exact-index feed MUST NOT crash flush
+                    continue
+        try:
+            from iai_mcp.events import write_event
+            write_event(
+                store,
+                "lance_buffer_flush",
+                {"table": "records", "count": n_pending},
+                severity="info",
+                buffered=False,
+            )
+        except Exception as exc:  # noqa: BLE001 -- telemetry MUST NOT crash flush
+            logger.debug("lance_buffer_flush telemetry failed: %s", str(exc)[:120])
+        return n_pending
 
 
 def should_flush_record_buffer(store_id: int, max_size: int | None = None) -> bool:
@@ -78,30 +122,50 @@ def flush_edge_buffer(store: "MemoryStore") -> int:
 
     with _BUFFER_LOCK:
         store_id = id(store)
-        pending = _edge_buffer.pop(store_id, [])
-        if not pending:
+        # Clear-after-success: snapshot without removing, write, then remove only
+        # the snapshotted edges on success. Edges are rederivable, but the same
+        # durable pattern is applied for consistency — a write fault re-buffers
+        # the batch for the next flush instead of dropping it.
+        buffered = _edge_buffer.get(store_id)
+        if not buffered:
             return 0
+        pending = list(buffered)
+        n_pending = len(pending)
         try:
             store.db.open_table(EDGES_TABLE).merge_insert(["src", "dst", "edge_type"]).execute(pending)
-            _edge_last_flush_at[store_id] = datetime.now(timezone.utc)
         except (OSError, RuntimeError, ValueError) as exc:
             logger.warning(
                 "flush_edge_buffer_failed",
-                extra={"n": len(pending), "err": str(exc)[:120]},
+                extra={"n": n_pending, "err": str(exc)[:120]},
             )
-        if pending:
-            try:
-                from iai_mcp.events import write_event
-                write_event(
-                    store,
-                    "lance_buffer_flush",
-                    {"table": "edges", "count": len(pending)},
-                    severity="info",
-                    buffered=False,
-                )
-            except Exception as exc:  # noqa: BLE001 -- telemetry MUST NOT crash flush
-                logger.debug("lance_buffer_flush telemetry failed: %s", str(exc)[:120])
-        return len(pending)
+            return 0
+        flushed_ids = {id(p) for p in pending}
+        remaining = [r for r in _edge_buffer.get(store_id, []) if id(r) not in flushed_ids]
+        if remaining:
+            _edge_buffer[store_id] = remaining
+        else:
+            _edge_buffer.pop(store_id, None)
+        _edge_last_flush_at[store_id] = datetime.now(timezone.utc)
+        # Invalidate the edges count in the corpus-count cache after a
+        # successful flush so the next edges_count() call recomputes from SQL.
+        try:
+            _cc = getattr(store, "_corpus_count_cache", None)
+            if _cc is not None:
+                _cc.invalidate("edges")
+        except Exception:  # noqa: BLE001 -- cache invalidation MUST NOT crash flush
+            pass
+        try:
+            from iai_mcp.events import write_event
+            write_event(
+                store,
+                "lance_buffer_flush",
+                {"table": "edges", "count": n_pending},
+                severity="info",
+                buffered=False,
+            )
+        except Exception as exc:  # noqa: BLE001 -- telemetry MUST NOT crash flush
+            logger.debug("lance_buffer_flush telemetry failed: %s", str(exc)[:120])
+        return n_pending
 
 
 def should_flush_edge_buffer(store_id: int, max_size: int | None = None) -> bool:

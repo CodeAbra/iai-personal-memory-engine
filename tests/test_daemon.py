@@ -23,7 +23,7 @@ def _short_socket_paths(tmp_path, monkeypatch):
     import os
     from iai_mcp import concurrency
     lock_path = tmp_path / ".lock"
-    sock_dir = tmp_path / "sock"
+    sock_dir = Path(f"/tmp/iai-daemon-{os.getpid()}-{id(tmp_path)}")
     sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
     monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
@@ -198,7 +198,10 @@ def test_launchd_plist_valid_xml_with_required_keys():
     keepalive = data["KeepAlive"]
     assert isinstance(keepalive, dict)
     assert keepalive.get("Crashed") is True
-    assert "SuccessfulExit" not in keepalive
+    # SuccessfulExit=false: launchd does not count SIGKILL (jetsam/OOM) as
+    # Crashed — without this key a killed daemon stays down until a manual
+    # start. Graceful exits (hibernation, stop) are 0 and stay down.
+    assert keepalive.get("SuccessfulExit") is False
 
     assert data["ThrottleInterval"] == 5
     assert "StandardOutPath" in data
@@ -222,6 +225,8 @@ def test_systemd_unit_required_keys():
     assert "Type=simple" in text
     assert "Restart=on-failure" in text
     assert "RestartSec=30" in text
+    assert "StartLimitIntervalSec=60" in text
+    assert "StartLimitBurst=3" in text
     assert "python3 -m iai_mcp.daemon" in text
     assert "StandardOutput=journal" in text
     assert "StandardError=journal" in text
@@ -383,3 +388,62 @@ def test_daemon_boot_raise_after_install_restores_funnel(
     assert _embed_mod.embedder_for_store is pre_install_funnel, (
         "funnel override leaked: restore did not run on a post-install boot raise"
     )
+
+
+def test_boot_preload_does_not_call_runtime_graph_cache_save_with_empty_payload(
+    monkeypatch
+):
+    """boot_preload must not call runtime_graph_cache.save with an empty (None)
+    node payload after build_runtime_graph returns; build_runtime_graph is the
+    single save authority.  preload_ready must still be set regardless.
+
+    We drive a coroutine that mirrors the production _boot_preload body exactly
+    so we test the logic without spinning up the full daemon.
+    """
+    import iai_mcp.retrieve as _retrieve_mod
+    from iai_mcp import runtime_graph_cache as _rgc_mod
+
+    build_calls: list = []
+    save_calls: list = []
+
+    _stub_triple = (object(), object(), object())
+
+    def _fake_build(store):
+        build_calls.append(True)
+        return _stub_triple
+
+    def _fake_save(*args, **kwargs):
+        save_calls.append(args)
+
+    monkeypatch.setattr(_retrieve_mod, "build_runtime_graph", _fake_build)
+    monkeypatch.setattr(_rgc_mod, "save", _fake_save)
+
+    _rgc_mod.preload_ready.clear()
+
+    # Mirror the production _boot_preload body (daemon/__init__.py) exactly
+    # so that refactors surface here without requiring a full daemon boot.
+    store_stub = object()
+
+    async def _boot_preload_mirror():
+        try:
+            from iai_mcp import retrieve as _retrieve_preload
+            await asyncio.to_thread(
+                _retrieve_preload.build_runtime_graph, store_stub,
+            )
+        except Exception as _exc:  # noqa: BLE001
+            pass
+        finally:
+            _rgc_mod.preload_ready.set()
+
+    asyncio.run(_boot_preload_mirror())
+
+    assert build_calls, "build_runtime_graph must have been called during boot_preload"
+    # The clobber: save called with node_payload=None (args[3]).
+    empty_payload_saves = [a for a in save_calls if len(a) >= 4 and a[3] is None]
+    assert not empty_payload_saves, (
+        "runtime_graph_cache.save must NOT be called with an empty (None) node "
+        "payload from boot_preload — build_runtime_graph is the single save authority"
+    )
+    assert _rgc_mod.preload_ready.is_set(), "preload_ready must be set after boot_preload completes"
+
+    _rgc_mod.preload_ready.clear()

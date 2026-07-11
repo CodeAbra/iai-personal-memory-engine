@@ -5,11 +5,9 @@ from uuid import uuid4
 
 import numpy as np
 
-from iai_mcp.community import CommunityAssignment
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
-
 
 def _make(vec: list[float], text: str = "rec") -> MemoryRecord:
     now = datetime.now(timezone.utc)
@@ -35,11 +33,10 @@ def _make(vec: list[float], text: str = "rec") -> MemoryRecord:
         language="en",
     )
 
-
 def test_collect_graph_pool_returns_aligned_ids_and_embeddings(tmp_path) -> None:
     from iai_mcp.pipeline import _collect_graph_pool
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     records: list[MemoryRecord] = []
     for i in range(5):
         vec = [0.0] * EMBED_DIM
@@ -64,22 +61,20 @@ def test_collect_graph_pool_returns_aligned_ids_and_embeddings(tmp_path) -> None
             pool_embs[i], np.asarray(rec.embedding, dtype=np.float32)
         )
 
-
 def test_collect_graph_pool_empty_graph(tmp_path) -> None:
     from iai_mcp.pipeline import _collect_graph_pool
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     graph = MemoryGraph()
     pool_ids, pool_embs = _collect_graph_pool(graph, None, store)
     assert pool_ids == []
     assert pool_embs.shape == (0, store.embed_dim)
     assert pool_embs.dtype == np.float32
 
-
 def test_collect_graph_pool_falls_back_to_store_get(tmp_path) -> None:
     from iai_mcp.pipeline import _collect_graph_pool
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     vec = [1.0] + [0.0] * (EMBED_DIM - 1)
     rec = _make(vec, text="store-only")
     store.insert(rec)
@@ -97,13 +92,11 @@ def test_collect_graph_pool_falls_back_to_store_get(tmp_path) -> None:
         pool_embs[0], np.asarray(vec, dtype=np.float32)
     )
 
-
 def test_K_CANDIDATES_is_200() -> None:
     from iai_mcp.pipeline import K_CANDIDATES
 
     assert K_CANDIDATES == 200
     assert isinstance(K_CANDIDATES, int)
-
 
 def test_COMMUNITY_BIAS_constants_are_mode_dependent() -> None:
     from iai_mcp.pipeline import COMMUNITY_BIAS_CONCEPT, COMMUNITY_BIAS_VERBATIM
@@ -113,7 +106,6 @@ def test_COMMUNITY_BIAS_constants_are_mode_dependent() -> None:
     assert isinstance(COMMUNITY_BIAS_VERBATIM, float)
     assert isinstance(COMMUNITY_BIAS_CONCEPT, float)
 
-
 def test_gate_bias_for_mode_returns_correct_value() -> None:
     from iai_mcp.pipeline import _gate_bias_for_mode
 
@@ -122,7 +114,6 @@ def test_gate_bias_for_mode_returns_correct_value() -> None:
     assert _gate_bias_for_mode("unknown") == 0.0
     assert _gate_bias_for_mode("") == 0.0
     assert _gate_bias_for_mode("CONCEPT") == 0.0
-
 
 def test_RecallCoreResult_dataclass_has_required_fields() -> None:
     from iai_mcp.pipeline import _RecallCoreResult

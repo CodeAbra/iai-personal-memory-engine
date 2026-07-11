@@ -6,7 +6,6 @@ import platform
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -79,7 +78,7 @@ def test_drain_consumes_jsonl_and_deletes_file(iai_home):
 
     deferred_dir = iai_home / ".iai-mcp" / ".deferred-captures"
     events = [
-        _make_event("Areg said: drain test event one — must be at least 12 chars"),
+        _make_event("Alice said: drain test event one — must be at least 12 chars"),
         _make_event("assistant reply with sufficient length to pass MIN_CAPTURE", role="assistant"),
         _make_event("third event for the round-trip drain count assertion"),
     ]
@@ -362,7 +361,6 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-drain-integration-pass")
-    monkeypatch.setenv("IAI_MCP_STARTUP_DEFERRED_DRAIN_GRACE_SEC", "0")
 
     iai_dir = tmp_path / ".iai-mcp"
     iai_dir.mkdir(parents=True, exist_ok=True)
@@ -379,8 +377,8 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
     )
     assert bad.exists()
 
-    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
-    sock_dir = Path(sock_dir_ctx.name)
+    sock_dir = Path(f"/tmp/iai-drn-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
 
     proc = None
@@ -425,6 +423,217 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
             sock_dir.rmdir()
         except OSError:
             pass
-        sock_dir_ctx.cleanup()
         import keyring.core
         keyring.core._keyring_backend = None
+
+
+def test_drain_streams_caps_and_preserves_remainder(iai_home, monkeypatch):
+    """A single deferred file larger than the per-run cap is drained in bounded
+    batches: each run processes at most the cap, the unread tail is preserved
+    verbatim for the next run, no event is lost across runs, and the file is
+    never materialized whole — the read step interleaves parse with read so its
+    resident batch tracks the cap, not the file size."""
+    import iai_mcp.capture as capture_mod
+    from iai_mcp.capture import drain_deferred_captures
+
+    # Shrink the per-run cap so the test stays fast while still exercising the
+    # cap-and-remainder path with a file several times larger than the cap.
+    cap = 5
+    monkeypatch.setattr(capture_mod, "MAX_DRAIN_EVENTS_PER_RUN", cap)
+
+    total_events = 12  # 2 full cap batches + a short final batch (5 + 5 + 2)
+    deferred_dir = iai_home / ".iai-mcp" / ".deferred-captures"
+    events = [
+        _make_event(
+            f"distinct streamed drain event number {i:03d} padded to clear "
+            f"the minimum-capture length gate with room to spare"
+        )
+        for i in range(total_events)
+    ]
+    fpath = _write_deferred_jsonl(deferred_dir, "session-stream", events, ts_suffix=7)
+    assert fpath.exists()
+
+    # Streaming proof: wrap the deferred file's handle so we can observe how many
+    # lines have been pulled from it at the moment the first EVENT is parsed. A
+    # read-all (list comprehension) drains every line before parsing the first
+    # event; a streaming drain parses the first event after pulling only the
+    # header + that one event line.
+    real_open = Path.open
+    lines_pulled_when_first_event_parsed: dict[str, int] = {}
+    peak_lines_pulled_before_first_parse: dict[str, int] = {}
+
+    class _CountingHandle:
+        def __init__(self, inner):
+            self._inner = inner
+            self.lines_pulled = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            line = next(self._inner)
+            self.lines_pulled += 1
+            return line
+
+        def readline(self, *a, **k):
+            line = self._inner.readline(*a, **k)
+            if line:
+                self.lines_pulled += 1
+            return line
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    active_handle: dict[str, _CountingHandle] = {}
+
+    def counting_open(self, *args, **kwargs):
+        inner = real_open(self, *args, **kwargs)
+        # Only wrap the deferred-capture jsonl we care about (the claimed file
+        # carries a .processing- marker; match on the session stem).
+        if "session-stream" in self.name and self.suffix == ".jsonl":
+            handle = _CountingHandle(inner)
+            active_handle["h"] = handle
+            return handle
+        return inner
+
+    real_loads = json.loads
+    first_event_seen = {"done": False}
+
+    def spy_loads(s, *a, **k):
+        obj = real_loads(s, *a, **k)
+        # The first non-header object parsed is an event (the header is parsed
+        # first; events carry a "text" field, the header does not).
+        if (
+            isinstance(obj, dict)
+            and "text" in obj
+            and not first_event_seen["done"]
+            and "h" in active_handle
+        ):
+            first_event_seen["done"] = True
+            peak_lines_pulled_before_first_parse["v"] = active_handle["h"].lines_pulled
+        return obj
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    monkeypatch.setattr(capture_mod.json, "loads", spy_loads)
+
+    store = _open_isolated_store()
+
+    # --- First drain: cap-bounded, remainder preserved ------------------------
+    counts1 = drain_deferred_captures(store)
+    assert counts1["events_inserted"] == cap, counts1
+    assert counts1["files_drained"] == 1, counts1
+    assert counts1["files_failed"] == 0, counts1
+
+    # Streaming proven: when the first event was parsed, only header + 1 event
+    # line had been pulled from the handle (== 2). A read-all would have pulled
+    # all total_events + 1 lines before the first parse.
+    assert first_event_seen["done"], "no event was ever parsed"
+    assert peak_lines_pulled_before_first_parse["v"] <= 2, (
+        "drain materialized the file before parsing the first event "
+        f"(pulled {peak_lines_pulled_before_first_parse['v']} lines first)"
+    )
+
+    # Original file consumed; a .partial.jsonl remainder must exist with the rest.
+    assert not fpath.exists(), "original deferred file must be unlinked after cap"
+    partials = list(deferred_dir.glob("session-stream-7*.partial.jsonl"))
+    assert len(partials) == 1, f"expected 1 .partial.jsonl, got {partials}"
+    partial = partials[0]
+    partial_lines = [
+        ln for ln in partial.read_text().splitlines() if ln.strip()
+    ]
+    # header + (total_events - cap) event lines preserved.
+    assert len(partial_lines) == 1 + (total_events - cap), partial_lines
+    # Remainder header is byte-identical to the original header.
+    assert json.loads(partial_lines[0])["session_id"] == "session-stream"
+    # Remainder events are exactly events[cap:] in order (no loss, no reorder).
+    remainder_texts = [json.loads(ln)["text"] for ln in partial_lines[1:]]
+    assert remainder_texts == [e["text"] for e in events[cap:]], "remainder reordered/dropped"
+
+    # Restore the partial to a plain .jsonl so the next drain claims it (the
+    # daemon promotes .partial.jsonl back into the rotation between cycles).
+    promoted = deferred_dir / "session-stream-7next.jsonl"
+    partial.rename(promoted)
+
+    # --- Second drain: next cap-bounded batch ---------------------------------
+    counts2 = drain_deferred_captures(store)
+    assert counts2["events_inserted"] == cap, counts2
+
+    partials2 = list(deferred_dir.glob("session-stream-7next*.partial.jsonl"))
+    assert len(partials2) == 1, partials2
+    promoted2 = deferred_dir / "session-stream-7final.jsonl"
+    partials2[0].rename(promoted2)
+
+    # --- Third drain: finishes the tail (< cap remaining) ---------------------
+    counts3 = drain_deferred_captures(store)
+    assert counts3["events_inserted"] == total_events - 2 * cap, counts3
+    assert not list(deferred_dir.glob("*.partial.jsonl")), "no remainder should survive"
+    assert not list(deferred_dir.glob("session-stream*.jsonl")), "all files consumed"
+
+    # No event lost: inserts across the three runs sum to the full file.
+    assert (
+        counts1["events_inserted"]
+        + counts2["events_inserted"]
+        + counts3["events_inserted"]
+        == total_events
+    )
+
+
+def test_drain_dedup_before_embed_skips_pending_write(iai_home, monkeypatch):
+    """A duplicate event on the drain path is skipped by the exact-key idem
+    check BEFORE any pending-row write, and the embedder is never invoked at all
+    during the drain (the two-phase drain defers all embedding)."""
+    import iai_mcp.capture as capture_mod
+    from iai_mcp.capture import drain_deferred_captures
+    from iai_mcp.embed import Embedder
+
+    deferred_dir = iai_home / ".iai-mcp" / ".deferred-captures"
+    dup_event = _make_event(
+        "this exact turn appears twice and must dedup before any write or embed"
+    )
+
+    # First drain: stores the record (one pending-row write, no embed).
+    f1 = _write_deferred_jsonl(deferred_dir, "session-dup", [dup_event], ts_suffix=100)
+    store = _open_isolated_store()
+    counts1 = drain_deferred_captures(store)
+    assert counts1["events_inserted"] == 1, counts1
+    assert not f1.exists()
+
+    # Second drain: the SAME turn (same session/role/ts/text → same idem tag).
+    f2 = _write_deferred_jsonl(deferred_dir, "session-dup", [dup_event], ts_suffix=200)
+
+    pending_calls: list[str] = []
+    real_pending = capture_mod._drain_write_pending
+
+    def spy_pending(store, *, text, **kwargs):
+        pending_calls.append(text)
+        return real_pending(store, text=text, **kwargs)
+
+    embed_calls: list[str] = []
+    real_embed = Embedder.embed
+
+    def spy_embed(self, text):
+        embed_calls.append(text)
+        return real_embed(self, text)
+
+    monkeypatch.setattr(capture_mod, "_drain_write_pending", spy_pending)
+    monkeypatch.setattr(Embedder, "embed", spy_embed)
+
+    counts2 = drain_deferred_captures(store)
+
+    # The duplicate is reinforced, never re-inserted.
+    assert counts2["events_inserted"] == 0, counts2
+    assert counts2["events_reinforced"] == 1, counts2
+    # Dedup fired BEFORE the pending-row write: the write site was never reached
+    # for the duplicate.
+    assert pending_calls == [], (
+        f"_drain_write_pending was called for a duplicate: {pending_calls}"
+    )
+    # The embedder is never touched on the drain path (two-phase deferral).
+    assert embed_calls == [], f"embedder invoked during drain: {embed_calls}"
+    assert not f2.exists()

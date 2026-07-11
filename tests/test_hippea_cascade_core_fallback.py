@@ -55,6 +55,17 @@ def _reset_core_state():
         fired.clear()
 
 
+@pytest.fixture(autouse=True)
+def _preload_ready_set():
+    """Default test posture: preload has completed (steady state).
+    Tests that need to simulate an in-flight preload must explicitly clear
+    preload_ready in their body and restore it in a try/finally."""
+    from iai_mcp import runtime_graph_cache as _rgc_mod
+    _rgc_mod.preload_ready.set()
+    yield
+    _rgc_mod.preload_ready.set()
+
+
 def _make_assignment_with_communities(*community_ids):
     class _A:
         def __init__(self, mid):
@@ -328,3 +339,91 @@ def test_response_carries_warm_lru_source():
     assert response["first_turn_recall"]["warm_lru_source"] in (
         "daemon", "core_fallback", "none",
     )
+
+
+def test_first_turn_hook_skips_sync_graph_build_when_preload_not_ready():
+    """When the background preload has not finished, the first-turn recall hook
+    must not issue a synchronous build_runtime_graph call on the request thread.
+    Recall must still complete and return a response.
+    Mirrors the gate added to core/__init__.py _first_turn_recall_hook.
+    """
+    from iai_mcp import core as _core
+    from iai_mcp import runtime_graph_cache as _rgc_mod
+
+    build_calls: list = []
+
+    def _recording_build(*args, **kwargs):
+        build_calls.append(args)
+        return (None, _make_assignment_with_communities(), None)
+
+    # Ensure preload_ready is clear (preload in flight).
+    _rgc_mod.preload_ready.clear()
+    try:
+        response: dict = {}
+        params = {"session_id": "sess-preload-gate", "cue": "hello"}
+        store = mock.MagicMock()
+        store.get = mock.MagicMock(return_value=None)
+
+        with mock.patch("iai_mcp.daemon_state.consume_first_turn", return_value=True), \
+             mock.patch("iai_mcp.daemon_state.load_state", return_value={}), \
+             mock.patch("iai_mcp.hippea_cascade.snapshot_warm_ids", return_value=[]), \
+             mock.patch("iai_mcp.retrieve.build_runtime_graph", side_effect=_recording_build), \
+             mock.patch(
+                 "iai_mcp.retrieve.recall",
+                 return_value=mock.MagicMock(hits=[], budget_used=0, anti_hits=[]),
+             ):
+            _core._first_turn_recall_hook(response, params=params, store=store)
+
+        # build_runtime_graph must NOT be called from the hook while preload is in flight.
+        assert not build_calls, (
+            "build_runtime_graph must not be called synchronously from _first_turn_recall_hook "
+            "while preload_ready is clear (preload still building)"
+        )
+        # Recall still responds.
+        assert "first_turn_recall" in response, (
+            "response must still carry first_turn_recall even when the sync build is skipped"
+        )
+    finally:
+        # Restore preload_ready so the Event state does not leak across tests.
+        _rgc_mod.preload_ready.set()
+
+
+def test_first_turn_hook_allows_sync_graph_build_when_preload_ready():
+    """Steady-state check: when preload_ready is set, the hook may call
+    build_runtime_graph on a cold empty-snapshot path (existing behaviour)."""
+    from iai_mcp import core as _core
+    from iai_mcp import runtime_graph_cache as _rgc_mod
+
+    build_calls: list = []
+
+    def _recording_build(*args, **kwargs):
+        build_calls.append(args)
+        return (None, _make_assignment_with_communities(), None)
+
+    _rgc_mod.preload_ready.set()
+    try:
+        response: dict = {}
+        params = {"session_id": "sess-ready-gate", "cue": "hello"}
+        store = mock.MagicMock()
+        store.get = mock.MagicMock(return_value=None)
+
+        with mock.patch("iai_mcp.daemon_state.consume_first_turn", return_value=True), \
+             mock.patch("iai_mcp.daemon_state.load_state", return_value={}), \
+             mock.patch("iai_mcp.hippea_cascade.snapshot_warm_ids", return_value=[]), \
+             mock.patch(
+                 "iai_mcp.hippea_cascade.compute_core_side_warm_snapshot",
+                 return_value=[uuid4()],
+             ), \
+             mock.patch("iai_mcp.retrieve.build_runtime_graph", side_effect=_recording_build), \
+             mock.patch(
+                 "iai_mcp.retrieve.recall",
+                 return_value=mock.MagicMock(hits=[], budget_used=0, anti_hits=[]),
+             ):
+            _core._first_turn_recall_hook(response, params=params, store=store)
+
+        assert build_calls, (
+            "build_runtime_graph should be eligible when preload_ready is set and "
+            "snapshot is empty on a fresh session"
+        )
+    finally:
+        _rgc_mod.preload_ready.set()

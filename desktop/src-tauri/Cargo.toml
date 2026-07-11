@@ -1,0 +1,20 @@
+[package]
+name = "iai-brain"
+version = "1.0.0"
+description = "IAI Brain — desktop window onto your agent's memory"
+edition = "2021"
+license = "FSL-1.1-Apache-2.0"
+
+# standalone crate: must not join the PyO3/maturin workspace at the repo root
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

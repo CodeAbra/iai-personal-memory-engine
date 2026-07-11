@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 
 def _make_user_turn(text: str = "generic user turn"):

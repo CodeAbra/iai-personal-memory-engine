@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import copy
-import json
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 
@@ -152,63 +149,6 @@ def default_state() -> dict[str, Any]:
         for name, spec in PROFILE_KNOBS.items()
         if spec.phase == 1
     }
-
-
-def coerce_json_stringified(schema: str, value: Any) -> Any:
-    """Undo JSON-type loss at an untyped-client boundary (e.g. an MCP tool).
-
-    Some JSON-RPC / MCP clients deliver a knob value as a *string* even when
-    the schema is bool/numeric — the JSON boolean ``true`` arrives as the
-    string ``"true"``. The strict, type-exact ``profile_set`` then rejects it
-    with ``value must be bool, got str``, so bool / numeric knobs become
-    unsettable through those clients.
-
-    This reverses *only* that exact stringification, and nothing else:
-
-    * ``"true"`` / ``"false"`` (case-insensitive) → the bool. Loose truthy
-      spellings (``"yes"``, ``"1"``, the int ``1``) are deliberately NOT
-      coerced — ``profile_set`` rejects those on purpose, and this boundary
-      must not widen that contract.
-    * a numeric string for an ``int_range`` / ``float_range`` knob → the number.
-    * ``dict`` values are coerced element-wise against the inner schema.
-
-    Anything it can't confidently convert is returned untouched, so the strict
-    validator still rejects it with a clear message. Intended for the MCP /
-    dispatch edge; ``profile_set`` itself stays strict.
-    """
-    if schema == "bool":
-        if isinstance(value, str):
-            s = value.strip().lower()
-            if s == "true":
-                return True
-            if s == "false":
-                return False
-        return value
-
-    if schema.startswith("int_range:"):
-        if isinstance(value, str):
-            try:
-                return int(value.strip())
-            except (TypeError, ValueError):
-                return value
-        return value
-
-    if schema.startswith("float_range:"):
-        if isinstance(value, str):
-            try:
-                return float(value.strip())
-            except (TypeError, ValueError):
-                return value
-        return value
-
-    if schema.startswith("dict:"):
-        if isinstance(value, dict):
-            _, _, val_type = schema[len("dict:"):].partition(":")
-            if val_type:
-                return {k: coerce_json_stringified(val_type, v) for k, v in value.items()}
-        return value
-
-    return value
 
 
 def _validate(schema: str, value: Any) -> tuple[bool, str]:
@@ -363,72 +303,6 @@ def profile_set(
             pass
 
     return {"status": "ok", "knob": knob, "value": value}
-
-
-# ---------------------------------------------------------------------------
-# Durable overrides: persist explicitly-set (pinned) knobs across restarts.
-#
-# _profile_state in core is initialised once to default_state() and never
-# rehydrated, so every daemon restart reset all knobs to defaults. These
-# helpers persist the knobs a user explicitly set (via profile_set) and reload
-# them at boot, so a stated preference survives restarts and outranks the
-# default. A knob present in the overrides file is "pinned"; core protects
-# pinned knobs from bayesian auto-tuning so an explicit answer wins.
-# ---------------------------------------------------------------------------
-
-PROFILE_OVERRIDES_PATH = Path.home() / ".iai-mcp" / ".profile-knobs.json"
-
-
-def save_profile_overrides(
-    overrides: dict[str, Any], *, path: Path | None = None,
-) -> None:
-    """Atomically persist the pinned-knob overrides map. Best-effort.
-
-    ``overrides`` is ``{knob: value}`` for every explicitly-set knob. Writing is
-    never allowed to raise into the caller (a failed persist must not fail the
-    ``profile_set`` it is attached to).
-    """
-    if path is None:
-        path = PROFILE_OVERRIDES_PATH
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(overrides, f, separators=(",", ":"), sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    except (OSError, ValueError, TypeError):
-        pass
-
-
-def load_profile_overrides(*, path: Path | None = None) -> dict[str, Any]:
-    """Load + re-validate persisted overrides.
-
-    Only phase-1 (live) knobs whose stored value still passes the current schema
-    are returned; unknown, deferred, or now-invalid entries are dropped so a
-    stale or hand-edited file can never inject a bad value into live state.
-    """
-    if path is None:
-        path = PROFILE_OVERRIDES_PATH
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, Any] = {}
-    for knob, value in data.items():
-        spec = PROFILE_KNOBS.get(knob)
-        if spec is None or spec.phase != 1:
-            continue
-        ok, _ = _validate(spec.value_schema, value)
-        if ok:
-            out[knob] = value
-    return out
 
 
 def bayesian_update(

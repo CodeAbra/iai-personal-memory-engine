@@ -5,13 +5,12 @@ import json
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
 from iai_mcp.store import (
     EDGES_TABLE,
-    RECORDS_TABLE,
     MemoryStore,
 )
 from iai_mcp.types import MemoryRecord

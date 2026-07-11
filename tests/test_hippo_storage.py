@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from iai_mcp.store import (
     EDGES_TABLE,
@@ -128,12 +127,13 @@ def test_e2e_async_write_queue_drains(tmp_path: Path) -> None:
     n = 50
     store = MemoryStore(tmp_path, user_id="test")
     try:
-        asyncio.run(store.enable_async_writes(coalesce_ms=10, max_batch=128))
+        try:
+            asyncio.run(store.enable_async_writes(coalesce_ms=10, max_batch=128))
 
-        for i in range(n):
-            store.insert(_make_record(seed=2000 + i))
-
-        asyncio.run(store.disable_async_writes())
+            for i in range(n):
+                store.insert(_make_record(seed=2000 + i))
+        finally:
+            asyncio.run(store.disable_async_writes())
 
         records_tbl = store.db.open_table(RECORDS_TABLE)
         count = records_tbl.count_rows()
@@ -142,6 +142,48 @@ def test_e2e_async_write_queue_drains(tmp_path: Path) -> None:
         )
     finally:
         store.close()
+
+
+def test_close_drains_async_writes_without_explicit_disable(tmp_path: Path) -> None:
+    """Closing a store that has async writes enabled tears down the queue, the
+    background loop, and the thread, leaving no pending coalesce task — even when
+    the caller never calls ``disable_async_writes`` explicitly."""
+    import asyncio
+
+    store = MemoryStore(tmp_path, user_id="test")
+    asyncio.run(store.enable_async_writes(coalesce_ms=10, max_batch=128))
+    for i in range(10):
+        store.insert(_make_record(seed=3000 + i))
+
+    bg_thread = store._async_thread
+    assert bg_thread is not None and bg_thread.is_alive()
+
+    # Close WITHOUT an explicit disable — the drain must run inside close().
+    store.close()
+
+    assert store._write_queue is None
+    assert store._async_loop is None
+    assert store._async_thread is None
+    assert store._async_conn is None
+    bg_thread.join(timeout=5.0)
+    assert not bg_thread.is_alive(), "async background thread must be joined on close"
+    leaked = [
+        t for t in threading.enumerate() if t.name == "iai-mcp-async-writes"
+    ]
+    assert not leaked, f"async write thread leaked past close: {leaked}"
+
+
+def test_close_is_noop_for_async_when_never_enabled(tmp_path: Path) -> None:
+    """The async drain on close is a strict no-op when async writes were never
+    enabled — closing a plain sync store does not create or touch any async
+    handles."""
+    store = MemoryStore(tmp_path, user_id="test")
+    store.insert(_make_record(seed=4000))
+    assert store._write_queue is None
+    store.close()
+    assert store._write_queue is None
+    assert store._async_loop is None
+    assert store._async_thread is None
 
 
 def test_concurrent_sync_and_async_writes(tmp_path: Path) -> None:

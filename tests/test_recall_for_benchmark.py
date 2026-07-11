@@ -10,7 +10,6 @@ from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord, RecallResponse
 
-
 class _FakeEmbedder:
 
     DIM = EMBED_DIM
@@ -23,7 +22,6 @@ class _FakeEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [list(self._vec) for _ in texts]
-
 
 def _make(
     vec: list[float], text: str = "rec", aaak: str = "", tier: str = "episodic",
@@ -51,11 +49,10 @@ def _make(
         language="en",
     )
 
-
 def _build_store_and_graph(
     tmp_path, n: int, surface_len: int = 4,
 ) -> tuple[MemoryStore, MemoryGraph, list[MemoryRecord]]:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs: list[MemoryRecord] = []
     for i in range(n):
         vec = [0.0] * EMBED_DIM
@@ -79,7 +76,6 @@ def _build_store_and_graph(
         })
     return store, graph, recs
 
-
 def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
     cid = uuid4()
     centroid = [1.0] + [0.0] * (EMBED_DIM - 1)
@@ -91,7 +87,6 @@ def _flat_assignment(recs: list[MemoryRecord]) -> CommunityAssignment:
         top_communities=[cid],
         mid_regions={cid: [r.id for r in recs]},
     )
-
 
 def test_recall_for_benchmark_no_budget_tokens_param(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark
@@ -107,7 +102,6 @@ def test_recall_for_benchmark_no_budget_tokens_param(tmp_path) -> None:
             budget_tokens=1500,
         )
 
-
 def test_recall_for_benchmark_returns_at_most_k_hits(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark
 
@@ -122,7 +116,6 @@ def test_recall_for_benchmark_returns_at_most_k_hits(tmp_path) -> None:
 
     assert isinstance(resp, RecallResponse)
     assert len(resp.hits) == 5
-
 
 def test_recall_for_benchmark_hits_sorted_by_score_desc(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark
@@ -141,7 +134,6 @@ def test_recall_for_benchmark_hits_sorted_by_score_desc(tmp_path) -> None:
         f"recall_for_benchmark hits not sorted desc by score: {scores}"
     )
 
-
 def test_recall_for_benchmark_returns_fewer_when_pool_is_small(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark
 
@@ -155,7 +147,6 @@ def test_recall_for_benchmark_returns_fewer_when_pool_is_small(tmp_path) -> None
     )
 
     assert len(resp.hits) == 8
-
 
 def test_recall_for_benchmark_budget_used_is_informational(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark
@@ -172,7 +163,6 @@ def test_recall_for_benchmark_budget_used_is_informational(tmp_path) -> None:
     assert len(resp.hits) == 3
     assert resp.budget_used == 150
 
-
 def test_recall_for_benchmark_threads_mode_to_core(tmp_path) -> None:
     from iai_mcp.pipeline import recall_for_benchmark
 
@@ -186,7 +176,6 @@ def test_recall_for_benchmark_threads_mode_to_core(tmp_path) -> None:
     )
     assert resp.cue_mode == "concept"
 
-
 def test_recall_for_benchmark_signature_has_no_budget_tokens_param() -> None:
     import inspect
     from iai_mcp.pipeline import recall_for_benchmark
@@ -196,10 +185,9 @@ def test_recall_for_benchmark_signature_has_no_budget_tokens_param() -> None:
     assert "mode" in sig.parameters
     assert "budget_tokens" not in sig.parameters, (
         "recall_for_benchmark signature must NOT carry a budget_tokens "
-        "parameter (the entry-point split exists so "
+        "parameter (contract split — the entry-point split exists so "
         "the two response shapes can never silently swap via an optional kwarg)."
     )
-
 
 def test_recall_for_benchmark_default_k_hits_10() -> None:
     import inspect

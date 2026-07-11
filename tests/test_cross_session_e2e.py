@@ -10,7 +10,7 @@ def test_cross_session_recency_query(tmp_path):
     store = make_tmp_store(tmp_path)
 
     b_session_id = "b-session-111"
-    distinctive_phrase = "distinctive phrase bxyz phase59 cross session marker"
+    distinctive_phrase = "distinctive phrase bxyz cross session marker"
 
     result_b = capture_turn(
         store,
@@ -27,7 +27,7 @@ def test_cross_session_recency_query(tmp_path):
         capture_turn(
             store,
             cue=f"session a turn {i}",
-            text=f"session a turn {i} normal content for e2e test phase59",
+            text=f"session a turn {i} normal content for e2e test",
             tier="episodic",
             session_id=a_session_id,
             role="user",

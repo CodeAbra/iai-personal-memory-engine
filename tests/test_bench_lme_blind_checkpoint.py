@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
-
-pytest.importorskip("huggingface_hub", reason="LongMemEval harness needs the hub client")
 
 
 class _StubLMESession:
@@ -40,6 +37,19 @@ def _patch_adapter(monkeypatch, qids: list[str] | None = None) -> None:
         "load_dataset",
         _stub_load_dataset,
         raising=True,
+    )
+
+    # The cleaned adapter (the default dataset) resolves a HuggingFace Hub
+    # revision in __init__ via a live ``repo_info`` network call, BEFORE
+    # load_dataset runs. Stubbing only load_dataset leaves that network call
+    # live, so the test flaked on any HF unreachability (offline, rate-limit,
+    # slow network under load). Pin __init__ to a fixed revision so the whole
+    # adapter is hermetic — no network on any path.
+    def _stub_init(self, revision=None):
+        self.revision = revision or "test-pinned-revision"
+
+    monkeypatch.setattr(
+        CleanedLongMemEvalAdapter, "__init__", _stub_init, raising=True
     )
 
 

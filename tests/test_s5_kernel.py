@@ -7,7 +7,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 def _anchor(
     *,
     text: str = "User is Alice",
@@ -43,7 +42,6 @@ def _anchor(
         s5_trust_score=s5_trust_score,
     )
 
-
 class _FakeEmbedder:
 
     DIM = EMBED_DIM
@@ -54,14 +52,12 @@ class _FakeEmbedder:
     def embed_batch(self, texts):
         return [self.embed(t) for t in texts]
 
-
 @pytest.fixture(autouse=True)
 def _patch_embedder(monkeypatch):
     from iai_mcp import embed as embed_mod
 
     monkeypatch.setattr(embed_mod, "Embedder", _FakeEmbedder)
     yield
-
 
 def test_s5_constants():
     from iai_mcp import s5
@@ -72,18 +68,15 @@ def test_s5_constants():
     assert s5.COOLDOWN_HOURS == 48
     assert s5.TRUST_THRESHOLD_IDENTITY == 0.9
 
-
 def test_s5_exports_propose_invariant_update():
     from iai_mcp import s5
 
     assert callable(getattr(s5, "propose_invariant_update", None))
 
-
 def test_s5_exports_check_identity_anchor_on_write():
     from iai_mcp import s5
 
     assert callable(getattr(s5, "check_identity_anchor_on_write", None))
-
 
 def test_propose_invariant_update_first_proposal_stages(tmp_path):
     from iai_mcp.s5 import propose_invariant_update
@@ -99,7 +92,6 @@ def test_propose_invariant_update_first_proposal_stages(tmp_path):
     assert verdict == "staged"
     assert isinstance(pid, UUID)
 
-
 def test_propose_invariant_update_consensus_commits(tmp_path):
     from iai_mcp.s5 import propose_invariant_update
     from iai_mcp.store import MemoryStore
@@ -114,7 +106,6 @@ def test_propose_invariant_update_consensus_commits(tmp_path):
     assert r1[0] == "staged"
     assert r2[0] == "staged"
     assert r3[0] == "committed"
-
 
 def test_propose_invariant_update_insufficient_consensus_rejected(tmp_path, monkeypatch):
     from iai_mcp import embed as embed_mod
@@ -149,7 +140,6 @@ def test_propose_invariant_update_insufficient_consensus_rejected(tmp_path, monk
         verdicts.append(v)
     assert verdicts[-1] == "rejected"
 
-
 def test_propose_invariant_update_cooldown(tmp_path):
     from iai_mcp.s5 import propose_invariant_update
     from iai_mcp.store import MemoryStore
@@ -168,7 +158,6 @@ def test_propose_invariant_update_cooldown(tmp_path):
     )
     assert verdict_next == "cooldown"
     assert pid is None
-
 
 def test_propose_invariant_update_writes_event(tmp_path):
     from iai_mcp.events import query_events
@@ -190,7 +179,6 @@ def test_propose_invariant_update_writes_event(tmp_path):
     assert "new_record_id" in ev["data"]
     assert "session_ids" in ev["data"]
     assert "agree_count" in ev["data"]
-
 
 def test_propose_invariant_update_vigilance_099(tmp_path, monkeypatch):
     from iai_mcp import embed as embed_mod
@@ -222,7 +210,6 @@ def test_propose_invariant_update_vigilance_099(tmp_path, monkeypatch):
     assert "committed" not in verdicts
     assert verdicts[-1] == "rejected"
 
-
 def test_propose_invariant_update_unknown_anchor_rejected(tmp_path):
     from iai_mcp.s5 import propose_invariant_update
     from iai_mcp.store import MemoryStore
@@ -232,7 +219,6 @@ def test_propose_invariant_update_unknown_anchor_rejected(tmp_path):
     verdict, pid = propose_invariant_update(store, ghost, "fact", "s")
     assert verdict == "rejected"
     assert pid is None
-
 
 def test_check_identity_anchor_on_write_blocks_direct(tmp_path):
     from iai_mcp.s5 import check_identity_anchor_on_write
@@ -244,7 +230,6 @@ def test_check_identity_anchor_on_write_blocks_direct(tmp_path):
     assert ok is False
     assert "identity-tier" in reason.lower() or "propose" in reason.lower()
 
-
 def test_check_identity_anchor_on_write_allows_low_trust(tmp_path):
     from iai_mcp.s5 import check_identity_anchor_on_write
     from iai_mcp.store import MemoryStore
@@ -253,7 +238,6 @@ def test_check_identity_anchor_on_write_allows_low_trust(tmp_path):
     rec = _anchor(s5_trust_score=0.5)
     ok, reason = check_identity_anchor_on_write(store, rec, {})
     assert ok is True
-
 
 def test_check_identity_anchor_on_write_allows_with_consensus_marker(tmp_path):
     from iai_mcp.s5 import check_identity_anchor_on_write
@@ -264,7 +248,6 @@ def test_check_identity_anchor_on_write_allows_with_consensus_marker(tmp_path):
     ok, reason = check_identity_anchor_on_write(store, rec, {})
     assert ok is True
 
-
 def test_guarded_insert_blocks_direct_identity_write(tmp_path):
     from iai_mcp.store import MemoryStore
     from iai_mcp.write import guarded_insert
@@ -273,7 +256,6 @@ def test_guarded_insert_blocks_direct_identity_write(tmp_path):
     rec = _anchor(s5_trust_score=0.95)
     ok, reason = guarded_insert(store, rec, {})
     assert ok is False
-
 
 def test_guarded_insert_allows_low_trust_write(tmp_path):
     from iai_mcp.store import MemoryStore

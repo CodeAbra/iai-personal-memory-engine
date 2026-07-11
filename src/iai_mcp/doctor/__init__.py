@@ -56,9 +56,11 @@ def _resolve_socket_path() -> Path:
 
 
 async def _socket_status_probe(socket_path: Path, timeout: float) -> dict | None:
-    from iai_mcp._ipc import open_ipc_connection
     try:
-        reader, writer = await open_ipc_connection(str(socket_path), timeout=timeout)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=str(socket_path)),
+            timeout=timeout,
+        )
     except (FileNotFoundError, ConnectionRefusedError, asyncio.TimeoutError, OSError):
         return None
     try:
@@ -151,10 +153,19 @@ def _extract_binder_pids_ss(ss_output: str, target_socket: Path) -> set[int]:
     # Linux: lsof requires root to introspect other processes' /proc/<pid>/fd/;
     # `ss -lxp` reads the globally-readable /proc/net/unix and embeds the
     # binder pid in a `users:(("...",pid=N,fd=K))` field on the matching path line.
+    #
+    # Scope: the `pid=` field is only populated for sockets owned by the invoking
+    # UID — `/proc/<pid>/fd/` is per-process-privileged. Cross-UID binders appear
+    # in `ss` output but without a `users:(...)` field, so they are silently
+    # skipped. This is acceptable: duplicate daemon processes always run under the
+    # same UID as the doctor invocation.
     pids: set[int] = set()
     target = str(target_socket)
     for line in ss_output.splitlines():
-        if target not in line:
+        # `ss -lxp` columns: Netid State Recv-Q Send-Q LocalAddr:Port PeerAddr:Port Process
+        # The Unix socket path is a whitespace-delimited token; require an exact
+        # token match so /a/b.sock does not match /a/b.sock-old or /a/b.sock2.
+        if target not in line.split():
             continue
         for m in re.finditer(r"pid=(\d+)", line):
             pids.add(int(m.group(1)))
@@ -277,6 +288,7 @@ def run_diagnosis() -> list[CheckResult]:
         check_v_native_embedder(),
         check_w_no_permanent_failed(),
         check_x_no_collapsed_timestamps(),
+        check_y_rss_24h_plateau(),
         check_z_avx2_support(),
     ]
 
@@ -305,8 +317,7 @@ def _kill_orphan_cores() -> tuple[bool, str, int]:
             if "iai_mcp.core" not in cl:
                 continue
             pid = p.info["pid"]
-            _term = getattr(signal, "SIGTERM", signal.SIGINT)
-            os.kill(pid, _term)
+            os.kill(pid, signal.SIGTERM)
             killed.append(pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -420,7 +431,7 @@ def _kill_dup_binders() -> tuple[bool, str, int]:
             int((time.monotonic() - t0) * 1000),
         )
     binder_pids = _extract_binder_pids(result.stdout, socket_path)
-    if not binder_pids and platform.system() == "Linux":
+    if not binder_pids and platform.system() == "Linux" and socket_path.exists():
         # Non-root Linux cannot read other procs' /proc/<pid>/fd/ via lsof; fall back to
         # `ss -lxp`, which reads the globally-readable /proc/net/unix.
         try:
@@ -629,6 +640,7 @@ from iai_mcp.doctor._lifecycle_checks import (
     check_n_hid_idle_source,
     check_o_subscription_credentials,
     check_q_iai_cli_reachable,
+    check_y_rss_24h_plateau,
 )
 from iai_mcp.doctor._storage_checks import (
     check_h_crypto_file_state,
@@ -681,5 +693,6 @@ __all__ = [
     "check_v_native_embedder",
     "check_w_no_permanent_failed",
     "check_x_no_collapsed_timestamps",
+    "check_y_rss_24h_plateau",
     "check_z_avx2_support",
 ]

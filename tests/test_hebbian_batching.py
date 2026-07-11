@@ -31,7 +31,7 @@ def test_boost_edges_emits_at_most_two_versions(tmp_path):
 
     assert delta_versions <= 2, (
         f"boost_edges emitted {delta_versions} versions "
-        f"(expected <= 2 after batching)"
+        f"(expected <= 2 with batching)"
     )
 
     assert len(new) == 5
@@ -128,7 +128,7 @@ def test_sleep_consolidated_from_batches_into_two_versions(tmp_path):
     delta_versions = versions_after - versions_before
     assert delta_versions <= 2, (
         f"sleep.cls boost emitted {delta_versions} versions for 5 sources "
-        f"(expected <= 2)"
+        f"(expected <= 2 with batching)"
     )
 
     tbl = store.db.open_table(EDGES_TABLE)
@@ -179,7 +179,7 @@ def test_curiosity_bridge_batches_into_two_versions(tmp_path):
     delta_versions = versions_after - versions_before
     assert delta_versions <= 2, (
         f"curiosity boost emitted {delta_versions} versions for 5 triggers "
-        f"(expected <= 2)"
+        f"(expected <= 2 with batching)"
     )
 
     tbl = store.db.open_table(EDGES_TABLE)
@@ -217,7 +217,7 @@ def test_schema_bind_batches_into_two_versions(tmp_path):
     delta_versions = versions_after - versions_before
     assert delta_versions <= 2, (
         f"schema.bind boost emitted {delta_versions} versions for 5 evidence "
-        f"(expected <= 2)"
+        f"(expected <= 2 with batching)"
     )
 
     tbl = store.db.open_table(EDGES_TABLE)
@@ -267,7 +267,7 @@ def test_pipeline_profile_modulates_batches_with_sequence_delta(tmp_path):
     delta_versions = versions_after - versions_before
     assert delta_versions <= 2, (
         f"profile_modulates boost emitted {delta_versions} versions "
-        f"(expected <= 2)"
+        f"(expected <= 2 with batching)"
     )
 
     assert len(new) == 4

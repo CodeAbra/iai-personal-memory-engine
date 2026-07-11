@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -109,11 +107,16 @@ def test_schema_version_v5_in_accepted() -> None:
         SCHEMA_VERSION_ACCEPTED,
         SCHEMA_VERSION_CURRENT,
         SCHEMA_VERSION_V5,
+        SCHEMA_VERSION_V6,
     )
 
     assert SCHEMA_VERSION_V5 == 5
+    assert SCHEMA_VERSION_V6 == 6
+    # V5 remains an accepted on-disk version (backward compat) even though the
+    # current write version has advanced to V6.
     assert SCHEMA_VERSION_V5 in SCHEMA_VERSION_ACCEPTED
-    assert SCHEMA_VERSION_CURRENT == SCHEMA_VERSION_V5
+    assert SCHEMA_VERSION_V6 in SCHEMA_VERSION_ACCEPTED
+    assert SCHEMA_VERSION_CURRENT == SCHEMA_VERSION_V6
 
 def test_structure_hv_bytes_unchanged() -> None:
     from iai_mcp.types import STRUCTURE_HV_BYTES
@@ -141,7 +144,6 @@ def test_migration_idempotent_on_existing_db(tmp_path: Path) -> None:
         _migrate_add_hv_tier_columns(conn)
 
 def test_existing_records_default_to_bsc_after_migration(tmp_path: Path) -> None:
-    from iai_mcp.hippo import HippoDB
 
     store = MemoryStore(tmp_path, user_id="test")
     try:

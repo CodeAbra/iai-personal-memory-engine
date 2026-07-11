@@ -3,10 +3,26 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_keychain_credentials(monkeypatch):
+    """Stop verify_credentials_subscription from reading the developer's real
+    macOS login Keychain when a test monkeypatches CREDENTIALS_PATH to a tmp
+    path that does not exist. Otherwise the Keychain fallback returns valid
+    OAuth credentials and tests that expect ``credentials_file_missing`` see
+    ``ok=True`` instead.
+
+    Also drop any ambient ``IAI_MCP_CLAUDE_BARE`` from the shell environment
+    so the bare-flag default behaviour is exercised hermetically regardless
+    of how the developer's shell is configured.
+    """
+    from iai_mcp import claude_cli
+    monkeypatch.setattr(claude_cli, "_read_keychain_credentials", lambda: None)
+    monkeypatch.delenv("IAI_MCP_CLAUDE_BARE", raising=False)
 
 
 @pytest.fixture
@@ -14,10 +30,6 @@ def isolated_state(tmp_path, monkeypatch):
     from iai_mcp import daemon_state
     state_path = tmp_path / ".daemon-state.json"
     monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-    # Pin to the code default so the `--bare` assertions are deterministic
-    # regardless of the runner's shell (a developer may export
-    # IAI_MCP_CLAUDE_BARE=0 as a local Keychain workaround).
-    monkeypatch.delenv("IAI_MCP_CLAUDE_BARE", raising=False)
     return state_path
 
 

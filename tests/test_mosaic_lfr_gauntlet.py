@@ -23,7 +23,6 @@ from iai_mcp.mosaic import (
     run_mosaic,
 )
 from iai_mcp.mosaic_policy import (
-    CPM_MODULARITY_FLOOR,
     all_communities_connected,
 )
 from iai_mcp.graph import MemoryGraph
@@ -289,8 +288,8 @@ def test_partition_nmi_vs_ground_truth(variant: dict[str, Any]) -> None:
         f"{variant['name']} NMI={nmi:.4f} < threshold={threshold}. "
         f"detected={n_detected_comms} communities, "
         f"ground_truth={n_ground_comms} communities. "
-        f"For Karate, this is a known gap; raise threshold when "
-        f"the super-level pairwise merge follow-up lands."
+        f"For Karate, see 21-03/21-05 Known Gap; raise threshold when "
+        f"super-level pairwise merge follow-up plan lands."
     )
 
 
@@ -371,7 +370,7 @@ def test_replay_determinism_5x(variant: dict[str, Any]) -> None:
     for i, p in enumerate(partitions[1:], start=1):
         assert p == reference, (
             f"{variant['name']} run {i+1} differs from run 1 -- determinism "
-            f"violated. Determinism contract broken."
+            f"violated."
         )
 
 
@@ -508,7 +507,7 @@ def test_ba_n5000_m5_modularity_above_threshold() -> None:
         pytest.skip(
             "BA n=5000 m=5 fell back to flat -- partition has 1 community; "
             "modularity-threshold test does not apply. This is a regression "
-            "signal worth investigating."
+            "signal to investigate."
         )
     print(
         f"\nba_n5000_m5: Q={assignment.modularity:.4f}, "

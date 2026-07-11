@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from iai_mcp.events import query_events, write_event
 from iai_mcp.store import MemoryStore

@@ -826,7 +826,7 @@ def _build_env_metadata(
 
     return {
         "benchmark": "sleep_ablation",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "run_utc": datetime.now(timezone.utc).isoformat(),
         "seed_list": seed_list,
         "store_base": str(store_base),

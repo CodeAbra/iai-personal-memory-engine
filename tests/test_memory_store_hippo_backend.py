@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 
 from iai_mcp.store import (
     CPU_HAS_AVX2,

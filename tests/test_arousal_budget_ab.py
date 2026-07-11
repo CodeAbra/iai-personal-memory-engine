@@ -4,13 +4,11 @@ import csv
 import hashlib
 import json
 import os
-import statistics
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -28,7 +26,7 @@ def _inline_production_route(cue: str) -> tuple[str, str]:
 
 def test_route_determinism(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("IAI_MCP_AROUSAL_USE_SHADOW", raising=False)
-    from bench import contradiction_longitudinal as bench
+    from bench import contradiction_longitudinal_claude as bench
 
     helper = bench._bench_arousal_route_for_cue  # noqa: SLF001
 
@@ -42,7 +40,7 @@ def test_route_determinism(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_split_balance(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("IAI_MCP_AROUSAL_USE_SHADOW", raising=False)
-    from bench import contradiction_longitudinal as bench
+    from bench import contradiction_longitudinal_claude as bench
 
     helper = bench._bench_arousal_route_for_cue  # noqa: SLF001
 
@@ -67,7 +65,7 @@ def test_env_override_shadow_forces_all_to_shadow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("IAI_MCP_AROUSAL_USE_SHADOW", "1")
-    from bench import contradiction_longitudinal as bench
+    from bench import contradiction_longitudinal_claude as bench
 
     helper = bench._bench_arousal_route_for_cue  # noqa: SLF001
 
@@ -94,7 +92,7 @@ def test_bench_production_route_parity(
     cue: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("IAI_MCP_AROUSAL_USE_SHADOW", raising=False)
-    from bench import contradiction_longitudinal as bench
+    from bench import contradiction_longitudinal_claude as bench
 
     bench_route, bench_hash = bench._bench_arousal_route_for_cue(cue)  # noqa: SLF001
     prod_route, prod_hash = _inline_production_route(cue)
@@ -156,7 +154,7 @@ def _build_store_and_graph(tmp_path, n: int):
     from iai_mcp.store import MemoryStore
     from iai_mcp.types import EMBED_DIM
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs = []
     for i in range(n):
         vec = [0.0] * EMBED_DIM
@@ -244,11 +242,10 @@ def test_rank_threshold_filters_candidates(
     from iai_mcp.pipeline import _recall_core
     from iai_mcp.types import EMBED_DIM
 
-    from iai_mcp.community import CommunityAssignment
     from iai_mcp.graph import MemoryGraph
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     recs = []
     good_count = 5
     bad_count = 55

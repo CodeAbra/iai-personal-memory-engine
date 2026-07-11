@@ -141,7 +141,12 @@ def _worker_entry(conn) -> None:
         # that exact pass is what stalled this child at scale.
         worker_centrality = centrality_for_runtime(graph)
         rc = rich_club_nodes(graph, centrality=worker_centrality)
-        max_degree = max((d for _, d in graph.degrees()), default=0)
+        _degree_pairs = list(graph.degrees())
+        max_degree = max((d for _, d in _degree_pairs), default=0)
+        # Build per-node degree map as a byproduct of the same pass — emitted
+        # alongside max_degree so the parent can populate ranking degree from
+        # the cached true values rather than from a bounded traversal count.
+        node_degree_map = [(nid.bytes, d) for nid, d in _degree_pairs]
 
         # Result stream — community table first so the parent can index assigns.
         # Deterministic order: sort communities by UUID bytes.
@@ -182,8 +187,19 @@ def _worker_entry(conn) -> None:
             for comm, members in assignment.mid_regions.items()
         ]
         conn.send(("mid_regions", mid_payload))
+        conn.send(("modularity", float(assignment.modularity)))
         conn.send(("rich_club", [u.bytes for u in rc]))
         conn.send(("max_degree", int(max_degree)))
+        # Emit per-node degree map in chunks to mirror the assign chunking shape.
+        _ND_CHUNK = _ASSIGN_CHUNK
+        nd_chunk: list = []
+        for node_bytes, deg in node_degree_map:
+            nd_chunk.append((node_bytes, deg))
+            if len(nd_chunk) >= _ND_CHUNK:
+                conn.send(("node_degrees", nd_chunk))
+                nd_chunk = []
+        if nd_chunk:
+            conn.send(("node_degrees", nd_chunk))
         conn.send(("done", None))
     except RuntimeError:
         # Protocol violation — re-raise so the in-process driver tests see it.
@@ -260,7 +276,12 @@ def _community_only_worker_entry(conn) -> None:
       - `("config", {"prior_mode": "seeded"|"cold", "with_centrality": bool,
         "centrality_only": bool})` — optional, sent first.
       - `("abort", None)` — clean early exit (no compute, no result stream).
-      - `("nodes", [(id_str, embedding_blob), ...])` — accumulate node tuples.
+      - `("nodes", [(id_str, embedding_blob), ...])` — accumulate node tuples
+        with full embeddings (used by community detection and mixed paths).
+      - `("nodes_topology", [id_str, ...])` — topology-only variant: accumulates
+        node ids with empty embeddings. Sufficient for betweenness centrality
+        since centrality reads only graph structure. Avoids embedding decode and
+        materialization cost in centrality-only mode.
       - `("nodes_end", None)` — sentinel; no action.
       - `("edges", [(src_str, dst_str, weight), ...])` — accumulate edges.
       - `("edges_end", None)` — break the recv loop and proceed to compute.
@@ -314,6 +335,14 @@ def _community_only_worker_entry(conn) -> None:
                 for id_str, emb_blob in payload:
                     emb = np.frombuffer(emb_blob, dtype=np.float32).tolist()
                     nodes_buf.append((UUID(id_str), None, emb, {}))
+            elif kind == "nodes_topology":
+                # Topology-only node stream: ids only, no embedding blobs.
+                # Betweenness centrality depends only on graph topology (node ids
+                # and edges), so embedding-free nodes are sufficient for centrality
+                # computation. The empty embedding list keeps the MemoryGraph node
+                # record valid without any decode or materialization cost.
+                for id_str in payload:
+                    nodes_buf.append((UUID(id_str), None, [], {}))
             elif kind == "nodes_end":
                 continue
             elif kind == "edges":
@@ -384,6 +413,7 @@ def _community_only_worker_entry(conn) -> None:
             for comm, members in assignment.mid_regions.items()
         ]
         conn.send(("mid_regions", mid_payload))
+        conn.send(("modularity", float(assignment.modularity)))
 
         # Optional centrality on the SAME graph — one child, both results.
         if with_centrality:

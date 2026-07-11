@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
+import time
 from contextlib import redirect_stdout, redirect_stderr
-from unittest.mock import patch, MagicMock
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +18,63 @@ def _make_args(cue: str = "test", limit: int = 5):
     ns.cue = cue
     ns.limit = limit
     return ns
+
+
+_STUB_DAEMON_SRC = """
+import asyncio
+import json
+import sys
+
+sock_path = sys.argv[1]
+surface = sys.argv[2]
+
+async def handle(reader, writer):
+    line = await reader.readline()
+    req = json.loads(line.decode("utf-8"))
+    resp = {
+        "jsonrpc": "2.0",
+        "id": req.get("id", 1),
+        "result": {"hits": [{"literal_surface": surface, "score": 0.91}]},
+    }
+    writer.write((json.dumps(resp) + "\\n").encode("utf-8"))
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+async def main():
+    server = await asyncio.start_unix_server(handle, path=sock_path)
+    async with server:
+        await server.serve_forever()
+
+asyncio.run(main())
+"""
+
+
+@pytest.fixture
+def stub_daemon_socket(tmp_path: Path, short_socket: Path):
+    """Spawn a minimal real AF_UNIX JSON-RPC server that answers
+    memory_recall with one deterministic hit. Fully hermetic, no
+    embedder/daemon-FSM involvement -- targets only the CLI-level wire
+    protocol cmd_recall depends on.
+    """
+    marker = f"stub daemon hit {id(tmp_path)}"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _STUB_DAEMON_SRC, str(short_socket), marker],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not short_socket.exists():
+        time.sleep(0.05)
+    assert short_socket.exists(), "stub daemon did not bind its socket in time"
+    try:
+        yield short_socket, marker
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def test_recall_daemon_hit_prints_hits(monkeypatch):
@@ -180,3 +241,54 @@ def test_recall_respects_limit_arg(monkeypatch):
     assert "memory 1" in out
     assert "memory 2" in out
     assert "memory 3" not in out
+
+
+def test_recall_contacts_daemon_while_lifecycle_state_is_sleep(
+    monkeypatch, tmp_path, stub_daemon_socket
+):
+    """A daemon deep in SLEEP (lifecycle_state.json stale well past any
+    margin) must still be contacted for recall -- lifecycle state must never
+    pre-empt the socket call."""
+    from iai_mcp import iai_cli
+    from iai_mcp.lifecycle_state import LifecycleState, save_state
+
+    sock_path, marker = stub_daemon_socket
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    store_root = fake_home / ".iai-mcp"
+    store_root.mkdir()
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    far_past = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    save_state(
+        {
+            "current_state": LifecycleState.SLEEP.value,
+            "since_ts": far_past,
+            "last_activity_ts": far_past,
+            "wrapper_event_seq": 0,
+            "sleep_cycle_progress": None,
+            "quarantine": None,
+            "shadow_run": False,
+            "crisis_mode": False,
+        },
+        store_root / "lifecycle_state.json",
+    )
+
+    buf = io.StringIO()
+    err = io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(err):
+        rc = iai_cli.cmd_recall(_make_args(cue="daemon sleep contact probe", limit=5))
+
+    assert rc == 0
+    out = buf.getvalue()
+    assert marker in out, (
+        f"cmd_recall did not contact the daemon while lifecycle state was SLEEP; "
+        f"stdout={out!r} stderr={err.getvalue()!r}"
+    )
+    assert "via daemon" in out
+    assert "daemon unreachable" not in err.getvalue()

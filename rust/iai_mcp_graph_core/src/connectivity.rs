@@ -40,8 +40,8 @@ use crate::error::GraphError;
 /// Build an undirected petgraph from the CSR triple.
 ///
 /// Returns `Err(GraphError::InvalidNodeId)` on:
-/// * indptr length mismatch (must equal `n_nodes + 1`),
-/// * any `indices[i] >= n_nodes` (out-of-range neighbour).
+///   * indptr length mismatch (must equal `n_nodes + 1`),
+///   * any `indices[i] >= n_nodes` (out-of-range neighbour).
 ///
 /// Edges are de-duplicated implicitly — the CSR stores each undirected edge
 /// in both endpoints' neighbour lists, so iterating with the `u < v` guard

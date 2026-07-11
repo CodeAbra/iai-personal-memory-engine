@@ -9,8 +9,6 @@ from uuid import UUID, uuid4
 
 import pytest
 
-pytest.importorskip("huggingface_hub", reason="LongMemEval harness needs the hub client")
-
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 _HF_CACHE = Path(
@@ -18,7 +16,6 @@ _HF_CACHE = Path(
 )
 HAS_LONGMEMEVAL_CACHE = any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exists() else False
 HAS_BGE_SMALL_CACHE = any(_HF_CACHE.rglob("*bge-small-en*")) if _HF_CACHE.exists() else False
-
 
 def _make_record(content: str, session_id: str, role: str, embedding: list[float]):
     from iai_mcp.types import MemoryRecord
@@ -45,11 +42,9 @@ def _make_record(content: str, session_id: str, role: str, embedding: list[float
         language="en",
     )
 
-
 def _r_at_k_session_ids(retrieved_record_ids, id_to_session, gold_session_ids, k):
     retrieved_sessions = [id_to_session.get(rid, "?") for rid in retrieved_record_ids[:k]]
     return 1.0 if any(s in gold_session_ids for s in retrieved_sessions) else 0.0
-
 
 @pytest.mark.skipif(
     not HAS_BGE_SMALL_CACHE,
@@ -81,7 +76,7 @@ def test_synthetic_pipeline_no_regression_vs_baseline(
     from iai_mcp.retrieve import build_runtime_graph, recall as retrieve_recall
     from iai_mcp.store import MemoryStore
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     asyncio.run(store.enable_async_writes(coalesce_ms=50, max_batch=128))
     embedder = embedder_for_store(store)
 
@@ -89,38 +84,39 @@ def test_synthetic_pipeline_no_regression_vs_baseline(
     gold_record_ids: set[UUID] = set()
     gold_session_ids: set[str] = set()
 
-    for gs_idx in range(n_gold_session):
-        session_id = f"gold-{gs_idx:03d}"
-        gold_session_ids.add(session_id)
-        for k in range(gold_session_count):
-            content = f"{gold_text_template} (turn {k} session {gs_idx})"
+    try:
+        for gs_idx in range(n_gold_session):
+            session_id = f"gold-{gs_idx:03d}"
+            gold_session_ids.add(session_id)
+            for k in range(gold_session_count):
+                content = f"{gold_text_template} (turn {k} session {gs_idx})"
+                vec = embedder.embed(content)
+                rec = _make_record(content, session_id, role="user", embedding=vec)
+                store.insert(rec)
+                id_to_session[rec.id] = session_id
+                gold_record_ids.add(rec.id)
+
+        distractor_topics = [
+            "I went to the grocery store today and bought apples",
+            "The weather has been rainy all week long here",
+            "I am learning to play the piano this year",
+            "My favorite TV show is about cooking competitions",
+            "The new garden tools arrived in the mail yesterday",
+            "I read an interesting book about ancient Rome recently",
+            "The car needs an oil change next month sometime",
+            "I decided to repaint the bedroom walls light blue",
+            "My friend recommended a great Italian restaurant nearby",
+            "I found an old photograph from my college years today",
+        ]
+        for i in range(n_haystack):
+            session_id = f"distractor-{i // 3:04d}"
+            content = distractor_topics[i % len(distractor_topics)] + f" (#{i})"
             vec = embedder.embed(content)
             rec = _make_record(content, session_id, role="user", embedding=vec)
             store.insert(rec)
             id_to_session[rec.id] = session_id
-            gold_record_ids.add(rec.id)
-
-    distractor_topics = [
-        "I went to the grocery store today and bought apples",
-        "The weather has been rainy all week long here",
-        "I am learning to play the piano this year",
-        "My favorite TV show is about cooking competitions",
-        "The new garden tools arrived in the mail yesterday",
-        "I read an interesting book about ancient Rome recently",
-        "The car needs an oil change next month sometime",
-        "I decided to repaint the bedroom walls light blue",
-        "My friend recommended a great Italian restaurant nearby",
-        "I found an old photograph from my college years today",
-    ]
-    for i in range(n_haystack):
-        session_id = f"distractor-{i // 3:04d}"
-        content = distractor_topics[i % len(distractor_topics)] + f" (#{i})"
-        vec = embedder.embed(content)
-        rec = _make_record(content, session_id, role="user", embedding=vec)
-        store.insert(rec)
-        id_to_session[rec.id] = session_id
-
-    asyncio.run(store.disable_async_writes())
+    finally:
+        asyncio.run(store.disable_async_writes())
 
     graph, assignment, rich_club = build_runtime_graph(store)
 
@@ -158,7 +154,7 @@ def test_synthetic_pipeline_no_regression_vs_baseline(
 
     assert r5_y >= r5_x, (
         f"recall_for_benchmark R@5 ({r5_y}) regressed against retrieve_recall R@5 ({r5_x}); "
-        f"this is exactly the regression that was previously closed. "
+        f"this is exactly the historical loss-of-QIDs regression. "
         f"Y record_ids: {y_record_ids[:5]}; X record_ids: {x_record_ids[:5]}; "
         f"gold_sessions: {gold_session_ids}; n_gold_records: {len(gold_record_ids)}; "
         f"n_communities: {len(assignment.mid_regions)}"
@@ -167,7 +163,7 @@ def test_synthetic_pipeline_no_regression_vs_baseline(
         f"recall_for_benchmark R@10 ({r10_y}) regressed against retrieve_recall R@10 ({r10_x})"
     )
 
-
+@pytest.mark.slow
 @pytest.mark.skipif(
     not (HAS_LONGMEMEVAL_CACHE and HAS_BGE_SMALL_CACHE),
     reason="LongMemEval-S dataset or bge-small-en-v1.5 embedder not cached locally",

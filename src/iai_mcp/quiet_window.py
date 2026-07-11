@@ -102,3 +102,60 @@ def should_bootstrap_trigger(last_session_ts: Optional[datetime], now: datetime)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     return (now - last_session_ts) >= timedelta(hours=BOOTSTRAP_IDLE_HOURS)
+
+
+DEFAULT_WINDOW_START_BUCKET = 4   # 2h past local midnight
+DEFAULT_WINDOW_BUCKETS = 8        # 4 hours
+
+
+def parse_window_spec(raw: "str | None") -> Optional[tuple[int, int]]:
+    """Parse an "HH:MM-HH:MM" local-time window into (start_bucket, buckets)."""
+    if not raw:
+        return None
+    try:
+        start_s, end_s = raw.strip().split("-")
+        sh, sm = (int(x) for x in start_s.split(":"))
+        eh, em = (int(x) for x in end_s.split(":"))
+        start = (sh * 60 + sm) // BUCKET_MINUTES
+        end = (eh * 60 + em) // BUCKET_MINUTES
+        buckets = (end - start) % BUCKET_COUNT
+        if buckets == 0:
+            return None
+        return (start % BUCKET_COUNT, buckets)
+    except (ValueError, AttributeError):
+        return None
+
+
+def effective_consolidation_window(
+    learned: "tuple[int, int] | list | None",
+) -> tuple[int, int]:
+    """Resolve the active consolidation window.
+
+    Precedence: explicit env override -> the learned quiet window (the system
+    adapts to the user's observed rhythm) -> the fixed night default. There is
+    ALWAYS a window: consolidation never runs around the clock.
+    """
+    import os
+
+    env = parse_window_spec(os.environ.get("IAI_MCP_CONSOLIDATION_WINDOW"))
+    if env is not None:
+        return env
+    if (
+        isinstance(learned, (tuple, list))
+        and len(learned) == 2
+        and all(isinstance(x, int) for x in learned)
+    ):
+        return (learned[0] % BUCKET_COUNT, max(1, min(int(learned[1]), BUCKET_COUNT)))
+    return (DEFAULT_WINDOW_START_BUCKET, DEFAULT_WINDOW_BUCKETS)
+
+
+def within_window(
+    window: "tuple[int, int]", now: datetime, tz: ZoneInfo,
+) -> bool:
+    start, buckets = window
+    try:
+        local = now.astimezone(tz)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    bucket = (local.hour * 60 + local.minute) // BUCKET_MINUTES
+    return ((bucket - start) % BUCKET_COUNT) < buckets

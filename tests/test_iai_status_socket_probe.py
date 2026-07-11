@@ -4,7 +4,6 @@ import io
 import sys
 from contextlib import redirect_stdout
 
-import pytest
 
 
 def _make_args():

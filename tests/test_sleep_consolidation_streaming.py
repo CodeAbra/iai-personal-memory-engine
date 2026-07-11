@@ -11,7 +11,6 @@ from iai_mcp.sleep import CLUSTER_MIN_SIZE, _tier0_schema_surfacing
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -25,7 +24,6 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
         _keyring, "delete_password", lambda s, u: fake.pop((s, u), None)
     )
     yield fake
-
 
 def _make(
     text: str = "hello world",
@@ -56,11 +54,9 @@ def _make(
         language=language,
     )
 
-
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(path=tmp_path / "hippo")
-
+    return MemoryStore(path=tmp_path / "lancedb")
 
 def _populate_mixed_16(store: MemoryStore) -> None:
     for _ in range(4):
@@ -69,7 +65,6 @@ def _populate_mixed_16(store: MemoryStore) -> None:
         store.insert(_make(text="beta", tags=["tag-b"]))
     for _ in range(7):
         store.insert(_make(text="gamma", tags=["raw:noise", "domain:misc"]))
-
 
 def test_tier0_schema_surfacing_uses_iter_record_columns_not_all_records(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -84,12 +79,12 @@ def test_tier0_schema_surfacing_uses_iter_record_columns_not_all_records(
     _tier0_schema_surfacing(store)
 
     assert spy_all.call_count == 0, (
-        f"_tier0_schema_surfacing must NOT call store.all_records(); "
+        f"_tier0_schema_surfacing must NOT call store.all_records() post-W3; "
         f"got {spy_all.call_count} call(s)"
     )
     assert spy_iter.call_count == 1, (
         f"_tier0_schema_surfacing must call store.iter_record_columns() exactly "
-        f"once; got {spy_iter.call_count} call(s)"
+        f"once post-W3; got {spy_iter.call_count} call(s)"
     )
 
     args, kwargs = spy_iter.call_args
@@ -101,7 +96,6 @@ def test_tier0_schema_surfacing_uses_iter_record_columns_not_all_records(
         f"projection must be exactly ['tags_json'] (zero AES-GCM cost); "
         f"got columns={cols!r}"
     )
-
 
 def test_tier0_schema_surfacing_zero_decrypt_calls(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -115,10 +109,9 @@ def test_tier0_schema_surfacing_zero_decrypt_calls(
 
     assert decrypt_spy.call_count == 0, (
         f"_tier0_schema_surfacing must NOT trigger ANY _decrypt_for_record "
-        f"calls (zero AES-GCM cost on the projection path); "
-        f"got {decrypt_spy.call_count} call(s)"
+        f"calls (-16210 AES-GCM operations on the 8105-record "
+        f"production store); got {decrypt_spy.call_count} call(s)"
     )
-
 
 def test_tier0_schema_surfacing_filters_raw_and_domain_tags(
     store: MemoryStore,
@@ -142,7 +135,6 @@ def test_tier0_schema_surfacing_filters_raw_and_domain_tags(
     assert by_pattern["tag:tag-real-2"]["evidence_count"] == 5
     assert by_pattern["tag:tag-real-2"]["confidence"] == pytest.approx(0.5)
 
-
 def test_tier0_schema_surfacing_floor_count_3(store: MemoryStore) -> None:
     for _ in range(3):
         store.insert(_make(text="a", tags=["tag-a"]))
@@ -165,7 +157,6 @@ def test_tier0_schema_surfacing_floor_count_3(store: MemoryStore) -> None:
         assert a["evidence_count"] == e["evidence_count"]
         assert a["confidence"] == pytest.approx(e["confidence"])
 
-
 def test_tier0_schema_surfacing_below_cluster_min_size_returns_empty(
     store: MemoryStore,
 ) -> None:
@@ -177,7 +168,6 @@ def test_tier0_schema_surfacing_below_cluster_min_size_returns_empty(
         f"expected [] when record count ({CLUSTER_MIN_SIZE - 1}) is below "
         f"CLUSTER_MIN_SIZE ({CLUSTER_MIN_SIZE}); got {candidates!r}"
     )
-
 
 def test_tier0_schema_surfacing_byte_identical_to_pre_w3(
     store: MemoryStore,
@@ -227,7 +217,6 @@ def test_tier0_schema_surfacing_byte_identical_to_pre_w3(
     assert by_pattern["tag:b"] == 8
     assert by_pattern["tag:c"] == 4
 
-
 def test_tier0_schema_surfacing_handles_malformed_tags_json_gracefully(
     store: MemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -252,7 +241,6 @@ def test_tier0_schema_surfacing_handles_malformed_tags_json_gracefully(
     assert by_pattern["tag:tag-good"]["evidence_count"] == 5
     assert by_pattern["tag:tag-good"]["confidence"] == pytest.approx(0.5)
 
-
 @pytest.fixture
 def _patch_schema_embedder(monkeypatch: pytest.MonkeyPatch):
     from iai_mcp import embed as embed_mod
@@ -273,7 +261,6 @@ def _patch_schema_embedder(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(embed_mod, "Embedder", _FakeEmbedder)
     yield
-
 
 def _populate_for_heavy(store: MemoryStore) -> list[MemoryRecord]:
     from iai_mcp.types import EMBED_DIM as _EMBED_DIM
@@ -307,7 +294,6 @@ def _populate_for_heavy(store: MemoryStore) -> list[MemoryRecord]:
         inserted.append(r)
     return inserted
 
-
 def test_run_heavy_consolidation_calls_all_records_at_most_once(
     store: MemoryStore,
     monkeypatch: pytest.MonkeyPatch,
@@ -332,11 +318,8 @@ def test_run_heavy_consolidation_calls_all_records_at_most_once(
 
     assert spy.call_count <= 1, (
         f"run_heavy_consolidation must call store.all_records() "
-        f"AT MOST ONCE per invocation; got {spy.call_count} call(s). "
-        f"Former contributors: records_by_id materialisation, "
-        f"induce_schemas_tier0, and persist_schema's keeper scan."
+        f"AT MOST ONCE per invocation; got {spy.call_count} call(s)."
     )
-
 
 def test_run_heavy_consolidation_iter_record_columns_called_at_least_once(
     store: MemoryStore,
@@ -363,9 +346,8 @@ def test_run_heavy_consolidation_iter_record_columns_called_at_least_once(
     assert spy.call_count >= 1, (
         f"run_heavy_consolidation must call store.iter_record_columns() at "
         f"least once per invocation (_tier0_schema_surfacing path + "
-        f"schema.py paths); got {spy.call_count} call(s)."
+        f"streaming schema.py paths); got {spy.call_count} call(s)."
     )
-
 
 def test_run_heavy_consolidation_returns_expected_keys(
     store: MemoryStore,

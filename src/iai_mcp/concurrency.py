@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -11,10 +13,93 @@ logger = logging.getLogger(__name__)
 
 SOCKET_PATH: Path = Path.home() / ".iai-mcp" / ".daemon.sock"
 
+# ---------------------------------------------------------------------------
+# Foreground-activity beacon
+# ---------------------------------------------------------------------------
+# A foreground read (a live recall serving a user) and background ingestion
+# (the deferred-capture drain, other maintenance loops) contend for the same
+# shared writer connection and the GIL. The beacon gives background loops a
+# cheap way to yield: the recall path stamps it at dispatch, and a polite
+# background loop pauses between work items while the stamp is fresh. Purely
+# advisory — a loop that never checks it is merely impolite, never wrong —
+# and every waiter bounds its total pause so background work always completes
+# even under a continuous stream of foreground reads (fail-open).
+
+_foreground_last_touch: float = 0.0
+_foreground_inflight: int = 0
+_foreground_touch_lock = threading.Lock()
+
+#: How long after the last foreground stamp the beacon still reads "active"
+#: when no in-flight marker is held (a stamp-only caller).
+FOREGROUND_RECENT_WINDOW_S = 0.75
+
+#: Ceiling on how long a stuck in-flight marker can hold the beacon active: a
+#: read that failed to clear its marker (a crashed thread) must not silence
+#: background work forever. Past this age since the last stamp, the beacon
+#: reads quiet regardless of the in-flight count.
+FOREGROUND_INFLIGHT_CEILING_S = 30.0
+
+
+def foreground_touch() -> None:
+    """Stamp the beacon: a foreground read is being served right now."""
+    global _foreground_last_touch  # noqa: PLW0603
+    with _foreground_touch_lock:
+        _foreground_last_touch = time.monotonic()
+
+
+def foreground_begin() -> None:
+    """Mark a foreground read in flight (paired with `foreground_end`)."""
+    global _foreground_inflight, _foreground_last_touch  # noqa: PLW0603
+    with _foreground_touch_lock:
+        _foreground_inflight += 1
+        _foreground_last_touch = time.monotonic()
+
+
+def foreground_end() -> None:
+    """Clear one in-flight foreground marker. Never goes below zero."""
+    global _foreground_inflight  # noqa: PLW0603
+    with _foreground_touch_lock:
+        if _foreground_inflight > 0:
+            _foreground_inflight -= 1
+
+
+def foreground_recent(window_s: float = FOREGROUND_RECENT_WINDOW_S) -> bool:
+    """True while a foreground read is in flight (bounded by the stuck-marker
+    ceiling) or one was stamped within the last `window_s`."""
+    with _foreground_touch_lock:
+        last = _foreground_last_touch
+        inflight = _foreground_inflight
+    if last <= 0.0:
+        return False
+    age = time.monotonic() - last
+    if inflight > 0:
+        return age < FOREGROUND_INFLIGHT_CEILING_S
+    return age < window_s
+
+
+def foreground_backoff(max_wait_s: float = 2.0, step_s: float = 0.05) -> None:
+    """Pause while the beacon is fresh, up to `max_wait_s` total.
+
+    For background loops between work items: yields the GIL and the shared
+    connection to in-flight foreground reads. Returns as soon as the beacon
+    goes quiet or the bound is reached — never an indefinite stall.
+    """
+    waited = 0.0
+    while waited < max_wait_s and foreground_recent():
+        time.sleep(step_s)
+        waited += step_s
+
 
 def cleanup_stale_socket(path: Path = SOCKET_PATH) -> None:
-    from iai_mcp._ipc import cleanup_ipc_address
-    cleanup_ipc_address(path)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _validate_socket_message(req: dict) -> tuple[bool, str | None]:
@@ -125,6 +210,7 @@ async def _dispatch_socket_request(
             "pending_digest": truncated_digest,
             "daemon_started_at": started_at,
             "scheduler_paused": bool(state.get("scheduler_paused", False)),
+            "ann_pool_health": state.get("ann_pool_health"),
         }
 
     if req_type == "user_initiated_sleep":
@@ -231,11 +317,19 @@ async def serve_control_socket(
     dispatcher: Callable[[dict], Awaitable[dict]] | None = None,
     socket_path: Path = SOCKET_PATH,
 ) -> None:
-    from iai_mcp._ipc import IS_WINDOWS, cleanup_ipc_address, start_ipc_server, shutdown_ipc
+    cleanup_stale_socket(socket_path)
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
 
-    cleanup_ipc_address(socket_path)
-    if not IS_WINDOWS:
-        socket_path.parent.mkdir(parents=True, exist_ok=True)
+    _supports_cleanup_socket = False
+    try:
+        import inspect as _inspect
+        import asyncio as _asyncio_mod
+        _loop_sig = _inspect.signature(
+            _asyncio_mod.get_event_loop_policy().new_event_loop().create_unix_server
+        )
+        _supports_cleanup_socket = "cleanup_socket" in _loop_sig.parameters
+    except (TypeError, ValueError, AttributeError):
+        _supports_cleanup_socket = False
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -265,16 +359,23 @@ async def serve_control_socket(
             except (OSError, ConnectionError):  # noqa: BLE001 -- cleanup is best-effort
                 pass
 
-    server, actual_addr, needs_cleanup = await start_ipc_server(handle, socket_path)
-    if not IS_WINDOWS:
-        try:
-            os.chmod(str(socket_path), 0o600)
-        except OSError:
-            pass
+    _server_kwargs = {"cleanup_socket": True} if _supports_cleanup_socket else {}
+    server = await asyncio.start_unix_server(
+        handle, path=str(socket_path), **_server_kwargs,
+    )
+    try:
+        os.chmod(str(socket_path), 0o600)
+    except OSError:
+        pass
 
     try:
         async with server:
             await shutdown.wait()
     finally:
-        if needs_cleanup:
-            shutdown_ipc(actual_addr)
+        if not _supports_cleanup_socket:
+            try:
+                socket_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass

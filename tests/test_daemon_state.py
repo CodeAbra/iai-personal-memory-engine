@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import sys
-
-import json
 import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -32,8 +28,7 @@ def test_save_and_load_roundtrip_with_0600_mode(isolated_state_path):
 
     assert isolated_state_path.exists()
     mode = isolated_state_path.stat().st_mode & 0o777
-    if sys.platform != "win32":
-        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+    assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
 
     loaded = load_state()
     assert loaded == state

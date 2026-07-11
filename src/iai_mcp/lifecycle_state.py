@@ -8,7 +8,27 @@ from enum import Enum
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
-LIFECYCLE_STATE_PATH: Path = Path.home() / ".iai-mcp" / "lifecycle_state.json"
+LIFECYCLE_STATE_FILENAME: str = "lifecycle_state.json"
+LIFECYCLE_STATE_PATH: Path = Path.home() / ".iai-mcp" / LIFECYCLE_STATE_FILENAME
+
+
+def lifecycle_state_path(store_root: Path | str | None = None) -> Path:
+    """Resolve the lifecycle-state file path under the active store root.
+
+    Single source of truth shared by the daemon writer and every reader so the
+    write side and the read side can never diverge. With no explicit
+    ``store_root``, the ``IAI_MCP_STORE`` environment variable is honored;
+    absent that, the module-level ``LIFECYCLE_STATE_PATH`` is returned as the
+    default — read at call time so it stays the single authoritative default for
+    the home-rooted store. For the default store the resolved path is
+    byte-identical to ``LIFECYCLE_STATE_PATH``.
+    """
+    if store_root is not None:
+        return Path(store_root) / LIFECYCLE_STATE_FILENAME
+    env = os.environ.get("IAI_MCP_STORE")
+    if env:
+        return Path(env) / LIFECYCLE_STATE_FILENAME
+    return LIFECYCLE_STATE_PATH
 
 
 class LifecycleState(str, Enum):
@@ -46,6 +66,8 @@ class LifecycleStateRecord(TypedDict):
     shadow_run: bool
     crisis_mode: bool
     crisis_mode_since_ts: NotRequired[str | None]
+    essential_variable_consecutive_breaches: NotRequired[int]
+    essential_variable_consecutive_clears: NotRequired[int]
 
 
 def _utc_now_iso() -> str:
@@ -64,6 +86,8 @@ def default_state() -> LifecycleStateRecord:
         "shadow_run": False,
         "crisis_mode": False,
         "crisis_mode_since_ts": None,
+        "essential_variable_consecutive_breaches": 0,
+        "essential_variable_consecutive_clears": 0,
     }
 
 
@@ -111,6 +135,22 @@ def _validate_record(raw: object) -> LifecycleStateRecord:
         )
     raw["crisis_mode_since_ts"] = since_ts_value
 
+    consecutive_breaches = raw.get("essential_variable_consecutive_breaches", 0)
+    if not isinstance(consecutive_breaches, int) or consecutive_breaches < 0:
+        raise ValueError(
+            f"lifecycle_state.essential_variable_consecutive_breaches must be a "
+            f"non-negative int, got {consecutive_breaches!r}"
+        )
+    raw["essential_variable_consecutive_breaches"] = consecutive_breaches
+
+    consecutive_clears = raw.get("essential_variable_consecutive_clears", 0)
+    if not isinstance(consecutive_clears, int) or consecutive_clears < 0:
+        raise ValueError(
+            f"lifecycle_state.essential_variable_consecutive_clears must be a "
+            f"non-negative int, got {consecutive_clears!r}"
+        )
+    raw["essential_variable_consecutive_clears"] = consecutive_clears
+
     progress = raw.get("sleep_cycle_progress")
     if progress is not None and not isinstance(progress, dict):
         raise ValueError(
@@ -137,7 +177,7 @@ def load_state(path: Path | None = None) -> LifecycleStateRecord:
     if not target.exists():
         return default_state()
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
+        raw = json.loads(target.read_text())
     except (OSError, json.JSONDecodeError):
         return default_state()
     try:

@@ -6,7 +6,6 @@ import select
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -40,6 +39,39 @@ def _count_iai_mcp_processes() -> dict[str, int]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return counts
+
+def _daemon_pids_on_socket(sock_path: Path) -> set[int]:
+    """Return PIDs of iai_mcp.daemon processes bound to exactly this socket.
+
+    Scoped by the test's own unique socket path so the count ignores the
+    always-warm production daemon and any daemon from another test/session that
+    happens to start or exit during the window — those bind different sockets.
+    A daemon spawned by the sub-agent path would bind THIS socket, so the count
+    still detects a real singleton violation.
+    """
+    target = str(sock_path)
+    res = subprocess.run(
+        ["lsof", "-U", "-F", "pn"],
+        capture_output=True, text=True, check=False,
+    )
+    current: int | None = None
+    pids: set[int] = set()
+    for line in res.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                current = int(line[1:])
+            except ValueError:
+                current = None
+        elif line.startswith("n") and current is not None and line[1:] == target:
+            pids.add(current)
+    daemon_pids: set[int] = set()
+    for pid in pids:
+        try:
+            if "iai_mcp.daemon" in " ".join(psutil.Process(pid).cmdline()):
+                daemon_pids.add(pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return daemon_pids
 
 def _kill_test_daemons(sock_path: Path) -> None:
     target = str(sock_path)
@@ -156,10 +188,10 @@ def _spawn_daemon_in_background(
     )
 
 def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
-    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
-    sock_dir = Path(sock_dir_ctx.name)
+    sock_dir = Path(f"/tmp/iai-subagent-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
-    store_dir = tmp_path / "store"
+    store_dir = sock_dir / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
     assert not sock_path.exists()
 
@@ -182,8 +214,10 @@ def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
         assert "result" in first_resp or "error" in first_resp, first_resp
 
         before = _count_iai_mcp_processes()
-        assert before["daemon"] >= 1, (
-            f"bootstrap did not leave a running daemon: {before}"
+        before_daemons = _daemon_pids_on_socket(sock_path)
+        assert len(before_daemons) >= 1, (
+            f"bootstrap did not leave a running daemon on {sock_path}: "
+            f"{before_daemons}"
         )
 
         for i in range(3):
@@ -198,6 +232,7 @@ def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
         time.sleep(0.5)
 
         after = _count_iai_mcp_processes()
+        after_daemons = _daemon_pids_on_socket(sock_path)
 
         core_delta = after["core"] - before["core"]
         assert core_delta <= 0, (
@@ -205,10 +240,16 @@ def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
             f"(before={before['core']} after={after['core']} delta={core_delta})"
         )
 
-        daemon_delta = after["daemon"] - before["daemon"]
-        assert daemon_delta <= 0, (
-            f"singleton violated: sub-agent path spawned an extra daemon "
-            f"(before={before['daemon']} after={after['daemon']} delta={daemon_delta})"
+        # Scope the singleton check to daemons bound to THIS test's socket so an
+        # unrelated daemon (the production daemon, or another test's) starting or
+        # exiting during the window cannot perturb the count. A sub-agent that
+        # wrongly spawned its own daemon would bind this same socket and appear
+        # as a new PID here.
+        new_daemons = after_daemons - before_daemons
+        assert not new_daemons, (
+            f"singleton violated: sub-agent path spawned an extra daemon on "
+            f"{sock_path} (before={sorted(before_daemons)} "
+            f"after={sorted(after_daemons)} new={sorted(new_daemons)})"
         )
     finally:
         try:
@@ -222,4 +263,3 @@ def test_subagent_spawns_zero_new_processes(built_wrapper, tmp_path):
             sock_path.unlink()
         except OSError:
             pass
-        sock_dir_ctx.cleanup()

@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 
 from iai_mcp.migrate import migrate_redact_undecryptable_records
 from iai_mcp.store import MemoryStore

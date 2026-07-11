@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import time
 
 import pytest
@@ -164,7 +163,6 @@ class TestBlackboxOnFailedProbe:
         _iv1, _c1 = _tick(watchdog_env, 0, False, blackbox_fn=None)
 
         if hasattr(daemon, "_WATCHDOG_BLACKBOX_EPISODE_FIRED"):
-            import importlib
             daemon._WATCHDOG_BLACKBOX_EPISODE_FIRED = False
 
         calls: list = []

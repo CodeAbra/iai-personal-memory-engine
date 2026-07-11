@@ -78,9 +78,42 @@ def migrate_dedupe_episodic_captures(
         now = datetime.now(timezone.utc)
         with db._conn_lock:
             db._conn.executemany(
-                "UPDATE records SET tombstoned_at = ? WHERE id = ?",
+                "UPDATE records SET tombstoned_at = ?, live = 0 WHERE id = ?",
                 [(now, rid) for rid in to_tombstone],
             )
+        # The tombstone pass moved rows out of the active set: the active count
+        # decreased.  Invalidate the cached active count so the next
+        # active_records_count() recomputes from the post-tombstone SQL state.
+        # Dedupe does not cascade to edges here, so only the active key is cleared.
+        # Best-effort guarded: a store without the cache (or a broken cache) must
+        # never fail the migration.
+        try:
+            _inv = getattr(store, "_invalidate_corpus_count", None)
+            if _inv is not None:
+                _inv("active")
+        except Exception:  # noqa: BLE001 -- invalidation must not crash migration
+            pass
+        # Invalidate the resident exact-cosine matrix so a just-tombstoned
+        # duplicate never lingers as a recallable id — the same discipline the
+        # recency-buffer eviction below applies for its own tier.
+        try:
+            _inv_x = getattr(store, "invalidate_exact_index", None)
+            if callable(_inv_x):
+                _inv_x()
+        except Exception:  # noqa: BLE001 -- invalidation must not crash migration
+            pass
+        # Evict the just-tombstoned ids from the recency buffer so a dead row
+        # never lingers as a stale marker until the next boot rebuild — the SQL
+        # authority filters tombstoned rows, so the buffer must too for them to
+        # stay byte-identical. Best-effort: a missing buffer or absent id is a
+        # no-op and must never fail the migration.
+        buf = getattr(store, "_recency_buffer", None)
+        if buf is not None:
+            for rid in to_tombstone:
+                try:
+                    buf.evict(str(rid))
+                except Exception as exc:  # noqa: BLE001 -- eviction is best-effort
+                    log.debug("recency buffer evict failed for %s: %s", rid, exc)
         try:
             write_event(
                 store,

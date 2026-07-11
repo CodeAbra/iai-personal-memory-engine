@@ -152,7 +152,6 @@ def _full_graph_recall(
     import iai_mcp.pipeline as _pm
     from iai_mcp.pipeline import recall_for_response
     from iai_mcp.embed import Embedder
-    from iai_mcp import core as _core
 
     _pm._last_recall_latency_ms = 0.0
     embedder = Embedder()
@@ -246,16 +245,18 @@ def _run_gate_b_parity(
         u5 = str(UUID(int=5))
         u5_in_full = u5 in full_hits
         u5_in_bounded = u5 in bounded_hits
-        if u5_in_full != u5_in_bounded:
+        if u5_in_full and not u5_in_bounded:
             failures.append(
                 f"  [FAIL U5] {cue_label} {n_label}: "
                 f"U5 in full={u5_in_full} but in bounded={u5_in_bounded} — "
-                "parity regression on the two-hop-only gold"
+                "bounded dropped a two-hop-only gold hit that full-graph kept"
             )
         else:
             telemetry.append(
                 f"  [TELEMETRY U5] {cue_label} {n_label}: "
-                f"U5 in full={u5_in_full}, in bounded={u5_in_bounded} (parity)"
+                f"U5 in full={u5_in_full}, in bounded={u5_in_bounded} "
+                "(bounded recovering more than full-graph, via the exact-similarity "
+                "authority, is an improvement, not a regression)"
             )
 
     print(f"\n  --- Gate B {n_label} Results ---")

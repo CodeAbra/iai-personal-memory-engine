@@ -4,7 +4,6 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
@@ -73,7 +72,7 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(path=tmp_path / "hippo")
+    return MemoryStore(path=tmp_path / "lancedb")
 
 
 def test_compute_salient_communities_empty_history(
@@ -325,3 +324,79 @@ def test_cascade_loop_yields_on_shutdown(tmp_path: Path) -> None:
         assert elapsed < 5.0, f"cascade loop did not yield within 5s: {elapsed}s"
     finally:
         daemon_state.STATE_PATH = orig_path
+
+
+def _drive_one_cascade_iteration(
+    store: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> int:
+    from iai_mcp import daemon
+    from iai_mcp import daemon_state
+    from iai_mcp import retrieve
+
+    state_file = tmp_path / ".daemon-state.json"
+    orig_path = daemon_state.STATE_PATH
+    daemon_state.STATE_PATH = state_file
+
+    call_count = {"n": 0}
+
+    def _fake_build_runtime_graph(_store):
+        call_count["n"] += 1
+        return None, None, 0
+
+    monkeypatch.setattr(retrieve, "build_runtime_graph", _fake_build_runtime_graph)
+    monkeypatch.setattr(daemon, "HIPPEA_CASCADE_POLL_SEC", 0.05)
+    monkeypatch.setattr(daemon, "_last_cascade_completed_at", 0.0)
+
+    try:
+        async def _drive() -> None:
+            state_file.write_text("{}")
+            state = daemon_state.load_state()
+            state["hippea_cascade_request"] = {"pending": True, "session_id": "s1"}
+            daemon_state.save_state(state)
+
+            shutdown = asyncio.Event()
+            task = asyncio.create_task(
+                daemon._hippea_cascade_loop(store, shutdown)
+            )
+            await asyncio.sleep(0.2)
+            shutdown.set()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                raise
+
+        asyncio.run(_drive())
+    finally:
+        daemon_state.STATE_PATH = orig_path
+
+    return call_count["n"]
+
+
+def test_cascade_defers_read_when_consolidation_intent_pending(
+    store: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent_flag = store.root / "hippo" / ".consolidation-pending"
+    intent_flag.parent.mkdir(parents=True, exist_ok=True)
+    intent_flag.write_text("")
+
+    call_count = _drive_one_cascade_iteration(store, tmp_path, monkeypatch)
+
+    assert call_count == 0, (
+        f"cascade must defer (skip build_runtime_graph) while the "
+        f"consolidation intent flag is present; got {call_count} calls"
+    )
+
+
+def test_cascade_reads_when_no_consolidation_intent(
+    store: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent_flag = store.root / "hippo" / ".consolidation-pending"
+    assert not intent_flag.exists()
+
+    call_count = _drive_one_cascade_iteration(store, tmp_path, monkeypatch)
+
+    assert call_count >= 1, (
+        f"cascade must run build_runtime_graph when no consolidation intent "
+        f"is signaled; got {call_count} calls"
+    )

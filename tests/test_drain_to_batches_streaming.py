@@ -179,13 +179,27 @@ def test_drain_is_lazy_first_batch_does_not_drain_cursor(tmp_path: Path) -> None
         tbl = store.db.open_table(RECORDS_TABLE)
         query = tbl.search().select(["id", "embedding"])
 
-        spy = _SpyConnection(query._conn)
-        query._conn = spy  # type: ignore[assignment]
+        # to_batches drains from a dedicated read-only snapshot connection (so a
+        # full scan never holds the shared _conn_lock across the consumer). Wrap
+        # that snapshot connection in the fetch-counting spy to observe laziness.
+        spy_holder: list[_SpyConnection] = []
+        _orig_open_snapshot = query._open_snapshot_conn
+
+        def _spy_open_snapshot(db_path):
+            spy = _SpyConnection(_orig_open_snapshot(db_path))
+            spy_holder.append(spy)
+            return spy
+
+        query._open_snapshot_conn = _spy_open_snapshot  # type: ignore[assignment]
 
         gen = query.to_batches(batch_size=batch_size)
 
         first = next(gen)
         assert first.num_rows == batch_size
+
+        # The snapshot connection is opened lazily, on the first pull.
+        assert len(spy_holder) == 1
+        spy = spy_holder[0]
 
         # A true generator has fetched exactly ONE chunk so far. A
         # materializing drain would have fetched the whole corpus

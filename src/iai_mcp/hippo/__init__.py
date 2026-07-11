@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import errno
+import fcntl
 import logging
 import os
 import re
@@ -117,6 +118,78 @@ _SHARED_RETRY_SLEEP_S: float = 0.040
 _SHARED_MAX_RETRIES: int = 30
 _SHARED_LOCK_TIMEOUT_S: float = 1.45
 
+# Staleness ceiling for the .consolidation-pending intent file. The primary
+# liveness discriminator is the holder PID written into the intent: if that PID
+# is no longer alive the intent is orphaned (the daemon that set it crashed) and
+# is removed on the spot, so a dead daemon can never gate a write. This time
+# ceiling is the secondary safety net for the PID-can't-be-read case (legacy or
+# truncated intent, or a recycled PID): an intent older than this is treated as
+# stale even if some live process happens to hold the same PID. It is set far
+# above the longest legitimate consolidation window so a real in-progress
+# consolidation is never misjudged as stale.
+_CONSOLIDATION_INTENT_TTL_S: float = 900.0
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _consolidation_intent_is_stale(intent_path: Path) -> bool:
+    """True when the consolidation intent is orphaned and safe to remove.
+
+    A live in-progress consolidation writes its PID (and a timestamp) into the
+    intent and holds the EXCLUSIVE flock for the whole window — its PID is alive,
+    so this returns False and the direct write correctly defers. A SIGKILL'd
+    daemon leaves the regular intent file behind with no live holder: its PID is
+    dead (primary signal) or the intent is unreadable/legacy, so this returns
+    True and the caller removes the orphan and proceeds.
+    """
+    try:
+        raw = intent_path.read_text()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Unreadable intent → treat as orphaned rather than wedge forever.
+        return True
+
+    lines = raw.split("\n")
+    pid_s = lines[0].strip() if lines else ""
+    ts_s = lines[1].strip() if len(lines) > 1 else ""
+
+    if pid_s:
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            return True
+        if not _pid_alive(pid):
+            return True
+        # Holder PID is alive — only the time ceiling can override (recycled PID).
+        if ts_s:
+            try:
+                age = time.time() - float(ts_s)
+            except ValueError:
+                return False
+            return age > _CONSOLIDATION_INTENT_TTL_S
+        return False
+
+    # No PID recorded (legacy empty intent written by an older daemon). Fall back
+    # to the mtime ceiling so a crashed legacy daemon still self-heals.
+    try:
+        age = time.time() - intent_path.stat().st_mtime
+    except OSError:
+        return True
+    return age > _CONSOLIDATION_INTENT_TTL_S
+
 
 _ENCRYPTED_RECORD_COLUMNS: tuple[str, ...] = (
     "literal_surface",
@@ -155,6 +228,8 @@ from iai_mcp.hippo._table import (
     _DDL_BUDGET_LEDGER_INDEXES,
     _DDL_RATELIMIT_LEDGER,
     _DDL_HIPPO_META,
+    _DDL_RECORD_TAGS,
+    _DDL_RECORD_TAGS_INDEXES,
     _TABLE_SQL,
 )
 
@@ -179,6 +254,8 @@ from iai_mcp.hippo._recall import (
     degraded_semantic_recall,
 )
 
+from iai_mcp.hippo._raw_open import open_store_conn
+
 __all__ = [
     "AccessMode",
     "ConsolidationPendingError",
@@ -196,5 +273,6 @@ __all__ = [
     "load_hnsw_readonly",
     "_ann_lookup_client",
     "degraded_semantic_recall",
+    "open_store_conn",
     "EMBED_DIM",
 ]

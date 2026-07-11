@@ -206,6 +206,37 @@ def test_reembed_skips_records_with_empty_text(reembed_home):
     assert result["total"] == len(ids), result
 
 
+def test_reembed_invalidates_exact_index(reembed_home, monkeypatch):
+    """The migration rewrites embeddings in place; the resident exact-cosine
+    matrix (if warm) must be invalidated alongside the hnsw rebuild and the
+    runtime graph cache drop, so a subsequent exact_top_k call rebuilds from
+    the corrected vectors rather than serving a stale pre-correction
+    snapshot."""
+    from iai_mcp.embed import embedder_for_store
+    from iai_mcp.migrate import migrate_reembed_from_text
+
+    store = _open_store()
+    embedder = embedder_for_store(store)
+    _seed_broken(store, embedder)
+
+    calls: list[bool] = []
+    real_invalidate = store.invalidate_exact_index
+
+    def _spy_invalidate():
+        calls.append(True)
+        return real_invalidate()
+
+    monkeypatch.setattr(store, "invalidate_exact_index", _spy_invalidate)
+
+    result = migrate_reembed_from_text(store)
+    assert result["reembedded"] > 0, result
+
+    assert calls, (
+        "migrate_reembed_from_text must call store.invalidate_exact_index() "
+        "after rewriting embeddings in place"
+    )
+
+
 def test_reembed_dry_run_changes_nothing(reembed_home):
     from iai_mcp.embed import embedder_for_store
     from iai_mcp.migrate import migrate_reembed_from_text

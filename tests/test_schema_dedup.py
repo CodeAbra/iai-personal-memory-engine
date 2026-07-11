@@ -9,7 +9,6 @@ from iai_mcp.events import query_events
 from iai_mcp.store import EDGES_TABLE, MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 def _rec(
     *,
     text: str = "t",
@@ -41,7 +40,6 @@ def _rec(
         language=language,
     )
 
-
 @pytest.fixture(autouse=True)
 def _patch_embedder(monkeypatch):
     from iai_mcp import embed as embed_mod
@@ -63,17 +61,15 @@ def _patch_embedder(monkeypatch):
     monkeypatch.setattr(embed_mod, "Embedder", _FakeEmbedder)
     yield
 
-
 def test_events_module_docstring_lists_schema_reinforced():
     import iai_mcp.events as events_mod
 
     doc = events_mod.__doc__ or ""
     assert "schema_reinforced" in doc, (
         "events.py module docstring missing `schema_reinforced` taxonomy entry. "
-        "Add an additions block after the AUTIST-13 "
-        "section listing the new event kind, payload schema, and source_ids note."
+        "Add it after the AUTIST-13 section listing the new event kind, "
+        "payload schema, and source_ids note."
     )
-
 
 def test_write_event_accepts_schema_reinforced_kind(tmp_path):
     from iai_mcp.events import write_event
@@ -104,13 +100,11 @@ def test_write_event_accepts_schema_reinforced_kind(tmp_path):
     assert payload["total_evidence"] == 5
     assert payload["schema_id"] == str(keeper_id)
 
-
 def _seed_evidence(store: MemoryStore, n: int) -> list[MemoryRecord]:
     recs = [_rec(text=f"ev{i}", tags=["capture", "role:user"]) for i in range(n)]
     for r in recs:
         store.insert(r)
     return recs
-
 
 def test_persist_schema_dedups_same_pattern(tmp_path):
     from iai_mcp.schema import SchemaCandidate, persist_schema
@@ -137,7 +131,6 @@ def test_persist_schema_dedups_same_pattern(tmp_path):
     assert len(schemas) == 1, (
         f"expected exactly one schema for pattern {pattern!r}, got {len(schemas)}"
     )
-
 
 def test_persist_schema_reinforces_edges_on_dedup(tmp_path):
     from iai_mcp.schema import SchemaCandidate, persist_schema
@@ -177,7 +170,6 @@ def test_persist_schema_reinforces_edges_on_dedup(tmp_path):
         if r.tier == "semantic" and pattern_tag in (r.tags or [])
     ]
     assert len(keepers) == 1
-
 
 def test_persist_schema_emits_schema_reinforced_event(tmp_path):
     from iai_mcp.schema import SchemaCandidate, persist_schema
@@ -223,7 +215,6 @@ def test_persist_schema_emits_schema_reinforced_event(tmp_path):
         f"total_evidence should grow over time; saw {totals}"
     )
 
-
 def test_persist_schema_returns_keeper_id(tmp_path):
     from iai_mcp.schema import SchemaCandidate, persist_schema
 
@@ -246,7 +237,6 @@ def test_persist_schema_returns_keeper_id(tmp_path):
     assert all(rid == first for rid in returned_ids), (
         f"persist_schema should return the keeper id on every call; got {returned_ids}"
     )
-
 
 def test_persist_schema_does_not_collapse_distinct_patterns(tmp_path):
     from iai_mcp.schema import SchemaCandidate, persist_schema

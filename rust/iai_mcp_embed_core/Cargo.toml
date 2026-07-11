@@ -13,7 +13,7 @@ crate-type = ["rlib"]    # only the native wrapper crate (iai_mcp_native) ships 
 default          = []
 accelerate       = ["dep:accelerate-src", "candle-core/accelerate", "candle-nn/accelerate"]
 metal            = ["candle-core/metal", "candle-nn/metal"]
-extension-module = ["pyo3/extension-module"]   # opt-in; activated by maturin via pyproject.toml ONLY
+extension-module = ["pyo3/extension-module"]   # opt-in; activated by maturin via pyproject.toml ONLY (Pitfall 8)
 
 [dependencies]
 candle-core    = { workspace = true }
@@ -27,6 +27,7 @@ pyo3-stub-gen  = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 thiserror      = { workspace = true }
+rayon          = "1.10"
 
 [dev-dependencies]
 dirs = "5"

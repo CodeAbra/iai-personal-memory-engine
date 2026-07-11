@@ -87,7 +87,6 @@ def _detected_labels_in_node_order(assignment, nodes: list[UUID]) -> list[int]:
 
 
 def _all_communities_connected(csr, partition: np.ndarray) -> bool:
-    import scipy.sparse
     from scipy.sparse.csgraph import connected_components
     for label in np.unique(partition):
         members = np.where(partition == label)[0]
@@ -124,7 +123,7 @@ def test_refine_uses_fastmath_false() -> None:
         r"@njit\([^)]*fastmath\s*=\s*False[^)]*\)[\s\S]{0,400}?def\s+_njit_refine",
     )
     assert pattern.search(src) is not None, (
-        "Expected _njit_refine to be decorated with @njit(fastmath=False, ...)."
+        "Expected _njit_refine to be decorated with @njit(fastmath=False, ...)"
     )
 
 
@@ -170,8 +169,8 @@ def test_football_nmi_ge_090() -> None:
     nmi = normalized_mutual_info_score(leidenalg_labels, detected)
     assert nmi >= 0.85, (
         f"Football NMI(custom, leidenalg) {nmi:.4f} below 0.85 gate "
-        f"(leidenalg-parity contract, calibrated to absorb residual "
-        f"local-optima divergence); "
+        f"(leidenalg-parity contract, post-merge "
+        f"super-merge calibrated to absorb residual local-optima divergence); "
         f"detected_communities={len(set(detected))}, "
         f"leidenalg_communities={len(set(leidenalg_labels))}"
     )

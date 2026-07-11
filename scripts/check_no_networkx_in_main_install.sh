@@ -6,24 +6,24 @@
 # committing any change to the dependency tree.
 #
 # Usage:
-# python -m venv /tmp/iai-mcp-clean-check && \
-# /tmp/iai-mcp-clean-check/bin/pip install -e. && \
-# /tmp/iai-mcp-clean-check/bin/python scripts/check_no_networkx_in_main_install.sh
+#   python -m venv /tmp/iai-mcp-clean-check && \
+#     /tmp/iai-mcp-clean-check/bin/pip install -e . && \
+#     /tmp/iai-mcp-clean-check/bin/python scripts/check_no_networkx_in_main_install.sh
 #
 # Or, on an existing venv, uninstall networkx + hypothesis-networkx
 # first to simulate the no-[dev] state.
 #
 # Exit codes:
-# 0 — main install is networkx-free AND iai_mcp_native importable AND
-# MemoryGraph public API stays networkx-free at runtime.
-# 1 — iai_mcp import failed.
-# 2 — networkx loaded after `import iai_mcp` (transitive regression).
-# 3 — iai_mcp_native missing or broken.
-# 4 — iai_mcp_native.graph.__file__ resolves to an empty path, or
-# the algorithm surface is incomplete.
-# 5 — MemoryGraph runtime invariant failed (either an API call regressed
-# or a lazy `import networkx` was reintroduced into the graph
-# backend's hot path).
+#   0  — main install is networkx-free AND iai_mcp_native importable AND
+#        MemoryGraph public API stays networkx-free at runtime.
+#   1  — iai_mcp import failed.
+#   2  — networkx loaded after `import iai_mcp` (transitive regression).
+#   3  — iai_mcp_native missing or broken.
+#   4  — iai_mcp_native.graph.__file__ resolves to an empty path, or
+#        the algorithm surface is incomplete.
+#   5  — MemoryGraph runtime invariant failed (either an API call regressed
+#        or a lazy `import networkx` was reintroduced into the graph
+#        backend's hot path).
 set -euo pipefail
 
 if ! python -c "import iai_mcp" 2>/dev/null; then

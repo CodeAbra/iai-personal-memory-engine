@@ -30,7 +30,7 @@ die()  { printf '\n\033[0;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 #
 # IAI_TEST_SKIP_BUILD=1 short-circuits the whole bootstrap so the LaunchAgent
 # section (6) can be exercised in isolation by tests/test_install_uninstall.py
-# without spending ~30s on venv + npm.
+# (Plan 07.1-03 Task 3) without spending ~30s on venv + npm.
 # ---------------------------------------------------------------------------
 if [[ "${IAI_TEST_SKIP_BUILD:-0}" == "1" ]]; then
     step "build skip (IAI_TEST_SKIP_BUILD=1)"

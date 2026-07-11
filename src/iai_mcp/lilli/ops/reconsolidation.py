@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""In-RAM labile-entry tracking for retrieval-reconsolidation.
+
+Retrieval-reconsolidation is already shipped end-to-end via
+`store.reinforce_record(is_retrieval=True)` (sets `labile_until`, a SQL
+column) followed by the nightly `step_reconsolidation` critic. This module's
+`ReconsolidationBuffer` is intentionally not wired to that path: it would
+duplicate the same labile-window concept in a second, divergent (in-RAM,
+non-persistent) representation with no identified correctness gap. Kept as
+dead code deliberately, not by oversight.
+"""
+
 import logging
 import time
 from dataclasses import dataclass, field

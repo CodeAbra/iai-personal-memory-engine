@@ -10,7 +10,6 @@ from iai_mcp.crypto import CIPHERTEXT_PREFIX
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -24,7 +23,6 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
         _keyring, "delete_password", lambda s, u: fake.pop((s, u), None)
     )
     yield fake
-
 
 def _make(
     tier: str = "episodic",
@@ -56,11 +54,9 @@ def _make(
         language=language,
     )
 
-
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(path=tmp_path / "hippo")
-
+    return MemoryStore(path=tmp_path / "lancedb")
 
 def test_iter_records_yields_all_inserted(store):
     inserted_ids = set()
@@ -72,7 +68,6 @@ def test_iter_records_yields_all_inserted(store):
     iterated = list(store.iter_records())
     assert len(iterated) == 10
     assert {r.id for r in iterated} == inserted_ids
-
 
 def test_iter_records_yields_correct_dataclass_type(store):
     rec_a = _make(text="alpha", tier="episodic", tags=["t1", "t2"])
@@ -94,10 +89,8 @@ def test_iter_records_yields_correct_dataclass_type(store):
     assert by_id[rec_c.id].literal_surface == "gamma"
     assert by_id[rec_c.id].tags == []
 
-
 def test_iter_records_handles_empty_store(store):
     assert list(store.iter_records()) == []
-
 
 def test_iter_records_respects_batch_size_one(store):
     for i in range(7):
@@ -105,13 +98,11 @@ def test_iter_records_respects_batch_size_one(store):
     iterated = list(store.iter_records(batch_size=1))
     assert len(iterated) == 7
 
-
 def test_iter_records_respects_batch_size_larger_than_table(store):
     for i in range(5):
         store.insert(_make(text=f"row-{i}"))
     iterated = list(store.iter_records(batch_size=10000))
     assert len(iterated) == 5
-
 
 def test_iter_records_with_columns_projects_subset(store):
     rec_a = _make(text="alpha", tags=["tag-a"])
@@ -129,7 +120,6 @@ def test_iter_records_with_columns_projects_subset(store):
     assert by_id[rec_b.id].tags == ["tag-b"]
     assert by_id[rec_c.id].tags == ["tag-c"]
 
-
 def test_iter_records_with_where_filter(store):
     rec_e1 = _make(text="ep1", tier="episodic")
     rec_e2 = _make(text="ep2", tier="episodic")
@@ -142,7 +132,6 @@ def test_iter_records_with_where_filter(store):
     assert {r.id for r in iterated} == {rec_e1.id, rec_e2.id}
     assert all(r.tier == "episodic" for r in iterated)
 
-
 def test_iter_record_columns_returns_raw_dicts(store):
     for i in range(3):
         store.insert(_make(text=f"row-{i}", tags=[f"t{i}"]))
@@ -153,7 +142,6 @@ def test_iter_record_columns_returns_raw_dicts(store):
         assert isinstance(row, dict)
         assert set(row.keys()) == {"id", "tags_json"}
         assert "literal_surface" not in row
-
 
 def test_iter_record_columns_passes_ciphertext_through(store):
     rec = _make(text="secret content for ciphertext test")
@@ -168,10 +156,8 @@ def test_iter_record_columns_passes_ciphertext_through(store):
         f"got {row['literal_surface']!r}"
     )
 
-
 def test_iter_record_columns_handles_empty_store(store):
     assert list(store.iter_record_columns(["id"])) == []
-
 
 def test_iter_record_columns_with_where_filter(store):
     rec_e1 = _make(text="ep1", tier="episodic")
@@ -186,7 +172,6 @@ def test_iter_record_columns_with_where_filter(store):
     assert len(rows) == 2
     assert {r["id"] for r in rows} == {str(rec_e1.id), str(rec_e2.id)}
     assert all(r["tier"] == "episodic" for r in rows)
-
 
 def test_from_row_partial_row_dict_does_not_crash(store):
     minimal_row = {
@@ -213,7 +198,6 @@ def test_from_row_partial_row_dict_does_not_crash(store):
     assert rec.language == "en"
     assert isinstance(rec.created_at, datetime)
     assert isinstance(rec.updated_at, datetime)
-
 
 def test_iter_records_does_not_modify_existing_all_records_behaviour(store):
     inserted = []

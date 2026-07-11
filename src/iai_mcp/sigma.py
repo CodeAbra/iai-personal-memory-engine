@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
@@ -19,29 +18,6 @@ if TYPE_CHECKING:
 
 
 SIGMA_N_FLOOR: int = 200
-
-# Defensive upper bound on graph size for the sigma (small-worldness) audit.
-# fast_sigma() runs average_clustering + all-pairs-shortest-path on the largest
-# component AND on n_random reference graphs of the same order; that cost is
-# roughly O(n_random * (V*E + V^2)) and is unbounded as the live graph grows.
-# Above the cap we return None: the regime degrades cleanly to "insufficient_data"
-# (sigma None is already handled everywhere) and the tick stays bounded -- the
-# watchdog does NOT kill on CPU, so an unbounded sigma compute would spin a core
-# uncontained. The default is far above the current live store (~4k nodes) so it
-# never trips today; both bounds are env-overridable.
-SIGMA_N_CEIL: int = 20000
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return val if val > 0 else default
-
 
 SIGMA_MID_LIFE_THRESHOLD: int = 500
 
@@ -218,19 +194,7 @@ def fast_sigma(
 
 
 def compute_sigma(graph: "MemoryGraph", *, seed: int = 42) -> Optional[float]:
-    n = graph.node_count()
-    floor = _env_int("IAI_MCP_SIGMA_N_FLOOR", SIGMA_N_FLOOR)
-    ceil = _env_int("IAI_MCP_SIGMA_N_CEIL", SIGMA_N_CEIL)
-    if n < floor:
-        return None
-    if n > ceil:
-        # Above the defensive cap: skip the (unbounded) small-worldness compute
-        # so a single tick can never spin a core for minutes on a pathologically
-        # large graph. Reported downstream as "insufficient_data".
-        logger.warning(
-            "sigma_skipped_above_ceiling",
-            extra={"node_count": int(n), "ceil": int(ceil)},
-        )
+    if graph.node_count() < SIGMA_N_FLOOR:
         return None
     sigma_val, *_ = fast_sigma(graph, seed=seed)
     if isinstance(sigma_val, float) and math.isnan(sigma_val):

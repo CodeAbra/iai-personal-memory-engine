@@ -1,21 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
-import os
 import platform
-import signal
 import sys
 import tempfile
 import threading
-from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from iai_mcp import _ipc
 from iai_mcp import cli as cli_mod
 
 
@@ -62,20 +56,10 @@ class _ThreadedFakeDaemon:
                         pass
 
             async def _serve():
-                # Mirror the production IPC transport (_ipc): Unix-domain
-                # socket on POSIX, TCP loopback + port file on Windows
-                # (asyncio.start_unix_server does not exist on Windows).
-                if _ipc.IS_WINDOWS:
-                    self._server = await asyncio.start_server(
-                        _handle, "127.0.0.1", 0,
-                    )
-                    port = self._server.sockets[0].getsockname()[1]
-                    _ipc._write_port(port)
-                else:
-                    self.path.parent.mkdir(parents=True, exist_ok=True)
-                    self._server = await asyncio.start_unix_server(
-                        _handle, path=str(self.path),
-                    )
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._server = await asyncio.start_unix_server(
+                    _handle, path=str(self.path),
+                )
                 self._ready.set()
                 async with self._server:
                     await self._server.serve_forever()
@@ -108,20 +92,13 @@ class _ThreadedFakeDaemon:
         loop.call_soon_threadsafe(loop.stop)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
-        if _ipc.IS_WINDOWS:
-            _ipc._remove_port_file()
 
 
 @pytest.fixture
-def short_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def short_socket(tmp_path: Path) -> Path:
     candidate = tmp_path / "d.sock"
     if len(str(candidate)) > 100:
         candidate = Path(tempfile.mkdtemp(prefix="iai-clitest-")) / "d.sock"
-    # On Windows the IPC layer rendezvous via a TCP port file, not the socket
-    # path. Redirect _ipc.PORT_FILE into the temp dir so the fake daemon and
-    # the CLI client (both reference this module global) find each other,
-    # without reading or clobbering a real daemon's ~/.iai-mcp/.daemon.port.
-    monkeypatch.setattr(_ipc, "PORT_FILE", candidate.parent / ".daemon.port")
     return candidate
 
 
@@ -581,6 +558,30 @@ def test_logs_macos_invokes_tail(
     assert any(c and c[0] == "tail" for c in calls), calls
 
 
+def test_logs_macos_tail_path_matches_launchd_write_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS tail argv must point at the path the launchd plist writes to."""
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda argv, **k: (calls.append(list(argv)) or type("R", (), {"returncode": 0})()),
+    )
+    rc = cli_mod.main(["daemon", "logs", "-n", "20"])
+    assert rc == 0
+    tail_calls = [c for c in calls if c and c[0] == "tail"]
+    assert tail_calls, "expected at least one tail invocation"
+    # The last element of the argv is the file path passed to tail.
+    tailed_path = tail_calls[0][-1]
+    # Must end with the path both launchd plists write to.
+    assert tailed_path.endswith(".iai-mcp/logs/launchd-stderr.log"), (
+        f"tail path {tailed_path!r} does not match launchd StandardErrorPath "
+        f"(.iai-mcp/logs/launchd-stderr.log)"
+    )
+
+
 def test_logs_linux_invokes_journalctl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -734,10 +735,6 @@ def test_stop_bootout_precedes_sigterm(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ("kill", 4242, sig.SIGTERM) in calls
 
 
-@pytest.mark.skipif(
-    not hasattr(signal, "SIGKILL"),
-    reason="SIGKILL escalation is POSIX-only; Windows os.kill has no SIGKILL",
-)
 def test_stop_escalates_to_sigkill_when_pid_survives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -763,10 +760,6 @@ def test_stop_escalates_to_sigkill_when_pid_survives(
     assert ("kill", 5151, sig.SIGTERM) in calls
 
 
-@pytest.mark.skipif(
-    not hasattr(signal, "SIGKILL"),
-    reason="SIGKILL escalation is POSIX-only; Windows os.kill has no SIGKILL",
-)
 def test_stop_no_sigkill_when_pid_dies_during_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

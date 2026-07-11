@@ -4,7 +4,6 @@ import argparse
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import pytest
 
 
 def _seed_pinned_l1(store, n=3):

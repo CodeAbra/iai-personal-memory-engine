@@ -34,7 +34,7 @@ def test_literal_surface_roundtrip_exact(tmp_path, text):
     got = store.get(rec_id)
     assert got is not None, f"Record {rec_id} not found after insert"
     assert got.literal_surface == text, (
-        f"MEM-01 VIOLATION: literal_surface mutated.\n"
+        f"literal_surface mutated.\n"
         f"  Expected: {text!r}\n"
         f"  Got:      {got.literal_surface!r}"
     )
@@ -49,7 +49,7 @@ def test_literal_surface_survives_multiple_inserts(tmp_path):
 
     for rid, expected in originals.items():
         got = store.get(rid)
-        assert got.literal_surface == expected, f"MEM-01 violation on record {rid}"
+        assert got.literal_surface == expected, f"literal_surface mutated on record {rid}"
 
 def test_literal_surface_not_trimmed(tmp_path):
     store = MemoryStore(str(tmp_path))
@@ -57,4 +57,4 @@ def test_literal_surface_not_trimmed(tmp_path):
     rec = _record(text)
     store.insert(rec)
     got = store.get(rec.id)
-    assert got.literal_surface == text, "Whitespace was trimmed — MEM-01 violation"
+    assert got.literal_surface == text, "Whitespace was trimmed"

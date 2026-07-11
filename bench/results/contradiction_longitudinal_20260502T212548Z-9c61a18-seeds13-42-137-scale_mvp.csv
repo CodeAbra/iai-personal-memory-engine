@@ -1,0 +1,601 @@
+probe_id,seed,n_slice,condition,topic,pipeline_rank,cosine_rank,pipeline_hit_at_k,cosine_hit_at_k,pipeline_top1_text
+post-0000-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0001-13,13,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0002-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0003-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0004-13,13,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0005-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0006-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0007-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0008-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0009-13,13,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0010-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0011-13,13,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0012-13,13,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0013-13,13,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0014-13,13,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0015-13,13,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0016-13,13,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0017-13,13,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0018-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0019-13,13,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0020-13,13,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0021-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0022-13,13,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0023-13,13,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0024-13,13,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0025-13,13,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0026-13,13,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0027-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0028-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0029-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0030-13,13,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0031-13,13,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0032-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0033-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0034-13,13,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0035-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0036-13,13,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0037-13,13,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0038-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0039-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0040-13,13,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0041-13,13,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0042-13,13,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0043-13,13,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0044-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0045-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0046-13,13,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0047-13,13,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0048-13,13,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0049-13,13,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+hist-0000-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0001-13,13,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0002-13,13,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0003-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0004-13,13,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0005-13,13,0,historical_verbatim,price_usd,4,19,1,0,Pricing updated: annual subscription is now $349.
+hist-0006-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0007-13,13,0,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0008-13,13,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0009-13,13,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0010-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0011-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0012-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0013-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0014-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0015-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0016-13,13,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0017-13,13,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0018-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0019-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0020-13,13,0,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0021-13,13,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0022-13,13,0,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0023-13,13,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0024-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0025-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0026-13,13,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0027-13,13,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0028-13,13,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0029-13,13,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0030-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0031-13,13,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0032-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0033-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0034-13,13,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0035-13,13,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0036-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0037-13,13,0,historical_verbatim,price_usd,4,19,1,0,Pricing updated: annual subscription is now $349.
+hist-0038-13,13,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0039-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0040-13,13,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0041-13,13,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0042-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0043-13,13,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0044-13,13,0,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0045-13,13,0,historical_verbatim,price_usd,4,19,1,0,Pricing updated: annual subscription is now $349.
+hist-0046-13,13,0,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0047-13,13,0,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0048-13,13,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0049-13,13,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+post-0000-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0001-13,13,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0002-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0003-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0004-13,13,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0005-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0006-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0007-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0008-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0009-13,13,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0010-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0011-13,13,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0012-13,13,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0013-13,13,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0014-13,13,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0015-13,13,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0016-13,13,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0017-13,13,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0018-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0019-13,13,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0020-13,13,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0021-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0022-13,13,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0023-13,13,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0024-13,13,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0025-13,13,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0026-13,13,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0027-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0028-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0029-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0030-13,13,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0031-13,13,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0032-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0033-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0034-13,13,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0035-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0036-13,13,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0037-13,13,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0038-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0039-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0040-13,13,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0041-13,13,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0042-13,13,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0043-13,13,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0044-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0045-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0046-13,13,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0047-13,13,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0048-13,13,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0049-13,13,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+hist-0000-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0001-13,13,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0002-13,13,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0003-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0004-13,13,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0005-13,13,1,historical_verbatim,price_usd,4,19,1,0,Pricing updated: annual subscription is now $349.
+hist-0006-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0007-13,13,1,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0008-13,13,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0009-13,13,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0010-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0011-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0012-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0013-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0014-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0015-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0016-13,13,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0017-13,13,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0018-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0019-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0020-13,13,1,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0021-13,13,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0022-13,13,1,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0023-13,13,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0024-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0025-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0026-13,13,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0027-13,13,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0028-13,13,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0029-13,13,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0030-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0031-13,13,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0032-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0033-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0034-13,13,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0035-13,13,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0036-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0037-13,13,1,historical_verbatim,price_usd,4,19,1,0,Pricing updated: annual subscription is now $349.
+hist-0038-13,13,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0039-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0040-13,13,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0041-13,13,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0042-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0043-13,13,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0044-13,13,1,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0045-13,13,1,historical_verbatim,price_usd,4,19,1,0,Pricing updated: annual subscription is now $349.
+hist-0046-13,13,1,historical_verbatim,supplier_name,3,41,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0047-13,13,1,historical_verbatim,bug_fix_eta,3,22,1,0,Fix ETA revised: week 18.
+hist-0048-13,13,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0049-13,13,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+post-0000-42,42,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0001-42,42,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0002-42,42,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0003-42,42,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0004-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0005-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0006-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0007-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0008-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0009-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0010-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0011-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0012-42,42,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0013-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0014-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0015-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0016-42,42,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0017-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0018-42,42,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0019-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0020-42,42,0,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0021-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0022-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0023-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0024-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0025-42,42,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0026-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0027-42,42,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0028-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0029-42,42,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0030-42,42,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0031-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0032-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0033-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0034-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0035-42,42,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0036-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0037-42,42,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0038-42,42,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0039-42,42,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0040-42,42,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0041-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0042-42,42,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0043-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0044-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0045-42,42,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0046-42,42,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0047-42,42,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0048-42,42,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0049-42,42,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+hist-0000-42,42,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0001-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0002-42,42,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0003-42,42,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0004-42,42,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0005-42,42,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0006-42,42,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0007-42,42,0,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0008-42,42,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0009-42,42,0,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0010-42,42,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0011-42,42,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0012-42,42,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0013-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0014-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0015-42,42,0,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0016-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0017-42,42,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0018-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0019-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0020-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0021-42,42,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0022-42,42,0,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0023-42,42,0,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0024-42,42,0,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0025-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0026-42,42,0,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0027-42,42,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0028-42,42,0,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0029-42,42,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0030-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0031-42,42,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0032-42,42,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0033-42,42,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0034-42,42,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0035-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0036-42,42,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0037-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0038-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0039-42,42,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0040-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0041-42,42,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0042-42,42,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0043-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0044-42,42,0,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0045-42,42,0,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0046-42,42,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0047-42,42,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0048-42,42,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0049-42,42,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+post-0000-42,42,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0001-42,42,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0002-42,42,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0003-42,42,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0004-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0005-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0006-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0007-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0008-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0009-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0010-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0011-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0012-42,42,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0013-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0014-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0015-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0016-42,42,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0017-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0018-42,42,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0019-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0020-42,42,1,post_flip,api_version,1,1,1,1,API rolled forward to version 3.0.
+post-0021-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0022-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0023-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0024-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0025-42,42,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0026-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0027-42,42,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0028-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0029-42,42,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0030-42,42,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0031-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0032-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0033-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0034-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0035-42,42,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0036-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0037-42,42,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0038-42,42,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0039-42,42,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0040-42,42,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0041-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0042-42,42,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0043-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0044-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0045-42,42,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0046-42,42,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0047-42,42,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0048-42,42,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0049-42,42,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+hist-0000-42,42,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0001-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0002-42,42,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0003-42,42,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0004-42,42,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0005-42,42,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0006-42,42,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0007-42,42,1,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0008-42,42,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0009-42,42,1,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0010-42,42,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0011-42,42,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0012-42,42,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0013-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0014-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0015-42,42,1,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0016-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0017-42,42,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0018-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0019-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0020-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0021-42,42,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0022-42,42,1,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0023-42,42,1,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0024-42,42,1,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0025-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0026-42,42,1,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0027-42,42,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0028-42,42,1,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+hist-0029-42,42,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0030-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0031-42,42,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0032-42,42,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0033-42,42,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0034-42,42,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0035-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0036-42,42,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0037-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0038-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0039-42,42,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0040-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0041-42,42,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0042-42,42,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0043-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0044-42,42,1,historical_verbatim,bug_fix_eta,3,31,1,0,Fix ETA revised: week 18.
+hist-0045-42,42,1,historical_verbatim,price_usd,4,15,1,0,Pricing updated: annual subscription is now $349.
+hist-0046-42,42,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0047-42,42,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0048-42,42,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0049-42,42,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+post-0000-137,137,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0001-137,137,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0002-137,137,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0003-137,137,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0004-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0005-137,137,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0006-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0007-137,137,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0008-137,137,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0009-137,137,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0010-137,137,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0011-137,137,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0012-137,137,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0013-137,137,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0014-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0015-137,137,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0016-137,137,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0017-137,137,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0018-137,137,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0019-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0020-137,137,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0021-137,137,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0022-137,137,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0023-137,137,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0024-137,137,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0025-137,137,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0026-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0027-137,137,0,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0028-137,137,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0029-137,137,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0030-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0031-137,137,0,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0032-137,137,0,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0033-137,137,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0034-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0035-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0036-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0037-137,137,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0038-137,137,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0039-137,137,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0040-137,137,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0041-137,137,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0042-137,137,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0043-137,137,0,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0044-137,137,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0045-137,137,0,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0046-137,137,0,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0047-137,137,0,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0048-137,137,0,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0049-137,137,0,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+hist-0000-137,137,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0001-137,137,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0002-137,137,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0003-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0004-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0005-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0006-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0007-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0008-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0009-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0010-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0011-137,137,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0012-137,137,0,historical_verbatim,bug_fix_eta,3,25,1,0,Fix ETA revised: week 18.
+hist-0013-137,137,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0014-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0015-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0016-137,137,0,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0017-137,137,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0018-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0019-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0020-137,137,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0021-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0022-137,137,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0023-137,137,0,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0024-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0025-137,137,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0026-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0027-137,137,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0028-137,137,0,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0029-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0030-137,137,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0031-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0032-137,137,0,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0033-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0034-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0035-137,137,0,historical_verbatim,bug_fix_eta,3,25,1,0,Fix ETA revised: week 18.
+hist-0036-137,137,0,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0037-137,137,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0038-137,137,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0039-137,137,0,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0040-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0041-137,137,0,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0042-137,137,0,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0043-137,137,0,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0044-137,137,0,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0045-137,137,0,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0046-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0047-137,137,0,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0048-137,137,0,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0049-137,137,0,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.
+post-0000-137,137,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0001-137,137,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0002-137,137,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0003-137,137,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0004-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0005-137,137,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0006-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0007-137,137,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0008-137,137,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0009-137,137,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0010-137,137,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0011-137,137,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0012-137,137,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0013-137,137,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0014-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0015-137,137,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0016-137,137,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0017-137,137,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0018-137,137,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0019-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0020-137,137,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0021-137,137,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0022-137,137,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0023-137,137,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0024-137,137,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0025-137,137,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0026-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0027-137,137,1,post_flip,dependency_lib,2,2,1,1,We use OpenSSL for crypto.
+post-0028-137,137,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0029-137,137,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0030-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0031-137,137,1,post_flip,ceo_name,1,1,1,1,Update: the actual CEO is Marcus Chen.
+post-0032-137,137,1,post_flip,conference_city,2,2,1,1,Annual conference will be in Berlin.
+post-0033-137,137,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0034-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0035-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0036-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0037-137,137,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0038-137,137,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0039-137,137,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0040-137,137,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0041-137,137,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0042-137,137,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0043-137,137,1,post_flip,hq_city,2,2,1,1,"Headquarters in Austin, Texas."
+post-0044-137,137,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+post-0045-137,137,1,post_flip,budget_ceiling,2,2,1,1,Q3 budget ceiling is $50k.
+post-0046-137,137,1,post_flip,launch_date,2,2,1,1,The product launches on 2026-06-01.
+post-0047-137,137,1,post_flip,bug_fix_eta,2,2,1,1,The fix ships in week 14.
+post-0048-137,137,1,post_flip,price_usd,1,1,1,1,Pricing updated: annual subscription is now $349.
+post-0049-137,137,1,post_flip,supplier_name,2,2,1,1,We source components from Acme Industries.
+hist-0000-137,137,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0001-137,137,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0002-137,137,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0003-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0004-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0005-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0006-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0007-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0008-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0009-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0010-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0011-137,137,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0012-137,137,1,historical_verbatim,bug_fix_eta,3,25,1,0,Fix ETA revised: week 18.
+hist-0013-137,137,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0014-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0015-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0016-137,137,1,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0017-137,137,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0018-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0019-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0020-137,137,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0021-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0022-137,137,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0023-137,137,1,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0024-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0025-137,137,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0026-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0027-137,137,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0028-137,137,1,historical_verbatim,conference_city,2,3,1,1,Conference venue changed: it will be in Lisbon.
+hist-0029-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0030-137,137,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0031-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0032-137,137,1,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0033-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0034-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0035-137,137,1,historical_verbatim,bug_fix_eta,3,25,1,0,Fix ETA revised: week 18.
+hist-0036-137,137,1,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0037-137,137,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0038-137,137,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0039-137,137,1,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0040-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0041-137,137,1,historical_verbatim,budget_ceiling,1,1,1,1,Q3 budget ceiling is $50k.
+hist-0042-137,137,1,historical_verbatim,ceo_name,2,3,1,1,Update: the actual CEO is Marcus Chen.
+hist-0043-137,137,1,historical_verbatim,price_usd,4,16,1,0,Pricing updated: annual subscription is now $349.
+hist-0044-137,137,1,historical_verbatim,dependency_lib,1,1,1,1,We use OpenSSL for crypto.
+hist-0045-137,137,1,historical_verbatim,hq_city,2,3,1,1,"Headquarters relocated to Boulder, Colorado."
+hist-0046-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0047-137,137,1,historical_verbatim,launch_date,2,3,1,1,Correction: launch moved to 2026-09-01.
+hist-0048-137,137,1,historical_verbatim,api_version,2,3,1,1,API rolled forward to version 3.0.
+hist-0049-137,137,1,historical_verbatim,supplier_name,3,26,1,0,Switched supplier: components now from Northwind Manufacturing.

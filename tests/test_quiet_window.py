@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import pytest
 
 def _fresh_store(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
@@ -21,7 +19,6 @@ def _seed_sessions(
     days: int = 7,
     sessions_per_hour: int = 3,
 ) -> None:
-    from iai_mcp.events import write_event
     for d in range(days):
         for h in hours:
             for s in range(sessions_per_hour):
@@ -56,7 +53,6 @@ def _insert_event_direct(store, *, kind: str, ts: datetime, data: dict) -> None:
 
 def test_western_9_to_5_user(tmp_path, monkeypatch):
     from iai_mcp.quiet_window import (
-        BUCKET_COUNT,
         BUCKET_MINUTES,
         learn_quiet_window,
     )

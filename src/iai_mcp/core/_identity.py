@@ -27,7 +27,7 @@ def _load_l0_identity_seed() -> str:
     )
     if os.path.isfile(config_path):
         try:
-            with open(config_path, encoding="utf-8") as f:
+            with open(config_path) as f:
                 cfg = json.load(f)
             identity = cfg.get("identity", {})
             parts = []
@@ -54,12 +54,22 @@ def _seed_l0_identity(store: MemoryStore) -> None:
         return
     now = datetime.now(timezone.utc)
     seed_dim = store.embed_dim
+    surface = _load_l0_identity_seed()
+    # The identity anchor must be semantically findable: a zero-embedded seed
+    # has cosine ~0 to every cue and never surfaces on identity questions.
+    # Embed failure degrades to zeros (seeding must not block store init) —
+    # the record stays verbatim/lexically findable either way.
+    try:
+        from iai_mcp.embed import embedder_for_store
+        seed_embedding = list(embedder_for_store(store).embed(surface))
+    except Exception:  # noqa: BLE001 -- init must not fail on the embedder
+        seed_embedding = [0.0] * seed_dim
     seed = MemoryRecord(
         id=L0_ID,
         tier="semantic",
-        literal_surface=_load_l0_identity_seed(),
+        literal_surface=surface,
         aaak_index="",
-        embedding=[0.0] * seed_dim,
+        embedding=seed_embedding,
         community_id=None,
         centrality=1.0,
         detail_level=5,

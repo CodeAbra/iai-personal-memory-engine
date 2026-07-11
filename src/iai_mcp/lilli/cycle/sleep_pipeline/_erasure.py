@@ -69,7 +69,7 @@ def step_erasure_agent(
         try:
             tbl.update(
                 where=eligibility_where,
-                values={"tombstoned_at": now},
+                values={"tombstoned_at": now, "live": 0},
             )
         except Exception as exc:  # noqa: BLE001 -- visibility over crash
             logger.error("erasure_agent tombstone mutation failed: %s", exc, exc_info=True)
@@ -87,6 +87,24 @@ def step_erasure_agent(
                 severity="warning",
             )
             raise
+        # The tombstone succeeded: rows moved from active to tombstoned, so the
+        # active count decreased.  Invalidate the cached active count so the next
+        # active_records_count() call recomputes from the post-tombstone SQL state.
+        try:
+            _inv = getattr(self._store, "_invalidate_corpus_count", None)
+            if _inv is not None:
+                _inv("active")
+        except Exception:  # noqa: BLE001 -- invalidation must not crash a sleep step
+            pass
+        # Rows just moved from active to tombstoned: invalidate the resident
+        # exact-cosine matrix so it never continues to serve a now-tombstoned
+        # id — the next exact_top_k rebuilds tombstone-filtered.
+        try:
+            _inv_x = getattr(self._store, "invalidate_exact_index", None)
+            if callable(_inv_x):
+                _inv_x()
+        except Exception:  # noqa: BLE001 -- invalidation must not crash a sleep step
+            pass
 
     write_event(
         self._store,

@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_codebooks.py",
+  "name": "bsc_roles_4096",
+  "payload": null,
+  "sha256": "e30cf80a6c66f6eee6cccc5ec5af1739b61395fa28d894a5b18b6eb76b3fb9bd",
+  "shape": [
+    18,
+    512
+  ],
+  "source": "src/iai_mcp/lilli/tiers/bsc.py role_hv(role, D=4096)",
+  "subsystem": "hdc"
+}

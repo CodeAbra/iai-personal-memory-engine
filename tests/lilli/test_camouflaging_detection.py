@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from iai_mcp.events import query_events, write_event
 from iai_mcp.store import MemoryStore
@@ -67,7 +66,6 @@ def test_detect_camouflaging_rising_but_low_mean_no_detect(tmp_path):
 
 def test_run_weekly_pass_emits_events_and_bumps_knob(tmp_path):
     from iai_mcp.camouflaging import run_weekly_pass
-    from iai_mcp.profile import profile_get
 
     import iai_mcp.core as core
     core._profile_state["camouflaging_relaxation"] = 0.0

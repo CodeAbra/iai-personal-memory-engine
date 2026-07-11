@@ -108,7 +108,7 @@ def induce_schemas_tier1(
         data={
             "component": "schema_induction",
             "tier": "tier0_fallback",
-            "reason": "v7.5_subscription_only",
+            "reason": "subscription_only",
         },
         severity="info",
     )
@@ -139,19 +139,15 @@ def _majority_language(evidence_ids: list[UUID], store: MemoryStore) -> str:
     return best
 
 
-def persist_schema(
-    store: MemoryStore,
-    candidate: SchemaCandidate,
-) -> UUID:
-    from iai_mcp.aaak import enforce_language_tagged, generate_aaak_index
-    from iai_mcp.embed import embedder_for_store
+def build_pattern_keeper_map(store: MemoryStore) -> "dict[str, UUID]":
+    """One corpus scan resolving every semantic keeper's `pattern:*` tag.
 
-    summary = (
-        f"Schema: {candidate.pattern} (confidence={candidate.confidence:.2f})"
-    )
-
-    pattern_tag = f"pattern:{candidate.pattern}"
-    existing_keeper_id: UUID | None = None
+    A loop persisting MANY candidates must build this once and hand it to
+    each persist_schema call: the per-candidate fallback below walks the
+    whole corpus, and rescanning it per candidate starves every other store
+    consumer for the length of the induction run.
+    """
+    keeper_map: "dict[str, UUID]" = {}
     try:
         for row in store.iter_record_columns(
             ["id", "tier", "tags_json"], batch_size=1024
@@ -163,19 +159,67 @@ def persist_schema(
                 tags = json.loads(tags_raw) if tags_raw else []
             except (TypeError, json.JSONDecodeError):
                 tags = []
-            if pattern_tag in tags:
-                id_raw = row.get("id")
-                if id_raw is None:
-                    continue
-                try:
-                    existing_keeper_id = (
-                        UUID(id_raw) if isinstance(id_raw, str) else id_raw
-                    )
-                except (ValueError, AttributeError):
-                    continue
-                break
+            id_raw = row.get("id")
+            if id_raw is None:
+                continue
+            for tag in tags:
+                if (
+                    isinstance(tag, str)
+                    and tag.startswith("pattern:")
+                    and tag not in keeper_map
+                ):
+                    try:
+                        keeper_map[tag] = (
+                            UUID(id_raw) if isinstance(id_raw, str) else id_raw
+                        )
+                    except (ValueError, AttributeError):
+                        continue
     except (OSError, RuntimeError, ValueError, KeyError):
-        existing_keeper_id = None
+        return keeper_map
+    return keeper_map
+
+
+def persist_schema(
+    store: MemoryStore,
+    candidate: SchemaCandidate,
+    keeper_map: "dict[str, UUID] | None" = None,
+) -> UUID:
+    from iai_mcp.aaak import enforce_language_tagged, generate_aaak_index
+    from iai_mcp.embed import embedder_for_store
+
+    summary = (
+        f"Schema: {candidate.pattern} (confidence={candidate.confidence:.2f})"
+    )
+
+    pattern_tag = f"pattern:{candidate.pattern}"
+    existing_keeper_id: UUID | None = None
+    if keeper_map is not None:
+        existing_keeper_id = keeper_map.get(pattern_tag)
+    else:
+        try:
+            for row in store.iter_record_columns(
+                ["id", "tier", "tags_json"], batch_size=1024
+            ):
+                if row.get("tier") != "semantic":
+                    continue
+                tags_raw = row.get("tags_json") or "[]"
+                try:
+                    tags = json.loads(tags_raw) if tags_raw else []
+                except (TypeError, json.JSONDecodeError):
+                    tags = []
+                if pattern_tag in tags:
+                    id_raw = row.get("id")
+                    if id_raw is None:
+                        continue
+                    try:
+                        existing_keeper_id = (
+                            UUID(id_raw) if isinstance(id_raw, str) else id_raw
+                        )
+                    except (ValueError, AttributeError):
+                        continue
+                    break
+        except (OSError, RuntimeError, ValueError, KeyError):
+            existing_keeper_id = None
 
     if existing_keeper_id is not None:
         from iai_mcp.store import EDGES_TABLE
@@ -190,12 +234,14 @@ def persist_schema(
             )
 
         try:
-            edges_df = store.db.open_table(EDGES_TABLE).to_pandas()
+            # Filtered COUNT, never to_pandas: materializing the whole edges
+            # table per persisted candidate starves the store for the run.
             keeper_str = str(existing_keeper_id)
             total_evidence = int(
-                ((edges_df["edge_type"] == "schema_instance_of")
-                 & ((edges_df["dst"] == keeper_str)
-                    | (edges_df["src"] == keeper_str))).sum()
+                store.db.open_table(EDGES_TABLE).count_rows(
+                    "edge_type = 'schema_instance_of'"
+                    f" AND (dst = '{keeper_str}' OR src = '{keeper_str}')"
+                )
             )
         except (OSError, RuntimeError, ValueError, KeyError):
             total_evidence = len(candidate.evidence_ids)

@@ -262,6 +262,27 @@ def migrate_reembed_from_text(
 
     if not dry_run and reembedded > 0:
         rebuild = db._rebuild_index_from_sqlite()
+        # The corpus vectors changed in place but the corpus count did not, so the
+        # warm graph's staleness-window cache key never flips. Drop the snapshot so
+        # the next build re-streams the corrected vectors into community gating and
+        # centrality instead of reusing the stale node set. Key-free unlink; the
+        # AES fence is untouched.
+        try:
+            from iai_mcp import runtime_graph_cache as _rgc
+            _rgc.invalidate(store)
+        except Exception:  # noqa: BLE001 -- invalidation must never break migration
+            pass
+        # The resident exact-cosine matrix (if warm) is now stale in the same
+        # way: it holds the pre-correction vectors for these ids. Invalidate
+        # it alongside the other two derived structures so the next
+        # exact_top_k rebuild reads the corrected embeddings, never a stale
+        # snapshot with live ids but wrong scores.
+        try:
+            _inv_exact = getattr(store, "invalidate_exact_index", None)
+            if callable(_inv_exact):
+                _inv_exact()
+        except Exception:  # noqa: BLE001 -- invalidation must never break migration
+            pass
         try:
             write_event(
                 store,

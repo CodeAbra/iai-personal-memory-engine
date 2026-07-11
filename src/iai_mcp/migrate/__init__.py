@@ -130,7 +130,6 @@ from iai_mcp.migrate._reembed import (  # noqa: E402
     _records_schema_at_dim,
     _validate_and_swap,
     _swap_tables_filesystem,
-    _lancedb_root,
     _progress_path,
     _progress_read,
     _progress_write,
@@ -160,6 +159,16 @@ from iai_mcp.migrate._reembed_from_text import migrate_reembed_from_text  # noqa
 from iai_mcp.migrate._dead_pid_unlock import (  # noqa: E402
     migrate_unlock_dead_pid_processing_files,
 )
+from iai_mcp.migrate._to_lilli_verify import (  # noqa: E402
+    verify_store_equality,
+    VerifyReport,
+)
+from iai_mcp.migrate._to_lilli import (  # noqa: E402
+    migrate_sqlite_to_lilli,
+    MigrateReport,
+)
+from iai_mcp.migrate._role_column import migrate_role_column  # noqa: E402
+from iai_mcp.migrate._live_flag_backfill import migrate_live_flag_backfill  # noqa: E402
 
 
 __all__ = [
@@ -182,4 +191,10 @@ __all__ = [
     "migrate_salvage_torn_permanent_failed",
     "migrate_reembed_from_text",
     "migrate_unlock_dead_pid_processing_files",
+    "verify_store_equality",
+    "VerifyReport",
+    "migrate_sqlite_to_lilli",
+    "MigrateReport",
+    "migrate_role_column",
+    "migrate_live_flag_backfill",
 ]

@@ -3,12 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import sys
-from pathlib import Path
 
-import pytest
-
-pytest.importorskip("huggingface_hub", reason="LongMemEval harness needs the hub client")
 
 
 class _StubLMESession:

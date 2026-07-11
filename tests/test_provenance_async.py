@@ -177,7 +177,7 @@ def test_overflow_spill_round_trip(tmp_path, monkeypatch):
             q.enqueue([(r.id, {"ts": f"t{i}", "cue": f"c{i}",
                                "session_id": "sov"})])
         time.sleep(0.1)
-        overflow_dir = tmp_path / ".iai-mcp" / ".provenance-overflow"
+        overflow_dir = store.root / ".provenance-overflow"
         spilled_before_release = list(overflow_dir.glob("*.jsonl"))
         assert len(spilled_before_release) >= 1, (
             f"expected at least 1 spilled file, got {len(spilled_before_release)} "
@@ -197,7 +197,7 @@ def test_overflow_spill_round_trip(tmp_path, monkeypatch):
     assert sorted(flushed_cues) == [f"c{i}" for i in range(5)], (
         f"expected all 5 cues flushed exactly once; got {sorted(flushed_cues)}"
     )
-    overflow_dir = tmp_path / ".iai-mcp" / ".provenance-overflow"
+    overflow_dir = store.root / ".provenance-overflow"
     assert list(overflow_dir.glob("*.jsonl")) == [], (
         f"spill dir should be empty after drain; got {list(overflow_dir.iterdir())}"
     )
@@ -219,7 +219,7 @@ def test_overflow_dir_lazy_create(tmp_path, monkeypatch):
     finally:
         q.stop()
 
-    overflow_dir = tmp_path / ".iai-mcp" / ".provenance-overflow"
+    overflow_dir = store.root / ".provenance-overflow"
     assert not overflow_dir.exists(), (
         "overflow dir must not be created when no spill happens"
     )
@@ -230,7 +230,7 @@ def test_overflow_malformed_spill_file_quarantined(tmp_path, monkeypatch):
     store = MemoryStore(path=tmp_path / "store")
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    overflow_dir = tmp_path / ".iai-mcp" / ".provenance-overflow"
+    overflow_dir = store.root / ".provenance-overflow"
     overflow_dir.mkdir(parents=True)
     bad_file = overflow_dir / "bad.jsonl"
     bad_file.write_text("this is not valid json at all\n")

@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import json
+import resource
 import sys
-
-if sys.platform != "win32":
-    import resource
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from iai_mcp.daemon import _raise_fd_limit
 from iai_mcp.fsm_reconcile import _CANONICAL_TO_LEGACY, reconcile_fsm_state
 from iai_mcp.s2_coordinator import S2Coordinator
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="resource module not available on Windows")
 class TestRaiseFdLimitClampsToHard:
 
     def test_raises_low_soft_to_floor(self):
@@ -137,6 +133,7 @@ class TestPlistRendersFdFloor:
         assert "NumberOfFiles" in text
 
     def test_rendered_plist_contains_fd_floor(self, tmp_path, monkeypatch):
+
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USER", "testuser")
 
@@ -146,10 +143,7 @@ class TestPlistRendersFdFloor:
         assert "SoftResourceLimits" in rendered
         assert "NumberOfFiles" in rendered
 
-        try:
-            import defusedxml.ElementTree as ET
-        except ModuleNotFoundError:
-            import xml.etree.ElementTree as ET
+        import defusedxml.ElementTree as ET
 
         root = ET.fromstring(rendered)
         top_dict = root.find("dict")

@@ -4,7 +4,6 @@ import json
 import warnings
 from pathlib import Path
 
-import pytest
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "formality_ru_en_50pairs.json"

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from iai_mcp.idle_detector import IdleDetector, IdleStatus
 

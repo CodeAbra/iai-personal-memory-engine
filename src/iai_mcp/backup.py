@@ -29,7 +29,7 @@ def export_jsonl(output: Path | None = None) -> Path:
 
     records = store.all_records()
     count = 0
-    with open(output, "w", encoding="utf-8") as f:
+    with open(output, "w") as f:
         for rec in records:
             entry = {
                 "id": str(rec.id),

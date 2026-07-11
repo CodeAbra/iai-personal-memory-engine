@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 
 def test_synthetic_corpus_generates_30_sessions():

@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_codebooks.py",
+  "name": "sparse_fillers_sample",
+  "payload": null,
+  "sha256": "c6f218663773b20da4e844936f9231d5df3965a7585a1c4190112613e4146f6b",
+  "shape": [
+    510,
+    40
+  ],
+  "source": "src/iai_mcp/lilli/tiers/sparse_vsa.py pack_indices(filler_hv(s)) over sample_strings.json",
+  "subsystem": "hdc"
+}

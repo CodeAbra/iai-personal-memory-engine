@@ -31,7 +31,7 @@ def test_grep_production_callsite_exists():
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parent.parent
-    daemon_src = repo_root / "src" / "iai_mcp" / "daemon.py"
+    daemon_src = repo_root / "src" / "iai_mcp" / "daemon" / "__init__.py"
     if not daemon_src.exists():
         pytest.skip("daemon.py source not on disk (sdist/wheel install)")
     text = daemon_src.read_text()

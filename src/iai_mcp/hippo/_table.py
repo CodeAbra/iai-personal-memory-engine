@@ -16,6 +16,11 @@ import pyarrow as pa
 
 _log = logging.getLogger(__name__)
 
+#: Bound on snapshot reopen attempts when a concurrent WAL checkpoint fences a
+#: streaming scan mid-drain. Mirrors the RO-pool's borrow()-level bound; a real
+#: fence resolves on one reopen, the bound only stops a pathological flap.
+_MAX_DRAIN_FENCE_ATTEMPTS = 8
+
 
 class HippoTableList:
 
@@ -128,7 +133,9 @@ CREATE TABLE IF NOT EXISTS records (
     valence         REAL DEFAULT 0.0,
     hv_tier              TEXT NOT NULL DEFAULT 'bsc',
     structure_hv_payload BLOB NOT NULL DEFAULT x'',
-    embedding_pending    INTEGER NOT NULL DEFAULT 0
+    embedding_pending    INTEGER NOT NULL DEFAULT 0,
+    role                 TEXT,
+    live                 INTEGER
 )"""
 
 _DDL_RECORDS_INDEXES = [
@@ -137,7 +144,10 @@ _DDL_RECORDS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_records_community ON records(community_id)",
     "CREATE INDEX IF NOT EXISTS idx_records_tomb      ON records(tombstoned_at) WHERE tombstoned_at IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_records_pending   ON records(embedding_pending) WHERE embedding_pending=1",
+    "CREATE INDEX IF NOT EXISTS idx_records_live      ON records(live)",
     "CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_records_role      ON records(role)",
+    "CREATE INDEX IF NOT EXISTS idx_records_vec_label ON records(vec_label)",
 ]
 
 _DDL_EDGES = """\
@@ -171,6 +181,13 @@ _DDL_EVENTS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_events_kind    ON events(kind)",
     "CREATE INDEX IF NOT EXISTS idx_events_ts      ON events(ts)",
     "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)",
+    # Composite index serving `WHERE kind = ? ORDER BY ts DESC LIMIT ?`
+    # (query_events). On the stdlib driver this removes the ORDER BY
+    # filesort. On the native engine, multi-column CREATE INDEX captures
+    # only the leading column in its catalog, so this degrades to a
+    # leading-column (kind) index there -- a no-harm add, not a filesort
+    # removal on that driver.
+    "CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts)",
 ]
 
 _DDL_BUDGET_LEDGER = """\
@@ -197,6 +214,17 @@ CREATE TABLE IF NOT EXISTS _hippo_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 )"""
+
+_DDL_RECORD_TAGS = """\
+CREATE TABLE IF NOT EXISTS record_tags (
+    record_id TEXT NOT NULL,
+    tag       TEXT NOT NULL,
+    UNIQUE(record_id, tag)
+)"""
+
+_DDL_RECORD_TAGS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_record_tags_tag ON record_tags(tag)",
+]
 
 
 _TABLE_SQL: dict[str, dict[str, str]] = {
@@ -254,6 +282,15 @@ _TABLE_SQL: dict[str, dict[str, str]] = {
         "insert_prefix":  "INSERT INTO _hippo_meta ",
         "alter_prefix":   "ALTER TABLE _hippo_meta ADD COLUMN ",
     },
+    "record_tags": {
+        "count":          "SELECT COUNT(*) FROM record_tags",
+        "select_all":     "SELECT * FROM record_tags",
+        "delete_prefix":  "DELETE FROM record_tags WHERE ",
+        "pragma":         "PRAGMA table_info(record_tags)",
+        "update_prefix":  "UPDATE record_tags SET ",
+        "insert_prefix":  "INSERT INTO record_tags ",
+        "alter_prefix":   "ALTER TABLE record_tags ADD COLUMN ",
+    },
 }
 
 
@@ -263,9 +300,24 @@ def _encode_embedding(vec: list[float] | np.ndarray | None) -> bytes | None:
     return np.array(vec, dtype=np.float32).tobytes()
 
 
-def _decode_embedding(blob: bytes | None) -> list[float] | None:
+#: Buffer types a stored BLOB cell may arrive as across drivers. The stdlib
+#: sqlite3 driver returns BLOBs as ``bytes``; the projected-scan zero-copy path
+#: of the engine driver returns them as ``memoryview`` slices into the mapped
+#: page. ``np.frombuffer`` reads all three losslessly, so the embedding decode
+#: must accept the whole set — otherwise a memoryview falls through the decode
+#: gate and is consumed downstream as a raw byte sequence (a 384-float vector
+#: mis-read as its 1536 raw bytes), corrupting the recall cosine math.
+_BLOB_TYPES = (bytes, bytearray, memoryview)
+
+
+def _decode_embedding(blob: "bytes | bytearray | memoryview | None") -> list[float] | None:
     if blob is None:
         return None
+    if isinstance(blob, memoryview) and (blob.format not in ("B", "b", "c") or blob.itemsize != 1):
+        # Non-byte-format or strided memoryview: cast to a flat byte view so any
+        # future typed/strided view raises loudly (TypeError/ValueError from cast)
+        # rather than silently mis-decoding. Zero cost on the real format-'B' path.
+        blob = blob.cast("B")
     return np.frombuffer(blob, dtype=np.float32).tolist()
 
 
@@ -276,13 +328,128 @@ def _encode_row_for_insert(row: dict) -> dict:
     return out
 
 
+def _tags_from_json(tags_json: "str | None") -> list[str]:
+    """Parse a ``tags_json`` cell into a list of tag strings.
+
+    Malformed or empty input yields an empty list rather than raising, so a
+    write-seam tag-index maintenance call never aborts the record write it is
+    attached to.
+    """
+    if not tags_json:
+        return []
+    import json as _json
+    try:
+        parsed = _json.loads(tags_json)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [t for t in parsed if isinstance(t, str)]
+
+
+def _upsert_record_tags(
+    conn: "sqlite3.Connection",
+    record_id: str,
+    tags_json: "str | None",
+) -> None:
+    """Upsert ``record_tags`` rows for one record's tag list.
+
+    Must be called while the caller already holds ``_conn_lock`` (and, for the
+    ``records`` insert path, ``_hnsw_lock``) and is inside the same logical
+    write transaction as the record write it accompanies — this function does
+    not acquire any lock itself and does not commit. Uses
+    ``ON CONFLICT (record_id, tag) DO NOTHING`` (the record_tags table is
+    all-key columns, so there is nothing to update on a conflict) — never a
+    plain ``INSERT`` that would raise on a duplicate.
+
+    Failures are swallowed: a tag-index maintenance fault must not abort the
+    record write it accompanies. ``find_record_by_tag`` degrades to the
+    LIKE-scan fallback if the index ever falls out of sync (differential
+    tested), so a missed upsert here is a bounded correctness risk, not a
+    crash.
+    """
+    tags = _tags_from_json(tags_json)
+    if not tags:
+        return
+    try:
+        conn.executemany(
+            "INSERT INTO record_tags (record_id, tag) VALUES (?, ?)"
+            " ON CONFLICT (record_id, tag) DO NOTHING",
+            [(record_id, tag) for tag in tags],
+        )
+    except Exception:  # noqa: BLE001 -- tag-index maintenance must not abort the write
+        _log.debug("record_tags upsert failed for record_id=%s", record_id, exc_info=True)
+
+
+def _delete_record_tags(conn: "sqlite3.Connection", record_id: str) -> None:
+    """Delete every ``record_tags`` row for ``record_id``.
+
+    Called only from a HARD delete of the record itself (``HippoTable.delete``
+    on the ``records`` table) — never from a soft tombstone, which does not
+    remove the row from ``records`` and must not remove it from the tag index
+    either (matches the pre-existing ``find_record_by_tag`` LIKE-scan, which
+    never filtered on ``tombstoned_at``). Must be called while the caller
+    already holds ``_conn_lock`` and is inside the same transaction as the
+    record delete. Failures are swallowed for the same reason as
+    ``_upsert_record_tags``.
+    """
+    try:
+        conn.execute("DELETE FROM record_tags WHERE record_id = ?", (record_id,))
+    except Exception:  # noqa: BLE001 -- tag-index maintenance must not abort the delete
+        _log.debug("record_tags delete failed for record_id=%s", record_id, exc_info=True)
+
+
 def _decode_df_embedding(df: pd.DataFrame) -> pd.DataFrame:
     if "embedding" in df.columns:
         df = df.copy()
         df["embedding"] = df["embedding"].apply(
-            lambda b: _decode_embedding(b) if isinstance(b, (bytes, bytearray)) else b
+            lambda b: _decode_embedding(b) if isinstance(b, _BLOB_TYPES) else b
         )
     return df
+
+
+def _decode_raw_row_embedding(row: dict) -> dict:
+    """Row-dict twin of ``_decode_df_embedding`` for a plain dict fetch (no
+    DataFrame). ``_from_row`` does not decode the embedding BLOB itself
+    (it does ``list(row["embedding"])``), so any row-dict fed to it must
+    arrive with the embedding column already turned into a plain float list —
+    otherwise a 384-d vector is mis-read as its 1536 raw bytes.
+    """
+    emb_raw = row.get("embedding")
+    if isinstance(emb_raw, _BLOB_TYPES):
+        decoded = _decode_embedding(emb_raw)
+        if decoded is not None:
+            row = dict(row)
+            row["embedding"] = decoded
+    return row
+
+
+def _rows_to_df(
+    cursor: "sqlite3.Cursor",
+    rows: "list",
+) -> pd.DataFrame:
+    """Build a DataFrame from a raw cursor fetch without pandas' SQL introspection.
+
+    ``pd.read_sql_query`` re-issues type discovery and emits a DBAPI-compat
+    warning on every call; on the recall hot path that per-call materialization
+    is the dominant cost. Constructing the frame directly from the cursor
+    description + fetched rows yields the same columns (in select order) and the
+    same row values, while skipping the introspection round-trip. The embedding
+    BLOB is decoded by ``_decode_df_embedding`` exactly as on the read_sql path.
+    """
+    if cursor.description is None:
+        return pd.DataFrame()
+    columns = [d[0] for d in cursor.description]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    # Materialise each row as a positional value tuple. Both row factories
+    # (stdlib ``sqlite3.Row`` and the engine's ``LilliBrainRow``) iterate as
+    # values in column-declaration order, so ``tuple(r)`` is the column-aligned
+    # value sequence. Going through tuples (rather than handing dict-subclass
+    # rows to ``from_records``) keeps the column projection identical on both
+    # drivers regardless of pandas' record-vs-mapping detection.
+    df = pd.DataFrame.from_records([tuple(r) for r in rows], columns=columns)
+    return _decode_df_embedding(df)
 
 
 def _decrypt_df_columns(
@@ -351,10 +518,9 @@ class HippoTable:
         else:
             base = "SELECT COUNT(*) FROM " + self._name
         stmt = (base + " WHERE " + filter) if filter else base
-        lock = self._db._conn_lock if self._db is not None else None
-        if lock is not None:
-            with lock:
-                row = self._conn.execute(stmt).fetchone()
+        if self._db is not None:
+            with self._db.ro_conn() as conn:
+                row = conn.execute(stmt).fetchone()
         else:
             row = self._conn.execute(stmt).fetchone()
         if row is None:
@@ -371,12 +537,13 @@ class HippoTable:
         else:
             stmt = "SELECT * FROM " + self._name
         if self._db is not None:
-            with self._db._conn_lock:
-                df = pd.read_sql_query(stmt, self._conn)
+            with self._db.ro_conn() as conn:
+                cur = conn.execute(stmt)
+                fetched = cur.fetchall()
         else:
-            df = pd.read_sql_query(stmt, self._conn)
-        df = _decode_df_embedding(df)
-        return df
+            cur = self._conn.execute(stmt)
+            fetched = cur.fetchall()
+        return _rows_to_df(cur, fetched)
 
     def _decrypt_df(self, df: pd.DataFrame) -> pd.DataFrame:
         from iai_mcp.hippo import _ENCRYPTED_RECORD_COLUMNS, _ENCRYPTED_EVENTS_COLUMNS
@@ -477,11 +644,30 @@ class HippoTable:
                             if emb_raw is not None:
                                 emb_vec = np.array(emb_raw, dtype=np.float32).reshape(1, -1)
                                 db._hnsw.add_items(emb_vec, np.array([vec_label], dtype=np.int64))
+                                if db._ann_journal is not None:
+                                    # A rebuild is between snapshot and swap:
+                                    # journal this add so the swapped-in buffer
+                                    # AND its label map replay it (else the
+                                    # record vanishes from ANN until the next
+                                    # rebuild).
+                                    db._ann_journal.append(
+                                        ("add", emb_vec, vec_label, str(r["id"]))
+                                    )
                                 db._label_map[str(r["id"])] = vec_label
                                 db._write_counter += 1
                             db._maybe_resize()
+                            _upsert_record_tags(self._conn, str(r["id"]), r.get("tags_json"))
                 if db._write_counter > 0 and db._write_counter % HNSW_SAVE_INTERVAL == 0:
-                    db._save_index_atomic()
+                    # Time-throttled: the save serializes the WHOLE index under
+                    # _hnsw_lock, so a large drain hitting the count interval
+                    # every 200 rows would stall concurrent recalls repeatedly.
+                    # The disk file is a boot accelerator, not the source of
+                    # truth — five-minute granularity loses nothing durable.
+                    import time as _t
+                    _last = getattr(db, "_last_periodic_save_mono", 0.0)
+                    if (_t.monotonic() - _last) >= 300.0:
+                        db._save_index_atomic()
+                        db._last_periodic_save_mono = _t.monotonic()
         else:
             if self._db is not None:
                 lock_ctx = self._db._conn_lock
@@ -548,12 +734,19 @@ class HippoTable:
                     affected = self._conn.execute(sel_sql).fetchall()
                     with _txn(self._conn):
                         self._conn.execute(del_sql)
+                        for row in affected:
+                            _delete_record_tags(self._conn, str(row["id"]))
                 for row in affected:
                     label = int(row["vec_label"])
                     try:
                         db._hnsw.mark_deleted(label)
                     except RuntimeError:
                         pass
+                    if db._ann_journal is not None:
+                        # Journal the delete so an in-flight rebuild's snapshot
+                        # (which may still contain this row) does not resurrect
+                        # it in the swapped-in buffer or label map.
+                        db._ann_journal.append(("del", None, label, str(row["id"])))
                     db._label_map.pop(str(row["id"]), None)
             return
 
@@ -701,23 +894,31 @@ class HippoQuery:
         if self._ann_vector is not None and self._ann_db is not None:
             return self._ann_to_pandas()
         sql = self._build_sql()
-        _lock = self._db._conn_lock if self._db is not None else None
-        if _lock is not None:
-            with _lock:
-                df = pd.read_sql_query(sql, self._conn)
+        if self._db is not None:
+            with self._db.ro_conn() as conn:
+                cur = conn.execute(sql)
+                fetched = cur.fetchall()
         else:
-            df = pd.read_sql_query(sql, self._conn)
-        df = _decode_df_embedding(df)
-        return df
+            cur = self._conn.execute(sql)
+            fetched = cur.fetchall()
+        return _rows_to_df(cur, fetched)
 
-    def _ann_to_pandas(self) -> pd.DataFrame:
+    def _ann_knn_fetch_core(
+        self,
+    ) -> "tuple[sqlite3.Cursor, list, dict[int, float]] | None":
+        """Run the knn_query + vec_label row fetch shared by every ANN output
+        shape (DataFrame or row-dict). Returns ``None`` on every "no
+        neighbours" outcome (empty index, RuntimeError, empty label result),
+        matching ``_ann_to_pandas``'s empty-DataFrame returns exactly so both
+        output shapes degrade identically.
+        """
         db = self._ann_db
         k = self._limit_val if self._limit_val is not None else 10
 
         with db._hnsw_lock:
             active_count = len(db._label_map)
             if active_count == 0:
-                return pd.DataFrame()
+                return None
             # Clamp k to the live hnswlib index count, not just the label_map
             # count. The two can diverge briefly during boot/rebuild, and
             # hnswlib raises "Probably ef or M is too small" when asked for
@@ -725,7 +926,25 @@ class HippoQuery:
             hnsw_count = db._hnsw.get_current_count()
             k_clamped = min(k, active_count, hnsw_count)
             if k_clamped == 0:
-                return pd.DataFrame()
+                return None
+            # hnswlib requires ef >= k: an exact-escalation query asking for
+            # the whole index otherwise dies with "ef or M is too small" and
+            # the lane silently returns empty. ef is a property of the SHARED
+            # index: a raised ef MUST be restored after the query (same
+            # _hnsw_lock block, so the pair is atomic) — one big-k caller
+            # (e.g. a large teach weave) would otherwise leave every later
+            # awake recall running at ef≈that-k until the next rebuild.
+            try:
+                _cur_ef = int(getattr(db._hnsw, "ef", 0))
+            except (AttributeError, TypeError, ValueError):
+                _cur_ef = 0
+            _ef_raised = False
+            if k_clamped > _cur_ef:
+                try:
+                    db._hnsw.set_ef(k_clamped)
+                    _ef_raised = _cur_ef > 0
+                except (AttributeError, RuntimeError):
+                    pass
             try:
                 labels, distances = db._hnsw.knn_query(
                     self._ann_vector, k=k_clamped
@@ -740,7 +959,13 @@ class HippoQuery:
                     "active_count=%d); returning empty result: %s",
                     k_clamped, hnsw_count, active_count, exc,
                 )
-                return pd.DataFrame()
+                return None
+            finally:
+                if _ef_raised:
+                    try:
+                        db._hnsw.set_ef(_cur_ef)
+                    except (AttributeError, RuntimeError):
+                        pass
 
         flat_labels: list[int] = labels[0].tolist()
         # Clamp cosine distance to its mathematical range — the BLAS backend
@@ -750,7 +975,7 @@ class HippoQuery:
         ]
 
         if not flat_labels:
-            return pd.DataFrame()
+            return None
 
         placeholders = ", ".join("?" for _ in flat_labels)
         sql = (  # nosemgrep: sql-injection
@@ -759,24 +984,101 @@ class HippoQuery:
         if self._where_clauses:
             sql += " AND " + " AND ".join(f"({c})" for c in self._where_clauses)
 
-        _lock = db._conn_lock if db is not None else None
-        if _lock is not None:
-            with _lock:
-                df = pd.read_sql_query(sql, self._conn, params=flat_labels)
+        # This vec_label IN lookup runs through db.ro_conn() — a pooled
+        # lock-free reader on the lilli driver (never touches _conn_lock), or
+        # the shared self._conn under _conn_lock as a fallback (stdlib driver,
+        # kill-switch, or any pool-acquisition failure) — NOT the
+        # _open_snapshot_conn path (only to_batches uses that). When the
+        # daemon is up self._conn is the read-write writer that already ran
+        # _ensure_tables (index present); when the store is opened read-only
+        # (daemon down / reader process) self._conn is the read-only engine
+        # connection that gets the index via meta.replay.
+        if db is not None:
+            with db.ro_conn() as conn:
+                cur = conn.execute(sql, flat_labels)
+                fetched = cur.fetchall()
         else:
-            df = pd.read_sql_query(sql, self._conn, params=flat_labels)
-        df = _decode_df_embedding(df)
-
-        if df.empty:
-            return df
+            cur = self._conn.execute(sql, flat_labels)
+            fetched = cur.fetchall()
+        # Best-effort operator signal: on a read-only open whose engine meta
+        # lacks the vec_label index (un-upgraded store, no read-write boot yet),
+        # this lookup full-scans — correct but slow. Log once, never disrupt.
+        if db is not None:
+            _emit_gap = getattr(db, "_debug_log_readonly_index_gap", None)
+            if _emit_gap is not None:
+                try:
+                    _emit_gap(self._conn)
+                except Exception:  # noqa: BLE001
+                    pass
 
         dist_map: dict[int, float] = {
             int(lbl): float(d) for lbl, d in zip(flat_labels, flat_distances)
         }
-        df["_distance"] = df["vec_label"].apply(lambda lbl: dist_map.get(int(lbl), float("nan")))
+        return cur, fetched, dist_map
 
-        df = df.sort_values("_distance").reset_index(drop=True)
+    def _ann_to_pandas(self) -> pd.DataFrame:
+        core = self._ann_knn_fetch_core()
+        if core is None:
+            return pd.DataFrame()
+        cur, fetched, dist_map = core
+
+        df = _rows_to_df(cur, fetched)
+        if df.empty:
+            return df
+
+        df["_distance"] = df["vec_label"].apply(lambda lbl: dist_map.get(int(lbl), float("nan")))
+        # kind="stable" (mergesort) preserves fetch order among tied distances
+        # and matches the row-dict twin's stable Python sort exactly — the
+        # default quicksort permutes tied blocks arbitrarily, which would make
+        # the kill-switch / per-call fail-safe return a different record set
+        # than the fast path for the identical cue whenever a tie straddles
+        # the k boundary.
+        df = df.sort_values("_distance", kind="stable").reset_index(drop=True)
         return df
+
+    def to_row_dicts(self) -> "list[dict]":
+        """Row-dict twin of ``_ann_to_pandas`` — same knn_query + vec_label
+        fetch + distance mapping + ascending-distance sort, without building a
+        pandas DataFrame. Each dict carries the embedding BLOB already decoded
+        to a plain float list (mirroring ``_rows_to_df``'s
+        ``_decode_df_embedding`` step) so it is a drop-in feed for
+        ``MemoryStore._from_row``, which does not decode the BLOB itself.
+
+        Only defined for the ANN branch (``self._ann_vector`` set) — the
+        query_similar fast-decode caller is the sole consumer.
+        """
+        if self._ann_vector is None or self._ann_db is None:
+            # Mirrors ``to_pandas``'s ANN-branch guard: a non-ANN query has no
+            # hnsw index to knn_query against. Degrade to an empty result
+            # instead of an AttributeError on ``None._hnsw_lock``.
+            return []
+        core = self._ann_knn_fetch_core()
+        if core is None:
+            return []
+        cur, fetched, dist_map = core
+
+        if cur.description is None or not fetched:
+            return []
+        columns = [d[0] for d in cur.description]
+        rows: list[dict] = []
+        for raw_row in fetched:
+            values = tuple(raw_row)
+            row = dict(zip(columns, values))
+            row = _decode_raw_row_embedding(row)
+            vec_label = row.get("vec_label")
+            row["_distance"] = dist_map.get(int(vec_label), float("nan")) if vec_label is not None else float("nan")
+            rows.append(row)
+
+        # Python's list.sort() key comparisons treat NaN as neither less-than
+        # nor greater-than anything, so a NaN key never moves during a stable
+        # sort — it stays wherever it happened to land in fetch order. pandas'
+        # sort_values (the DataFrame path this mirrors) explicitly places NaN
+        # last (na_position="last" is its default). Sorting on
+        # (is_nan, distance) reproduces that ordering exactly: every non-NaN
+        # row sorts by its true distance first, and all NaN rows land after
+        # them, in their original relative (stable) order.
+        rows.sort(key=lambda r: (r["_distance"] != r["_distance"], r["_distance"]))
+        return rows
 
     def _decrypt_query_df(self, df: pd.DataFrame) -> pd.DataFrame:
         from iai_mcp.hippo import _ENCRYPTED_RECORD_COLUMNS, _ENCRYPTED_EVENTS_COLUMNS
@@ -794,17 +1096,112 @@ class HippoQuery:
 
     def to_batches(self, batch_size: int = 1000) -> Iterator[pa.RecordBatch]:
         sql = self._build_sql()
-        _lock = self._db._conn_lock if self._db is not None else None
-        if _lock is not None:
-            with _lock:
-                yield from self._drain_to_batches(sql, batch_size)
+        db = self._db
+        db_path = getattr(db, "_db_path", None) if db is not None else None
+        if db_path is not None:
+            # Bounded-hold discipline: a full-corpus scan must NEVER hold the
+            # shared ``_conn_lock`` across the consumer's per-batch work, or it
+            # starves every concurrent writer / index rebuild for the whole scan.
+            # Stream from a dedicated read-only snapshot connection on the same
+            # WAL file instead — it observes the committed snapshot, holds NO
+            # shared lock, and is closed when this generator is exhausted or
+            # closed. This preserves lazy streaming (one fetch per yielded batch,
+            # bounded memory) while restoring the bounded-hold invariant. The
+            # snapshot sees ciphertext ``literal_surface`` BLOBs exactly as the
+            # shared connection would; decryption stays above this layer.
+            yield from self._drain_snapshot_with_fence_recovery(
+                sql, batch_size, db_path
+            )
         else:
+            # Detached / pre-construction table (no HippoDB, no shared
+            # connection to starve): drain the local cursor directly, unlocked.
             yield from self._drain_to_batches(sql, batch_size)
 
-    def _drain_to_batches(
-        self, sql: str, batch_size: int
+    def _drain_snapshot_with_fence_recovery(
+        self, sql: str, batch_size: int, db_path: str
     ) -> Iterator[pa.RecordBatch]:
-        cursor = self._conn.execute(sql)
+        """Stream a snapshot scan, surviving checkpoint fences mid-drain.
+
+        A concurrent WAL checkpoint invalidates an open read-only snapshot on
+        the engine driver ("read-only snapshot invalidated"). Recovery reopens
+        a fresh snapshot and re-executes the same statement; rows already
+        yielded are skipped by their ``id`` so the consumer sees each row at
+        most once. Recovery therefore requires ``id`` among the selected
+        columns UNLESS nothing was yielded yet (a clean restart). A scan
+        without ``id`` that fenced mid-drain re-raises — silently re-yielding
+        rows would be worse than failing loud.
+        """
+        from iai_mcp.hippo._ro_pool import _RO_SNAPSHOT_FENCE_MARKER
+
+        yielded_ids: set = set()
+        rows_yielded = False
+        dedup_possible = True
+        attempts = 0
+        while True:
+            conn = self._open_snapshot_conn(db_path)
+            try:
+                for batch in self._drain_to_batches(sql, batch_size, conn=conn):
+                    has_id = "id" in batch.schema.names
+                    if has_id and yielded_ids:
+                        keep = [
+                            i for i, v in enumerate(batch.column("id").to_pylist())
+                            if v not in yielded_ids
+                        ]
+                        if not keep:
+                            continue
+                        if len(keep) < batch.num_rows:
+                            batch = batch.take(pa.array(keep, type=pa.int32()))
+                    if has_id:
+                        yielded_ids.update(batch.column("id").to_pylist())
+                    else:
+                        dedup_possible = False
+                    rows_yielded = True
+                    yield batch
+                return
+            except sqlite3.OperationalError as exc:
+                if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
+                    raise
+                attempts += 1
+                if attempts > _MAX_DRAIN_FENCE_ATTEMPTS:
+                    raise
+                if rows_yielded and not dedup_possible:
+                    raise
+                _log.debug(
+                    "snapshot scan fenced by concurrent checkpoint "
+                    "(attempt %d/%d, %d rows already served) — reopening",
+                    attempts, _MAX_DRAIN_FENCE_ATTEMPTS, len(yielded_ids),
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    conn.close()
+
+    def _open_snapshot_conn(self, db_path: str) -> sqlite3.Connection:
+        """Open a short-lived read-only connection for a lock-free scan.
+
+        Mirrors the audited daemon-down direct-access pattern: driver-aware
+        open (engine raw connection on the lilli driver, else stdlib
+        ``sqlite3.connect``), read-only, ``sqlite3.Row`` factory so name-keyed
+        row access works. Holds no shared ``_conn_lock``.
+        """
+        from iai_mcp.hippo._raw_open import open_store_conn
+        conn = open_store_conn(db_path, read_only=True)
+        if conn is None:
+            conn = sqlite3.connect(
+                db_path,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+        with contextlib.suppress(Exception):
+            conn.execute("PRAGMA busy_timeout=2000")
+        with contextlib.suppress(Exception):
+            conn.execute("PRAGMA query_only=ON")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _drain_to_batches(
+        self, sql: str, batch_size: int, conn: "sqlite3.Connection | None" = None
+    ) -> Iterator[pa.RecordBatch]:
+        cursor = (conn if conn is not None else self._conn).execute(sql)
         try:
             column_names = [desc[0] for desc in cursor.description]
             while True:
@@ -818,13 +1215,16 @@ class HippoQuery:
                 if "embedding" in data:
                     data["embedding"] = [
                         _decode_embedding(b)
-                        if isinstance(b, (bytes, bytearray))
+                        if isinstance(b, _BLOB_TYPES)
                         else b
                         for b in data["embedding"]
                     ]
                 yield pa.record_batch(data)
         finally:
-            cursor.close()
+            # A fenced snapshot can refuse even close(); never let that mask
+            # the in-flight error the recovery wrapper needs to see.
+            with contextlib.suppress(Exception):
+                cursor.close()
 
 
 class HippoMergeInsert:

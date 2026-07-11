@@ -26,44 +26,13 @@ from iai_mcp.migrate import STAGING_TABLE, OLD_TABLE_PREFIX, PROGRESS_FILE
 log = logging.getLogger(__name__)
 
 
-def _records_schema_at_dim(dim: int) -> pa.Schema:
-    return pa.schema(
-        [
-            ("id", pa.string()),
-            ("tier", pa.string()),
-            ("literal_surface", pa.string()),
-            ("aaak_index", pa.string()),
-            ("embedding", pa.list_(pa.float32(), dim)),
-            ("structure_hv", pa.binary()),
-            ("community_id", pa.string()),
-            ("centrality", pa.float32()),
-            ("detail_level", pa.int32()),
-            ("pinned", pa.bool_()),
-            ("stability", pa.float32()),
-            ("difficulty", pa.float32()),
-            ("last_reviewed", pa.timestamp("us", tz="UTC")),
-            ("never_decay", pa.bool_()),
-            ("never_merge", pa.bool_()),
-            ("tombstoned_at", pa.timestamp("us", tz="UTC")),
-            ("schema_bypass", pa.bool_()),
-            ("labile_until", pa.timestamp("us", tz="UTC")),
-            ("provenance_json", pa.string()),
-            ("created_at", pa.timestamp("us", tz="UTC")),
-            ("updated_at", pa.timestamp("us", tz="UTC")),
-            ("tags_json", pa.string()),
-            ("language", pa.string()),
-            ("s5_trust_score", pa.float32()),
-            ("profile_modulation_gain_json", pa.string()),
-            ("schema_version", pa.int32()),
-            ("wing", pa.string()),
-            ("room", pa.string()),
-            ("drawer", pa.string()),
-            ("valence", pa.float32()),
-            ("hv_tier", pa.string()),
-            ("structure_hv_payload", pa.binary()),
-            ("embedding_pending", pa.int32()),
-        ]
-    )
+def _records_schema_at_dim(db, dim: int) -> pa.Schema:
+    # Staging inherits the LIVE records schema (only the embedding dim
+    # changes) — a hand-copied column list silently drifts behind
+    # _reconcile_columns additions and breaks the staging insert.
+    base = db.open_table(RECORDS_TABLE).schema
+    idx = base.get_field_index("embedding")
+    return base.set(idx, pa.field("embedding", pa.list_(pa.float32(), dim)))
 
 
 def _progress_path(store: MemoryStore) -> Path:
@@ -75,7 +44,7 @@ def _progress_read(store: MemoryStore) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
 
@@ -147,11 +116,6 @@ def _stage_record_to_table(
         s5_trust_score=rec.s5_trust_score,
         profile_modulation_gain=rec.profile_modulation_gain,
         schema_version=rec.schema_version,
-        hv_tier=rec.hv_tier,
-        structure_hv_payload=rec.structure_hv_payload,
-        # Keep pending rows pending even though this pass writes a target-dim
-        # placeholder embedding; the normal pending drain owns readiness flips.
-        embedding_pending=rec.embedding_pending,
     )
     target_tbl.add([store._to_row(new_rec)])
 
@@ -222,10 +186,6 @@ def _stage_loop(
     return staged_count, failures
 
 
-def _lancedb_root(db) -> Path:
-    return Path(db.uri)
-
-
 def _swap_tables_filesystem(db, *, source: str, dest: str) -> None:
     from iai_mcp.hippo import HippoDB
 
@@ -234,10 +194,9 @@ def _swap_tables_filesystem(db, *, source: str, dest: str) -> None:
             f"ALTER TABLE [{source}] RENAME TO [{dest}]"
         )
         return
-    root = _lancedb_root(db)
-    src_path = root / f"{source}.lance"
-    dst_path = root / f"{dest}.lance"
-    os.replace(src_path, dst_path)
+    raise RuntimeError(
+        f"re-embed table swap requires a Hippo store, got {type(db).__name__}"
+    )
 
 
 def _validate_and_swap(
@@ -356,7 +315,7 @@ def migrate_reembed_to_current_dim(
     if STAGING_TABLE in set(store.db.table_names()):
         store.db.drop_table(STAGING_TABLE)
     target_tbl = store.db.create_table(
-        STAGING_TABLE, schema=_records_schema_at_dim(target_dim)
+        STAGING_TABLE, schema=_records_schema_at_dim(store.db, target_dim)
     )
 
     total = store.db.open_table(RECORDS_TABLE).count_rows()
@@ -540,7 +499,7 @@ def _resume(db, store: MemoryStore, target_embedder) -> int:
 
     if STAGING_TABLE not in names:
         target_tbl = db.create_table(
-            STAGING_TABLE, schema=_records_schema_at_dim(target_dim)
+            STAGING_TABLE, schema=_records_schema_at_dim(db, target_dim)
         )
         already_staged: set[str] = set()
     else:

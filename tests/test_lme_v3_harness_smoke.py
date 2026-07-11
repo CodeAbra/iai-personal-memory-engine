@@ -9,8 +9,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("huggingface_hub", reason="LongMemEval harness needs the hub client")
-
 
 V2_BASELINE_QIDS: list[tuple[str, str]] = [
     ("e47becba",        "single-session-user"),
@@ -58,6 +56,7 @@ class TestV2BaselineReproduction:
         )
         return truth
 
+    @pytest.mark.slow
     def test_v2_baseline_reproduction_six_qids(self, tmp_path: Path) -> None:
         truth = self._load_v2_truth()
         qid_csv = ",".join(qid for qid, _ in V2_BASELINE_QIDS)

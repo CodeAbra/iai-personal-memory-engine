@@ -57,7 +57,7 @@ def test_w5_provenance_overflow_sustained_load(tmp_path, monkeypatch):
                 "ts": f"t{i}", "cue": f"sustained-{i}", "session_id": "soak",
             })])
         time.sleep(0.15)
-        overflow_dir = tmp_path / ".iai-mcp" / ".provenance-overflow"
+        overflow_dir = store.root / ".provenance-overflow"
         spilled = list(overflow_dir.glob("*.jsonl"))
         assert len(spilled) >= 1, (
             f"expected ≥1 spilled file under sustained overload; got {spilled}"
@@ -78,9 +78,9 @@ def test_w5_provenance_overflow_sustained_load(tmp_path, monkeypatch):
 
     cues = [p[1]["cue"] for p in flushed]
     assert sorted(cues) == [f"sustained-{i}" for i in range(10)], (
-        f"consolidation invariant: expected all 10 cues exactly once; got {sorted(cues)}"
+        f"expected all 10 cues exactly once; got {sorted(cues)}"
     )
-    overflow_dir = tmp_path / ".iai-mcp" / ".provenance-overflow"
+    overflow_dir = store.root / ".provenance-overflow"
     assert list(overflow_dir.glob("*.jsonl")) == []
 
 
@@ -106,7 +106,7 @@ def test_w5_capture_drain_partial_failure_preserves_evidence(tmp_path, monkeypat
             "tier": "episodic", "role": "user",
         }) + "\n"
         + json.dumps({
-            "cue": "poison", "text": "INSERT_FAIL_SENTINEL_W5_SOAK middle event",
+            "cue": "poison", "text": "INSERT_FAIL_SENTINEL_SOAK middle event",
             "tier": "episodic", "role": "user",
         }) + "\n"
         + json.dumps({
@@ -115,19 +115,26 @@ def test_w5_capture_drain_partial_failure_preserves_evidence(tmp_path, monkeypat
         }) + "\n"
     )
 
-    import iai_mcp.capture as _capture_mod
-    real_dwp = _capture_mod._drain_write_pending
+    # The backlog drain routes new events through `_drain_write_pending` (the
+    # two-phase pending-row write), not `MemoryStore.insert`. Inject the failure
+    # there, content-specifically: only the poison sentinel turn fails, while the
+    # two good turns still flow through the real drain path and insert. This keeps
+    # the partial-failure intent — evidence is preserved by promoting the file to
+    # `.failed-*` even though some events in it landed.
+    import iai_mcp.capture as capture_mod
 
-    def dwp_or_fail(store, *, text, **kw):
-        # The two-phase backlog drain writes via `_drain_write_pending` (pending
-        # row first, embed later), not MemoryStore.insert. Simulate a storage
-        # failure on the sentinel turn so the drain records an insert failure
-        # and quarantines the file to `.failed-*`.
-        if "INSERT_FAIL_SENTINEL_W5_SOAK" in text:
-            return {"status": "skipped", "reason": "insert-failed:soak"}
-        return real_dwp(store, text=text, **kw)
+    real_drain_write_pending = capture_mod._drain_write_pending
 
-    monkeypatch.setattr(_capture_mod, "_drain_write_pending", dwp_or_fail)
+    def drain_or_fail(store, *, text, **kwargs):
+        if "INSERT_FAIL_SENTINEL_SOAK" in text:
+            return {
+                "status": "skipped",
+                "record_id": None,
+                "reason": "insert-failed: simulated failure at soak",
+            }
+        return real_drain_write_pending(store, text=text, **kwargs)
+
+    monkeypatch.setattr(capture_mod, "_drain_write_pending", drain_or_fail)
 
     store = MemoryStore()
     counts = drain_deferred_captures(store)
@@ -153,7 +160,7 @@ def test_w5_graph_cache_encryption_no_plaintext_canary(tmp_path):
     store.root = tmp_path
 
     rid = uuid4()
-    canary = "PLAINTEXT_CANARY_W5_SOAK_aaak_07_9"
+    canary = "PLAINTEXT_CANARY_SOAK_aaak"
     node_payload = {
         str(rid): {
             "embedding": [0.1] * 384,
@@ -190,7 +197,7 @@ def test_w5_graph_cache_encryption_no_plaintext_canary(tmp_path):
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None
-    _, _, payload, _ = loaded
+    _, _, payload, _, _ = loaded
     assert payload[str(rid)]["surface"] == canary
 
 

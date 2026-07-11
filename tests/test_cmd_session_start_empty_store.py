@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import io
-import sys
 
-import pytest
 
 
 def test_empty_store_yields_empty_stdout_exit_zero(tmp_path, monkeypatch, capsys):

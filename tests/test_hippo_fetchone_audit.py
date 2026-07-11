@@ -3,13 +3,10 @@ from __future__ import annotations
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
-from iai_mcp.hippo import HippoDB, HippoIntegrityError
+from iai_mcp.hippo import HippoDB
 
 
 def _insert_events(db: HippoDB, n: int = 5) -> None:
@@ -41,7 +38,6 @@ def _seed_records_direct(db: HippoDB, n: int = 10) -> None:
 class TestConnLockType:
 
     def test_conn_lock_is_rlock(self, tmp_path: Path) -> None:
-        import threading as _threading
         db = HippoDB(tmp_path)
         lock = db._conn_lock
         assert lock.acquire(blocking=True), "Could not acquire _conn_lock first time"
@@ -56,7 +52,6 @@ class TestConnLockType:
         db.close()
 
     def test_conn_lock_type_annotation(self, tmp_path: Path) -> None:
-        import threading as _threading
         db = HippoDB(tmp_path)
         lock = db._conn_lock
         lock.acquire()
@@ -299,7 +294,6 @@ class TestRebuildIndexRLock:
 class TestSchemaOpsConcurrentAccess:
 
     def test_add_columns_no_exception_under_concurrent_writes(self, tmp_path: Path) -> None:
-        import pyarrow as pa
         db = HippoDB(tmp_path)
         events_tbl = db.open_table("events")
         _seed_records_direct(db, 5)

@@ -41,6 +41,30 @@ def step_dmn_reflection(
         synth_record = ReflectionAgent().synthesize(
             self._store, cfg.reflection_window_hours,
         )
+        prov = (synth_record.provenance or [{}])[0]
+        if prov.get("embed_failed"):
+            # A reflection that could not be embedded is junk in the ANN
+            # (cosine ~0 to every cue); skip the insert, next cycle retries.
+            return True, {
+                "meta_analyst_emitted": meta_analyst_emitted,
+                "reflection_synthesized": False,
+                "reflection_skipped_embed_failed": True,
+                "dry_run_mode": bool(cfg.dry_run),
+            }
+        empty_window = (
+            int(prov.get("captured_count") or 0) == 0
+            and int(prov.get("recalled_count") or 0) == 0
+        )
+        if empty_window:
+            # A genuinely quiet window writes NOTHING: a real-embedded
+            # "captured 0 turns" record is a valid ANN neighbor for vague
+            # cues — junk that can actually surface on degraded recall.
+            return True, {
+                "meta_analyst_emitted": meta_analyst_emitted,
+                "reflection_synthesized": False,
+                "reflection_skipped_empty": True,
+                "dry_run_mode": bool(cfg.dry_run),
+            }
         if not cfg.dry_run:
             self._store.insert(synth_record)
             reflection_synthesized = True

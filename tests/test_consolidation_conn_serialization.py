@@ -458,3 +458,53 @@ def test_txn_foreign_owner_raises_hippo_integrity_error(tmp_path: Path) -> None:
             "stale entry would false-positive the next legitimate caller"
         )
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# MR-01 guard: _ensure_tables must route through _txn/_conn_lock uniformly
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_tables_does_not_leave_stale_txn_owner(tmp_path: Path) -> None:
+    """HippoDB boot must not leave a stale _txn_owners entry after _ensure_tables.
+
+    Before the MR-01 fix _ensure_tables hand-rolled BEGIN/ROLLBACK/COMMIT outside
+    _txn(), so it never registered a _txn_owners entry. With the fix it uses _txn()
+    which registers and then removes an entry. After boot the map must be clean —
+    a stale entry would cause every subsequent _txn() caller on the same conn to
+    see 'txn in progress' and silently yield into a foreign transaction.
+    """
+    store = MemoryStore(tmp_path, user_id="test")
+    try:
+        conn = store.db._conn
+        with _txn_owners_lock:
+            assert id(conn) not in _txn_owners, (
+                "_txn_owners still has an entry for the boot connection after "
+                "HippoDB.__init__ — _ensure_tables leaked a stale owner (MR-01)"
+            )
+    finally:
+        store.close()
+
+
+def test_ensure_tables_boot_conn_accepts_txn_after_init(tmp_path: Path) -> None:
+    """After boot the shared connection accepts a fresh _txn with no leftover state.
+
+    Proves the _txn() path is taken (owner registered then cleared), not the old
+    hand-rolled path (which never touched _txn_owners). A fresh _txn on the boot
+    conn must complete without error — no stale in_transaction or journal from
+    _ensure_tables.
+    """
+    store = MemoryStore(tmp_path, user_id="test")
+    try:
+        conn = store.db._conn
+        # A no-op _txn under _conn_lock must complete cleanly after boot.
+        completed = []
+        with store.db._conn_lock, _txn(conn):
+            completed.append(True)
+        assert completed, "_txn on the boot connection failed after _ensure_tables"
+        with _txn_owners_lock:
+            assert id(conn) not in _txn_owners, (
+                "owner entry not cleared after post-boot _txn exit"
+            )
+    finally:
+        store.close()

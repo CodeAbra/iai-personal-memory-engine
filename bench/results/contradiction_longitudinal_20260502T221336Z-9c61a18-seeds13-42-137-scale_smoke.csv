@@ -1,0 +1,25 @@
+probe_id,seed,n_slice,condition,topic,pipeline_rank,cosine_rank,pipeline_hit_at_k,cosine_hit_at_k,s4_contradiction_emitted,anti_hits_count,hint_kinds,pipeline_top1_text
+post-0000-13,13,0,post_flip,supplier_name,2,2,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema,curiosity_question",We source components from Acme Industries.
+post-0001-13,13,0,post_flip,supplier_name,2,2,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",We source components from Acme Industries.
+hist-0000-13,13,0,historical_verbatim,supplier_name,3,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Switched supplier: components now from Northwind Manufacturing.
+hist-0001-13,13,0,historical_verbatim,supplier_name,3,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Switched supplier: components now from Northwind Manufacturing.
+post-0000-13,13,1,post_flip,supplier_name,2,2,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema,curiosity_question",We source components from Acme Industries.
+post-0001-13,13,1,post_flip,supplier_name,2,2,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",We source components from Acme Industries.
+hist-0000-13,13,1,historical_verbatim,supplier_name,3,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Switched supplier: components now from Northwind Manufacturing.
+hist-0001-13,13,1,historical_verbatim,supplier_name,3,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Switched supplier: components now from Northwind Manufacturing.
+post-0000-42,42,0,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema,curiosity_question",Update: the actual CEO is Marcus Chen.
+post-0001-42,42,0,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0000-42,42,0,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0001-42,42,0,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+post-0000-42,42,1,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema,curiosity_question",Update: the actual CEO is Marcus Chen.
+post-0001-42,42,1,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0000-42,42,1,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0001-42,42,1,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+post-0000-137,137,0,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema,curiosity_question",Update: the actual CEO is Marcus Chen.
+post-0001-137,137,0,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0000-137,137,0,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0001-137,137,0,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+post-0000-137,137,1,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema,curiosity_question",Update: the actual CEO is Marcus Chen.
+post-0001-137,137,1,post_flip,ceo_name,1,1,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0000-137,137,1,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.
+hist-0001-137,137,1,historical_verbatim,ceo_name,2,3,1,1,1,0,"s4_contradiction,provisional_schema,provisional_schema",Update: the actual CEO is Marcus Chen.

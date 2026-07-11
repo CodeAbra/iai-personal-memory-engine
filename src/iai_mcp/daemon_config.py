@@ -313,6 +313,11 @@ _SLEEP_OVERHAUL_DEFAULT_EDGE_DENSITY_FLOOR: float = 0.001
 _SLEEP_OVERHAUL_DEFAULT_CLUSTER_WINDOW_SEC: int = 300
 _SLEEP_OVERHAUL_DEFAULT_CRISIS_DROP_QUARTILE: float = 0.25
 _SLEEP_OVERHAUL_DEFAULT_CLUSTER_REPLAY_INITIAL_WEIGHT: float = 0.05
+_SLEEP_OVERHAUL_DEFAULT_AVG_DEGREE_FLOOR: float = 2.0
+_SLEEP_OVERHAUL_DEFAULT_GIANT_COMPONENT_FRACTION_FLOOR: float = 0.5
+_SLEEP_OVERHAUL_DEFAULT_EV_MIN_NODES: int = 100
+_SLEEP_OVERHAUL_DEFAULT_EV_ARM_AFTER_N: int = 3
+_SLEEP_OVERHAUL_DEFAULT_EV_DISARM_AFTER_N: int = 3
 
 _SLEEP_OVERHAUL_DRY_RUN_TRUE_VALUES: frozenset[str] = frozenset({"true", "1", "yes", "on"})
 _SLEEP_OVERHAUL_DRY_RUN_FALSE_VALUES: frozenset[str] = frozenset({"false", "0", "no", "off", ""})
@@ -328,6 +333,11 @@ class SleepOverhaulConfig:
     crisis_drop_quartile: float
     cluster_replay_initial_weight: float
     dry_run: bool
+    avg_degree_floor: float
+    giant_component_fraction_floor: float
+    ev_min_nodes: int
+    ev_arm_after_n: int
+    ev_disarm_after_n: int
 
 
 def _load_sleep_overhaul_config() -> SleepOverhaulConfig:
@@ -449,6 +459,91 @@ def _load_sleep_overhaul_config() -> SleepOverhaulConfig:
                 f"{sorted(_SLEEP_OVERHAUL_DRY_RUN_TRUE_VALUES | _SLEEP_OVERHAUL_DRY_RUN_FALSE_VALUES)}"
             )
 
+    raw_avg_degree_floor = os.environ.get(
+        "IAI_MCP_AVG_DEGREE_FLOOR",
+        str(_SLEEP_OVERHAUL_DEFAULT_AVG_DEGREE_FLOOR),
+    )
+    try:
+        avg_degree_floor = float(raw_avg_degree_floor)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"IAI_MCP_AVG_DEGREE_FLOOR: invalid value "
+            f"{raw_avg_degree_floor!r}, expected float"
+        )
+    if not (0.0 < avg_degree_floor <= 1000.0):
+        raise ValueError(
+            f"IAI_MCP_AVG_DEGREE_FLOOR: invalid value "
+            f"{raw_avg_degree_floor!r}, expected float in (0.0, 1000.0]"
+        )
+
+    raw_giant_component_floor = os.environ.get(
+        "IAI_MCP_GIANT_COMPONENT_FRACTION_FLOOR",
+        str(_SLEEP_OVERHAUL_DEFAULT_GIANT_COMPONENT_FRACTION_FLOOR),
+    )
+    try:
+        giant_component_fraction_floor = float(raw_giant_component_floor)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"IAI_MCP_GIANT_COMPONENT_FRACTION_FLOOR: invalid value "
+            f"{raw_giant_component_floor!r}, expected float"
+        )
+    if not (0.0 < giant_component_fraction_floor <= 1.0):
+        raise ValueError(
+            f"IAI_MCP_GIANT_COMPONENT_FRACTION_FLOOR: invalid value "
+            f"{raw_giant_component_floor!r}, expected float in (0.0, 1.0]"
+        )
+
+    raw_ev_min_nodes = os.environ.get(
+        "IAI_MCP_EV_MIN_NODES",
+        str(_SLEEP_OVERHAUL_DEFAULT_EV_MIN_NODES),
+    )
+    try:
+        ev_min_nodes = int(raw_ev_min_nodes)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"IAI_MCP_EV_MIN_NODES: invalid value {raw_ev_min_nodes!r}, "
+            f"expected int"
+        )
+    if not (1 <= ev_min_nodes <= 10000000):
+        raise ValueError(
+            f"IAI_MCP_EV_MIN_NODES: invalid value {raw_ev_min_nodes!r}, "
+            f"expected int in [1, 10000000]"
+        )
+
+    raw_ev_arm_after_n = os.environ.get(
+        "IAI_MCP_EV_ARM_AFTER_N",
+        str(_SLEEP_OVERHAUL_DEFAULT_EV_ARM_AFTER_N),
+    )
+    try:
+        ev_arm_after_n = int(raw_ev_arm_after_n)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"IAI_MCP_EV_ARM_AFTER_N: invalid value {raw_ev_arm_after_n!r}, "
+            f"expected int"
+        )
+    if not (1 <= ev_arm_after_n <= 100):
+        raise ValueError(
+            f"IAI_MCP_EV_ARM_AFTER_N: invalid value {raw_ev_arm_after_n!r}, "
+            f"expected int in [1, 100]"
+        )
+
+    raw_ev_disarm_after_n = os.environ.get(
+        "IAI_MCP_EV_DISARM_AFTER_N",
+        str(_SLEEP_OVERHAUL_DEFAULT_EV_DISARM_AFTER_N),
+    )
+    try:
+        ev_disarm_after_n = int(raw_ev_disarm_after_n)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"IAI_MCP_EV_DISARM_AFTER_N: invalid value "
+            f"{raw_ev_disarm_after_n!r}, expected int"
+        )
+    if not (1 <= ev_disarm_after_n <= 100):
+        raise ValueError(
+            f"IAI_MCP_EV_DISARM_AFTER_N: invalid value "
+            f"{raw_ev_disarm_after_n!r}, expected int in [1, 100]"
+        )
+
     return SleepOverhaulConfig(
         rich_club_ratio_floor=rich_club_ratio_floor,
         community_count_ceiling_ratio=community_count_ceiling_ratio,
@@ -457,6 +552,11 @@ def _load_sleep_overhaul_config() -> SleepOverhaulConfig:
         crisis_drop_quartile=crisis_drop_quartile,
         cluster_replay_initial_weight=cluster_replay_initial_weight,
         dry_run=dry_run,
+        avg_degree_floor=avg_degree_floor,
+        giant_component_fraction_floor=giant_component_fraction_floor,
+        ev_min_nodes=ev_min_nodes,
+        ev_arm_after_n=ev_arm_after_n,
+        ev_disarm_after_n=ev_disarm_after_n,
     )
 
 

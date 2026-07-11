@@ -66,12 +66,17 @@ def _send_embed_cue_rpc(cue: str, timeout_ms: int) -> "list[float] | None":
     import asyncio
     import json
 
-    from iai_mcp._ipc import open_ipc_connection
+    from iai_mcp.concurrency import SOCKET_PATH
+
+    sock_path = os.environ.get("IAI_DAEMON_SOCKET_PATH") or str(SOCKET_PATH)
     connect_timeout = timeout_ms / 1000.0
 
     async def _runner() -> "list[float] | None":
         try:
-            reader, writer = await open_ipc_connection(timeout=connect_timeout)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(sock_path),
+                timeout=connect_timeout,
+            )
         except (FileNotFoundError, ConnectionRefusedError, OSError, asyncio.TimeoutError):
             return None
         try:
@@ -158,6 +163,17 @@ def _recall_daemon_down_post_warm(
         def _injected_embedder_for_store(_store: "Any") -> "Any":
             return _captured_embedder
 
+        # INVARIANT: single-process, single-recall-per-process only.
+        # The warm embedder is injected by swapping the module-global
+        # embedder_for_store because core.dispatch resolves the model via that
+        # global rather than an explicit parameter. This swap is NOT
+        # concurrency-safe: two recalls in the same process would race the
+        # global (one could observe the other's injected or restored binding,
+        # or see a torn binding while finally restores mid-dispatch). It is
+        # safe here because the sole caller is the short-lived daemon-down CLI,
+        # which runs exactly one recall per process. Do NOT call this path from
+        # the daemon or any threaded/concurrent context without first plumbing
+        # the embedder as an explicit argument through core.dispatch.
         _orig_efs = _embed_mod.embedder_for_store
         try:
             _embed_mod.embedder_for_store = _injected_embedder_for_store
@@ -328,8 +344,16 @@ def _fetch_records_by_labels(
 
         results: list[dict] = []
         for label in vec_labels[:n]:
-            with db._conn_lock:
-                row = db._conn.execute(
+            # This vec_label = ? equality is a second beneficiary of the records
+            # vec_label index: the engine serves it through the ColIndex
+            # ``col = <literal>`` branch (single-value probe + full-predicate
+            # re-apply), so it is index-served and scan-parity on migrated stores
+            # exactly like the ``vec_label IN (...)`` recall lookup.
+            # Recall read: route through the RO pool (lock-free on lilli,
+            # falls back to the shared writer conn on stdlib) so this read
+            # never serializes behind background write activity.
+            with db.ro_conn() as _rc:
+                row = _rc.execute(
                     "SELECT id, literal_surface, created_at FROM records"
                     " WHERE vec_label = ? AND tombstoned_at IS NULL"
                     " AND COALESCE(embedding_pending, 0) = 0",

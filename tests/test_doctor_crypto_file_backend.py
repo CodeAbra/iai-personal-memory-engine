@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import io
 import os
 import secrets
-from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 

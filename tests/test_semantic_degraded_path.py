@@ -5,6 +5,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests._store_raw import open_store_raw
+
 
 def _zero_vector_blob(embed_dim: int) -> bytes:
     return struct.pack(f"<{embed_dim}f", *([0.0] * embed_dim))
@@ -132,7 +134,7 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
     zero_blob = _zero_vector_blob(EMBED_DIM)
     now = datetime.now(timezone.utc).isoformat()
 
-    conn = _sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     conn.row_factory = _sqlite3.Row
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
@@ -197,7 +199,7 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
     real_vec = rng2.randn(EMBED_DIM).tolist()
     real_blob = struct.pack(f"<{EMBED_DIM}f", *real_vec)
 
-    conn3 = _sqlite3.connect(str(db_path))
+    conn3 = open_store_raw(db_path)
     try:
         conn3.execute(
             "UPDATE records SET embedding = ?, embedding_pending = 0 WHERE id = ?",
@@ -206,15 +208,6 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
         conn3.commit()
     finally:
         conn3.close()
-
-    # Production re-embed (reembed_pending_rows / `migrate --reembed-from-text`)
-    # invalidates the runtime-graph cache on the pending->ready transition so the
-    # repaired row rejoins the warm graph. This test flips the row via direct SQL,
-    # bypassing that path, so it must trigger the same invalidation explicitly;
-    # otherwise the drift-tolerant cache absorbs the +1 growth and serves the
-    # stale graph that still excludes the row.
-    from iai_mcp import runtime_graph_cache as _rgc_inval
-    _rgc_inval.invalidate_at_root(hermetic_store)
 
     store3 = MemoryStore(hermetic_store)
     try:

@@ -4,7 +4,6 @@ import io
 import sys
 from contextlib import redirect_stdout, redirect_stderr
 
-import pytest
 
 
 def _make_args(text: str = "hello world", session_id: str | None = None):

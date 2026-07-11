@@ -12,7 +12,6 @@ from iai_mcp.events import query_events, write_event
 from iai_mcp.peri_event_buffer import (
     PeriEventBuffer,
     PeriEventEntry,
-    get_buffer,
     set_buffer,
 )
 from iai_mcp.store import MemoryStore

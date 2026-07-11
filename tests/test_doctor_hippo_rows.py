@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+_skip_on_lilli = pytest.mark.skipif(
+    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
+    reason=(
+        "seeds a fresh SQLite file then calls the production doctor SQLite check; "
+        "the lilli equivalent degrades to WARN and is covered separately"
+    ),
+)
+
+
 
 def test_row_f_hippo_readable_clean_store(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
-    from iai_mcp.doctor import check_f_hippo_readable, run_diagnosis
+    from iai_mcp.doctor import check_f_hippo_readable
 
-    from iai_mcp import doctor as _doctor
 
     monkeypatch.setattr(
         "iai_mcp.store.MemoryStore",
@@ -173,6 +182,7 @@ def test_row_r_hnsw_corrupted_fail(tmp_path, monkeypatch):
     assert "rebuild" in result.detail
 
 
+@_skip_on_lilli
 def test_row_s_schema_version_match(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     hippo = tmp_path / "hippo"
@@ -193,6 +203,7 @@ def test_row_s_schema_version_match(tmp_path, monkeypatch):
     assert "schema_version=1" in result.detail
 
 
+@_skip_on_lilli
 def test_row_s_schema_drift_warn(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     hippo = tmp_path / "hippo"
@@ -273,13 +284,14 @@ def test_row_t_hippo_compaction_stale_warn(tmp_path, monkeypatch):
     assert "no hippo_compacted event" in result.detail
 
 
+@_skip_on_lilli
 def test_doctor_total_count_22(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp.doctor import run_diagnosis
 
     results = run_diagnosis()
-    assert len(results) == 25, (
-        f"expected 25 rows; got {len(results)}: {[r.name for r in results]}"
+    assert len(results) == 26, (
+        f"expected 26 rows; got {len(results)}: {[r.name for r in results]}"
     )
 
 
@@ -294,6 +306,7 @@ def _build_records_table(db_path: Path) -> None:
     conn.close()
 
 
+@_skip_on_lilli
 def test_check_x_collapsed_timestamps_warns(tmp_path, monkeypatch):
     """A store with >=5 episodic records sharing one created_at yields WARN."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
@@ -321,6 +334,7 @@ def test_check_x_collapsed_timestamps_warns(tmp_path, monkeypatch):
     assert "iai-mcp migrate --rederive-timestamps" in result.detail
 
 
+@_skip_on_lilli
 def test_check_x_collapsed_timestamps_ignores_tombstoned(tmp_path, monkeypatch):
     """Tombstoned duplicates must not count toward the >=5 collapsed-group threshold."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
@@ -347,6 +361,7 @@ def test_check_x_collapsed_timestamps_ignores_tombstoned(tmp_path, monkeypatch):
     assert result.status != "WARN"
 
 
+@_skip_on_lilli
 def test_check_x_collapsed_timestamps_pass(tmp_path, monkeypatch):
     """A store with episodic records each having a distinct created_at yields PASS."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
@@ -383,4 +398,106 @@ def test_no_lance_storage_optimized_in_identity_audit():
     assert "optimize_lance_storage" not in src, (
         "identity_audit.py still imports optimize_lance_storage; "
         "it must use optimize_hippo_storage."
+    )
+
+
+_lilli_driver = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli"
+
+
+@pytest.mark.skipif(
+    not _lilli_driver,
+    reason="proves doctor checks on a real lilli store — requires LILLI_STORAGE_DRIVER=lilli",
+)
+def test_doctor_checks_on_lilli_store(tmp_path, monkeypatch):
+    """Doctor (s) PASSes and (x) WARN-degrades on a real lilli store."""
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    os.environ["LILLI_STORAGE_DRIVER"] = "lilli"
+
+    from iai_mcp.hippo import HippoDB, AccessMode
+
+    db = HippoDB(path=tmp_path, access_mode=AccessMode.EXCLUSIVE)
+    try:
+        tbl = db.open_table("records")
+        import numpy as np
+        from iai_mcp.types import EMBED_DIM
+        import uuid as _uuid
+        for _ in range(3):
+            tbl.add([{
+                "id": str(_uuid.uuid4()),
+                "tier": "episodic",
+                "literal_surface": "test record",
+                "embedding": np.random.rand(EMBED_DIM).astype(np.float32).tolist(),
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }])
+    finally:
+        db.close()
+
+    from iai_mcp.doctor import (
+        check_s_hippo_schema_version,
+        check_x_no_collapsed_timestamps,
+    )
+
+    rs = check_s_hippo_schema_version()
+    assert rs.status == "PASS", f"(s) expected PASS on lilli, got {rs.status}: {rs.detail}"
+    assert "schema_version=" in rs.detail
+
+    rx = check_x_no_collapsed_timestamps()
+    assert rx.status in ("WARN", "PASS"), (
+        f"(x) expected WARN or PASS on lilli (engine ParseError degrades to WARN), "
+        f"got {rx.status}: {rx.detail}"
+    )
+    # Must not raise — if we get here the except broadening worked correctly.
+
+
+@pytest.mark.skipif(
+    not _lilli_driver,
+    reason="proves HAVING COUNT(*) >= 5 actually detects collapsed timestamps on lilli",
+)
+def test_check_x_collapsed_timestamps_detects_on_lilli(tmp_path, monkeypatch):
+    """After MR-02 fix: the doctor (x) check actually detects >=5 rows at one
+    timestamp on the lilli driver (not just a WARN-skip for ParseError).
+
+    Seeds 7 episodic records at the same created_at on a real HippoDB, then
+    asserts check_x_no_collapsed_timestamps returns passed=False / status=WARN
+    with the count in the detail (not 'check skipped').
+    """
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    os.environ["LILLI_STORAGE_DRIVER"] = "lilli"
+
+    from iai_mcp.hippo import HippoDB, AccessMode
+
+    db = HippoDB(path=tmp_path, access_mode=AccessMode.EXCLUSIVE)
+    try:
+        tbl = db.open_table("records")
+        import numpy as np
+        from iai_mcp.types import EMBED_DIM
+        import uuid as _uuid
+
+        collapsed_ts = "2024-01-01T00:00:00+00:00"
+        for _ in range(7):
+            tbl.add([{
+                "id": str(_uuid.uuid4()),
+                "tier": "episodic",
+                "literal_surface": "test record",
+                "embedding": np.random.rand(EMBED_DIM).astype(np.float32).tolist(),
+                "created_at": collapsed_ts,
+            }])
+    finally:
+        db.close()
+
+    from iai_mcp.doctor import check_x_no_collapsed_timestamps
+
+    result = check_x_no_collapsed_timestamps()
+    assert result.passed is False, (
+        f"expected detection (passed=False) but got passed=True; detail={result.detail!r}"
+    )
+    assert result.status == "WARN", f"expected WARN, got {result.status}: {result.detail}"
+    assert "7" in result.detail, (
+        f"expected count 7 in detail but got: {result.detail!r}"
+    )
+    # Confirm this is not a 'check skipped' degradation.
+    assert "check skipped" not in result.detail, (
+        f"check still degrading to skip instead of detecting: {result.detail!r}"
     )

@@ -4,7 +4,6 @@ import pytest
 
 from iai_mcp.lilli.core.similarity import hamming
 from iai_mcp.lilli.ops.separation import (
-    MAX_RETRIES_DEFAULT,
     SIMILARITY_THRESHOLD_DEFAULT,
     pattern_separate,
 )

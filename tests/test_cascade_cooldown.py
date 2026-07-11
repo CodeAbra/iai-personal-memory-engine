@@ -6,15 +6,22 @@ from unittest.mock import patch
 import pytest
 
 
-def test_at_most_six_cascades_over_five_minute_window_with_continuous_pending(monkeypatch):
-    asyncio.run(_at_most_six_cascades_body(monkeypatch))
+def test_at_most_six_cascades_over_five_minute_window_with_continuous_pending(
+    monkeypatch, tmp_path
+):
+    asyncio.run(_at_most_six_cascades_body(monkeypatch, tmp_path))
 
 
-async def _at_most_six_cascades_body(monkeypatch):
+async def _at_most_six_cascades_body(monkeypatch, tmp_path):
     import iai_mcp.daemon as daemon_mod
 
     cascade_invocations: list[float] = []
     sentinel_assignment = type("Asgmt", (), {"top_communities": [], "mid_regions": {}})()
+
+    # The loop dereferences store.root for the consolidation-intent lock
+    # check before it ever cascades — a bare None store kills every
+    # iteration inside the loop's catch-all and counts nothing.
+    store_stub = type("StoreStub", (), {"root": tmp_path})()
 
     clock = [1000.0]
 
@@ -25,8 +32,8 @@ async def _at_most_six_cascades_body(monkeypatch):
         cascade_invocations.append(fake_monotonic())
         return (None, sentinel_assignment, [])
 
-    async def fast_cascade_stub(store, assignment, **kwargs):
-        return {"communities_selected": 0, "records_warmed": 0}
+    def fast_warm_stub(store, assignment):
+        return ([], [])
 
     state_holder = {
         "fsm_state": "WAKE",
@@ -51,14 +58,14 @@ async def _at_most_six_cascades_body(monkeypatch):
     shutdown = asyncio.Event()
 
     with patch("iai_mcp.retrieve.build_runtime_graph", counting_stub), \
-         patch("iai_mcp.hippea_cascade.run_cascade", fast_cascade_stub), \
+         patch("iai_mcp.hippea_cascade.compute_and_fetch_warm", fast_warm_stub), \
          patch("iai_mcp.daemon_state.load_state", load_state_stub), \
          patch("iai_mcp.daemon_state.save_state", save_state_stub), \
          patch("iai_mcp.daemon.write_event", write_event_stub):
 
         cascade_task = asyncio.create_task(
             daemon_mod._hippea_cascade_loop(
-                store=None, shutdown=shutdown, _clock=fake_monotonic,
+                store=store_stub, shutdown=shutdown, _clock=fake_monotonic,
             ),
         )
 

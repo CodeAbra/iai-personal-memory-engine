@@ -5,7 +5,6 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -26,11 +25,30 @@ def built_wrapper() -> Path:
     return dist
 
 
-def _count_iai_mcp_processes() -> dict[str, int]:
+def _count_iai_mcp_processes(root_pid: int) -> dict[str, int]:
+    """Count iai_mcp.daemon / iai_mcp.core processes in ``root_pid``'s subtree.
+
+    The invariant under test is that the WRAPPER must not spawn a daemon or core
+    — i.e. no such process may appear beneath the wrapper process. Scoping the
+    scan to the wrapper's own descendants (rather than a system-wide substring
+    match) makes the count immune to unrelated daemons: a prior test's daemon
+    shutting down, or the developer's real daemon, no longer perturbs the delta
+    during the test's baseline→after window. The wrapper pid itself is included
+    so a daemon re-exec'd in place would still be caught.
+    """
     counts = {"core": 0, "daemon": 0}
-    for p in psutil.process_iter(["cmdline"]):
+    try:
+        root = psutil.Process(root_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return counts
+    procs = [root]
+    try:
+        procs += root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    for p in procs:
         try:
-            cl = p.info.get("cmdline") or []
+            cl = p.cmdline() or []
             if not cl:
                 continue
             joined = " ".join(c or "" for c in cl)
@@ -177,23 +195,32 @@ def _wait_for_daemon_socket(sock_path: Path, timeout_sec: float = 30.0) -> bool:
 def test_start_throws_DaemonUnreachableError_when_socket_missing(
     built_wrapper, tmp_path
 ):
-    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
-    sock_dir = Path(sock_dir_ctx.name)
+    sock_dir = Path(f"/tmp/iai-7.1-noconn-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
-    store_dir = tmp_path / "store"
+    store_dir = sock_dir / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
 
+    # Establish the socket-missing precondition deterministically: clear any
+    # leftover socket so the test never races a stale file (the sock dir name is
+    # derived from pid + id(tmp_path), and CPython can recycle object ids within
+    # one process, so a prior instance could have left a socket here).
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
     assert not sock_path.exists(), f"tmp socket pre-exists: {sock_path}"
-
-    baseline = _count_iai_mcp_processes()
-    daemon_baseline = baseline["daemon"]
-    core_baseline = baseline["core"]
 
     env_overrides = {
         "IAI_DAEMON_SOCKET_PATH": str(sock_path),
         "IAI_MCP_STORE": str(store_dir),
     }
     wrapper_proc = _spawn_wrapper(built_wrapper, env_overrides)
+    # Baseline is scoped to the wrapper subtree (freshly spawned -> zero
+    # daemon/core), so unrelated daemons can never perturb the delta.
+    baseline = _count_iai_mcp_processes(wrapper_proc.pid)
+    daemon_baseline = baseline["daemon"]
+    core_baseline = baseline["core"]
     try:
         init_resp = _initialize(wrapper_proc, rpc_id=1)
         assert "result" in init_resp, f"initialize failed: {init_resp}"
@@ -206,22 +233,26 @@ def test_start_throws_DaemonUnreachableError_when_socket_missing(
         }
         wrapper_proc.stdin.write((json.dumps(list_req) + "\n").encode("utf-8"))
         wrapper_proc.stdin.flush()
-        list_t0 = time.monotonic()
         line = wrapper_proc.stdout.readline()
-        list_elapsed = time.monotonic() - list_t0
         assert line, "wrapper closed stdout before tools/list reply"
         list_resp = json.loads(line.decode("utf-8"))
         assert "result" in list_resp, f"tools/list error: {list_resp}"
         tools = list_resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert len(names) == 13, (
-            f"tools/list returned {len(names)} tools, expected 13. "
+        assert len(names) == 15, (
+            f"tools/list returned {len(names)} tools, expected 15. "
             f"names={sorted(names)}"
         )
-        assert list_elapsed < 4.0, (
-            f"tools/list took {list_elapsed:.2f}s with no daemon — "
-            f"regression: wrapper is blocking server.connect on "
-            f"bridge.start (the mcp-tools-list-empty-cache bug)."
+        meta = list_resp["result"].get("_meta") or {}
+        list_elapsed = meta.get("listHandlerElapsedMs")
+        assert list_elapsed is not None, (
+            f"wrapper did not return _meta.listHandlerElapsedMs in tools/list "
+            f"response — cannot assert timing robustly. result={list_resp['result']}"
+        )
+        assert list_elapsed < 4000, (
+            f"tools/list handler took {list_elapsed}ms with no daemon — "
+            f"regression: wrapper is blocking tools/list on daemon state "
+            f"(the mcp-tools-list-empty-cache bug)."
         )
 
         time.sleep(7.0)
@@ -266,7 +297,7 @@ def test_start_throws_DaemonUnreachableError_when_socket_missing(
         )
 
         time.sleep(1.0)
-        after = _count_iai_mcp_processes()
+        after = _count_iai_mcp_processes(wrapper_proc.pid)
         daemon_delta = after["daemon"] - daemon_baseline
         assert daemon_delta == 0, (
             f"REGRESSION: wrapper spawned {daemon_delta} new iai_mcp.daemon "
@@ -292,15 +323,18 @@ def test_start_throws_DaemonUnreachableError_when_socket_missing(
             sock_path.unlink()
         except OSError:
             pass
-        sock_dir_ctx.cleanup()
 
 
 def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path):
-    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
-    sock_dir = Path(sock_dir_ctx.name)
+    sock_dir = Path(f"/tmp/iai-7.1-warm-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
-    store_dir = tmp_path / "store"
+    store_dir = sock_dir / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
     assert not sock_path.exists()
 
     daemon_proc = _spawn_daemon_in_background(sock_path, store_dir)
@@ -309,15 +343,17 @@ def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path)
             f"daemon did not bind socket {sock_path} within 30s"
         )
 
-        baseline = _count_iai_mcp_processes()
-        daemon_baseline = baseline["daemon"]
-        core_baseline = baseline["core"]
-
         env_overrides = {
             "IAI_DAEMON_SOCKET_PATH": str(sock_path),
             "IAI_MCP_STORE": str(store_dir),
         }
         wrapper_proc = _spawn_wrapper(built_wrapper, env_overrides)
+        # Scope the count to the wrapper subtree: the warm daemon spawned above
+        # is a sibling, not a wrapper child, so it never enters the count and a
+        # second wrapper-spawned daemon would be the only thing the delta sees.
+        baseline = _count_iai_mcp_processes(wrapper_proc.pid)
+        daemon_baseline = baseline["daemon"]
+        core_baseline = baseline["core"]
         try:
             init_resp = _initialize(wrapper_proc, rpc_id=1)
             assert "result" in init_resp, f"initialize failed: {init_resp}"
@@ -334,7 +370,7 @@ def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path)
             )
 
             time.sleep(0.5)
-            after = _count_iai_mcp_processes()
+            after = _count_iai_mcp_processes(wrapper_proc.pid)
 
             daemon_delta = after["daemon"] - daemon_baseline
             assert daemon_delta == 0, (
@@ -365,4 +401,3 @@ def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path)
             sock_path.unlink()
         except OSError:
             pass
-        sock_dir_ctx.cleanup()

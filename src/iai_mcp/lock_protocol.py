@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import logging
 import os
 from pathlib import Path
-
-from iai_mcp._filelock import LOCK_NB, LOCK_SH, flock
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ def acquire_client_shared_nb(fd: int, lock_path: Path) -> bool:
         return False
 
     try:
-        flock(fd, LOCK_SH | LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         return True
     except OSError as exc:
         if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 
 
 def test_default_construct_budget_ms_is_1000():

@@ -44,18 +44,18 @@ def _make_clean_jsonl(deferred_dir: Path, session_id: str, ts_suffix: int) -> Pa
 
 
 def _force_insert_failed(monkeypatch) -> None:
-
+    # The backlog drain routes genuinely-new events through `_drain_write_pending`
+    # (the two-phase pending-row write), not the synchronous `capture_turn`. Inject
+    # the failure at the live drain path so the drain loop sees the real
+    # `insert-failed:` reason that drives the failed-path promotion (attempt
+    # advancement, permanent-after-3). Stubbing `capture_turn` would no longer be
+    # intercepted by the live drain and the turn would land as a pending row.
     def _stub(*_args: Any, **_kwargs: Any) -> dict:
-        return {"status": "skipped", "reason": "insert-failed:test"}
+        return {"status": "skipped", "record_id": None, "reason": "insert-failed:test"}
 
     import iai_mcp.capture as capture_mod
 
-    # The deferred-capture drain inserts via `_drain_write_pending` (two-phase:
-    # insert the pending row first, embed later); the live path still uses
-    # `capture_turn`. Force both to report an insert failure so the retry /
-    # permanent-failure attempt accounting is exercised regardless of path.
     monkeypatch.setattr(capture_mod, "_drain_write_pending", _stub)
-    monkeypatch.setattr(capture_mod, "capture_turn", _stub)
 
 
 def _open_isolated_store():

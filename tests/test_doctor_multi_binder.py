@@ -96,6 +96,30 @@ def test_extract_binder_pids_ss_handles_empty_output():
     assert _extract_binder_pids_ss("u_str LISTEN 0 5 /tmp/other.sock 1 * 0 users:((\"x\",pid=1,fd=0))", target) == set()
 
 
+def test_extract_binder_pids_ss_exact_token_no_false_positive():
+    # A line whose path is a *superset* of the target (e.g. .daemon.sock-old,
+    # .daemon.sock2) must NOT match — substring containment would trigger on these.
+    from iai_mcp.doctor import _extract_binder_pids_ss
+
+    target = Path("/home/u/.iai-mcp/.daemon.sock")
+    decoy_lines = "\n".join([
+        f'u_str LISTEN 0 5 {target}-old 9001 * 0 users:(("x",pid=9001,fd=3))',
+        f'u_str LISTEN 0 5 {target}2 9002 * 0 users:(("x",pid=9002,fd=4))',
+        f'u_str LISTEN 0 5 {target}.bak 9003 * 0 users:(("x",pid=9003,fd=5))',
+    ])
+    assert _extract_binder_pids_ss(decoy_lines, target) == set(), (
+        "paths that contain the target as a substring must not match"
+    )
+
+    # The exact target path DOES match.
+    exact_line = (
+        f'u_str LISTEN 0 5 {target} 8000 * 0 users:(("python3",pid=8000,fd=3))'
+    )
+    assert _extract_binder_pids_ss(exact_line, target) == {8000}, (
+        "the exact target path must match"
+    )
+
+
 @pytest.fixture
 def short_socket_path(tmp_path, monkeypatch):
     sock_dir = Path(f"/tmp/iai-mb-{os.getpid()}-{id(tmp_path)}")

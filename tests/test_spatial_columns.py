@@ -4,7 +4,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pyarrow as pa
 import pytest
 
 from iai_mcp.store import RECORDS_TABLE, MemoryStore

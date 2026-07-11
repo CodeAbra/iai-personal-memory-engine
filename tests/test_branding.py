@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import io
 
-import pytest
 
 
 def test_logo_has_no_mcp_columns(monkeypatch):
@@ -41,7 +40,6 @@ def test_tagline_reads_iai_cli(monkeypatch):
 
 
 def test_brand_internals_intact():
-    import iai_mcp
     from iai_mcp import iai_cli  # noqa: F401  module importable
 
     assert callable(iai_cli._color), "_color helper missing"
@@ -50,7 +48,7 @@ def test_brand_internals_intact():
 
 def test_doctor_header_reads_iai(monkeypatch, tmp_path):
     monkeypatch.setenv("NO_COLOR", "1")
-    from iai_mcp.doctor import CheckResult, print_checklist
+    from iai_mcp.doctor import print_checklist
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

@@ -5,13 +5,18 @@ The predicate `_check_sleep_cycle_staleness(state, now)` decides whether
 the daemon's lifecycle has been parked in SLEEP with an unadvancing
 consolidation cycle for longer than a configurable threshold. When true,
 the watchdog tick fires the operator-facing `daemon_sleep_cycle_stale`
-event exactly once per stuck cycle (dedup key = the cycle's `started_at`
-string).
+event at most once per stuck cycle. Dedup is durable: the tick queries
+the events ledger for a prior event whose payload `sleep_cycle_started_at`
+matches the current cycle's identity, so the same wedge does not re-emit
+after a daemon restart. An in-process attribute cache primes the fast-path
+for subsequent ticks within one process lifetime.
 
 Tests are hermetic: no real `~/.iai-mcp/` interaction. State is injected
 via monkeypatch on `iai_mcp.lifecycle_state.load_state`; the watchdog's
 in-memory dedup state is reset between cases via `monkeypatch.setattr`
-on `daemon._last_sleep_stale_started_at`. One regression test
+on `daemon._last_sleep_stale_started_at`; the ledger query is intercepted
+via monkeypatch on `iai_mcp.daemon.query_events` (alias resolved by the
+late import inside the tick). One regression test
 (`test_first_tick_on_stale_state_emits_without_attr_init`) deliberately
 skips the dedup-reset so the call-site's `getattr(_pkg(), ..., "")`
 default-empty contract is pinned against the package-vs-submodule
@@ -99,23 +104,34 @@ class TestPredicate:
         assert ctx["attempt"] == 1
         assert ctx["crisis_mode"] is False
 
-    def test_attempt_gt_1_still_stale(self):
-        # A retried-but-still-wedged cycle (attempt >= 2) is exactly the case the
-        # watchdog must catch: a retry that itself hangs for hours. The gate is
-        # `attempt < 1`, so attempt 2 (10 days stuck) MUST be flagged stale.
+    def test_attempt_gt_1_is_not_stale(self):
+        # attempt >= 2 means the cycle has retried — quarantine/retry band,
+        # outside the scope of this predicate.
         state = _state(
             LifecycleState.SLEEP.value,
             _progress(NOW - timedelta(days=10), attempt=2),
         )
-        is_stale, ctx = daemon._check_sleep_cycle_staleness(state, NOW)
-        assert is_stale is True
-        assert ctx["attempt"] == 2
+        assert daemon._check_sleep_cycle_staleness(state, NOW)[0] is False
 
-    def test_attempt_zero_is_not_stale(self):
-        # attempt 0 (or negative / non-int) is not a genuine running attempt.
+    def test_attempt_0_step_body_hang_is_stale(self):
+        # attempt=0 is the on-disk shape for a true step-body hang: after the
+        # prior step completes _save_progress writes attempt=0, and if the next
+        # step's body blocks forever no further save runs, leaving attempt=0.
+        # Also covers a clean-defer-loop wedge (no prior exception → attempt
+        # preserved at 0 via prior.get("attempt", 0)).
         state = _state(
             LifecycleState.SLEEP.value,
             _progress(NOW - timedelta(days=10), attempt=0),
+        )
+        is_stale, ctx = daemon._check_sleep_cycle_staleness(state, NOW)
+        assert is_stale is True
+        assert ctx["attempt"] == 0
+
+    def test_attempt_negative_is_not_stale(self):
+        # Defensive: a corrupt negative attempt value must not fire.
+        state = _state(
+            LifecycleState.SLEEP.value,
+            _progress(NOW - timedelta(days=10), attempt=-1),
         )
         assert daemon._check_sleep_cycle_staleness(state, NOW)[0] is False
 
@@ -282,6 +298,113 @@ class TestWatchdogTickEmits:
         assert (
             stale_emits[0][1]["sleep_cycle_started_at"]
             != stale_emits[1][1]["sleep_cycle_started_at"]
+        )
+
+    def test_durable_dedup_suppresses_emit_on_restart(self, env, monkeypatch):
+        """Same on-disk wedge (same started_at) must NOT re-emit after a daemon
+        restart.  Simulates a restart by clearing the in-process dedup key and
+        injecting a ledger that already contains the prior event for that cycle.
+        """
+        import iai_mcp.events as _events_mod
+
+        started_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        stale_state = _state(
+            LifecycleState.SLEEP.value,
+            {
+                "last_completed_index": 1,
+                "attempt": 1,
+                "last_error": "deferred:step=OPTIMIZE_HIPPO:chunk_idx=0",
+                "started_at": started_at,
+            },
+        )
+        monkeypatch.setattr(
+            "iai_mcp.lifecycle_state.load_state",
+            lambda path=None: stale_state,
+        )
+        # Ledger already has one event for this cycle (from before the restart).
+        prior_ledger = [
+            {"data": {"sleep_cycle_started_at": started_at}, "kind": "daemon_sleep_cycle_stale"}
+        ]
+        monkeypatch.setattr(
+            _events_mod, "query_events", lambda store, kind=None, limit=500: prior_ledger,
+        )
+        emitted: list = []
+        monkeypatch.setattr(
+            daemon,
+            "write_event",
+            lambda store, kind, data, **kw: emitted.append((kind, data, kw)) or "id",
+        )
+
+        async def _probe_ok(_sock, _t):
+            return True
+
+        # Simulate a post-restart tick: in-process dedup was cleared by the
+        # fixture's monkeypatch.setattr(daemon, "_last_sleep_stale_started_at", "").
+        daemon._watchdog_tick(
+            object(),
+            env.sock_path,
+            env.log_path,
+            0,
+            probe_fn=_probe_ok,
+            pressure_fn=lambda: 1,
+            rss_fn=lambda: 300 * 1024 * 1024,
+        )
+
+        stale_emits = [e for e in emitted if e[0] == "daemon_sleep_cycle_stale"]
+        assert stale_emits == [], "durable dedup must suppress re-emit on restart"
+
+    def test_durable_dedup_primes_inprocess_fastpath(self, env, monkeypatch):
+        """After ledger-dedup suppresses the first tick, subsequent ticks must
+        NOT re-hit the ledger (in-process fast-path should be primed).
+        """
+        import iai_mcp.events as _events_mod
+
+        started_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        stale_state = _state(
+            LifecycleState.SLEEP.value,
+            {
+                "last_completed_index": 1,
+                "attempt": 0,
+                "last_error": None,
+                "started_at": started_at,
+            },
+        )
+        monkeypatch.setattr(
+            "iai_mcp.lifecycle_state.load_state",
+            lambda path=None: stale_state,
+        )
+        prior_ledger = [
+            {"data": {"sleep_cycle_started_at": started_at}, "kind": "daemon_sleep_cycle_stale"}
+        ]
+        ledger_reads: list = []
+
+        def _counting_query(store, kind=None, limit=500):
+            ledger_reads.append(1)
+            return prior_ledger
+
+        monkeypatch.setattr(_events_mod, "query_events", _counting_query)
+        monkeypatch.setattr(
+            daemon, "write_event", lambda *a, **kw: "id",
+        )
+
+        async def _probe_ok(_sock, _t):
+            return True
+
+        for _ in range(3):
+            daemon._watchdog_tick(
+                object(),
+                env.sock_path,
+                env.log_path,
+                0,
+                probe_fn=_probe_ok,
+                pressure_fn=lambda: 1,
+                rss_fn=lambda: 300 * 1024 * 1024,
+            )
+
+        # Ledger should be read exactly once (first tick); ticks 2 and 3 use
+        # the in-process fast-path and skip the DB hit.
+        assert len(ledger_reads) == 1, (
+            f"expected 1 ledger read, got {len(ledger_reads)}"
         )
 
     def test_emit_failure_does_not_crash_tick(self, env, monkeypatch):

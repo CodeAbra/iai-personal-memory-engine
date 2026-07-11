@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 def test_shield_tier_enum_has_three_levels():
     from iai_mcp.shield import ShieldTier

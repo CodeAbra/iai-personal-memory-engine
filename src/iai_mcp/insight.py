@@ -134,13 +134,26 @@ async def generate_overnight_insight(store, session_id: str) -> dict:
     if not insight_text:
         return {"ok": False, "reason": "empty_insight", "text": None}
 
-    embed_dim = getattr(store, "embed_dim", None) or 384
+    # A real embedding, never zeros: a zero-embedded insight is semantically
+    # unfindable (cosine ~0 to every cue) yet occupies an ANN slot. An
+    # insight that cannot be embedded is not stored.
+    try:
+        from iai_mcp.embed import embedder_for_store
+        insight_embedding = list(
+            await asyncio.to_thread(embedder_for_store(store).embed, insight_text)
+        )
+    except Exception as exc:  # noqa: BLE001 -- skip beats junk
+        return {
+            "ok": False,
+            "reason": f"insight_embed_failed: {type(exc).__name__}",
+            "text": insight_text,
+        }
     record = MemoryRecord(
         id=uuid4(),
         tier="semantic",
         literal_surface=insight_text,
         aaak_index="",
-        embedding=[0.0] * int(embed_dim),
+        embedding=insight_embedding,
         community_id=None,
         centrality=0.0,
         detail_level=2,

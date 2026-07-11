@@ -84,35 +84,15 @@ def step_crisis_recluster(
                 from iai_mcp.store import EDGES_TABLE
                 import uuid as _uuid
 
-                # Recluster on the LIVE graph only: stream the corpus
-                # (RSS-bounded), exclude tombstoned and embedding-pending records
-                # at the SQL layer, and carry community_id. Reclustering over ALL
-                # records incl. tombstoned collapses the partition (it once
-                # reassigned ~9700 records into a single community on the real
-                # store), so the crisis hooks must compute on exactly recall's
-                # live node set -- matching active_records_count().
                 g = MemoryGraph()
-                live_node_ids: set[str] = set()
                 for row in self._store.iter_record_columns(
-                    ["id", "embedding", "community_id", "embedding_pending"],
-                    batch_size=1024,
-                    where="tombstoned_at IS NULL",
+                    ["id", "embedding"], batch_size=1024,
                 ):
                     try:
-                        if int(row.get("embedding_pending") or 0) != 0:
-                            continue
                         rid = _uuid.UUID(str(row["id"]))
-                        cid_raw = row.get("community_id")
-                        cid_uuid = None
-                        if cid_raw is not None and str(cid_raw).strip():
-                            try:
-                                cid_uuid = _uuid.UUID(str(cid_raw))
-                            except (ValueError, TypeError):
-                                cid_uuid = None
                         emb = row.get("embedding")
                         emb_list = list(emb) if emb is not None else []
-                        g.add_node(rid, cid_uuid, emb_list)
-                        live_node_ids.add(str(rid))
+                        g.add_node(rid, None, emb_list)
                     except (ValueError, TypeError, AttributeError):
                         continue
 
@@ -125,18 +105,10 @@ def step_crisis_recluster(
                     for batch in edges_q.to_batches(batch_size=2048):
                         for e in batch.to_pylist():
                             try:
-                                src_s, dst_s = str(e["src"]), str(e["dst"])
-                                # Both endpoints must already be live nodes;
-                                # add_edge() setdefault would otherwise resurrect
-                                # a tombstoned endpoint as a phantom node and
-                                # re-bloat the partition.
-                                if (
-                                    src_s not in live_node_ids
-                                    or dst_s not in live_node_ids
-                                ):
-                                    continue
+                                src_u = _uuid.UUID(str(e["src"]))
+                                dst_u = _uuid.UUID(str(e["dst"]))
                                 g.add_edge(
-                                    _uuid.UUID(src_s), _uuid.UUID(dst_s),
+                                    src_u, dst_u,
                                     weight=float(
                                         e.get("weight", 1.0) or 1.0
                                     ),
@@ -184,6 +156,7 @@ def step_crisis_recluster(
             try:
                 rec = self._load_state_record()
                 rec["crisis_mode"] = False
+                rec["crisis_mode_since_ts"] = None
                 self._save_state_record(rec)
             except (OSError, json.JSONDecodeError) as exc:
                 logger.warning("crisis_mode clear last-resort write failed: %s", exc)

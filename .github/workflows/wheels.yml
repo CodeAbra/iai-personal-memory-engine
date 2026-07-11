@@ -1,0 +1,57 @@
+name: Wheels
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_wheels:
+    name: wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp311-* cp312-*"
+          CIBW_SKIP: "*-musllinux_* *_i686 *_ppc64le *_s390x *-win32 *-win_arm64"
+          CIBW_ARCHS_MACOS: "arm64 x86_64"
+          # The manylinux build container has no Rust toolchain; install it
+          # (pinned to the repo's rust-toolchain.toml channel) plus the OpenSSL
+          # headers the native extension links against.
+          CIBW_BEFORE_ALL_LINUX: >
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
+            | sh -s -- -y --default-toolchain 1.87 --profile minimal &&
+            (yum install -y openssl-devel pkgconfig ||
+             apt-get update && apt-get install -y libssl-dev pkg-config || true)
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+          # A freshly built native wheel must import before it ships.
+          CIBW_TEST_COMMAND: 'python -c "import iai_mcp, iai_mcp_native"'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz

@@ -324,13 +324,26 @@ def test_deferred_embed_pass_stops_early_under_injected_over_cap(iai_home, monke
     drain_deferred_captures(store)
     assert _count_pending(store) == n, _count_pending(store)
 
-    # Window of 3 → the soft cap is checked before reading the second window. Force
-    # an over-cap resident-set reading so exactly the first window (3 rows) embeds
-    # and the remaining nine stay pending for the next cycle.
+    # Window of 3 → the soft cap is checked before reading the second window.
+    # The cap is growth-relative (max(requested, start + growth budget)), so
+    # the injected reader returns the baseline on the pass-start sample and a
+    # value past the budget on the per-window checks: exactly the first
+    # window (3 rows) embeds and the remaining nine stay pending.
+    from iai_mcp.hippo._db import REEMBED_RSS_GROWTH_BUDGET_BYTES
+
     monkeypatch.setenv("IAI_MCP_REEMBED_BATCH_SIZE", "3")
     monkeypatch.setenv("IAI_MCP_REEMBED_RSS_SOFT_CAP_BYTES", "1000")
+
+    _rss_calls = {"n": 0}
+
+    def _growing_rss() -> int:
+        _rss_calls["n"] += 1
+        if _rss_calls["n"] == 1:
+            return 10_000
+        return 10_000 + REEMBED_RSS_GROWTH_BUDGET_BYTES + 1
+
     monkeypatch.setattr(
-        HippoDB, "_reembed_rss_bytes", staticmethod(lambda: 10_000)
+        HippoDB, "_reembed_rss_bytes", staticmethod(_growing_rss)
     )
 
     spy = _SpyEmbedder()

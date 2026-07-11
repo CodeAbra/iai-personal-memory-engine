@@ -12,10 +12,10 @@ def test_recall_hit_carries_session_id_and_captured_at(tmp_path):
 
     result = capture_turn(
         store,
-        cue="known user line phase59",
-        text="known user line phase59 distinctive text",
+        cue="known user line mk59",
+        text="known user line mk59 distinctive text",
         tier="episodic",
-        session_id="sess-A1-phase59",
+        session_id="sess-A1-mk59",
         role="user",
     )
     assert result["status"] == "inserted", f"capture failed: {result}"
@@ -23,14 +23,14 @@ def test_recall_hit_carries_session_id_and_captured_at(tmp_path):
     recall = dispatch(
         store,
         "memory_recall",
-        {"cue": "known user line phase59"},
+        {"cue": "known user line mk59"},
     )
     hits = recall.get("hits", [])
     assert hits, "expected at least one recall hit"
 
     top = hits[0]
 
-    assert top.get("session_id") == "sess-A1-phase59", (
+    assert top.get("session_id") == "sess-A1-mk59", (
         f"hit session_id not surfaced (got {top.get('session_id')!r}); "
         "session_id missing from _hit_to_json / MemoryHit"
     )

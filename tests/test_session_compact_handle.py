@@ -14,13 +14,11 @@ from iai_mcp.handle import (
 )
 from iai_mcp.session import _approx_tokens
 
-
 @pytest.fixture(autouse=True)
 def _fresh_handle_cache():
     _reset_cache_for_tests()
     yield
     _reset_cache_for_tests()
-
 
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
@@ -36,13 +34,11 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 @pytest.fixture
 def _fresh_store(tmp_path: Path):
     from iai_mcp.store import MemoryStore
 
-    return MemoryStore(path=tmp_path / "hippo")
-
+    return MemoryStore(path=tmp_path / "lancedb")
 
 def _assemble_with_wake_depth(store, wake_depth):
     from iai_mcp import retrieve
@@ -57,20 +53,17 @@ def _assemble_with_wake_depth(store, wake_depth):
         profile_state={"wake_depth": wake_depth},
     )
 
-
 def test_minimal_payload_carries_non_empty_compact_handle(_fresh_store):
     payload = _assemble_with_wake_depth(_fresh_store, "minimal")
     assert payload.wake_depth == "minimal"
     assert payload.compact_handle != ""
     assert COMPACT_HANDLE_RE.fullmatch(payload.compact_handle)
 
-
 def test_encode_is_deterministic():
     a = encode_compact_handle("abcdef01", "12345678", "general", 3)
     b = encode_compact_handle("abcdef01", "12345678", "general", 3)
     assert a == b
     assert COMPACT_HANDLE_RE.fullmatch(a)
-
 
 def test_decode_round_trips_for_lru_hit():
     handle = encode_compact_handle("feedface", "cafebabe", "security", 7)
@@ -81,11 +74,9 @@ def test_decode_round_trips_for_lru_hit():
     assert parts[2] == "security"
     assert parts[3] == 7
 
-
 def test_decode_cold_cache_returns_none():
     fake = "<iai:" + ("a" * 16) + ">"
     assert decode_compact_handle(fake) is None
-
 
 @pytest.mark.parametrize(
     "malformed",
@@ -104,14 +95,12 @@ def test_decode_cold_cache_returns_none():
 def test_decode_rejects_malformed(malformed):
     assert decode_compact_handle(malformed) is None
 
-
 def test_standard_and_deep_populate_compact_handle_for_back_compat(_fresh_store):
     for depth in ("standard", "deep"):
         payload = _assemble_with_wake_depth(_fresh_store, depth)
         assert payload.wake_depth == depth
         assert payload.compact_handle != "", f"compact_handle missing at wake_depth={depth}"
         assert COMPACT_HANDLE_RE.fullmatch(payload.compact_handle)
-
 
 def test_minimal_payload_cached_tokens_within_budget(_fresh_store):
     payload = _assemble_with_wake_depth(_fresh_store, "minimal")
@@ -120,7 +109,6 @@ def test_minimal_payload_cached_tokens_within_budget(_fresh_store):
         f"{COMPACT_HANDLE_TOKEN_BUDGET}"
     )
     assert _approx_tokens(payload.compact_handle) <= COMPACT_HANDLE_TOKEN_BUDGET
-
 
 def test_compact_handle_is_hex_only_no_knob_leak():
     import re
@@ -138,14 +126,12 @@ def test_compact_handle_is_hex_only_no_knob_leak():
     body = handle[5:-1]
     assert re.fullmatch(r"[0-9a-f]{16}", body)
 
-
 def test_minimal_cached_count_charges_only_compact_handle(_fresh_store):
     payload = _assemble_with_wake_depth(_fresh_store, "minimal")
     assert payload.brain_handle.startswith("<sess:")
     assert payload.topic_cluster_hint.startswith("<topic:")
     assert payload.total_cached_tokens == _approx_tokens(payload.compact_handle)
     assert payload.total_cached_tokens <= COMPACT_HANDLE_TOKEN_BUDGET
-
 
 def test_resolve_compact_handle_rebuilds_legacy_triple():
     from iai_mcp.session import _resolve_compact_handle_to_pointers
@@ -157,7 +143,6 @@ def test_resolve_compact_handle_rebuilds_legacy_triple():
     assert identity_pointer == "<id:abcdef01>"
     assert brain_handle == "<sess:12345678 pend:4>"
     assert topic_cluster_hint == "<topic:general>"
-
 
 def test_resolve_compact_handle_returns_none_for_unknown():
     from iai_mcp.session import _resolve_compact_handle_to_pointers

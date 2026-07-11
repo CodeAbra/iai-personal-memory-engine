@@ -4,6 +4,7 @@ import argparse
 import gc
 import json
 import os
+import resource
 import shutil
 import sys
 import tempfile
@@ -37,14 +38,6 @@ def _cur_rss_bytes() -> int:
 
 
 def _ru_maxrss_bytes() -> int:
-    if sys.platform == "win32":
-        try:
-            import psutil
-            mi = psutil.Process().memory_info()
-            return int(getattr(mi, "peak_wset", mi.rss))
-        except Exception:
-            return 0
-    import resource
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform == "darwin":
         return int(r)

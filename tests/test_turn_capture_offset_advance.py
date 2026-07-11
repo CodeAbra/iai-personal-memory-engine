@@ -6,13 +6,10 @@ import re
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 from pathlib import Path
 
-
 HOOK_FILE = Path(__file__).resolve().parent.parent / "src" / "iai_mcp" / "_deploy" / "hooks" / "iai-mcp-turn-capture.sh"
-
 
 def _extract_py_script() -> str:
     text = HOOK_FILE.read_text()
@@ -20,7 +17,6 @@ def _extract_py_script() -> str:
     if not m:
         raise RuntimeError(f"Could not find PY_SCRIPT heredoc in {HOOK_FILE}")
     return m.group(1)
-
 
 def _run_py_script(
     py_script: str,
@@ -40,7 +36,6 @@ def _run_py_script(
     elapsed = time.monotonic() - t0
     return result.returncode, elapsed
 
-
 def _make_transcript(path: Path, n_lines: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
@@ -50,7 +45,6 @@ def _make_transcript(path: Path, n_lines: int) -> None:
                 "type": role,
                 "message": {"role": role, "content": f"Turn {i}"},
             }) + "\n")
-
 
 def _make_transcript_with_nonce(path: Path, n_lines: int, nonce: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,13 +57,11 @@ def _make_transcript_with_nonce(path: Path, n_lines: int, nonce: str) -> None:
                 "message": {"role": role, "content": content},
             }) + "\n")
 
-
 def _read_offset(state_dir: Path, session_id: str) -> int:
     offset_file = state_dir / f"{session_id}.offset"
     if not offset_file.exists():
         return -1
     return int(offset_file.read_text().strip() or "0")
-
 
 def _count_live_turns(deferred_dir: Path, session_id: str) -> int:
     live_file = deferred_dir / f"{session_id}.live.jsonl"
@@ -86,7 +78,6 @@ def _count_live_turns(deferred_dir: Path, session_id: str) -> int:
                 pass
     return count
 
-
 def _live_contains_text(deferred_dir: Path, session_id: str, text: str) -> bool:
     live_file = deferred_dir / f"{session_id}.live.jsonl"
     if not live_file.exists():
@@ -100,7 +91,6 @@ def _live_contains_text(deferred_dir: Path, session_id: str, text: str) -> bool:
             except Exception:
                 pass
     return False
-
 
 def test_ha_refuted_large_transcript_advances_offset():
     py_script = _extract_py_script()
@@ -124,7 +114,6 @@ def test_ha_refuted_large_transcript_advances_offset():
         new_offset = _read_offset(state_dir, sid)
         assert new_offset == 1520, f"expected 1520, got {new_offset}"
         assert elapsed < 4.0, f"took {elapsed:.2f}s — unexpected timeout risk"
-
 
 def test_hd_shorter_transcript_must_not_clobber_offset():
     py_script = _extract_py_script()
@@ -156,7 +145,6 @@ def test_hd_shorter_transcript_must_not_clobber_offset():
             f"re-emitted {live_turns} old turns as new events (clobber bug)"
         )
 
-
 def test_normal_growing_transcript_advances_and_writes_turns():
     py_script = _extract_py_script()
     sid = "test-normal-grow"
@@ -180,7 +168,6 @@ def test_normal_growing_transcript_advances_and_writes_turns():
 
         live_turns = _count_live_turns(deferred_dir, sid)
         assert live_turns > 0, "expected at least one turn written for new lines"
-
 
 def test_fresh_session_no_offset_captures_all_turns():
     py_script = _extract_py_script()
@@ -207,7 +194,6 @@ def test_fresh_session_no_offset_captures_all_turns():
             f"expected 10 turns captured, got {live_turns}"
         )
 
-
 def test_stale_path_scan_fallback_captures_turns():
     py_script = _extract_py_script()
     sid = "test-scan-fallback"
@@ -219,7 +205,7 @@ def test_stale_path_scan_fallback_captures_turns():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-example-project"
+        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
         project_dir.mkdir(parents=True, exist_ok=True)
         real_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript(real_transcript, 12)
@@ -238,7 +224,6 @@ def test_stale_path_scan_fallback_captures_turns():
         assert live_turns == 12, (
             f"expected 12 turns captured via canonical-first, got {live_turns}"
         )
-
 
 def test_missing_transcript_everywhere_exits_cleanly():
     py_script = _extract_py_script()
@@ -260,7 +245,6 @@ def test_missing_transcript_everywhere_exits_cleanly():
         assert _read_offset(state_dir, sid) == -1, "offset must not be created"
         assert _count_live_turns(deferred_dir, sid) == 0, "live file must not be created"
 
-
 def test_present_but_empty_stdin_uses_canonical_and_writes_nonce():
     py_script = _extract_py_script()
     sid = "test-empty-stdin-canonical"
@@ -273,7 +257,7 @@ def test_present_but_empty_stdin_uses_canonical_and_writes_nonce():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-example-project"
+        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
         project_dir.mkdir(parents=True, exist_ok=True)
         canonical_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript_with_nonce(canonical_transcript, 35, nonce)
@@ -296,7 +280,6 @@ def test_present_but_empty_stdin_uses_canonical_and_writes_nonce():
         live_turns = _count_live_turns(deferred_dir, sid)
         assert live_turns > 0, "no turns written despite 35-line canonical transcript"
 
-
 def test_present_but_wrong_session_stdin_uses_canonical_not_stdin():
     py_script = _extract_py_script()
     sid = "test-wrong-session-stdin"
@@ -309,7 +292,7 @@ def test_present_but_wrong_session_stdin_uses_canonical_not_stdin():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-example-project"
+        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
         project_dir.mkdir(parents=True, exist_ok=True)
         canonical_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript_with_nonce(canonical_transcript, 35, nonce)

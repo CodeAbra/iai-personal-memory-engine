@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "u8",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "proj_100",
+  "payload": null,
+  "sha256": "10970ee06db7c764eea69acdab567e4dcd58696d28d341f18e6a15075235bac4",
+  "shape": [
+    100,
+    1250
+  ],
+  "source": "src/iai_mcp/lilli/crossmodal/embed_to_hv.py from_embedding(proj_100_in[i]) \u2014 packbits MSB-first of (emb@P >= 0), 1250 bytes per row",
+  "subsystem": "hdc"
+}

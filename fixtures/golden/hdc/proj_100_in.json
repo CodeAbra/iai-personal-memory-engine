@@ -1,0 +1,15 @@
+{
+  "byte_order": "le",
+  "dtype": "f32",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "proj_100_in",
+  "payload": null,
+  "sha256": "4e4f93910942fa0242af4bd24109164b60f228e550bc96bce18158be11a9afd2",
+  "shape": [
+    100,
+    384
+  ],
+  "source": "default_rng(0).standard_normal((100,384)).astype(float32) \u2014 the exact inputs fed to project()",
+  "subsystem": "hdc"
+}

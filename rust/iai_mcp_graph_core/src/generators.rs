@@ -139,8 +139,8 @@ pub(crate) fn gnm_random_graph_core(
 /// ## Errors
 ///
 /// Raises ``ValueError`` when:
-/// * ``n == 0``.
-/// * ``m > n * (n - 1) / 2`` (undirected-max guard — see module doc).
+///   * ``n == 0``.
+///   * ``m > n * (n - 1) / 2`` (undirected-max guard — see module doc).
 #[pyfunction]
 pub fn gnm_random_graph(
     py: Python<'_>,

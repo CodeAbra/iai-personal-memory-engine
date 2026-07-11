@@ -28,7 +28,7 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(path=tmp_path / "hippo")
+    return MemoryStore(path=tmp_path / "lancedb")
 
 
 def _make_record(

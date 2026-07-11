@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -117,7 +116,7 @@ def test_baseline_on_first(iai_home, monkeypatch):
 
 def test_no_trigger_when_not_newer(iai_home, monkeypatch):
     from iai_mcp import cli
-    from iai_mcp.cli import read_watermark, write_watermark
+    from iai_mcp.cli import write_watermark
 
     store = _open_store(iai_home)
     _insert_record(store, "alice refactored the parser")
@@ -344,10 +343,10 @@ def test_hook_shape_regression():
     )
 
     assert "MemoryStore(" not in content, (
-        "Hook must NOT open a MemoryStore — all store mutations are daemon-owned"
+        "Hook must NOT open a MemoryStore — all store mutations are daemon-owned (Pitfall 7)"
     )
     assert "drain_deferred_captures" not in content, (
-        "Hook must NOT call drain_deferred_captures directly — call via daemon RPC"
+        "Hook must NOT call drain_deferred_captures directly — call via daemon RPC (Pitfall 7)"
     )
 
 
@@ -547,7 +546,6 @@ def test_live_growth_only_trips_gate(iai_home, monkeypatch):
     from iai_mcp import cli
     from iai_mcp.cli import (
         read_live_fingerprint,
-        read_watermark,
         write_live_fingerprint,
         write_watermark,
     )

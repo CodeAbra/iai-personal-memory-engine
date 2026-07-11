@@ -7,7 +7,6 @@ import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 class _FakeEmbedder:
     DIM = EMBED_DIM
 
@@ -17,14 +16,12 @@ class _FakeEmbedder:
     def embed_batch(self, texts):
         return [self.embed(t) for t in texts]
 
-
 @pytest.fixture(autouse=True)
 def _patch_embedder(monkeypatch):
     from iai_mcp import embed as embed_mod
 
     monkeypatch.setattr(embed_mod, "Embedder", _FakeEmbedder)
     yield
-
 
 def _build_record(
     *,
@@ -60,7 +57,6 @@ def _build_record(
         s5_trust_score=s5_trust_score,
     )
 
-
 def test_guarded_insert_hard_block_rejects_injection_on_pinned(tmp_path):
     from iai_mcp.store import MemoryStore
     from iai_mcp.write import guarded_insert
@@ -77,7 +73,6 @@ def test_guarded_insert_hard_block_rejects_injection_on_pinned(tmp_path):
     assert ok is False
     assert "shield" in reason.lower()
 
-
 def test_guarded_insert_hard_block_on_high_trust_rejects(tmp_path):
     from iai_mcp.store import MemoryStore
     from iai_mcp.write import guarded_insert
@@ -92,7 +87,6 @@ def test_guarded_insert_hard_block_on_high_trust_rejects(tmp_path):
     ok, reason = guarded_insert(store, record, profile_state={})
     assert ok is False
     assert "shield" in reason.lower()
-
 
 def test_guarded_insert_clean_pinned_record_proceeds(tmp_path):
     from iai_mcp.store import MemoryStore
@@ -109,7 +103,6 @@ def test_guarded_insert_clean_pinned_record_proceeds(tmp_path):
     ok, reason = guarded_insert(store, record, profile_state={})
     assert ok is True
     assert reason in ("created", f"merged_into:{record.id}")
-
 
 def test_guarded_insert_flag_allows_but_warns_profile(tmp_path):
     from iai_mcp.events import query_events
@@ -130,7 +123,6 @@ def test_guarded_insert_flag_allows_but_warns_profile(tmp_path):
     assert len(events) >= 1
     assert events[0]["severity"] == "warning"
 
-
 def test_guarded_insert_flag_event_carries_record_id(tmp_path):
     from iai_mcp.events import query_events
     from iai_mcp.store import MemoryStore
@@ -148,7 +140,6 @@ def test_guarded_insert_flag_event_carries_record_id(tmp_path):
     assert data.get("record_id") == str(record.id)
     assert data.get("tier") == "flag"
     assert "matched" in data and len(data["matched"]) >= 1
-
 
 def test_guarded_insert_log_allows_content(tmp_path):
     from iai_mcp.events import query_events
@@ -169,7 +160,6 @@ def test_guarded_insert_log_allows_content(tmp_path):
     assert len(events) >= 1
     assert events[0]["severity"] == "info"
 
-
 def test_shield_event_logged_on_reject(tmp_path):
     from iai_mcp.events import query_events
     from iai_mcp.store import MemoryStore
@@ -189,7 +179,6 @@ def test_shield_event_logged_on_reject(tmp_path):
     assert events[0]["data"].get("record_id") == str(record.id)
     assert events[0]["data"].get("action") == "reject"
 
-
 def test_shield_integration_preserves_mem01(tmp_path):
     from iai_mcp.store import MemoryStore
     from iai_mcp.write import guarded_insert
@@ -206,7 +195,6 @@ def test_shield_integration_preserves_mem01(tmp_path):
     stored = store.get(record.id)
     if stored is not None:
         assert stored.literal_surface == literal
-
 
 def test_shield_clean_record_emits_no_shield_event(tmp_path):
     from iai_mcp.events import query_events

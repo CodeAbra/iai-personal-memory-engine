@@ -30,7 +30,7 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     yield fake
 
 
-def test_apply_runs_to_completion_against_real_store(
+def test_apply_runs_to_completion_against_real_lancedb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_home = tmp_path / "fake_home"

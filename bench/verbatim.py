@@ -98,7 +98,7 @@ def run_verbatim_bench(
     dim = s.embed_dim
 
     pinned_texts = [
-        f"Alice said on day {i}: verbatim phrase #{i}-{'x' * 10}"
+        f"alice said on day {i}: verbatim phrase #{i}-{'x' * 10}"
         for i in range(n_records)
     ]
     pinned_records = [_make_pinned(t, dim=dim) for t in pinned_texts]
@@ -154,17 +154,17 @@ def run_verbatim_bench(
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bench.verbatim",
-        description="Verbatim recall benchmark with diagnostics",
+        description="verbatim recall benchmark + diagnostics",
     )
     parser.add_argument(
         "--skip-l0-seed",
         action="store_true",
-        help="diagnostic: skip _seed_l0_identity to isolate L0 crowding effect",
+        help="D5-01 diagnostic: skip _seed_l0_identity to isolate L0 crowding effect",
     )
     parser.add_argument(
         "--storage-direct",
         action="store_true",
-        help="diagnostic: bypass recall(), call store.query_similar directly",
+        help="D5-01 diagnostic: bypass recall(), call store.query_similar directly",
     )
     parser.add_argument(
         "--n", "--n-records",

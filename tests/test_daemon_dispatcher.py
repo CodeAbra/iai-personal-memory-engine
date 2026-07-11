@@ -3,47 +3,42 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
-
-from iai_mcp._ipc import IS_WINDOWS, open_ipc_connection
-
-
-def _endpoint_ready_path(sock_path: Path) -> Path:
-    """Path that exists once the control socket has bound: the unix socket on
-    POSIX, the TCP port file (``<sock_path>.port``) on Windows."""
-    return Path(f"{sock_path}.port") if IS_WINDOWS else sock_path
 
 
 @pytest.fixture
 def short_socket_paths(tmp_path, monkeypatch):
     from iai_mcp import concurrency, daemon_state
 
+    sock_dir = Path(f"/tmp/iai-disp-{os.getpid()}-{id(tmp_path)}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = sock_dir / "d.sock"
     state_path = tmp_path / ".daemon-state.json"
 
-    with tempfile.TemporaryDirectory(prefix="iai-sock-") as sock_dir_name:
-        sock_dir = Path(sock_dir_name)
-        sock_path = sock_dir / "d.sock"
-        monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
-        monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
-        # Per-test endpoint isolation (unix socket on POSIX; TCP port file on
-        # Windows) via the env var start_ipc_server/open_ipc_connection honor.
-        monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+    monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
+    monkeypatch.setattr(daemon_state, "STATE_PATH", state_path)
 
+    try:
+        yield None, sock_path, state_path
+    finally:
         try:
-            yield None, sock_path, state_path
-        finally:
-            try:
-                if sock_path.exists():
-                    sock_path.unlink()
-            except OSError:
-                pass
+            if sock_path.exists():
+                sock_path.unlink()
+        except OSError:
+            pass
+        try:
+            sock_dir.rmdir()
+        except OSError:
+            pass
 
 
 async def _send_ndjson(sock_path: Path, message: dict, *, timeout: float = 5.0) -> dict:
-    reader, writer = await open_ipc_connection(timeout=timeout)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_unix_connection(path=str(sock_path)),
+        timeout=timeout,
+    )
     try:
         writer.write((json.dumps(message) + "\n").encode("utf-8"))
         await writer.drain()
@@ -71,12 +66,11 @@ async def _with_real_dispatcher(sock_path: Path, state: dict, coro_fn):
             socket_path=sock_path,
         ),
     )
-    ready_path = _endpoint_ready_path(sock_path)
     for _ in range(250):
-        if ready_path.exists():
+        if sock_path.exists():
             break
         await asyncio.sleep(0.01)
-    if not ready_path.exists():
+    if not sock_path.exists():
         shutdown.set()
         await asyncio.wait_for(server_task, timeout=5)
         raise AssertionError("socket never bound")

@@ -17,7 +17,7 @@ from _recall_helpers import (  # noqa: E402
     _prime_structural_cache,
 )
 
-_TEST_CRYPTO_PASSPHRASE = "iai-mcp-test-passphrase-2026-04-30"
+_TEST_CRYPTO_PASSPHRASE = "iai-mcp-test-passphrase"
 
 
 def _child_env(store_root: Path, tmp_home: Path) -> dict[str, str]:
@@ -52,7 +52,7 @@ def _seed_store_with_drained_turn(store_root: Path, text: str) -> None:
             last_reviewed=None,
             never_decay=False,
             never_merge=False,
-            provenance=[{"session_id": "c3h1-session", "role": "user"}],
+            provenance=[{"session_id": "mk3-session", "role": "user"}],
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
             tags=["role:user"],
@@ -70,7 +70,7 @@ def test_subprocess_iai_last_daemon_down_returns_drained_store_turn(
     tmp_home = tmp_path / "tmp_home"
     tmp_home.mkdir(parents=True, exist_ok=True)
 
-    drained_text = "c3h1 last drained distinctive store turn text"
+    drained_text = "mk3 last drained distinctive store turn text"
     _seed_store_with_drained_turn(hermetic_store, drained_text)
 
     env = _child_env(hermetic_store, tmp_home)
@@ -100,7 +100,7 @@ def test_subprocess_iai_capture_daemon_down_writes_to_store(
     tmp_home = tmp_path / "tmp_home"
     tmp_home.mkdir(parents=True, exist_ok=True)
 
-    capture_text = "c3h1 capture distinctive write probe text"
+    capture_text = "mk3 capture distinctive write probe text"
     env = _child_env(hermetic_store, tmp_home)
 
     result = subprocess.run(
@@ -137,13 +137,13 @@ def test_subprocess_iai_recall_daemon_down_returns_store_backed_degraded(
     tmp_home = tmp_path / "tmp_home"
     tmp_home.mkdir(parents=True, exist_ok=True)
 
-    drained_text = "c3h1 recall store backed degraded distinctive probe text"
+    drained_text = "mk3 recall store backed degraded distinctive probe text"
     _seed_store_with_drained_turn(hermetic_store, drained_text)
 
     env = _child_env(hermetic_store, tmp_home)
 
     result = subprocess.run(
-        [sys.executable, "-m", "iai_mcp.iai_cli", "recall", "c3h1 recall store backed"],
+        [sys.executable, "-m", "iai_mcp.iai_cli", "recall", "mk3 recall store backed"],
         env=env,
         capture_output=True,
         text=True,

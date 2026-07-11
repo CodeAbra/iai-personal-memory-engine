@@ -58,42 +58,23 @@ print("encode_ms=" + ",".join(f"{{x:.4f}}" for x in samples))
 """
 
 _PAYLOAD_RSS = r"""
-import sys
+import sys, resource
 sys.path.insert(0, {src_path!r})
-import platform as _plat
-_system = _plat.system()
-if _system == "Windows":
-    import psutil as _psutil
-    def _peak_raw():
-        mi = _psutil.Process().memory_info()
-        return int(getattr(mi, "peak_wset", mi.rss))
-    def _to_mb(raw):
-        return raw / 1048576
-    _unit_is_bytes = True
-else:
-    import resource as _resource
-    def _peak_raw():
-        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
-    if _system == "Darwin":
-        def _to_mb(raw):
-            return raw / 1048576
-        _unit_is_bytes = True
-    else:
-        def _to_mb(raw):
-            return raw / 1024
-        _unit_is_bytes = False
 from iai_mcp.embed import Embedder
 e = Embedder()
-rss_post_construct_raw = _peak_raw()
+rss_post_construct_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 text = {text!r}
 _ = e.embed(text)
-rss_post_encode_raw = _peak_raw()
-print(f"rss_post_construct_mb={{_to_mb(rss_post_construct_raw):.1f}}")
-print(f"rss_post_encode_mb={{_to_mb(rss_post_encode_raw):.1f}}")
+rss_post_encode_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+import platform as _plat
+is_mac = (_plat.system() == "Darwin")
+def to_mb(raw):
+    return raw / 1048576 if is_mac else raw / 1024
+print(f"rss_post_construct_mb={{to_mb(rss_post_construct_raw):.1f}}")
+print(f"rss_post_encode_mb={{to_mb(rss_post_encode_raw):.1f}}")
 print(f"rss_post_construct_raw={{rss_post_construct_raw}}")
 print(f"rss_post_encode_raw={{rss_post_encode_raw}}")
-print(f"unit_is_bytes={{_unit_is_bytes}}")
-print(f"rss_platform={{_system}}")
+print(f"unit_is_bytes={{is_mac}}")
 """
 
 
@@ -229,17 +210,10 @@ def measure_rss(src_path: str, text: str) -> dict:
     rss_post_construct_mb = float(kv["rss_post_construct_mb"])
     rss_post_encode_mb = float(kv["rss_post_encode_mb"])
     unit_is_bytes = kv["unit_is_bytes"] == "True"
-    rss_platform = kv.get("rss_platform", "")
-    if rss_platform == "Windows":
-        unit_label = "bytes (Windows peak_wset)"
-    elif rss_platform == "Darwin" or (unit_is_bytes and not rss_platform):
-        unit_label = "bytes (macOS)"
-    else:
-        unit_label = "KB (Linux)"
     print(
         f"  RSS post-construct={rss_post_construct_mb:.1f}MB  "
         f"post-first-encode={rss_post_encode_mb:.1f}MB  "
-        f"unit={unit_label}"
+        f"unit={'bytes (macOS)' if unit_is_bytes else 'KB (Linux)'}"
     )
     return {
         "rss_post_construct_mb": rss_post_construct_mb,
@@ -247,7 +221,6 @@ def measure_rss(src_path: str, text: str) -> dict:
         "rss_post_construct_raw": int(kv["rss_post_construct_raw"]),
         "rss_post_encode_raw": int(kv["rss_post_encode_raw"]),
         "unit_is_bytes_macos": unit_is_bytes,
-        "rss_platform": rss_platform,
     }
 
 

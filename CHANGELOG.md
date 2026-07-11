@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-07-10
+
+### Changed
+
+- **New Rust storage and graph engine.** The memory store and graph now run on a
+  native Rust engine, replacing the previous Python/hnswlib backend. Existing stores
+  migrate automatically on first run — no manual steps.
+
+### Added
+
+- **Desktop app.** A local dashboard to watch the memory graph live, add a memory,
+  and hint records into the forgetting queue.
+- **Document study/teach**, anticipatory foresight packs, and combined lexical +
+  semantic search lanes.
+
+### Removed
+
+- The last GPL-adjacent dependencies; the project now ships its own storage and
+  graph engines under MIT.
+
+### Fixed
+
+- **Dashboard graph view** stays centered on zoom and pan, with a recenter
+  control that appears when the view leaves its home position.
+
 ## [1.2.1] — 2026-06-30
 
 ### Fixed

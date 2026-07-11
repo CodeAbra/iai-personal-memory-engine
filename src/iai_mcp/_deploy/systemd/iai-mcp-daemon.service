@@ -16,6 +16,8 @@ Type=simple
 ExecStart=/usr/bin/python3 -m iai_mcp.daemon
 Restart=on-failure
 RestartSec=30
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 Environment="IAI_MCP_STORE=%h/.iai-mcp"
 Environment="LANG=en_US.UTF-8"

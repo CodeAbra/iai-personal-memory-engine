@@ -2,11 +2,11 @@
 # macOS launchd install/uninstall idempotency.
 #
 # Verifies:
-# -: plist installed under ~/Library/LaunchAgents
-# -: silent install (--yes bypasses consent banner)
-# - Uninstall removes plist + ~/.iai-mcp/.lock +
-# ~/.iai-mcp/.daemon.sock + ~/.iai-mcp/.daemon-state.json
-# - Idempotency: install twice / uninstall twice -> no error
+#   - plist installed under ~/Library/LaunchAgents
+#   - silent install (--yes bypasses consent banner)
+#   - uninstall removes plist + ~/.iai-mcp/.lock +
+#     ~/.iai-mcp/.daemon.sock + ~/.iai-mcp/.daemon-state.json
+#   - Idempotency: install twice / uninstall twice -> no error
 #
 # Skipped on non-macOS (returns 0). Linux equivalent lives in
 # tests/shell/test_systemd_install.sh.
@@ -127,15 +127,15 @@ if [[ -f "$PLIST" ]]; then
 fi
 # lock + sock + state file all gone
 if [[ -f "$LOCK" ]]; then
-    echo "FAIL: lock file not removed"
+    echo "FAIL: lock file not removed (cleanup violation)"
     exit 1
 fi
 if [[ -f "$SOCK" ]]; then
-    echo "FAIL: socket file not removed"
+    echo "FAIL: socket file not removed (cleanup violation)"
     exit 1
 fi
 if [[ -f "$STATE" ]]; then
-    echo "FAIL: state file not removed"
+    echo "FAIL: state file not removed (cleanup violation)"
     exit 1
 fi
 

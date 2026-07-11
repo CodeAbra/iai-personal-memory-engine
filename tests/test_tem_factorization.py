@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_role_vocabulary_has_18_entries() -> None:
-    from iai_mcp.tem import ROLE_VOCABULARY
+    from iai_mcp.lilli.tiers.bsc import BSC_ROLE_VOCABULARY as ROLE_VOCABULARY
 
     assert isinstance(ROLE_VOCABULARY, tuple)
     assert len(ROLE_VOCABULARY) == 18
@@ -33,7 +33,8 @@ def test_filler_hv_is_deterministic_and_correct_length() -> None:
     assert a == b
 
 def test_bind_is_xor_reversible() -> None:
-    from iai_mcp.tem import bind, role_hv
+    from iai_mcp.lilli.tiers.bsc import bind
+    from iai_mcp.tem import role_hv
 
     a = role_hv("WHEN")
     b = role_hv("PROJECT")
@@ -44,7 +45,8 @@ def test_bind_is_xor_reversible() -> None:
     assert bind(bound, a) == b
 
 def test_unbind_inverts_bind() -> None:
-    from iai_mcp.tem import bind, role_hv, unbind
+    from iai_mcp.lilli.tiers.bsc import bind, unbind
+    from iai_mcp.tem import role_hv
 
     a = role_hv("ROLE")
     b = role_hv("LANG")
@@ -53,12 +55,12 @@ def test_unbind_inverts_bind() -> None:
     assert recovered == b
 
 def _fidelity_at(n_pairs: int) -> float:
+    from iai_mcp.lilli.tiers.bsc import BSC_ROLE_VOCABULARY as ROLE_VOCABULARY
+    from iai_mcp.lilli.tiers.bsc import unbind
     from iai_mcp.tem import (
-        ROLE_VOCABULARY,
         filler_hv,
         pack_pairs,
         role_hv,
-        unbind,
     )
 
     fillers = [filler_hv(f"filler-seed42-{i}") for i in range(len(ROLE_VOCABULARY))]

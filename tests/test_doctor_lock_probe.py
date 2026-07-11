@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import fcntl
+
 import pytest
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_UN
-from iai_mcp._filelock import flock as _flock
 
 from iai_mcp.doctor import check_c_lock_healthy
 
@@ -46,14 +46,14 @@ def test_held_lock_is_healthy(tmp_store):
     try:
         with open(lock_path, "r") as held:
             held_fd = held.fileno()
-            _flock(held_fd, LOCK_EX | LOCK_NB)
+            fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
             result = check_c_lock_healthy()
 
             assert result.passed is True
             assert result.name == "(c) lock file healthy"
             assert "held" in result.detail
-            _flock(held_fd, LOCK_UN)
+            fcntl.flock(held_fd, fcntl.LOCK_UN)
     finally:
         pass
 

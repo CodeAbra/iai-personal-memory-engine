@@ -56,14 +56,14 @@ def test_cache_invalidated_on_insert(tmp_path):
     store.insert(_make_record("bob first"))
 
     build_temporal_validity_maps(store)
-    assert _tv_cache_dirty.get(id(store)) is False
+    assert _tv_cache_dirty.get(store) is False
 
     store.insert(_make_record("bob second"))
-    assert _tv_cache_dirty.get(id(store)) is True
+    assert _tv_cache_dirty.get(store) is True
 
     result = build_temporal_validity_maps(store)
     assert result is not None
-    assert _tv_cache_dirty.get(id(store)) is False
+    assert _tv_cache_dirty.get(store) is False
 
 def test_cache_invalidated_on_contradict(tmp_path):
     store = MemoryStore(path=tmp_path)
@@ -71,12 +71,12 @@ def test_cache_invalidated_on_contradict(tmp_path):
     store.insert(rec)
 
     build_temporal_validity_maps(store)
-    assert _tv_cache_dirty.get(id(store)) is False
+    assert _tv_cache_dirty.get(store) is False
 
     from iai_mcp.retrieve import contradict
     contradict(store, rec.id, "alice corrected fact", [0.2] * EMBED_DIM)
 
-    assert _tv_cache_dirty.get(id(store)) is True
+    assert _tv_cache_dirty.get(store) is True
     result = build_temporal_validity_maps(store)
     outgoing, _ = result
     assert len(outgoing) > 0
@@ -91,8 +91,8 @@ def test_per_store_isolation(tmp_path):
     result_b = build_temporal_validity_maps(store_b)
 
     store_a.insert(_make_record("alice store a second"))
-    assert _tv_cache_dirty.get(id(store_a)) is True
-    assert _tv_cache_dirty.get(id(store_b)) is False
+    assert _tv_cache_dirty.get(store_a) is True
+    assert _tv_cache_dirty.get(store_b) is False
 
     result_b_cached = build_temporal_validity_maps(store_b)
     assert result_b_cached is result_b

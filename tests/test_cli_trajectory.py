@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from iai_mcp.cli import main as cli_main
 from iai_mcp.events import write_event

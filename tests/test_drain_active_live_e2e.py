@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import tempfile
-
 import json
 import platform
 from pathlib import Path
 
 import pytest
+
+from iai_mcp.store import MemoryStore
 
 
 pytestmark = pytest.mark.skipif(
@@ -43,7 +43,7 @@ def _write_live_file(
         "version": 1,
         "deferred_at": "2026-05-31T04:45:00.000000+00:00",
         "session_id": session_id,
-        "cwd": str(Path(tempfile.gettempdir()) / "test"),
+        "cwd": "/tmp/test",
     }
     lines = [json.dumps(header, ensure_ascii=False)]
     for ev in events:
@@ -182,3 +182,64 @@ def test_drain_active_idempotent_with_offset(iai_home):
 
     turns = store.recent_user_turns(50, session_id=B_SESSION)
     assert len(turns) == 1, f"Expected 1 turn after two drains; got {len(turns)}"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_drain_active_live_promotion_both_drivers(driver, iai_home, monkeypatch):
+    """The .live.jsonl -> drain -> Hippo promotion path surfaces content
+    identically on both storage drivers.
+
+    Closes the "zero dual-driver coverage" gap for the promotion path:
+    verified this session that no existing test in this cluster exercises
+    LILLI_STORAGE_DRIVER=lilli.
+    """
+    if driver == "lilli":
+        try:
+            import iai_mcp_native  # noqa: F401
+        except ImportError:
+            pytest.skip("iai_mcp_native not built — lilli driver unavailable in this env")
+
+    from iai_mcp.capture import drain_active_live_captures
+
+    if driver == "lilli":
+        monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    else:
+        monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+
+    session = f"dual-driver-promo-session-{driver}"
+    nonce = f"dual driver promotion nonce marker for {driver} driver test content"
+    exclude_session = f"exclude-session-{driver}"
+
+    deferred_dir = iai_home / ".iai-mcp" / ".deferred-captures"
+    _write_live_file(
+        deferred_dir,
+        session,
+        [
+            {
+                "text": nonce,
+                "cue": f"session {session} turn",
+                "tier": "episodic",
+                "role": "user",
+                "ts": "2026-05-31T04:45:43.000000+00:00",
+            },
+        ],
+    )
+
+    store = _open_store()
+    try:
+        counts = drain_active_live_captures(store, exclude_session_id=exclude_session)
+        assert counts["events_inserted"] == 1, (
+            f"[driver={driver}] expected 1 inserted, got: {counts}"
+        )
+
+        turns = store.recent_user_turns(50, session_id=session)
+        assert len(turns) >= 1, (
+            f"[driver={driver}] recent_user_turns returned {len(turns)} turns; "
+            "expected >= 1 after drain"
+        )
+        texts = [t.literal_surface for t in turns]
+        assert any(nonce in (t or "") for t in texts), (
+            f"[driver={driver}] nonce not found in recent_user_turns; got: {texts!r}"
+        )
+    finally:
+        store.close()

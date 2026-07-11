@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import gc
 import os
 import sqlite3
+import subprocess
+import tracemalloc
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests._store_raw import open_store_raw
+
 import numpy as np
-import pytest
 
 from iai_mcp.hippo import HippoDB
 from iai_mcp.types import EMBED_DIM
@@ -83,7 +87,7 @@ def test_vector_blob_encoding_is_float32_not_float64(tmp_path: Path) -> None:
         db.close()
 
     db_path = tmp_path / "hippo" / "brain.sqlite3"
-    conn = sqlite3.connect(str(db_path))
+    conn = open_store_raw(db_path)
     conn.row_factory = sqlite3.Row
     result = conn.execute(
         "SELECT embedding FROM records WHERE id = ?", (row_id,)
@@ -100,24 +104,55 @@ def test_vector_blob_encoding_is_float32_not_float64(tmp_path: Path) -> None:
     )
 
 
-def test_no_leak_on_repeated_open_close(tmp_path: Path) -> None:
+def _count_open_fds() -> int:
+    """Return the number of open file descriptors for this process."""
+    pid = os.getpid()
+    proc_fd = Path(f"/proc/{pid}/fd")
+    if proc_fd.is_dir():
+        return len(list(proc_fd.iterdir()))
+    # Darwin / BSD: no /proc — fall back to lsof.
     try:
-        import resource
-        rss_available = True
-    except ImportError:
-        rss_available = False
+        out = subprocess.run(
+            ["lsof", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return len(out.stdout.splitlines())
+    except (OSError, subprocess.SubprocessError):
+        return -1  # unavailable — fd check is skipped
 
-    def _get_rss_mb() -> float:
-        if rss_available:
-            usage = resource.getrusage(resource.RUSAGE_SELF)
-            import platform
-            if platform.system() == "Darwin":
-                return usage.ru_maxrss / (1024 * 1024)
-            return usage.ru_maxrss / 1024
-        return 0.0
 
+def test_no_leak_on_repeated_open_close(tmp_path: Path) -> None:
+    """Repeated open/close must reclaim heap and file descriptors.
+
+    The signal here is reclamation, not a process high-water mark. An earlier
+    version asserted on ``resource.getrusage().ru_maxrss`` — a peak RSS mark
+    that monotonically rises and never falls. First-touch C arenas and lazy
+    imports ratchet that mark up once even when every cycle's memory is fully
+    reclaimed, so it crosses any fixed threshold on both storage backends and
+    is unrelated to a real leak. The honest signals are:
+
+    - the tracemalloc Python-heap delta after a settling ``gc.collect()`` — a
+      true per-cycle leak would scale with the cycle count (megabytes over 100
+      cycles); a clean teardown leaves it flat (sub-megabyte), and
+    - the open file-descriptor delta — a leaked connection / lock / mmap would
+      raise it; a clean teardown leaves it at zero.
+    """
     cycles = 100
-    rss_before = _get_rss_mb()
+
+    # Warm one cycle so one-time imports and arena growth settle before the
+    # measured window (those are not per-cycle and must not count as leak).
+    db = HippoDB(tmp_path)
+    try:
+        db.open_table("records").add([_make_row(seed=6999)])
+    finally:
+        db.close()
+    gc.collect()
+
+    tracemalloc.start()
+    heap_before, _ = tracemalloc.get_traced_memory()
+    fd_before = _count_open_fds()
 
     for i in range(cycles):
         db = HippoDB(tmp_path)
@@ -127,11 +162,20 @@ def test_no_leak_on_repeated_open_close(tmp_path: Path) -> None:
         finally:
             db.close()
 
-    rss_after = _get_rss_mb()
+    gc.collect()
+    heap_after, _ = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    fd_after = _count_open_fds()
 
-    if rss_available:
-        growth_mb = rss_after - rss_before
-        assert growth_mb < 10.0, (
-            f"RSS grew by {growth_mb:.1f} MB over {cycles} open/close cycles; "
-            f"expected < 10 MB (possible fd or lock leak)"
+    heap_growth_mb = (heap_after - heap_before) / (1024 * 1024)
+    assert heap_growth_mb < 2.0, (
+        f"Python heap grew by {heap_growth_mb:.2f} MB over {cycles} open/close "
+        f"cycles; expected < 2 MB (a real per-cycle leak would scale to many MB)"
+    )
+
+    if fd_before >= 0 and fd_after >= 0:
+        fd_growth = fd_after - fd_before
+        assert fd_growth <= 1, (
+            f"open file descriptors grew by {fd_growth} over {cycles} cycles; "
+            f"expected no growth (possible connection / lock / mmap leak)"
         )

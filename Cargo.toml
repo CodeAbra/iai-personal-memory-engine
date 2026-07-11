@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/iai_mcp_embed_core",
+    "rust/iai_mcp_graph_core",
+    "rust/iai_mcp_native",
+    "crates/lilli-hd",
+    "crates/lillibrain",
+    "crates/lilliengine",
+    "crates/lilli-parity",
+]
+
+[workspace.package]
+edition    = "2021"
+license    = "MIT OR Apache-2.0"
+repository = "https://github.com/CodeAbra/iai-personal-memory-engine"
+
+[workspace.dependencies]
+candle-core    = "0.10.2"
+candle-nn      = "0.10.2"
+safetensors    = "0.7.0"
+tokenizers     = "0.23.1"
+hf-hub         = { version = "0.4.1", features = ["ureq"] }
+pyo3           = "0.22"
+numpy          = "0.22"
+accelerate-src = "0.3.2"
+pyo3-stub-gen  = "0.6"
+serde          = { version = "1", features = ["derive", "rc"] }
+serde_json     = "1"
+thiserror      = "2"

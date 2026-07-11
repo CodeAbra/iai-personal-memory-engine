@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -13,7 +12,6 @@ from uuid import UUID, uuid4
 import numpy as np
 import pytest
 
-from iai_mcp.crypto import CryptoKey, decrypt_field, encrypt_field, is_encrypted
 from iai_mcp.memory_bank import (
     append_recent_record,
     bank_recall_substring,
@@ -29,7 +27,7 @@ def iai_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-recent-passphrase")
-    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "hippo"))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp" / "lancedb"))
 
     import keyring.core
 

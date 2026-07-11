@@ -7,6 +7,7 @@ export const BANK_FALLBACK_LIMIT = 20;
 
 export const TOOL_NAMES = [
   "memory_recall",
+  "memory_search",
   "memory_recall_structural",
   "memory_reinforce",
   "memory_contradict",
@@ -19,6 +20,7 @@ export const TOOL_NAMES = [
   "topology",
   "camouflaging_status",
   "episodes_recent",
+  "memory_temporal_recall",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -430,6 +432,39 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
       openWorldHint: false,
     },
   },
+  memory_search: {
+    name: "memory_search",
+    description:
+      "Use for code/doc search; returns hints to verify.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search text: identifiers, phrases, or a question.",
+        },
+        k: {
+          type: "integer",
+          description: "Max hits (default 8, max 24).",
+          default: 8,
+        },
+      },
+      required: ["query"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        hits: { type: "array", items: { type: "object" } },
+        frame: { type: "string" },
+      },
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
   memory_recall_structural: {
     name: "memory_recall_structural",
     description:
@@ -485,11 +520,11 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
       type: "object",
       properties: {
         N: { type: "integer" },
-        C: { type: "number" },
-        L: { type: "number" },
-        sigma: { type: "number" },
+        C: { type: ["number", "null"] },
+        L: { type: ["number", "null"] },
+        sigma: { type: ["number", "null"] },
         community_count: { type: "integer" },
-        rich_club_ratio: { type: "number" },
+        rich_club_ratio: { type: ["number", "null"] },
         regime: { type: "string" },
       },
     },
@@ -557,6 +592,53 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
       properties: {
         turns: { type: "array", items: { type: "object" } },
         count: { type: "integer" },
+      },
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  memory_temporal_recall: {
+    name: "memory_temporal_recall",
+    description:
+      "Time-travel recall: as_of bounds records, changed_since filters events. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cue: {
+          type: "string",
+          description:
+            "Optional natural-language cue. If omitted, the records side " +
+            "returns recency-ordered rows bounded by as_of.",
+        },
+        as_of: {
+          type: "string",
+          description:
+            "ISO-8601 timestamp. Bounds the records side: " +
+            "records.created_at <= as_of.",
+        },
+        changed_since: {
+          type: "string",
+          description:
+            "ISO-8601 timestamp. Bounds the events side: " +
+            "events.ts > changed_since (strict).",
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum items per side (default 10).",
+          default: 10,
+        },
+      },
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        hits: { type: "array", items: { type: "object" } },
+        changed_since_events: { type: "array", items: { type: "object" } },
+        _scope: { type: "string" },
       },
     },
     annotations: {
@@ -725,6 +807,59 @@ export async function runDirectRecall(
   });
 }
 
+export async function runDirectTemporal(
+  args: Record<string, unknown>,
+  spawnFn: typeof spawn = spawn,
+): Promise<Record<string, unknown> | null> {
+  const cli = process.env.IAI_MCP_CLI ?? "iai";
+  const cue = String(args.cue ?? "");
+  const limit = String(
+    typeof args.limit === "number" ? args.limit : 10,
+  );
+  const spawnArgs: string[] = ["temporal-recall", "--json", "--limit", limit];
+  if (typeof args.as_of === "string" && args.as_of) {
+    spawnArgs.push("--as-of", args.as_of);
+  }
+  if (typeof args.changed_since === "string" && args.changed_since) {
+    spawnArgs.push("--changed-since", args.changed_since);
+  }
+  if (cue) {
+    spawnArgs.push(cue);
+  }
+  return new Promise((resolve) => {
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const proc = spawnFn(cli, spawnArgs, opts);
+    let stdout = "";
+    const stdoutStream = proc.stdout;
+    if (stdoutStream) {
+      stdoutStream.setEncoding("utf-8");
+      stdoutStream.on("data", (chunk: string) => { stdout += chunk; });
+    }
+    const t = setTimeout(() => {
+      try { proc.kill(); } catch {  }
+      resolve(null);
+    }, 5_000);
+    proc.on("error", () => {
+      clearTimeout(t);
+      resolve(null);
+    });
+    proc.on("close", (code: number | null) => {
+      clearTimeout(t);
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout) as Record<string, unknown>;
+        parsed["_source"] = "direct-store";
+        resolve(parsed);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
 export async function handleToolCall(
   bridge: PythonCoreBridge,
   name: ToolName,
@@ -764,9 +899,66 @@ export async function handleToolCall(
         }
       }
     }
+    if (name === "memory_temporal_recall") {
+      const direct = await runDirectTemporal(args, spawnFn);
+      if (direct !== null) {
+        return direct;
+      }
+      throw startErr;
+    }
+    if (name === "memory_search") {
+      const direct = await runDirectSearch(args, spawnFn);
+      if (direct !== null) {
+        return direct;
+      }
+      throw startErr;
+    }
     throw startErr;
   }
   return invokeTool(bridge, name, args, spawnFn);
+}
+
+export async function runDirectSearch(
+  args: Record<string, unknown>,
+  spawnFn: typeof spawn = spawn,
+): Promise<Record<string, unknown> | null> {
+  const cli = process.env.IAI_MCP_CLI ?? "iai";
+  const query = String(args.query ?? "");
+  if (!query) return null;
+  const limit = String(typeof args.k === "number" ? args.k : 8);
+  const spawnArgs: string[] = ["search", "--json", "--limit", limit, query];
+  return new Promise((resolve) => {
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const proc = spawnFn(cli, spawnArgs, opts);
+    let stdout = "";
+    const stdoutStream = proc.stdout;
+    if (stdoutStream) {
+      stdoutStream.setEncoding("utf-8");
+      stdoutStream.on("data", (chunk: string) => { stdout += chunk; });
+    }
+    const t = setTimeout(() => {
+      try { proc.kill(); } catch {  }
+      resolve(null);
+    }, 15_000);
+    proc.on("error", () => {
+      clearTimeout(t);
+      resolve(null);
+    });
+    proc.on("close", (code: number | null) => {
+      clearTimeout(t);
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout) as Record<string, unknown>;
+        parsed["_source"] = "direct-store";
+        resolve(parsed);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
 }
 
 export async function runBankFallback(
@@ -896,6 +1088,31 @@ export async function invokeTool(
           throw err;
         }
         const direct = await runDirectRecency(args, spawnFn);
+        if (direct !== null) {
+          return direct;
+        }
+        throw err;
+      }
+    }
+    case "memory_temporal_recall": {
+      try {
+        return await bridge.call("memory_temporal_recall", args);
+      } catch (err) {
+        const direct = await runDirectTemporal(args, spawnFn);
+        if (direct !== null) {
+          return direct;
+        }
+        throw err;
+      }
+    }
+    case "memory_search": {
+      try {
+        return await bridge.call("memory_search", args);
+      } catch (err) {
+        if (!isDaemonDownError(err)) {
+          throw err;
+        }
+        const direct = await runDirectSearch(args, spawnFn);
         if (direct !== null) {
           return direct;
         }

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import math
+import threading
+import time
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
@@ -12,6 +15,14 @@ ENTROPY_LOW: float = 0.4
 ENTROPY_MID: float = 0.7
 ENTROPY_HIGH: float = 0.9
 COOLDOWN_TURNS: int = 3
+
+_log = logging.getLogger(__name__)
+
+# Curiosity signals are advisory: the recall dispatch does not need
+# per-recall freshness. A cached projection older than this threshold
+# triggers a background single-flight refresh instead of blocking the
+# caller on the two live query_events scans.
+_CURIOSITY_CACHE_REFRESH_SEC: float = 30.0
 
 
 @dataclass
@@ -176,3 +187,104 @@ def get_pending_questions(store: MemoryStore, limit: int = 2) -> list[dict]:
         {"text": q.text, "entropy": q.entropy, "tier": q.tier}
         for q in qs[:limit]
     ]
+
+
+class _CuriosityCache:
+    """Refresh-ahead, single-flight, in-process cache of the pending-questions
+    projection for one ``MemoryStore``.
+
+    Curiosity signals are advisory -- the recall dispatch does not need a
+    per-recall-fresh read. This cache mirrors the corpus-count-cache
+    discipline (lock guards only the dict/state access, never the SQL): a
+    warm read returns the last computed projection immediately; a stale or
+    cold read also returns immediately (the current value, or ``[]`` if
+    never computed) and, if no refresh is already in flight, schedules
+    exactly one background refresh via a daemon thread. The refresh reuses
+    ``get_pending_questions`` verbatim, so the underlying question-set
+    correctness (resolved-filtering, session scoping) is unchanged -- only
+    WHEN it runs moves off the caller's thread.
+
+    No-raise contract: a refresh failure is caught and logged; the cache
+    keeps (or reverts to) its last-known value rather than propagating the
+    exception into the caller.
+    """
+
+    def __init__(self, refresh_after_sec: float = _CURIOSITY_CACHE_REFRESH_SEC) -> None:
+        self._lock = threading.Lock()
+        self._value: list[dict] = []
+        self._computed_at: float | None = None
+        self._refresh_in_flight: bool = False
+        self._refresh_after_sec = float(refresh_after_sec)
+
+    def get(self, store: MemoryStore, limit: int = 2) -> list[dict]:
+        """Return the cached projection, triggering a background refresh if
+        stale/cold. Never blocks on ``query_events``; never raises.
+        """
+        with self._lock:
+            value = list(self._value)
+            is_stale = (
+                self._computed_at is None
+                or (time.monotonic() - self._computed_at) >= self._refresh_after_sec
+            )
+            should_start_refresh = is_stale and not self._refresh_in_flight
+            if should_start_refresh:
+                self._refresh_in_flight = True
+
+        if should_start_refresh:
+            self._start_background_refresh(store)
+
+        return value[:limit]
+
+    def _start_background_refresh(self, store: MemoryStore) -> None:
+        thread = threading.Thread(
+            target=self._refresh_once,
+            args=(store,),
+            name="iai-mcp-curiosity-refresh",
+            daemon=True,
+        )
+        thread.start()
+
+    def _refresh_once(self, store: MemoryStore) -> None:
+        try:
+            fresh = get_pending_questions(store, limit=200)
+        except Exception as exc:  # noqa: BLE001 -- refresh must never raise into a bg thread
+            _log.debug("curiosity_cache_refresh_failed: %s", exc)
+            with self._lock:
+                self._refresh_in_flight = False
+            return
+        with self._lock:
+            self._value = fresh
+            self._computed_at = time.monotonic()
+            self._refresh_in_flight = False
+
+
+# Module-level cache keyed by store identity so multiple stores in one
+# process (e.g. tests, or a future multi-store host) do not share state.
+_caches: dict[int, _CuriosityCache] = {}
+_caches_lock = threading.Lock()
+
+
+def _cache_for(store: MemoryStore) -> _CuriosityCache:
+    key = id(store)
+    with _caches_lock:
+        cache = _caches.get(key)
+        if cache is None:
+            cache = _CuriosityCache()
+            _caches[key] = cache
+        return cache
+
+
+def get_pending_questions_cached(store: MemoryStore, limit: int = 2) -> list[dict]:
+    """Recall-path variant of ``get_pending_questions``.
+
+    Serves the projection from a refresh-ahead, single-flight, in-process
+    cache instead of running the two synchronous ``query_events`` scans on
+    the caller's thread. A cold cache returns ``[]`` immediately and
+    schedules the first background refresh. Advisory only: a slightly stale
+    signal is acceptable, and any refresh failure degrades to the
+    last-known (or empty) value -- never raises, never blocks.
+
+    Non-recall callers that want a live read (e.g. the ``curiosity_pending``
+    MCP tool) should keep calling ``get_pending_questions`` directly.
+    """
+    return _cache_for(store).get(store, limit=limit)

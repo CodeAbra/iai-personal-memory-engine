@@ -147,15 +147,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bench.tokens",
         description=(
-            "Session-start token bench. Measures the lazy <=30-tok payload, "
-            "standard, and deep wake_depth variants."
+            "Session-start token bench. Also included: "
+            "--wake-depth for measuring the lazy <=30-tok payload vs lazy "
+            "eager dump vs the deep variant."
         ),
     )
     parser.add_argument(
         "--wake-depth",
         choices=("minimal", "standard", "deep"),
         default="minimal",
-        help="Session-start payload mode (default: minimal).",
+        help="Session-start payload mode (default: minimal per D5-02).",
     )
     args = parser.parse_args(argv)
     result = run_token_bench(wake_depth=args.wake_depth)

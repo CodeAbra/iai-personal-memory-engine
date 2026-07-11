@@ -145,17 +145,17 @@ def test_cpm_floor_calibrated_from_fixtures():
     from iai_mcp.mosaic_policy import CPM_MODULARITY_FLOOR
 
     assert CPM_MODULARITY_FLOOR != 0.2, (
-        "CPM_MODULARITY_FLOOR must not match the legacy "
+        "CPM_MODULARITY_FLOOR must not match the legacy community.py:44 "
         "MODULARITY_FLOOR (0.2) -- that value was calibrated for the classical "
         "Newman-modularity ModularityVertexPartition. CPM-Q is "
-        "gamma-dependent and falls in a different range; it is "
-        "calibrated empirically."
+        "gamma-dependent and falls in a different range; it is calibrated "
+        "empirically."
     )
     assert 0.05 <= CPM_MODULARITY_FLOOR <= 0.30, (
         f"CPM_MODULARITY_FLOOR = {CPM_MODULARITY_FLOOR} outside sanity bounds "
         "[0.05, 0.30] (Traag 2019 CPM-Q observations on Karate / Football). "
         "If the calibration sweep returns a value outside these bounds, "
-        "expand the fixture set or surface as a documented exception."
+        "expand the fixture set or surface as a deviation in the SUMMARY."
     )
 
 
@@ -278,7 +278,7 @@ def test_tuner_candidate_set_size():
     )
     assert "candidate_scores" in diagnostics
     assert len(diagnostics["candidate_scores"]) == 5, (
-        f"Tuner must evaluate exactly 5 gamma candidates, "
+        f"Tuner must evaluate exactly 5 gamma candidates (budget), "
         f"got {len(diagnostics['candidate_scores'])}: "
         f"{diagnostics['candidate_scores']}"
     )
@@ -520,11 +520,11 @@ def test_gamma_tuner_closes_karate_gap():
     print(
         f"\n[KARATE-GAP] tuner-chosen final NMI vs leidenalg@gamma=0.5 = "
         f"{nmi_v_05:.4f}; vs leidenalg@gamma=1.0 = {nmi_v_10:.4f}; "
-        f"baseline at gamma=0.5 was 0.7753; "
+        f"M3 baseline at gamma=0.5 was 0.7753; "
         f"super-level pairwise merge needed for >= 0.90"
     )
     assert nmi_v_05 >= 0.74, (
         f"Karate NMI regression: NMI vs leidenalg@gamma=0.5 = {nmi_v_05:.4f} "
-        f"< 0.74. Baseline was 0.7753; tuner-chosen partition should "
+        f"< 0.74. 21-03 baseline was 0.7753; tuner-chosen partition should "
         f"match it (gamma=0.5 by composite score)."
     )

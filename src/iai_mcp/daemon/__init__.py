@@ -6,7 +6,7 @@ import faulthandler
 import json
 import logging
 import os
-import platform as _platform
+import resource
 import signal
 import sys
 import threading
@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -28,16 +28,17 @@ from iai_mcp.events import (
     DAEMON_SLEEP_CYCLE_STALE,
     DAEMON_WATCHDOG_NEEDS_OPERATOR,
     DAEMON_WEDGE_KILL,
-    emit_best_effort,
     write_event,
 )
 from iai_mcp.identity_audit import continuous_audit
 from iai_mcp.quiet_window import (
     BUCKET_COUNT,
     BUCKET_MINUTES,
+    effective_consolidation_window,
     learn_quiet_window,
     should_bootstrap_trigger,
     should_relearn,
+    within_window,
 )
 from iai_mcp.hippo import AccessMode
 from iai_mcp.lock_protocol import cleanup_stale_consolidation_intent
@@ -61,12 +62,6 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 }
 
 TICK_INTERVAL_SEC: int = 30
-# Read once at import so spawned daemon processes can override it via env.
-STARTUP_DEFERRED_DRAIN_GRACE_SEC: float = float(
-    os.environ.get("IAI_MCP_STARTUP_DEFERRED_DRAIN_GRACE_SEC", "20.0")
-)
-CAPTURE_QUEUE_RETRY_PENDING_KEY: str = "_capture_queue_drain_retry_pending"
-CAPTURE_QUEUE_LAST_RETRY_KEY: str = "_capture_queue_drain_last_retry_at"
 
 DEFAULT_CYCLE_COUNT: int = 4
 
@@ -77,26 +72,26 @@ S4_FIRST_ITER_GRACE_SEC: float = float(
 )
 
 SESSION_START_CACHE_PATH = Path.home() / ".iai-mcp" / ".session-start-payload.cached.md"
-SESSION_START_CACHE_META_PATH = (
-    Path.home() / ".iai-mcp" / ".session-start-payload.cached.meta.json"
-)
 from iai_mcp.session import SESSION_START_CACHE_MAX_CHARS  # noqa: E402 -- placed after PATH constant for readability
 
-SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT: float = 60.0
-SESSION_START_CACHE_LOCK_TIMEOUT_SEC: float = 300.0
-# Single-flight lock for refreshes — the SLEEP path also routes through it so a
-# WAKE refresh kicked from the wake-sequence hook never races a sleep-pipeline
-# write on the same file.
-_session_start_cache_lock = threading.Lock()
-
 INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC: float = 30.0
+
+#: Cooldown after a failed sleep-pipeline run before the next attempt. Each
+#: run escalates the store lock to EXCLUSIVE; without a cooldown a persistent
+#: step failure re-escalates every tick and starves SHARED clients all night.
+#: An explicit force-rem bypasses the cooldown (operator intent wins).
+SLEEP_FAIL_BACKOFF_SEC: float = float(
+    os.environ.get("IAI_MCP_SLEEP_FAIL_BACKOFF_SEC", "600")
+)
 
 
 def _hippo_health_check_on_boot(store) -> dict[str, int | str]:
     try:
         db = store.db
         sqlite_count_row = db._conn.execute(
-            "SELECT COUNT(*) FROM records WHERE tombstoned_at IS NULL"
+            "SELECT COUNT(*) FROM records"
+            " WHERE tombstoned_at IS NULL"
+            " AND COALESCE(embedding_pending, 0) = 0"
         ).fetchone()
         sqlite_count = int(sqlite_count_row[0]) if sqlite_count_row else 0
     except Exception as exc:
@@ -117,7 +112,7 @@ def _hippo_health_check_on_boot(store) -> dict[str, int | str]:
         hnsw_raw_count = -1
     action = (
         "ok"
-        if sqlite_count == active_label_count
+        if sqlite_count == active_label_count == hnsw_raw_count
         else "divergence_at_boot"
     )
     return {
@@ -132,10 +127,6 @@ _DAEMON_NOFILE_FLOOR_DEFAULT: int = 8192
 
 
 def _raise_fd_limit() -> None:
-    if _platform.system() == "Windows":
-        return
-    import resource as _resource
-
     try:
         floor = int(
             os.environ.get("IAI_MCP_DAEMON_NOFILE_FLOOR", _DAEMON_NOFILE_FLOOR_DEFAULT)
@@ -144,18 +135,18 @@ def _raise_fd_limit() -> None:
         floor = _DAEMON_NOFILE_FLOOR_DEFAULT
 
     try:
-        soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     except (OSError, ValueError):
         return
 
-    effective_hard = hard if hard != _resource.RLIM_INFINITY else floor
+    effective_hard = hard if hard != resource.RLIM_INFINITY else floor
 
     target = min(max(soft, floor), effective_hard)
     if target <= soft:
         return
 
     try:
-        _resource.setrlimit(_resource.RLIMIT_NOFILE, (target, hard))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
         log.debug("daemon_fd_limit_raised soft=%d->%d hard=%d", soft, target, hard)
     except (OSError, ValueError) as exc:
         log.debug("daemon_fd_limit_raise failed (non-fatal): %s", exc)
@@ -166,148 +157,114 @@ def _should_drain_on_drowsy_edge(prev, current) -> bool:
     return prev is _L.WAKE and current is _L.DROWSY
 
 
-def _mcp_recent_activity(mcp_socket, *, window_sec: float) -> bool:
-    if mcp_socket is None:
+def _sleep_pipeline_gate(daemon_state: dict | None) -> bool:
+    # Module-level so it is directly unit-testable without assembling the
+    # daemon. Returns False (pipeline must NOT run) when scheduler_paused is
+    # truthy; True otherwise, including when daemon_state is None/missing the
+    # key -- fail-open to the pre-existing always-run behavior.
+    #
+    # An explicit force-rem is an intentional operator request and overrides
+    # the pause gate: a manual `iai-mcp daemon force-rem` must actually run
+    # the consolidation pipeline, never be silently swallowed by a standing
+    # pause. (Idle-driven auto-sleep, which sets no force_rem_request, still
+    # obeys the pause.)
+    ds = daemon_state or {}
+    if bool((ds.get("force_rem_request") or {}).get("pending")):
+        return True
+    return not bool(ds.get("scheduler_paused"))
+
+
+def _sleep_backoff_active(
+    daemon_state: dict | None, backoff_until: float, now: float
+) -> bool:
+    # Module-level so it is directly unit-testable without assembling the
+    # daemon. force-rem is explicit operator intent and always wins over the
+    # failure cooldown.
+    if bool(((daemon_state or {}).get("force_rem_request") or {}).get("pending")):
         return False
-    try:
-        return (time.monotonic() - float(mcp_socket.last_activity_ts)) < window_sec
-    except Exception:  # noqa: BLE001 -- activity probe must never crash scheduling
-        return False
+    return now < backoff_until
 
 
-def _capture_queue_pending_count(capture_queue) -> int | None:
-    try:
-        return int(capture_queue.pending_count())
-    except Exception:  # noqa: BLE001 -- telemetry only
-        return None
+def _in_consolidation_window(daemon_state: "dict | None") -> bool:
+    """May consolidation run right now?
 
-
-def _set_capture_queue_retry_state(
-    state: dict,
-    *,
-    pending: bool,
-    pending_count: int | None = None,
-) -> None:
-    state[CAPTURE_QUEUE_RETRY_PENDING_KEY] = bool(pending)
-    state[CAPTURE_QUEUE_LAST_RETRY_KEY] = datetime.now(timezone.utc).isoformat()
-    if pending_count is not None:
-        state["_capture_queue_pending_count"] = pending_count
-
-
-def _drain_capture_queue_once(
-    store,
-    capture_queue,
-    capture_handler,
-    *,
-    phase: str,
-) -> dict:
-    ingested = int(capture_queue.ingest_pending(capture_handler))
-    pending_count = _capture_queue_pending_count(capture_queue)
-    payload = {"phase": phase, "ingested": ingested}
-    if pending_count is not None:
-        payload["pending_count"] = pending_count
-    if ingested > 0:
-        write_event(store, "capture_queue_drained", payload, severity="info")
-    return {
-        "ingested": ingested,
-        "pending_count": pending_count,
-        "pending": bool(pending_count) if pending_count is not None else False,
-    }
-
-
-async def _retry_capture_queue_drain_if_due(
-    store: MemoryStore,
-    state: dict,
-    *,
-    capture_queue=None,
-    capture_handler: Callable[[dict], None] | None = None,
-    mcp_socket: SocketServer | None = None,
-) -> None:
-    if (
-        capture_queue is None
-        or capture_handler is None
-        or not state.get(CAPTURE_QUEUE_RETRY_PENDING_KEY)
-    ):
-        return
-    if _mcp_recent_activity(mcp_socket, window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC):
-        return
-    try:
-        result = await asyncio.to_thread(
-            _drain_capture_queue_once,
-            store,
-            capture_queue,
-            capture_handler,
-            phase="tick_retry",
-        )
-        _set_capture_queue_retry_state(
-            state,
-            pending=bool(result.get("pending")),
-            pending_count=result.get("pending_count"),
-        )
-        await asyncio.to_thread(save_state, state)
-    except Exception as exc:  # noqa: BLE001 -- tick retry must never crash daemon
-        _set_capture_queue_retry_state(state, pending=True)
-        log.warning("capture queue retry drain failed: %s", exc, exc_info=True)
-        try:
-            await asyncio.to_thread(
-                write_event,
-                store,
-                "capture_queue_drain_failed",
-                {"phase": "tick_retry", "error": str(exc)[:200]},
-                severity="warning",
-            )
-        except Exception:  # noqa: BLE001 -- event write inside boundary guard
-            log.debug("capture_queue_drain_failed retry event write failed")
-        try:
-            await asyncio.to_thread(save_state, state)
-        except (OSError, ValueError) as save_exc:
-            log.debug("save_state after capture queue retry failure failed: %s", save_exc)
-
-
-# Idle-countdown decisions. The lifecycle tick translates these into FSM events.
-IDLE_DECISION_ACTIVE: str = "active"   # real work in flight -> reset the countdown
-IDLE_DECISION_SLEEP: str = "sleep"     # idle past the sleep threshold -> IDLE_30MIN
-IDLE_DECISION_DROWSY: str = "drowsy"   # idle past the drowsy threshold -> IDLE_5MIN
-IDLE_DECISION_HOLD: str = "hold"       # within the drowsy window -> no transition
-
-
-def _idle_countdown_decision(
-    *,
-    scanner_active: bool,
-    drain_in_progress: bool,
-    seconds_since_rpc: float,
-    idle_elapsed: float,
-    sleep_eligible: bool,
-    recent_rpc_window_sec: float,
-    drowsy_after_sec: float,
-    sleep_heartbeat_idle_sec: float,
-) -> str:
-    """Decide what the lifecycle idle countdown should do this tick.
-
-    The wrapper heartbeat (``scanner_active``) is only ONE signal that the
-    daemon is busy. Two others MUST also hold the daemon awake:
-
-    * ``drain_in_progress`` -- a deferred-capture drain is writing to the store
-      right now. The wrappers dir can be empty (heartbeat stale) while a drain
-      kicked off by earlier RPC traffic is still hammering the store.
-    * ``seconds_since_rpc`` -- real JSON-RPC traffic arrived recently. A drain
-      runs inside its triggering request, so by the time a long drain finishes
-      ``last_activity_ts`` (set at request start) may already look stale; the
-      ``drain_in_progress`` signal covers that tail.
-
-    When any of these holds we return ``ACTIVE`` so the caller resets the idle
-    countdown. Otherwise the daemon really is idle and we advance toward SLEEP
-    (which escalates to an EXCLUSIVE store lock) / DROWSY exactly as the
-    heartbeat-only logic used to, so a genuinely quiet daemon still settles and
-    crisis re-arming in SLEEP keeps running.
+    True inside the effective window — the learned user-rhythm quiet window,
+    an explicit env override, or the fixed night default — and ALWAYS for an
+    explicit force (pending, or honored within the last two hours so an
+    in-flight forced cycle is never cut off mid-run). Consolidation must
+    never share the machine with an active user outside that window.
+    Fail-open on any error: a broken gate must not stop consolidation
+    forever.
     """
-    if scanner_active or drain_in_progress or seconds_since_rpc < recent_rpc_window_sec:
-        return IDLE_DECISION_ACTIVE
-    if idle_elapsed >= sleep_heartbeat_idle_sec and sleep_eligible:
-        return IDLE_DECISION_SLEEP
-    if idle_elapsed >= drowsy_after_sec:
-        return IDLE_DECISION_DROWSY
-    return IDLE_DECISION_HOLD
+    from datetime import datetime, timedelta, timezone as _tz
+
+    try:
+        if daemon_state is None:
+            from iai_mcp.daemon_state import load_state as _gate_load
+            daemon_state = _gate_load()
+        if not isinstance(daemon_state, dict):
+            return True
+        now_utc = datetime.now(_tz.utc)
+        for req_key in ("force_rem_request", "user_sleep_request"):
+            req = daemon_state.get(req_key)
+            if not isinstance(req, dict):
+                continue
+            if req.get("pending"):
+                return True
+            honored_raw = req.get("honored_at")
+            if honored_raw:
+                try:
+                    honored = datetime.fromisoformat(str(honored_raw))
+                    if honored.tzinfo is None:
+                        honored = honored.replace(tzinfo=_tz.utc)
+                    if (now_utc - honored) <= timedelta(hours=2):
+                        return True
+                except (ValueError, TypeError):
+                    pass
+        window = effective_consolidation_window(daemon_state.get("quiet_window"))
+        local = datetime.now().astimezone()
+        return within_window(window, local, local.tzinfo)
+    except Exception:  # noqa: BLE001 -- gate errors must never stop consolidation
+        log.debug("consolidation window gate failed; allowing", exc_info=True)
+        return True
+
+
+async def _consume_force_wake(ds: dict, state_machine: Any) -> dict:
+    """Consume a pending dashboard/MCP force-wake request.
+
+    Module-level so it is directly unit-testable without assembling the
+    daemon. WAKE_SIGNAL wakes SLEEP/HIBERNATION; in WAKE/DROWSY there is
+    nothing to wake, and the request is STILL marked honored — a stale
+    pending flag must never re-fire every tick forever. Returns the updated
+    (saved) state dict, or the input unchanged when nothing was pending.
+    """
+    if not bool((ds.get("force_wake_request") or {}).get("pending")):
+        return ds
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    from iai_mcp.daemon_state import save_state as _save
+    from iai_mcp.lifecycle import LifecycleEvent as _Ev
+    from iai_mcp.s2_coordinator import (
+        S2OscillationBlocked as _Blocked,
+        S2OscillationConflict as _Conflict,
+    )
+
+    try:
+        await state_machine.dispatch(_Ev.WAKE_SIGNAL, reason="force_wake_request")
+    except (_Conflict, _Blocked):
+        # S2 refused (oscillation guard / min-interval). Marking honored here
+        # would be the control lying about success again — leave the request
+        # pending so the next tick retries after the interval clears.
+        return ds
+
+    updated = dict(ds)
+    req = dict(updated.get("force_wake_request") or {})
+    req["pending"] = False
+    req["honored_at"] = _dt.now(_tz.utc).isoformat()
+    updated["force_wake_request"] = req
+    await asyncio.to_thread(_save, updated)
+    return updated
 
 
 def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
@@ -367,7 +324,7 @@ def _kick_drowsy_rgc_rebuild(store) -> None:
 def _wake_hook_rebuild_if_cold(store) -> None:
     try:
         import iai_mcp.runtime_graph_cache as _rgc
-        _, _, _, _src = _rgc.load_recall_structural(store)
+        _, _, _, _src, _ = _rgc.load_recall_structural(store)
         if _src in ("cold_degrade", "last_good"):
             # This site only fires when the cache is already cold, so the gate's
             # own coldness term would rebuild here anyway; force makes the intent
@@ -393,53 +350,8 @@ def _store_is_empty(store: MemoryStore) -> bool:
     try:
         return store.db.open_table("records").count_rows() == 0
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        # Unknown != empty. A transient count failure (e.g. the shared sqlite
-        # connection left in an error state by a concurrent heavy reader, raising
-        # HippoIntegrityError/lock errors which subclass RuntimeError) must NOT be
-        # treated as an empty store: doing so parks the whole lifecycle tick
-        # (no idle-check, no drain) on a store that actually has records. Treat
-        # the unknown case as NOT empty so the tick proceeds; a truly empty store
-        # just does a little harmless no-op work.
-        log.debug("store empty check failed, assuming NOT empty: %s", exc)
-        # e8f3deb fixed the *behavior* (don't park the tick) but left the
-        # condition invisible. A recurring count failure (sqlite left in an error
-        # state by a heavy reader) should surface to the operator, not just
-        # log.debug. emit_best_effort is buffered and never raises, so it is safe
-        # even when the store connection is the thing failing.
-        try:
-            emit_best_effort(
-                store,
-                "store_empty_check_failed",
-                {"error": str(exc), "error_type": type(exc).__name__},
-                severity="warning",
-            )
-        except Exception:  # noqa: BLE001 -- telemetry must never break the tick
-            pass
-        return False
-
-
-def _normalize_boot_lifecycle_state(raw: dict) -> tuple[dict, bool]:
-    """Repair a crash-left incoherent lifecycle state at boot.
-
-    A daemon killed mid-SLEEP can leave lifecycle_state.json at
-    current_state=SLEEP with sleep_cycle_progress=None -- incoherent, because a
-    real in-flight sleep cycle always carries a progress dict. Resuming it wedges
-    the daemon (it never advances the pipeline, never reaches the recluster that
-    clears crisis, and recall stays degraded). Reset that one case to a clean
-    WAKE and drop the stale crisis flag. A genuine degeneration re-arms crisis on
-    the next complete sleep cycle. Returns (state, changed).
-    """
-    if (
-        isinstance(raw, dict)
-        and raw.get("current_state") == "SLEEP"
-        and raw.get("sleep_cycle_progress") is None
-    ):
-        out = dict(raw)
-        out["current_state"] = "WAKE"
-        out["crisis_mode"] = False
-        out["crisis_mode_since_ts"] = None
-        return out, True
-    return raw, False
+        log.debug("store empty check failed, assuming empty: %s", exc)
+        return True
 
 
 def _is_inside_window(
@@ -487,401 +399,47 @@ def _update_pending_digest(state: dict, cycle_result: dict) -> None:
     state["pending_digest"] = digest
 
 
-def _default_session_start_cache_meta_path(cache_path: Path) -> Path:
-    """Canonical sidecar path next to ``cache_path``.
-
-    ``Path.with_suffix(".meta.json")`` REPLACES the existing suffix, so
-    ``.session-start-payload.cached.md`` → ``.session-start-payload.cached.meta.json``
-    (matches ``SESSION_START_CACHE_META_PATH``). Both the writer and the
-    reader route through this single helper so a future change to the naming
-    convention cannot accidentally desync them.
-    """
-    return cache_path.with_suffix(".meta.json")
-
-
-def _session_start_cache_watermark(store) -> dict:
-    """Cheap probe used to decide whether the cache needs regenerating.
-
-    Returns a dict with `records_count`, `max_vec_label`, `max_created_at`,
-    `max_updated_at`. The probe runs a single SELECT — no rebuild, no spawn —
-    so it is safe to call on every WAKE tick.
-
-    ``max_vec_label`` is the monotone AUTOINCREMENT primary key on the records
-    table: it strictly increases on every insert, so it catches records inserted
-    *now* with an *old* ``created_at`` (e.g. backfilled from a transcript), which
-    a ``MAX(created_at)`` comparison would miss.
-    """
+def _write_session_start_cache(store, *, cache_path: Path = SESSION_START_CACHE_PATH) -> None:
     try:
-        with store.db._conn_lock:
-            row = store.db._conn.execute(
-                "SELECT COUNT(*),"
-                " COALESCE(MAX(vec_label), 0),"
-                " COALESCE(MAX(created_at), ''),"
-                " COALESCE(MAX(updated_at), '')"
-                " FROM records WHERE tombstoned_at IS NULL"
-            ).fetchone()
-    except Exception as exc:  # noqa: BLE001 -- watermark probe MUST NOT crash
-        log.debug("session_start_cache watermark probe failed: %s", exc)
-        return {
-            "records_count": -1,
-            "max_vec_label": -1,
-            "max_created_at": "",
-            "max_updated_at": "",
-            "probe_failed": True,
-        }
-    if not row:
-        return {
-            "records_count": 0,
-            "max_vec_label": 0,
-            "max_created_at": "",
-            "max_updated_at": "",
-        }
-    return {
-        "records_count": int(row[0] or 0),
-        "max_vec_label": int(row[1] or 0),
-        "max_created_at": str(row[2] or ""),
-        "max_updated_at": str(row[3] or ""),
-    }
+        from iai_mcp import retrieve
+        from iai_mcp.session import (
+            _compose_session_start_payload,
+            format_payload_as_markdown,
+        )
 
+        _graph, assignment, rc = retrieve.build_runtime_graph(store)
+        payload = _compose_session_start_payload(
+            store,
+            assignment,
+            rc,
+            session_id="precache",
+            profile_state={"wake_depth": "standard"},
+        )
+        rendered = format_payload_as_markdown(payload)
+        if not rendered:
+            return
+        if len(rendered) > SESSION_START_CACHE_MAX_CHARS:
+            rendered = rendered[:SESSION_START_CACHE_MAX_CHARS]
 
-def _load_session_start_cache_meta(meta_path: Path) -> dict | None:
-    try:
-        with open(meta_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        log.debug("session_start_cache meta load failed: %s", exc)
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
-
-
-def _save_session_start_cache_meta(meta_path: Path, meta: dict) -> None:
-    try:
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, separators=(",", ":"))
+            f.write(rendered)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, meta_path)
-    except (OSError, ValueError) as exc:
-        log.debug("session_start_cache meta save failed: %s", exc)
-
-
-def _runtime_graph_cache_is_warm(store) -> bool:
-    """Cheap probe: returns False if a full runtime-graph rebuild is required.
-
-    Wraps `retrieve._runtime_graph_rebuild_needed` (a disk read + COUNT(*), no
-    rebuild) so the WAKE refresh path can skip cleanly with reason
-    ``runtime_graph_cache_cold`` instead of spawning the expensive child fleet
-    inside the lifecycle tick.
-    """
-    try:
-        from iai_mcp import retrieve
-        return not retrieve._runtime_graph_rebuild_needed(store)
-    except Exception as exc:  # noqa: BLE001 -- probe MUST NOT crash
-        log.debug("runtime_graph_cache warm probe failed: %s", exc)
-        return False
-
-
-def _should_refresh_session_start_cache(
-    store,
-    *,
-    cache_path: Path,
-    meta_path: Path,
-    min_interval_sec: float,
-    now_monotonic: float | None = None,
-) -> tuple[bool, str, dict]:
-    """Decide whether the cache should be regenerated right now.
-
-    Returns ``(should_refresh, reason, current_watermark)``. ``reason`` is the
-    string emitted into the ``session_start_cache_write_skipped`` / ``_started``
-    events so the user can tell at a glance why a tick did or did not refresh.
-
-    Decisions, in order:
-
-    * No cache file yet → ``cache_absent``.
-    * Cache exists but mtime is younger than ``min_interval_sec`` → block to
-      avoid thrashing under burst ingestion (``min_interval_not_elapsed``).
-    * No meta sidecar (older install or pre-watermark cache) → refresh and
-      backfill the sidecar (``meta_absent``).
-    * Watermark probe matches the stored watermark exactly → nothing new,
-      ``no_new_records``.
-    * Otherwise refresh (``watermark_changed``).
-    """
-    current = _session_start_cache_watermark(store)
-    if current.get("probe_failed"):
-        return False, "probe_failed", current
-
-    try:
-        cache_mtime = cache_path.stat().st_mtime
-    except (FileNotFoundError, OSError):
-        return True, "cache_absent", current
-
-    if min_interval_sec > 0:
-        age = time.time() - cache_mtime
-        if age < min_interval_sec:
-            return False, "min_interval_not_elapsed", current
-
-    stored = _load_session_start_cache_meta(meta_path)
-    if not stored:
-        return True, "meta_absent", current
-
-    if (
-        int(stored.get("records_count", -1)) == current["records_count"]
-        and int(stored.get("max_vec_label", -1)) == current["max_vec_label"]
-        and str(stored.get("max_created_at", "")) == current["max_created_at"]
-        and str(stored.get("max_updated_at", "")) == current["max_updated_at"]
-    ):
-        return False, "no_new_records", current
-
-    return True, "watermark_changed", current
-
-
-def _emit_session_start_cache_event(
-    store,
-    kind: str,
-    data: dict,
-    *,
-    severity: str = "info",
-) -> None:
-    """Best-effort event write that never crashes the caller."""
-    try:
-        write_event(store, kind, data, severity=severity)
-    except Exception:  # noqa: BLE001 -- event write must not crash the refresh path
-        log.debug("failed to write %s event", kind)
-
-
-def _write_session_start_cache(
-    store,
-    *,
-    cache_path: Path = SESSION_START_CACHE_PATH,
-    meta_path: Path | None = None,
-    trigger: str = "sleep_pipeline",
-    force_rebuild: bool = True,
-) -> dict:
-    """Write the SessionStart cache from the current memory store.
-
-    Parameters
-    ----------
-    cache_path : Path
-        Target file; defaults to ``~/.iai-mcp/.session-start-payload.cached.md``.
-    meta_path : Path
-        Sidecar with the watermark; defaults to ``cache_path`` + ``.meta.json``
-        so a custom ``cache_path`` (tests) keeps the meta next to the cache.
-    trigger : str
-        Why this write was kicked: ``sleep_pipeline`` (under EXCLUSIVE lock,
-        rebuild allowed), ``wake_sequence`` (after fresh ingest/reembed),
-        ``periodic_wake`` (watermark drifted), ``manual`` (CLI / test).
-    force_rebuild : bool
-        When True (the SLEEP path), we let ``build_runtime_graph`` do whatever
-        rebuild it needs — we already hold EX and the consolidation window is the
-        right moment for the expensive recompute. When False (WAKE path), we
-        skip with ``runtime_graph_cache_cold`` rather than spawn a rebuild on a
-        live tick.
-
-    Returns a small status dict with the reason and watermark so callers
-    (e.g. tests) can assert without grovelling through events.
-    """
-    started_at = time.monotonic()
-    block_on_lock = bool(force_rebuild and trigger == "sleep_pipeline")
-    if block_on_lock:
-        lock_acquired = _session_start_cache_lock.acquire(
-            timeout=SESSION_START_CACHE_LOCK_TIMEOUT_SEC,
-        )
-    else:
-        lock_acquired = _session_start_cache_lock.acquire(blocking=False)
-    if not lock_acquired:
-        _emit_session_start_cache_event(
-            store,
-            "session_start_cache_write_skipped",
-            {"reason": "refresh_in_progress", "trigger": trigger,
-             "cache_path": str(cache_path)},
-        )
-        return {"action": "skipped", "reason": "refresh_in_progress"}
-
-    if meta_path is None:
-        meta_path = _default_session_start_cache_meta_path(cache_path)
-
-    try:
-        _emit_session_start_cache_event(
-            store,
-            "session_start_cache_write_started",
-            {"trigger": trigger, "cache_path": str(cache_path),
-             "force_rebuild": bool(force_rebuild)},
-        )
-
-        if not force_rebuild and not _runtime_graph_cache_is_warm(store):
-            _emit_session_start_cache_event(
-                store,
-                "session_start_cache_write_skipped",
-                {"reason": "runtime_graph_cache_cold", "trigger": trigger,
-                 "cache_path": str(cache_path),
-                 "duration_ms": int((time.monotonic() - started_at) * 1000)},
-            )
-            return {"action": "skipped", "reason": "runtime_graph_cache_cold"}
-
+        os.replace(tmp_path, cache_path)
+    except Exception as exc:  # noqa: BLE001 -- cache write MUST NOT crash the REM loop
+        log.warning("session start cache write failed: %s", exc, exc_info=True)
         try:
-            from iai_mcp.session import (
-                _compose_session_start_payload,
-                format_payload_as_markdown,
-            )
-
-            if force_rebuild:
-                from iai_mcp import retrieve
-
-                _graph, assignment, rc = retrieve.build_runtime_graph(store)
-            else:
-                from iai_mcp import runtime_graph_cache as _rgc
-
-                assignment, rc, _max_degree, _source = _rgc.load_recall_structural(store)
-            payload = _compose_session_start_payload(
-                store,
-                assignment,
-                rc,
-                session_id="precache",
-                profile_state={"wake_depth": "standard"},
-            )
-            rendered = format_payload_as_markdown(payload)
-            if not rendered:
-                _emit_session_start_cache_event(
-                    store,
-                    "session_start_cache_write_skipped",
-                    {"reason": "empty_render", "trigger": trigger,
-                     "cache_path": str(cache_path),
-                     "duration_ms": int((time.monotonic() - started_at) * 1000)},
-                )
-                return {"action": "skipped", "reason": "empty_render"}
-            if len(rendered) > SESSION_START_CACHE_MAX_CHARS:
-                rendered = rendered[:SESSION_START_CACHE_MAX_CHARS]
-
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(rendered)
-                f.flush()
-                os.fsync(f.fileno())
-            os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, cache_path)
-
-            watermark = _session_start_cache_watermark(store)
-            meta = {
-                "records_count": watermark["records_count"],
-                "max_vec_label": watermark["max_vec_label"],
-                "max_created_at": watermark["max_created_at"],
-                "max_updated_at": watermark["max_updated_at"],
-                "rendered_chars": len(rendered),
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "trigger": trigger,
-            }
-            _save_session_start_cache_meta(meta_path, meta)
-
-            _emit_session_start_cache_event(
-                store,
-                "session_start_cache_write_success",
-                {
-                    "trigger": trigger,
-                    "cache_path": str(cache_path),
-                    "rendered_chars": len(rendered),
-                    "records_count": watermark["records_count"],
-                    "max_vec_label": watermark["max_vec_label"],
-                    "max_record_created_at": watermark["max_created_at"],
-                    "max_updated_at": watermark["max_updated_at"],
-                    "duration_ms": int((time.monotonic() - started_at) * 1000),
-                },
-            )
-            return {
-                "action": "wrote",
-                "rendered_chars": len(rendered),
-                "watermark": watermark,
-            }
-        except Exception as exc:  # noqa: BLE001 -- cache write MUST NOT crash the loop
-            log.warning("session start cache write failed: %s", exc, exc_info=True)
-            _emit_session_start_cache_event(
+            write_event(
                 store,
                 "session_start_cache_write_failed",
-                {
-                    "trigger": trigger,
-                    "cache_path": str(cache_path),
-                    "reason": type(exc).__name__,
-                    "error": str(exc)[:200],
-                    "duration_ms": int((time.monotonic() - started_at) * 1000),
-                },
+                {"error": str(exc)[:200]},
                 severity="warning",
             )
-            return {"action": "failed", "reason": type(exc).__name__}
-    finally:
-        _session_start_cache_lock.release()
-
-
-def _maybe_refresh_session_start_cache(
-    store,
-    *,
-    trigger: str,
-    cache_path: Path = SESSION_START_CACHE_PATH,
-    meta_path: Path | None = None,
-    min_interval_sec: float | None = None,
-    force_rebuild: bool = False,
-) -> dict:
-    """Best-effort WAKE-time refresh.
-
-    Always:
-      * runs the cheap watermark probe + min-interval gate before doing any work;
-      * acquires the single-flight lock non-blocking;
-      * skips if the runtime graph cache is cold;
-      * never raises — callers from the lifecycle tick depend on this.
-    """
-    if meta_path is None:
-        meta_path = _default_session_start_cache_meta_path(cache_path)
-    if min_interval_sec is None:
-        try:
-            min_interval_sec = float(
-                os.environ.get(
-                    "IAI_MCP_SESSION_CACHE_REFRESH_MIN_SEC",
-                    str(SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT),
-                )
-            )
-        except (TypeError, ValueError):
-            min_interval_sec = SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT
-
-    try:
-        should, reason, _wm = _should_refresh_session_start_cache(
-            store,
-            cache_path=cache_path,
-            meta_path=meta_path,
-            min_interval_sec=min_interval_sec,
-        )
-    except Exception as exc:  # noqa: BLE001 -- gate probe must not crash
-        log.debug("session_start_cache should-refresh probe failed: %s", exc)
-        return {"action": "skipped", "reason": "probe_failed"}
-
-    if not should:
-        if not (
-            trigger == "periodic_wake"
-            and reason in {"min_interval_not_elapsed", "no_new_records"}
-        ):
-            _emit_session_start_cache_event(
-                store,
-                "session_start_cache_write_skipped",
-                {"reason": reason, "trigger": trigger, "cache_path": str(cache_path)},
-            )
-        return {"action": "skipped", "reason": reason}
-
-    try:
-        return _write_session_start_cache(
-            store,
-            cache_path=cache_path,
-            meta_path=meta_path,
-            trigger=trigger,
-            force_rebuild=force_rebuild,
-        )
-    except Exception as exc:  # noqa: BLE001 -- belt-and-suspenders; _write already guards
-        log.debug("session_start_cache refresh wrapper failed: %s", exc)
-        return {"action": "failed", "reason": type(exc).__name__}
+        except Exception:  # noqa: BLE001 -- event write inside boundary guard
+            log.debug("failed to write session_start_cache_write_failed event")
 
 
 async def _tick_body(
@@ -889,8 +447,6 @@ async def _tick_body(
     state: dict,
     *,
     mcp_socket: SocketServer | None = None,
-    capture_queue=None,
-    capture_handler: Callable[[dict], None] | None = None,
 ) -> None:
     try:
         from iai_mcp.daemon_state import (
@@ -932,7 +488,13 @@ async def _tick_body(
         ).total_seconds() > 3600
         if _should_s4bg:
             from iai_mcp.s4 import s4_background_scan
-            await asyncio.to_thread(s4_background_scan, store, 50)
+
+            def _s4_body():
+                from iai_mcp import retrieve as _retrieve_s4
+                with _retrieve_s4.background_store_work("s4_background_scan"):
+                    return s4_background_scan(store, 50)
+
+            await asyncio.to_thread(_s4_body)
             state["_last_s4bg_ts"] = _now_iso
     except Exception:  # noqa: BLE001 -- tick step MUST NOT crash
         log.debug("tick step 0.6 (s4_background_scan) failed", exc_info=True)
@@ -946,8 +508,8 @@ async def _tick_body(
         if _should_forage:
             _skip_foraging_in_sleep = False
             try:
-                from iai_mcp.lifecycle_state import LIFECYCLE_STATE_PATH, LifecycleState, load_state as _load_ls
-                _ls_rec = await asyncio.to_thread(_load_ls, LIFECYCLE_STATE_PATH)
+                from iai_mcp.lifecycle_state import lifecycle_state_path as _lifecycle_state_path, LifecycleState, load_state as _load_ls
+                _ls_rec = await asyncio.to_thread(_load_ls, _lifecycle_state_path())
                 _ls_current = _ls_rec.get("current_state", "")
                 if _ls_current == LifecycleState.SLEEP.value:
                     _skip_foraging_in_sleep = True
@@ -955,7 +517,13 @@ async def _tick_body(
                 _skip_foraging_in_sleep = True
             if not _skip_foraging_in_sleep:
                 from iai_mcp.foraging import forage_for_connections
-                _foraged = await asyncio.to_thread(forage_for_connections, store, 3)
+
+                def _forage_body():
+                    from iai_mcp import retrieve as _retrieve_forage
+                    with _retrieve_forage.background_store_work("forage_for_connections"):
+                        return forage_for_connections(store, 3)
+
+                _foraged = await asyncio.to_thread(_forage_body)
                 state["_last_forage_ts"] = _now_iso
                 if _foraged > 0:
                     await asyncio.to_thread(
@@ -1002,18 +570,6 @@ async def _tick_body(
             await asyncio.to_thread(flush_edge_buffer, store)
     except Exception as e:  # noqa: BLE001 -- periodic flush MUST NOT crash tick
         log.debug("edges buffer periodic flush skipped: %s", str(e)[:120])
-
-
-    try:
-        await _retry_capture_queue_drain_if_due(
-            store,
-            state,
-            capture_queue=capture_queue,
-            capture_handler=capture_handler,
-            mcp_socket=mcp_socket,
-        )
-    except Exception:  # noqa: BLE001 -- retry boundary must not affect tick
-        log.debug("tick step capture_queue_retry failed", exc_info=True)
 
 
     if state.get("scheduler_paused") is True:
@@ -1068,10 +624,6 @@ async def _tick_body(
 
 
     state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
-    # Clear the skip reason: reaching here means the tick was NOT skipped. Leaving a
-    # stale "empty_store"/"paused" value here makes a healthy daemon look parked in
-    # observability (last_tick_skipped_reason is only ever set, never reset).
-    state["last_tick_skipped_reason"] = None
     try:
         await asyncio.to_thread(save_state, state)
     except (OSError, ValueError) as exc:
@@ -1084,19 +636,11 @@ async def _scheduler_tick(
     *,
     tick_body: Callable[..., Awaitable[None]] | None = None,
     mcp_socket: SocketServer | None = None,
-    capture_queue=None,
-    capture_handler: Callable[[dict], None] | None = None,
 ) -> None:
     body = tick_body or _tick_body
     while True:
         try:
-            await body(
-                store,
-                state,
-                mcp_socket=mcp_socket,
-                capture_queue=capture_queue,
-                capture_handler=capture_handler,
-            )
+            await body(store, state, mcp_socket=mcp_socket)
         except TypeError:
             try:
                 await body(store, state)
@@ -1244,35 +788,16 @@ def _set_process_title(title: str = "iai lilli (iai_mcp.daemon)") -> None:
         pass
 
 
-def _auto_set_embed_offline() -> None:
-    """Set IAI_MCP_EMBED_OFFLINE if the bge-small-en-v1.5 model is already cached locally.
-
-    The Rust hf-hub client uses a different TLS stack than Python and may fail to reach
-    huggingface.co in restricted network environments (e.g., containers with custom CA
-    certificates). When the model files are already present in the HF cache, setting this
-    env var tells the Rust embedder to skip the network entirely.
-    """
-    if os.environ.get("IAI_MCP_EMBED_OFFLINE"):
-        return
-    import pathlib
-
-    revision = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-    hf_home = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if hf_home:
-        cache_base = pathlib.Path(hf_home)
-    else:
-        cache_base = pathlib.Path.home() / ".cache" / "huggingface" / "hub"
-    snap = cache_base / "models--BAAI--bge-small-en-v1.5" / "snapshots" / revision
-    if (snap / "model.safetensors").exists() and (snap / "tokenizer.json").exists():
-        os.environ["IAI_MCP_EMBED_OFFLINE"] = "1"
-        log.debug("bge-small-en-v1.5 found in HF cache — setting IAI_MCP_EMBED_OFFLINE=1")
-
-
 async def main() -> int:
     _set_process_title()
     _require_native()
     _raise_fd_limit()
-    _auto_set_embed_offline()
+    # kill -USR2 <pid> dumps every thread's stack to stderr — the sanctioned
+    # way to see where a live daemon is stuck without root or a debugger.
+    try:
+        faulthandler.register(signal.SIGUSR2, all_threads=True)
+    except (AttributeError, ValueError, OSError):
+        pass
 
     store = await _open_exclusive_store_with_backoff(
         lambda: MemoryStore(
@@ -1280,23 +805,6 @@ async def main() -> int:
             access_mode=AccessMode.EXCLUSIVE,
         )
     )
-
-    # Replay explicitly-set profile knobs from the previous run. _profile_state
-    # starts as defaults and is never otherwise rehydrated, so without this a
-    # user's stated preferences (e.g. dunn_quadrant, inertia_awareness) silently
-    # revert to defaults on every restart. Best-effort; never blocks boot.
-    try:
-        from iai_mcp import core as _core
-
-        _restored = _core.rehydrate_profile_overrides()
-        if _restored:
-            log.info(
-                "profile: rehydrated %d pinned knob override(s) from disk: %s",
-                len(_restored),
-                ", ".join(sorted(_restored)),
-            )
-    except Exception:  # noqa: BLE001 -- profile rehydrate MUST NOT wedge boot
-        log.debug("profile override rehydrate failed", exc_info=True)
 
     try:
         hippo_lock_path = store.root / "hippo" / ".lock"
@@ -1397,9 +905,15 @@ async def main() -> int:
 
     try:
         try:
+            from iai_mcp.daemon_state import daemon_state_path as _drp_daemon_state_path
             from iai_mcp.fsm_reconcile import reconcile_fsm_state
+            from iai_mcp.lifecycle_state import lifecycle_state_path as _drp_lifecycle_state_path
 
-            _drift_report = reconcile_fsm_state(auto_correct=True)
+            _drift_report = reconcile_fsm_state(
+                canonical_path=_drp_lifecycle_state_path(),
+                legacy_path=_drp_daemon_state_path(),
+                auto_correct=True,
+            )
             if _drift_report.get("drift") is True:
                 log.warning(
                     "fsm_drift_detected canonical=%s legacy=%s",
@@ -1437,11 +951,9 @@ async def main() -> int:
 
         _wake_was_pending = False
         try:
-            from pathlib import Path as _Path
+            from iai_mcp.wake_handler import WakeHandler, wake_signal_path
 
-            from iai_mcp.wake_handler import WakeHandler
-
-            _wake_signal_path = _Path("~/.iai-mcp/wake.signal").expanduser()
+            _wake_signal_path = wake_signal_path()
             if WakeHandler(_wake_signal_path).consume_wake_signal():
                 _wake_was_pending = True
                 write_event(
@@ -1450,14 +962,11 @@ async def main() -> int:
         except Exception:  # noqa: BLE001 -- boot MUST NOT block on wake-handler
             log.debug("wake signal consume failed", exc_info=True)
 
-        _capture_queue = None
-        _capture_handler = None
         try:
             from iai_mcp.capture import capture_turn as _capture_turn
             from iai_mcp.capture_queue import CaptureQueue
 
             _capture_queue = CaptureQueue()
-
             def _capture_handler(record: dict) -> None:
                 kwargs = {
                     "cue": record.get("cue", ""),
@@ -1467,13 +976,24 @@ async def main() -> int:
                     "role": record.get("role", "user"),
                 }
                 _capture_turn(store, **kwargs)
-        except Exception as exc:  # noqa: BLE001 -- never block boot on queue init
-            log.warning("capture queue init failed at startup: %s", exc, exc_info=True)
+
+            ingested = await asyncio.to_thread(
+                _capture_queue.ingest_pending, _capture_handler,
+            )
+            if ingested > 0:
+                write_event(
+                    store,
+                    "capture_queue_drained",
+                    {"phase": "startup", "ingested": ingested},
+                    severity="info",
+                )
+        except Exception as exc:  # noqa: BLE001 -- never block boot on queue drain
+            log.warning("capture queue drain failed at startup: %s", exc, exc_info=True)
             try:
                 write_event(
                     store,
                     "capture_queue_drain_failed",
-                    {"phase": "startup_init", "error": str(exc)[:200]},
+                    {"phase": "startup", "error": str(exc)[:200]},
                     severity="warning",
                 )
             except Exception:  # noqa: BLE001 -- event write inside boundary guard
@@ -1528,15 +1048,10 @@ async def main() -> int:
 
         shutdown = asyncio.Event()
         loop = asyncio.get_running_loop()
-        _shutdown_sigs = [signal.SIGINT]
-        if hasattr(signal, "SIGTERM"):
-            _shutdown_sigs.append(signal.SIGTERM)
-        if hasattr(signal, "SIGHUP"):
-            _shutdown_sigs.append(signal.SIGHUP)
-        for sig in _shutdown_sigs:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             try:
                 loop.add_signal_handler(sig, shutdown.set)
-            except (NotImplementedError, RuntimeError, ValueError):
+            except (NotImplementedError, RuntimeError):
                 pass
 
         try:
@@ -1551,22 +1066,64 @@ async def main() -> int:
         except Exception:  # noqa: BLE001
             log.debug("hippo boot health check failed", exc_info=True)
 
+        if os.environ.get("IAI_MCP_ASYNC_WRITES_OFF", "").strip() not in (
+            "1", "true", "TRUE", "yes",
+        ):
+            try:
+                await store.enable_async_writes()
+            except Exception:  # noqa: BLE001 -- boot must never fail on this optimization
+                log.warning(
+                    "enable_async_writes failed; using sync reinforce fallback",
+                    exc_info=True,
+                )
+
+        # Warm the first-dispatch surface (imports, embedder model, structural
+        # decode) BEFORE the socket appears: a recall can arrive the instant
+        # the socket binds, and racing it against a cold dispatch surface puts
+        # one-time process warm-up on that first awake read. Bounded so a
+        # pathological store cannot stall the boot; on timeout the socket
+        # still comes up and the background warm-up finishes the job.
+        try:
+            from iai_mcp.daemon._boot_warmup import warm_dispatch_surface
+
+            _wds_summary = await asyncio.wait_for(
+                asyncio.to_thread(warm_dispatch_surface, store), timeout=20.0,
+            )
+            log.info(
+                "dispatch surface warmed pre-bind in %.0fms",
+                _wds_summary.get("elapsed_ms", -1.0),
+            )
+        except Exception:  # noqa: BLE001 -- pre-bind warm-up must never block boot
+            log.debug("pre-bind dispatch surface warm-up failed", exc_info=True)
+
         mcp_socket = SocketServer(store, state=state)
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
         await asyncio.sleep(0.05)
 
         try:
+            from iai_mcp.daemon._boot_warmup import run_boot_warmup
+
+            async def _boot_warmup_task() -> None:
+                try:
+                    await asyncio.to_thread(run_boot_warmup, store)
+                except Exception as _exc:  # noqa: BLE001 -- warm-up must never crash the daemon
+                    log.debug("boot_warmup failed: %s", _exc, exc_info=True)
+
+            asyncio.create_task(_boot_warmup_task())
+        except Exception:  # noqa: BLE001 -- scheduling failure must not block boot
+            log.debug("boot_warmup scheduling failed", exc_info=True)
+
+        try:
             from iai_mcp import runtime_graph_cache as _rgc_mod
+
+            def _boot_preload_body() -> None:
+                from iai_mcp import retrieve as _retrieve_preload
+                with _retrieve_preload.background_store_work("boot_preload"):
+                    _retrieve_preload.build_runtime_graph(store)
 
             async def _boot_preload() -> None:
                 try:
-                    # WAKE boot must not stream the whole Hippo store. The recall
-                    # hot path is ANN-first and only needs the structural overlay
-                    # or last-good snapshot; expensive rebuilds belong to sleep /
-                    # drowsy paths.
-                    await asyncio.to_thread(
-                        _rgc_mod.load_recall_structural, store,
-                    )
+                    await asyncio.to_thread(_boot_preload_body)
                 except Exception as _exc:  # noqa: BLE001 -- preload MUST NOT crash daemon
                     log.debug("boot_preload failed: %s", _exc, exc_info=True)
                 finally:
@@ -1581,93 +1138,17 @@ async def main() -> int:
             except Exception:  # noqa: BLE001
                 pass
 
-        if _capture_queue is not None and _capture_handler is not None:
-            async def _capture_queue_drain_and_report() -> None:
-                try:
-                    if STARTUP_DEFERRED_DRAIN_GRACE_SEC > 0:
-                        await asyncio.sleep(STARTUP_DEFERRED_DRAIN_GRACE_SEC)
-                    if _mcp_recent_activity(
-                        mcp_socket,
-                        window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC,
-                    ):
-                        pending_count = _capture_queue_pending_count(_capture_queue)
-                        retry_pending = pending_count is None or pending_count > 0
-                        _set_capture_queue_retry_state(
-                            state,
-                            pending=retry_pending,
-                            pending_count=pending_count,
-                        )
-                        await asyncio.to_thread(save_state, state)
-                        payload = {
-                            "reason": "recent_mcp_activity",
-                            "retry_pending": retry_pending,
-                        }
-                        if pending_count is not None:
-                            payload["pending_count"] = pending_count
-                        await asyncio.to_thread(
-                            write_event,
-                            store,
-                            "capture_queue_drain_startup_skipped",
-                            payload,
-                            severity="info",
-                        )
-                        return
-                    result = await asyncio.to_thread(
-                        _drain_capture_queue_once,
-                        store,
-                        _capture_queue,
-                        _capture_handler,
-                        phase="startup",
-                    )
-                    _set_capture_queue_retry_state(
-                        state,
-                        pending=bool(result.get("pending")),
-                        pending_count=result.get("pending_count"),
-                    )
-                    await asyncio.to_thread(save_state, state)
-                except Exception as exc:  # noqa: BLE001 -- never block socket serving
-                    _set_capture_queue_retry_state(state, pending=True)
-                    log.warning("capture queue drain failed at startup: %s", exc, exc_info=True)
-                    try:
-                        await asyncio.to_thread(save_state, state)
-                    except (OSError, ValueError) as save_exc:
-                        log.debug(
-                            "save_state after startup capture queue failure failed: %s",
-                            save_exc,
-                        )
-                    try:
-                        await asyncio.to_thread(
-                            write_event,
-                            store,
-                            "capture_queue_drain_failed",
-                            {"phase": "startup", "error": str(exc)[:200]},
-                            severity="warning",
-                        )
-                    except Exception:  # noqa: BLE001 -- event write inside boundary guard
-                        log.debug("capture_queue_drain_failed event write failed")
-
-            asyncio.create_task(_capture_queue_drain_and_report())
-
         try:
-            from iai_mcp.capture import drain_deferred_captures as _drain
+            from iai_mcp.capture import drain_capture_backlog as _drain
+
+            def _drain_body():
+                from iai_mcp import retrieve as _retrieve_drain
+                with _retrieve_drain.background_store_work("drain_deferred_captures"):
+                    return _drain(store)
 
             async def _drain_and_report() -> None:
                 try:
-                    if STARTUP_DEFERRED_DRAIN_GRACE_SEC > 0:
-                        await asyncio.sleep(STARTUP_DEFERRED_DRAIN_GRACE_SEC)
-                    if _mcp_recent_activity(
-                        mcp_socket,
-                        window_sec=STARTUP_DEFERRED_DRAIN_GRACE_SEC,
-                    ):
-                        await asyncio.to_thread(
-                            write_event,
-                            store,
-                            "deferred_drain_startup_skipped",
-                            {"reason": "recent_mcp_activity"},
-                            severity="info",
-                        )
-                        return
-                    drain_counts = await asyncio.to_thread(_drain, store)
+                    drain_counts = await asyncio.to_thread(_drain_body)
                     if drain_counts.get("files_drained") or drain_counts.get(
                         "files_failed"
                     ):
@@ -1723,7 +1204,22 @@ async def main() -> int:
         ) / "wrappers"
         _heartbeat_scanner = _HeartbeatScanner(_wrappers_dir)
         _idle_detector = _IdleDetector()
-        _sleep_pipeline = _SleepPipeline(store=store)
+
+        from iai_mcp.lifecycle_event_log import LifecycleEventLog as _LifecycleEventLog
+        from iai_mcp.lifecycle_state import lifecycle_state_path as _lifecycle_state_path
+        _lifecycle_log_dir = (
+            _PathHere(_store_root) if _store_root else _PathHere.home() / ".iai-mcp"
+        ) / "logs"
+        _resolved_lifecycle_state_path = _lifecycle_state_path(
+            _store_root if _store_root else None,
+        )
+        _resolved_lifecycle_event_log = _LifecycleEventLog(log_dir=_lifecycle_log_dir)
+
+        _sleep_pipeline = _SleepPipeline(
+            store=store,
+            lifecycle_state_path=_resolved_lifecycle_state_path,
+            lifecycle_event_log=_resolved_lifecycle_event_log,
+        )
 
         # Eagerly clear a long-expired quarantine at boot. Auto-recovery
         # otherwise only fires when a sleep cycle is next attempted, so a daemon
@@ -1738,44 +1234,10 @@ async def main() -> int:
                 )
         except Exception as _q_exc:  # noqa: BLE001 -- boot recovery must never wedge startup
             log.debug("quarantine boot-recover failed: %s", _q_exc)
-
-        from pathlib import Path as _PathS2
-        # Boot normalization for a crash mid-SLEEP: lifecycle_state.json can be
-        # left at current_state=SLEEP with sleep_cycle_progress=None -- an
-        # incoherent state (a real in-flight cycle always carries a progress
-        # dict). Resuming it wedges the daemon: it never advances the sleep
-        # pipeline, never reaches the recluster that clears crisis, and recall
-        # stays degraded (SLEEP + crisis both degrade recall). Reset that one
-        # case to a clean WAKE (and drop the stale crisis flag set before the
-        # crash) so the daemon serves immediately; a genuine degeneration will
-        # simply re-arm crisis on the next complete sleep cycle.
-        try:
-            import json as _json_lc
-            _lc_path = _PathS2.home() / ".iai-mcp" / "lifecycle_state.json"
-            _lc_raw = _json_lc.loads(_lc_path.read_text())
-            _lc_norm, _lc_changed = _normalize_boot_lifecycle_state(_lc_raw)
-            if _lc_changed:
-                _lc_path.write_text(_json_lc.dumps(_lc_norm, indent=2))
-                log.warning(
-                    "lifecycle_boot_normalized: stale SLEEP without "
-                    "sleep_cycle_progress -> WAKE (crisis cleared)"
-                )
-                try:
-                    emit_best_effort(
-                        store,
-                        "lifecycle_boot_normalized",
-                        {"from_state": "SLEEP", "to_state": "WAKE",
-                         "reason": "sleep_without_progress"},
-                        severity="warning",
-                    )
-                except Exception:  # noqa: BLE001 -- telemetry must not block boot
-                    pass
-        except (OSError, ValueError) as _lc_exc:
-            log.debug("lifecycle boot normalization skipped: %s", _lc_exc)
         _s2_config = _load_s2_config()
         _s2_coord = S2Coordinator(
             store=store,
-            state_path=_PathS2.home() / ".iai-mcp" / "lifecycle_state.json",
+            state_path=_resolved_lifecycle_state_path,
             min_interval_sec=_s2_config.min_interval_sec,
             dry_run=_s2_config.dry_run,
         )
@@ -1785,7 +1247,11 @@ async def main() -> int:
         _peri_event_buffer = PeriEventBuffer(maxlen=_stc_config.peri_event_buffer_size)
         set_buffer(_peri_event_buffer)
 
-        _state_machine = _LifecycleStateMachine(coordinator=_s2_coord)
+        _state_machine = _LifecycleStateMachine(
+            state_path=_resolved_lifecycle_state_path,
+            event_log=_resolved_lifecycle_event_log,
+            coordinator=_s2_coord,
+        )
 
         if _wake_was_pending:
             try:
@@ -1804,13 +1270,7 @@ async def main() -> int:
         )
 
         tick_task = asyncio.create_task(
-            _scheduler_tick(
-                store,
-                state,
-                mcp_socket=mcp_socket,
-                capture_queue=_capture_queue,
-                capture_handler=_capture_handler,
-            )
+            _scheduler_tick(store, state, mcp_socket=mcp_socket)
         )
         audit_task = asyncio.create_task(
             continuous_audit(store, shutdown)
@@ -1846,10 +1306,46 @@ async def main() -> int:
         SLEEP_HEARTBEAT_IDLE_SEC: float = float(
             os.environ.get("LIFECYCLE_SLEEP_HEARTBEAT_IDLE_SEC", "1800")
         )
+        PENDING_EMBED_FLOOR_SEC: float = float(
+            os.environ.get("IAI_MCP_PENDING_EMBED_FLOOR_SEC", "300")
+        )
 
         _last_active_monotonic: list[float] = [time.monotonic()]
         _prev_lifecycle_state: list = [_LifecycleState.WAKE]
         _lock_downgraded_to_shared: list[bool] = [False]
+        # A failing pipeline must not re-escalate to EX every tick — that
+        # starves every SHARED client (dashboard, CLI) for as long as the
+        # failure persists. One failure buys a cooldown before the next try.
+        _sleep_fail_backoff_until: list[float] = [0.0]
+        _last_pending_embed_mono: list[float] = [0.0]
+        _pending_embed_inflight: list[bool] = [False]
+
+        def _pending_embed_pass_sync() -> None:
+            from iai_mcp import runtime_graph_cache as _rgc
+            from iai_mcp.embed import embedder_for_store
+
+            # warning level: the daemon runs with the root logger's WARNING
+            # default, so anything quieter is invisible in launchd-stderr.
+            log.warning("pending_embed_pass: start")
+            try:
+                _emb = embedder_for_store(store)
+            except Exception as _emb_exc:  # noqa: BLE001 -- embed-less pass still heals sidecars
+                _emb = None
+                log.warning("pending_embed_pass: embedder unavailable: %s", _emb_exc)
+            result = store.db.pending_embeddings_wake_sequence(embedder=_emb)
+            log.warning("pending_embed_pass: result=%s", result)
+            if isinstance(result, dict) and result.get("action") != "skip":
+                try:
+                    _rgc.invalidate(store)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    _kick_drowsy_rgc_rebuild(store)
+                except Exception:  # noqa: BLE001 -- best-effort
+                    log.debug("pending-embed rgc kick failed", exc_info=True)
+
+        async def _pending_embed_pass() -> None:
+            await asyncio.to_thread(_pending_embed_pass_sync)
 
         async def lifecycle_tick() -> None:
             while not shutdown.is_set():
@@ -1911,34 +1407,7 @@ async def main() -> int:
                     now_mono = time.monotonic()
                     idle_elapsed = now_mono - _last_active_monotonic[0]
 
-                    # Beyond the wrapper heartbeat, real RPC traffic and an
-                    # in-flight deferred-capture drain are activity too. Folding
-                    # them into the idle countdown stops the FSM forcing SLEEP
-                    # (-> EXCLUSIVE store lock) while drain threads are still
-                    # hammering the store. See _idle_countdown_decision.
-                    try:
-                        from iai_mcp.capture import is_drain_in_progress as _drain_q
-                        _drain_active = bool(await asyncio.to_thread(_drain_q))
-                    except Exception:  # noqa: BLE001 -- idle accounting MUST NOT crash the tick
-                        _drain_active = False
-                    _seconds_since_rpc = (
-                        (now_mono - mcp_socket.last_activity_ts)
-                        if mcp_socket is not None
-                        else float("inf")
-                    )
-                    _idle_decision = _idle_countdown_decision(
-                        scanner_active=scanner_active,
-                        drain_in_progress=_drain_active,
-                        seconds_since_rpc=_seconds_since_rpc,
-                        idle_elapsed=idle_elapsed,
-                        sleep_eligible=sleep_eligible,
-                        recent_rpc_window_sec=INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC,
-                        drowsy_after_sec=DROWSY_AFTER_SEC,
-                        sleep_heartbeat_idle_sec=SLEEP_HEARTBEAT_IDLE_SEC,
-                    )
-                    if _idle_decision == IDLE_DECISION_ACTIVE:
-                        _last_active_monotonic[0] = now_mono
-
+                    _ds: dict = {}
                     try:
                         from iai_mcp.daemon_state import load_state as _load_ds
                         _ds = await asyncio.to_thread(_load_ds)
@@ -1977,20 +1446,35 @@ async def main() -> int:
                                     _ds_upd["user_sleep_request"] = req
                                 from iai_mcp.daemon_state import save_state as _save_ds
                                 await asyncio.to_thread(_save_ds, _ds_upd)
+                                # Later consumers in this tick must see the
+                                # honored flags, not the stale pre-save dict.
+                                _ds = _ds_upd
                     except Exception:  # noqa: BLE001 -- FORCE_SLEEP dispatch is best-effort
                         log.debug("lifecycle_tick FORCE_SLEEP dispatch failed", exc_info=True)
 
                     try:
+                        # Processed after the force-sleep block so the wake —
+                        # the user's manual escape hatch — wins a same-tick tie.
+                        _ds = await _consume_force_wake(_ds, _state_machine)
+                    except Exception:  # noqa: BLE001 -- force-wake is best-effort
+                        log.debug("lifecycle_tick force_wake dispatch failed", exc_info=True)
+
+                    try:
+                        from iai_mcp.daemon_state import daemon_state_path as _tick_daemon_state_path
                         from iai_mcp.fsm_reconcile import reconcile_fsm_state
-                        reconcile_fsm_state(auto_correct=True)
+                        from iai_mcp.lifecycle_state import (
+                            lifecycle_state_path as _tick_lifecycle_state_path,
+                        )
+                        reconcile_fsm_state(
+                            canonical_path=_tick_lifecycle_state_path(_store_root),
+                            legacy_path=_tick_daemon_state_path(_store_root),
+                            auto_correct=True,
+                        )
                     except Exception:  # noqa: BLE001 -- reconcile is best-effort
                         pass
 
                     if scanner_active:
-                        # _last_active_monotonic was already refreshed above
-                        # (scanner_active -> IDLE_DECISION_ACTIVE); a fresh
-                        # wrapper heartbeat additionally pulls the FSM back to
-                        # WAKE, which RPC/drain activity alone does not.
+                        _last_active_monotonic[0] = now_mono
                         try:
                             await _state_machine.dispatch(
                                 _LifecycleEvent.HEARTBEAT_REFRESH,
@@ -1998,7 +1482,13 @@ async def main() -> int:
                             )
                         except (S2OscillationConflict, S2OscillationBlocked):
                             pass
-                    elif _idle_decision == IDLE_DECISION_SLEEP:
+                    elif (
+                        idle_elapsed >= SLEEP_HEARTBEAT_IDLE_SEC
+                        and sleep_eligible
+                        # Night-only consolidation: idle alone never puts the
+                        # daemon to sleep outside the (learned) quiet window.
+                        and _in_consolidation_window(None)
+                    ):
                         try:
                             await _state_machine.dispatch(
                                 _LifecycleEvent.IDLE_30MIN,
@@ -2007,7 +1497,7 @@ async def main() -> int:
                             )
                         except (S2OscillationConflict, S2OscillationBlocked):
                             pass
-                    elif _idle_decision == IDLE_DECISION_DROWSY:
+                    elif idle_elapsed >= DROWSY_AFTER_SEC:
                         try:
                             await _state_machine.dispatch(
                                 _LifecycleEvent.IDLE_5MIN,
@@ -2019,67 +1509,68 @@ async def main() -> int:
                     current = _state_machine.current_state
                     if _should_drain_on_drowsy_edge(_prev_lifecycle_state[0], current):
                         try:
-                            from iai_mcp.capture import drain_deferred_captures
+                            from iai_mcp.capture import drain_capture_backlog
 
                             await asyncio.to_thread(
                                 _run_drowsy_drain,
                                 store,
-                                drain_fn=drain_deferred_captures,
+                                drain_fn=drain_capture_backlog,
                                 write_event_fn=write_event,
                             )
                         except Exception:  # noqa: BLE001 -- drowsy drain non-fatal
                             log.debug("lifecycle_tick drowsy drain failed", exc_info=True)
 
                         try:
-                            from iai_mcp.embed import embedder_for_store
-                            from iai_mcp import runtime_graph_cache as _rgc
-
-                            def _run_wake_sequence():
-                                try:
-                                    _emb = embedder_for_store(store)
-                                except Exception:
-                                    _emb = None
-                                result = store.db.pending_embeddings_wake_sequence(embedder=_emb)
-                                if result.get("action") != "skip":
-                                    try:
-                                        _rgc.invalidate(store)
-                                    except Exception:
-                                        pass
-                                return result
-
-                            _wake_seq_result = await asyncio.to_thread(_run_wake_sequence)
-                            if (
-                                isinstance(_wake_seq_result, dict)
-                                and _wake_seq_result.get("action") != "skip"
-                            ):
-                                try:
-                                    _kick_drowsy_rgc_rebuild(store)
-                                except Exception:  # noqa: BLE001 -- best-effort
-                                    log.debug("drowsy-edge kick failed", exc_info=True)
-                                # Kick a light, best-effort SessionStart cache refresh:
-                                # new records just got embedded (reembed_count > 0 or
-                                # ingest_count > 0), so what the hook would serve from
-                                # disk is now stale. _maybe_refresh_session_start_cache
-                                # gates on min-interval + single-flight + runtime-graph
-                                # warm — if any of those say no, it emits a _skipped
-                                # event and returns.
-                                if (
-                                    int(_wake_seq_result.get("reembed_count", 0) or 0) > 0
-                                    or int(_wake_seq_result.get("ingest_count", 0) or 0) > 0
-                                ):
-                                    try:
-                                        await asyncio.to_thread(
-                                            _maybe_refresh_session_start_cache,
-                                            store,
-                                            trigger="wake_sequence",
-                                        )
-                                    except Exception:  # noqa: BLE001 -- best-effort
-                                        log.debug(
-                                            "wake_sequence cache refresh failed",
-                                            exc_info=True,
-                                        )
+                            _last_pending_embed_mono[0] = now_mono
+                            await _pending_embed_pass()
                         except Exception:  # noqa: BLE001 -- wake sequence non-fatal
                             log.debug("lifecycle_tick pending_embeddings_wake_sequence failed", exc_info=True)
+
+                    # A pending-embed backlog must never wait on the drowsy
+                    # edge alone: a daemon that boots straight into SLEEP (or
+                    # keeps getting restarted) never crosses that edge, and
+                    # captured rows would stay invisible to semantic recall
+                    # forever. The floor pass is windowed + RSS-bounded, and
+                    # runs as a task guarded by an in-flight latch — a pass
+                    # crawling on store-lock contention must not stall the
+                    # lifecycle tick or stack a second pass on top of itself.
+                    # FSM guard: no floor pass while the FSM is in SLEEP — the
+                    # sleep pipeline owns the store then (its own steps run the
+                    # wake sequence), and the rebuild serialization must not be
+                    # contended by a background pass racing consolidation. The
+                    # night-only window means daytime backlogs still drain on
+                    # the 300s cadence.
+                    if (
+                        (now_mono - _last_pending_embed_mono[0]) >= PENDING_EMBED_FLOOR_SEC
+                        and not _pending_embed_inflight[0]
+                        and current is not _LifecycleState.SLEEP
+                    ):
+                        _last_pending_embed_mono[0] = now_mono
+                        _pending_embed_inflight[0] = True
+
+                        def _floor_pending_embed() -> None:
+                            # Dedicated thread, NOT asyncio.to_thread: the
+                            # shared default executor saturates under the
+                            # daemon's recurring background work and a queued
+                            # pass can wait there forever without running.
+                            try:
+                                if store.db.has_pending_rows():
+                                    _pending_embed_pass_sync()
+                            except Exception as _floor_exc:  # noqa: BLE001 -- floor pass non-fatal
+                                log.warning(
+                                    "pending-embed floor pass failed: %s",
+                                    _floor_exc,
+                                    exc_info=True,
+                                )
+                            finally:
+                                _pending_embed_inflight[0] = False
+
+                        import threading as _pe_threading
+                        _pe_threading.Thread(
+                            target=_floor_pending_embed,
+                            name="pending-embed-floor",
+                            daemon=True,
+                        ).start()
                     if (
                         not _lock_downgraded_to_shared[0]
                         and current in (
@@ -2094,40 +1585,68 @@ async def main() -> int:
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_downgrade failed", exc_info=True)
 
-                    # Periodic WAKE/DROWSY safety net: if the daemon never reaches
-                    # SLEEP (long-lived Claude sessions keep activity recent), the
-                    # sleep-pipeline cache writer never fires and the precache file
-                    # drifts. _maybe_refresh_session_start_cache is a cheap probe
-                    # (SQL COUNT + sidecar read), gated by:
-                    #   * min-interval (default 60s, IAI_MCP_SESSION_CACHE_REFRESH_MIN_SEC)
-                    #   * single-flight lock
-                    #   * watermark (records_count + max_vec_label + max_*_at)
-                    #   * runtime-graph-cache warm probe (skip if cold)
-                    # so a quiet tick costs one SELECT + one stat() and emits at
-                    # most one _skipped event.
-                    if current in (_LifecycleState.WAKE, _LifecycleState.DROWSY):
-                        try:
-                            await asyncio.to_thread(
-                                _maybe_refresh_session_start_cache,
-                                store,
-                                trigger="periodic_wake",
-                            )
-                        except Exception:  # noqa: BLE001 -- best-effort
-                            log.debug(
-                                "lifecycle_tick periodic session_start_cache refresh failed",
-                                exc_info=True,
-                            )
-
                     _prev_lifecycle_state[0] = current
-                    if current is _LifecycleState.SLEEP:
+
+                    # Publish the ANN/pool health counters into the live
+                    # status surface every tick — a write-only counter
+                    # observes nothing. Read via `iai-mcp daemon status`.
+                    try:
+                        _hp_pool = getattr(store.db, "_ro_pool", None)
+                        state["ann_pool_health"] = {
+                            "reuse_collisions": int(
+                                getattr(store.db, "_reuse_collision_count", 0)
+                            ),
+                            "fence_reopens": int(
+                                getattr(_hp_pool, "fence_reopen_count", 0) or 0
+                            ),
+                            "writer_fallbacks": int(
+                                getattr(_hp_pool, "writer_fallback_count", 0) or 0
+                            ),
+                        }
+                    except Exception:  # noqa: BLE001 -- health publish is best-effort
+                        pass
+
+                    if current is _LifecycleState.SLEEP and not _sleep_pipeline_gate(_ds):
+                        log.debug(
+                            "lifecycle_tick: SLEEP pipeline skipped (scheduler_paused)",
+                        )
+                    elif current is _LifecycleState.SLEEP and not _in_consolidation_window(_ds):
+                        # Night-only consolidation: outside the (learned) quiet
+                        # window no cycle starts, whatever the idle state, and a
+                        # daemon that finds itself in SLEEP out of hours (boot
+                        # restored the pre-restart state, or the window closed
+                        # mid-sleep) transitions back to WAKE so the awake path
+                        # keeps the machine to itself. Explicit force bypasses
+                        # via the gate's own force check.
+                        log.debug(
+                            "lifecycle_tick: SLEEP outside consolidation window — waking",
+                        )
+                        try:
+                            await _state_machine.dispatch(
+                                _LifecycleEvent.WAKE_SIGNAL,
+                                reason="wake_outside_consolidation_window",
+                            )
+                        except (S2OscillationConflict, S2OscillationBlocked):
+                            pass
+                        except Exception:  # noqa: BLE001 -- wake-out must not crash the tick
+                            log.debug("out-of-window wake dispatch failed", exc_info=True)
+                    elif current is _LifecycleState.SLEEP and _sleep_backoff_active(
+                        _ds, _sleep_fail_backoff_until[0], time.monotonic()
+                    ):
+                        log.debug(
+                            "lifecycle_tick: SLEEP pipeline in failure backoff "
+                            "(%.0fs left)",
+                            _sleep_fail_backoff_until[0] - time.monotonic(),
+                        )
+                    elif current is _LifecycleState.SLEEP:
+                        # Consolidation is NEVER on the awake critical path:
+                        # every step yields the moment a client is active, even
+                        # for a force-rem. 'Force' means run NOW (skip the
+                        # schedule wait), not 'block the user' — it completes at
+                        # the next lull.
                         def _interrupt_check() -> bool:
-                            # Defer the sleep pipeline only on RECENT ACTIVITY, not on
-                            # open connections: long-lived Claude sessions keep sockets
-                            # open permanently, so `active_connections > 0` was True at
-                            # nearly every tick -> the cycle never completed -> no
-                            # HIBERNATION -> the wake-hook re-ran every 30s (the 221% CPU
-                            # churn). last_activity_ts is refreshed on each request, so a
-                            # busy burst still defers; a 30s lull lets the cycle finish.
+                            if mcp_socket.active_connections > 0:
+                                return True
                             elapsed = (
                                 time.monotonic() - mcp_socket.last_activity_ts
                             )
@@ -2139,23 +1658,31 @@ async def main() -> int:
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_escalate failed", exc_info=True)
 
-                        result = await asyncio.to_thread(
-                            _sleep_pipeline.run, _interrupt_check,
-                        )
+                        try:
+                            result = await asyncio.to_thread(
+                                _sleep_pipeline.run, _interrupt_check,
+                            )
+                        except Exception:  # noqa: BLE001 -- a raising pipeline must not hold EX
+                            # run() is designed not to raise; if it ever does,
+                            # falling into the outer tick handler would skip
+                            # the downgrade AND the backoff — the daemon would
+                            # hold EXCLUSIVE while FSM=SLEEP and retry every
+                            # tick, locking out every SHARED client. Synthesize
+                            # a failed result so the normal downgrade + backoff
+                            # path below runs.
+                            log.warning(
+                                "sleep pipeline raised — treating as failed step",
+                                exc_info=True,
+                            )
+                            result = {
+                                "failed_step": "pipeline_exception",
+                                "interrupted": False,
+                                "completed_steps": [],
+                            }
 
                         # --- WAKE hook (UNDER LOCK_EX, BEFORE downgrade) ---
-                        # The SLEEP path explicitly passes force_rebuild=True: we
-                        # hold the EXCLUSIVE lock for the whole consolidation
-                        # window, so a runtime-graph rebuild here is the cheapest
-                        # place to absorb the cost — the WAKE refresh paths skip
-                        # the rebuild with reason=runtime_graph_cache_cold instead.
                         try:
-                            await asyncio.to_thread(
-                                _write_session_start_cache,
-                                store,
-                                trigger="sleep_pipeline",
-                                force_rebuild=True,
-                            )
+                            await asyncio.to_thread(_write_session_start_cache, store)
                         except Exception:  # noqa: BLE001 -- precache MUST NOT crash
                             log.debug("lifecycle_tick _write_session_start_cache failed", exc_info=True)
                         try:
@@ -2198,6 +1725,19 @@ async def main() -> int:
                             log.debug("daemon_lock_downgrade: EX→SH after sleep pipeline")
                         except Exception:  # noqa: BLE001
                             log.debug("daemon_lock_downgrade_post_sleep failed", exc_info=True)
+                        if result.get("failed_step") is not None:
+                            _sleep_fail_backoff_until[0] = (
+                                time.monotonic() + SLEEP_FAIL_BACKOFF_SEC
+                            )
+                            log.warning(
+                                "sleep pipeline failed at %s — next attempt "
+                                "backed off %.0fs so awake clients are not "
+                                "starved by the retry loop",
+                                result.get("failed_step"),
+                                SLEEP_FAIL_BACKOFF_SEC,
+                            )
+                        else:
+                            _sleep_fail_backoff_until[0] = 0.0
                         if (
                             not result.get("interrupted", False)
                             and result.get("failed_step") is None
@@ -2269,6 +1809,10 @@ async def main() -> int:
                 t.cancel()
             await asyncio.gather(*_cancel_targets, return_exceptions=True)
             try:
+                await store.disable_async_writes()
+            except Exception as exc:  # noqa: BLE001 -- shutdown MUST complete
+                log.debug("disable_async_writes on shutdown failed: %s", exc, exc_info=True)
+            try:
                 from iai_mcp.events import flush_event_buffer
 
                 events_count = flush_event_buffer(store)
@@ -2339,6 +1883,7 @@ from iai_mcp.daemon._watchdog import (  # noqa: E402 -- re-exported after main()
     BOOT_LOCK_RETRY_ATTEMPTS,
     BOOT_LOCK_RETRY_BACKOFF_SEC,
     _last_overload_event_at,
+    _last_rss_breadcrumb_at,
     _last_sleep_stale_started_at,
     _daemon_started_monotonic,
     _hippea_cascade_loop,
@@ -2376,11 +1921,6 @@ __all__ = [
     "_raise_fd_limit",
     "_run_drowsy_drain",
     "_should_drain_on_drowsy_edge",
-    "_idle_countdown_decision",
-    "IDLE_DECISION_ACTIVE",
-    "IDLE_DECISION_SLEEP",
-    "IDLE_DECISION_DROWSY",
-    "IDLE_DECISION_HOLD",
     "_kick_drowsy_rgc_rebuild",
     "_wake_hook_rebuild_if_cold",
     "_store_is_empty",
@@ -2392,13 +1932,6 @@ __all__ = [
     "_is_inside_window",
     "_update_pending_digest",
     "_write_session_start_cache",
-    "_maybe_refresh_session_start_cache",
-    "_should_refresh_session_start_cache",
-    "_session_start_cache_watermark",
-    "_load_session_start_cache_meta",
-    "_save_session_start_cache_meta",
-    "_default_session_start_cache_meta_path",
-    "_runtime_graph_cache_is_warm",
     "_tick_body",
     "_scheduler_tick",
     "_s4_offline_loop",
@@ -2413,10 +1946,7 @@ __all__ = [
     "S4_OFFLINE_INTERVAL_SEC",
     "S4_FIRST_ITER_GRACE_SEC",
     "SESSION_START_CACHE_PATH",
-    "SESSION_START_CACHE_META_PATH",
     "SESSION_START_CACHE_MAX_CHARS",
-    "SESSION_START_CACHE_REFRESH_MIN_SEC_DEFAULT",
-    "SESSION_START_CACHE_LOCK_TIMEOUT_SEC",
     "INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC",
     "_DAEMON_NOFILE_FLOOR_DEFAULT",
     # daemon_config

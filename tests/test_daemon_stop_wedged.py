@@ -6,7 +6,6 @@ import subprocess
 import sys
 import time
 
-import pytest
 
 from iai_mcp.lifecycle_lock import _is_pid_alive
 

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from uuid import UUID
 
-from iai_mcp.core import DEFERRED_KNOBS, L0_ID, LIVE_KNOBS, _seed_l0_identity, dispatch
+from iai_mcp.core import L0_ID, LIVE_KNOBS, _seed_l0_identity, dispatch
 from iai_mcp.store import MemoryStore
 from tests.test_store import _make
 

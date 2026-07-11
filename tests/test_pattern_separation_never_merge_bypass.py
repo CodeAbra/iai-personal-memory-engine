@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -11,7 +10,6 @@ import pytest
 from iai_mcp.events import query_events
 from iai_mcp.store import (
     RECORDS_TABLE,
-    GateAction,
     MemoryStore,
 )
 from iai_mcp.types import MemoryRecord

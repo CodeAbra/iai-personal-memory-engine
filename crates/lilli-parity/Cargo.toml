@@ -1,0 +1,20 @@
+[package]
+name = "lilli-parity"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.87"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+criterion = "0.8.2"
+tempfile = "3"
+
+[[bench]]
+name = "parity_gate"
+harness = false

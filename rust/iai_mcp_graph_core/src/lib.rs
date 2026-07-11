@@ -20,9 +20,9 @@ use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 
 /// Wave-1 wiring probe. Returning the literal `42` lets a downstream Python
 /// smoke test prove that:
-/// 1. the wrapper crate exposes the `graph` sub-module successfully, and
-/// 2. the cross-crate `register(py, m)` indirection actually mounts a
-/// live callable on the resulting PyModule.
+///   1. the wrapper crate exposes the `graph` sub-module successfully, and
+///   2. the cross-crate `register(py, m)` indirection actually mounts a
+///      live callable on the resulting PyModule.
 ///
 /// Algorithm work begins in subsequent plans; this stub is the contract
 /// the next wave will replace. The `module = "iai_mcp_native.graph"`

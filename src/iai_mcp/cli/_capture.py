@@ -90,7 +90,7 @@ def read_live_fingerprint(session_id: str) -> int | None:
     try:
         if not p.exists():
             return None
-        raw = p.read_text(encoding="utf-8").strip()
+        raw = p.read_text().strip()
         if not raw:
             return None
         return int(raw)
@@ -102,18 +102,23 @@ def write_live_fingerprint(session_id: str, total_size: int) -> None:
     d = Path.home() / ".iai-mcp" / ".capture-state"
     d.mkdir(parents=True, exist_ok=True)
     tmp = d / f"{session_id}.live-fingerprint.tmp"
-    tmp.write_text(str(total_size), encoding="utf-8")
+    tmp.write_text(str(total_size))
     os.replace(tmp, d / f"{session_id}.live-fingerprint")
 
 
 def get_max_created_at() -> str | None:
     import sqlite3 as _sqlite3
+    from iai_mcp.hippo._raw_open import open_store_conn
 
     db_path = Path.home() / ".iai-mcp" / "hippo" / "brain.sqlite3"
     if not db_path.exists():
         return None
     try:
-        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        _eng = open_store_conn(db_path, read_only=True)
+        if _eng is not None:
+            conn = _eng
+        else:
+            conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
             row = conn.execute(
                 "SELECT MAX(created_at) FROM records WHERE tombstoned_at IS NULL"
@@ -142,7 +147,7 @@ def read_watermark(session_id: str) -> str | None:
     try:
         if not p.exists():
             return None
-        return p.read_text(encoding="utf-8").strip() or None
+        return p.read_text().strip() or None
     except OSError:
         return None
 
@@ -151,7 +156,7 @@ def write_watermark(session_id: str, ts: str) -> None:
     d = Path.home() / ".iai-mcp" / ".capture-state"
     d.mkdir(parents=True, exist_ok=True)
     tmp = d / f"{session_id}.watermark.tmp"
-    tmp.write_text(_utc_iso(ts), encoding="utf-8")
+    tmp.write_text(_utc_iso(ts))
     os.replace(tmp, d / f"{session_id}.watermark")
 
 
@@ -276,11 +281,11 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         prev_offset = 0
         if offset_path.exists():
             try:
-                prev_offset = int(offset_path.read_text(encoding="utf-8").strip() or "0")
+                prev_offset = int(offset_path.read_text().strip() or "0")
             except ValueError:
                 prev_offset = 0
 
-        with transcript.open(encoding="utf-8") as fh:
+        with transcript.open() as fh:
             all_lines = fh.readlines()
         total = len(all_lines)
 
@@ -310,7 +315,7 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
 
         new_offset = prev_offset + consumed
         tmp_path = offset_path.parent / (offset_path.name + ".tmp")
-        tmp_path.write_text(str(new_offset), encoding="utf-8")
+        tmp_path.write_text(str(new_offset))
         os.replace(tmp_path, offset_path)
         return 0
     except Exception as e:
@@ -323,36 +328,16 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
 
 
 def _capture_hook_paths() -> tuple:
-    ext = _hook_ext()
-    src = _res.files("iai_mcp") / "_deploy" / "hooks" / f"iai-mcp-session-capture{ext}"
-    dst = Path.home() / ".claude" / "hooks" / f"iai-mcp-session-capture{ext}"
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-session-capture.sh"
+    dst = Path.home() / ".claude" / "hooks" / "iai-mcp-session-capture.sh"
     settings = Path.home() / ".claude" / "settings.json"
     return src, dst, settings
 
 
 def _turn_hook_paths() -> tuple:
-    ext = _hook_ext()
-    src = _res.files("iai_mcp") / "_deploy" / "hooks" / f"iai-mcp-turn-capture{ext}"
-    dst = Path.home() / ".claude" / "hooks" / f"iai-mcp-turn-capture{ext}"
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-turn-capture.sh"
+    dst = Path.home() / ".claude" / "hooks" / "iai-mcp-turn-capture.sh"
     return src, dst
-
-
-def _wrapper_deps_resolvable(index_js: Path) -> bool:
-    """Whether ``index_js``'s npm dependencies actually resolve from its location.
-
-    Node resolves bare imports like ``@modelcontextprotocol/sdk`` by walking
-    parent directories for a ``node_modules`` that contains the package. The
-    wrapper bundled inside the wheel (``iai_mcp/_wrapper/index.js``) ships the JS
-    but no ``node_modules``, so spawning it fails with
-    ``ERR_MODULE_NOT_FOUND: @modelcontextprotocol/sdk``. This lets resolution
-    prefer a wrapper that is genuinely runnable (e.g. ``mcp-wrapper/dist``
-    sitting next to its ``node_modules``) over one that merely exists.
-    """
-    sentinel = Path("node_modules") / "@modelcontextprotocol" / "sdk"
-    for parent in index_js.parents:
-        if (parent / sentinel).exists():
-            return True
-    return False
 
 
 def _resolve_wrapper_path() -> Path:
@@ -367,15 +352,10 @@ def _resolve_wrapper_path() -> Path:
             f"IAI_MCP_WRAPPER_PATH={env_val!r} is set but the file does not exist."
         )
 
-    # Collect candidate wrappers in preference order, then return the first whose
-    # npm deps actually resolve. Choosing a wrapper purely because it exists is
-    # the bug behind #26: the in-wheel _wrapper/ has no node_modules, so wiring
-    # it into ~/.claude.json yields an MCP server that fails at spawn.
-    candidates: list[Path] = []
     try:
         pkg_p = Path(str(_res.files("iai_mcp") / "_wrapper" / "index.js"))
         if pkg_p.exists():
-            candidates.append(pkg_p)
+            return pkg_p
     except (TypeError, FileNotFoundError):
         pass
 
@@ -383,23 +363,7 @@ def _resolve_wrapper_path() -> Path:
     repo_root = src_file.parent.parent.parent
     editable_path = repo_root / "mcp-wrapper" / "dist" / "index.js"
     if editable_path.exists():
-        candidates.append(editable_path)
-
-    for cand in candidates:
-        if _wrapper_deps_resolvable(cand):
-            return cand
-
-    # A wrapper exists but its deps are not installed — surface a clear error
-    # rather than silently registering a broken MCP entry. Callers route
-    # FileNotFoundError through the placeholder/warning path.
-    if candidates:
-        raise FileNotFoundError(
-            f"MCP wrapper found at {candidates[0]} but its npm dependencies are "
-            "not installed (no node_modules with @modelcontextprotocol/sdk "
-            "alongside it), so it would fail at spawn with ERR_MODULE_NOT_FOUND. "
-            "Build a runnable wrapper: cd mcp-wrapper && npm install && npm run "
-            "build, or point IAI_MCP_WRAPPER_PATH at a runnable index.js."
-        )
+        return editable_path
 
     raise FileNotFoundError(
         "MCP wrapper (index.js) not found. Checked locations:\n"
@@ -428,38 +392,6 @@ def _build_iai_mcp_server_entry() -> dict:
     }
 
 
-def _iai_entry_or_placeholder(config_label: str, *, include_type: bool) -> dict:
-    """Build the MCP server entry, or a placeholder (with a stderr warning)
-    when the wrapper isn't built yet, so ``capture-hooks install`` doesn't
-    crash mid-run after it has already written the hooks. ``include_type``
-    controls the stdio ``type`` field that Claude Code expects but Claude
-    Desktop omits."""
-    from iai_mcp import cli as _cli
-
-    try:
-        entry = _build_iai_mcp_server_entry()
-    except FileNotFoundError as exc:
-        print(
-            f"WARN: MCP wrapper not found — {config_label} entry written with "
-            f"placeholder args. Build it first: cd mcp-wrapper && npm run build. "
-            f"({exc})",
-            file=_cli.sys.stderr,
-        )
-        entry = {
-            "command": "node",
-            "args": ["<run: cd mcp-wrapper && npm run build>"],
-            "env": {
-                "IAI_MCP_PYTHON": _cli.sys.executable,
-                "IAI_MCP_STORE": str(Path.home() / ".iai-mcp"),
-                "TRANSFORMERS_VERBOSITY": "error",
-                "TOKENIZERS_PARALLELISM": "false",
-            },
-        }
-    if include_type:
-        entry.setdefault("type", "stdio")
-    return entry
-
-
 def _patch_claude_desktop_config(action: str) -> str:
     from iai_mcp import cli as _cli
     import json as _json
@@ -472,13 +404,12 @@ def _patch_claude_desktop_config(action: str) -> str:
         if action == "uninstall":
             return f"Claude Desktop: {cfg_path} absent — skipped"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        entry = _iai_entry_or_placeholder("Claude Desktop", include_type=False)
-        data = {"mcpServers": {"iai-mcp": entry}}
-        cfg_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        data = {"mcpServers": {"iai-mcp": _build_iai_mcp_server_entry()}}
+        cfg_path.write_text(_json.dumps(data, indent=2))
         return f"Claude Desktop: created {cfg_path} with iai-mcp registered"
 
     try:
-        data = _json.loads(cfg_path.read_text(encoding="utf-8"))
+        data = _json.loads(cfg_path.read_text())
     except (OSError, ValueError) as e:
         return f"Claude Desktop: {cfg_path} unreadable ({type(e).__name__}) — skipped"
 
@@ -487,19 +418,20 @@ def _patch_claude_desktop_config(action: str) -> str:
     if action == "uninstall":
         if "iai-mcp" in servers:
             servers.pop("iai-mcp", None)
-            cfg_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            cfg_path.write_text(_json.dumps(data, indent=2))
             return f"Claude Desktop: removed iai-mcp from {cfg_path}"
         return f"Claude Desktop: iai-mcp not in config — no change"
 
-    new_entry = _iai_entry_or_placeholder("Claude Desktop", include_type=False)
+    new_entry = _build_iai_mcp_server_entry()
     if servers.get("iai-mcp") == new_entry:
         return f"Claude Desktop: {cfg_path} already has iai-mcp — no change"
     servers["iai-mcp"] = new_entry
-    cfg_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+    cfg_path.write_text(_json.dumps(data, indent=2))
     return f"Claude Desktop: patched {cfg_path} (iai-mcp registered)"
 
 
 def _patch_claude_code_config(action: str) -> str:
+    from iai_mcp import cli as _cli
     import json as _json
 
     cfg_path = Path.home() / ".claude.json"
@@ -508,25 +440,46 @@ def _patch_claude_code_config(action: str) -> str:
         if not cfg_path.exists():
             return "Claude Code: ~/.claude.json absent — skipped"
         try:
-            data = _json.loads(cfg_path.read_text(encoding="utf-8"))
+            data = _json.loads(cfg_path.read_text())
         except (OSError, ValueError) as e:
             return f"Claude Code: ~/.claude.json unreadable ({type(e).__name__}) — skipped"
         servers = data.get("mcpServers", {})
         if "iai-mcp" in servers:
             servers.pop("iai-mcp")
             data["mcpServers"] = servers
-            cfg_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            cfg_path.write_text(_json.dumps(data, indent=2))
             return "Claude Code: removed iai-mcp from ~/.claude.json"
         return "Claude Code: iai-mcp not in ~/.claude.json — no change"
 
-    entry = _iai_entry_or_placeholder("~/.claude.json", include_type=True)
+    try:
+        entry = _build_iai_mcp_server_entry()
+    except FileNotFoundError as exc:
+        entry = {
+            "type": "stdio",
+            "command": "node",
+            "args": ["<run: cd mcp-wrapper && npm run build>"],
+            "env": {
+                "IAI_MCP_PYTHON": _cli.sys.executable,
+                "IAI_MCP_STORE": str(Path.home() / ".iai-mcp"),
+                "TRANSFORMERS_VERBOSITY": "error",
+                "TOKENIZERS_PARALLELISM": "false",
+            },
+        }
+        print(
+            f"WARN: MCP wrapper not found — ~/.claude.json entry written with "
+            f"placeholder args. Build it first: cd mcp-wrapper && npm run build. "
+            f"({exc})",
+            file=_cli.sys.stderr,
+        )
+    else:
+        entry.setdefault("type", "stdio")
 
     if not cfg_path.exists():
-        cfg_path.write_text(_json.dumps({"mcpServers": {"iai-mcp": entry}}, indent=2), encoding="utf-8")
+        cfg_path.write_text(_json.dumps({"mcpServers": {"iai-mcp": entry}}, indent=2))
         return "Claude Code: created ~/.claude.json with iai-mcp registered"
 
     try:
-        data = _json.loads(cfg_path.read_text(encoding="utf-8"))
+        data = _json.loads(cfg_path.read_text())
     except (OSError, ValueError) as e:
         return f"Claude Code: ~/.claude.json unreadable ({type(e).__name__}) — skipped"
 
@@ -534,27 +487,27 @@ def _patch_claude_code_config(action: str) -> str:
     if servers.get("iai-mcp") == entry:
         return "Claude Code: ~/.claude.json already has iai-mcp — no change"
     servers["iai-mcp"] = entry
-    cfg_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+    cfg_path.write_text(_json.dumps(data, indent=2))
     return "Claude Code: patched ~/.claude.json (iai-mcp registered)"
 
 
-import platform as _platform
-
-_CAPTURE_HOOK_MARKER = "iai-mcp-session-capture"
-_TURN_HOOK_MARKER = "iai-mcp-turn-capture"
-_SESSION_RECALL_HOOK_MARKER = "iai-mcp-session-recall"
-
-
-def _hook_ext() -> str:
-    return ".ps1" if _platform.system() == "Windows" else ".sh"
+_CAPTURE_HOOK_MARKER = "iai-mcp-session-capture.sh"
+_TURN_HOOK_MARKER = "iai-mcp-turn-capture.sh"
+_SESSION_RECALL_HOOK_MARKER = "iai-mcp-session-recall.sh"
+_PER_TURN_RECALL_HOOK_MARKER = "iai-mcp-per-turn-recall.sh"
 
 
 def _session_recall_hook_paths() -> tuple:
-    ext = _hook_ext()
-    src = _res.files("iai_mcp") / "_deploy" / "hooks" / f"iai-mcp-session-recall{ext}"
-    dst = Path.home() / ".claude" / "hooks" / f"iai-mcp-session-recall{ext}"
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-session-recall.sh"
+    dst = Path.home() / ".claude" / "hooks" / "iai-mcp-session-recall.sh"
     settings = Path.home() / ".claude" / "settings.json"
     return src, dst, settings
+
+
+def _per_turn_recall_hook_paths() -> tuple:
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-per-turn-recall.sh"
+    dst = Path.home() / ".claude" / "hooks" / "iai-mcp-per-turn-recall.sh"
+    return src, dst
 
 
 def _load_settings(path):
@@ -562,30 +515,9 @@ def _load_settings(path):
     if not path.exists():
         return {}
     try:
-        return _json.loads(path.read_text(encoding="utf-8"))
+        return _json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
-
-
-_VALID_HOOK_COMPONENTS: tuple[str, ...] = ("stop", "turn", "recall")
-
-
-def _parse_hook_components(raw: str | None) -> set[str]:
-    """Parse a ``--components`` value into a validated set of component names.
-
-    Empty / None selects all components (preserves the historical default).
-    Raises ``ValueError`` on an unknown component name.
-    """
-    if not raw or not raw.strip():
-        return set(_VALID_HOOK_COMPONENTS)
-    items = {c.strip().lower() for c in raw.split(",") if c.strip()}
-    unknown = items - set(_VALID_HOOK_COMPONENTS)
-    if unknown:
-        raise ValueError(
-            f"unknown capture component(s): {', '.join(sorted(unknown))}. "
-            f"valid: {', '.join(_VALID_HOOK_COMPONENTS)}"
-        )
-    return items or set(_VALID_HOOK_COMPONENTS)
 
 
 def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
@@ -593,94 +525,106 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     import json as _json
     import stat
 
-    try:
-        components = _parse_hook_components(getattr(args, "components", None))
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=_cli.sys.stderr)
-        return 2
-
     src, dst, settings = _capture_hook_paths()
     turn_src, turn_dst = _turn_hook_paths()
 
-    # Fail loudly only for components the caller actually asked for.
-    if "stop" in components and not src.exists():
+    if not src.exists():
         print(f"ERROR: hook template missing in package data: {src}", file=_cli.sys.stderr)
         return 1
-    if "turn" in components and not turn_src.exists():
+    if not turn_src.exists():
         print(f"ERROR: turn-hook template missing in package data: {turn_src}", file=_cli.sys.stderr)
         return 1
 
-    is_windows = _platform.system() == "Windows"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(src.read_bytes())
+    dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+    print(f"installed: {dst}")
 
-    def _hook_command(path: Path) -> str:
-        return (
-            f"powershell -ExecutionPolicy Bypass -File \"{path}\""
-            if is_windows else f"bash {path}"
-        )
-
-    def _install_template(template: Path, target: Path) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(template.read_bytes())
-        if hasattr(os, "chmod") and not is_windows:
-            target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
-        print(f"installed: {target}")
+    turn_dst.parent.mkdir(parents=True, exist_ok=True)
+    turn_dst.write_bytes(turn_src.read_bytes())
+    turn_dst.chmod(turn_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+    print(f"installed: {turn_dst}")
 
     settings.parent.mkdir(parents=True, exist_ok=True)
     data = _load_settings(settings)
     data.setdefault("hooks", {})
+    stop_list = data["hooks"].setdefault("Stop", [])
+    submit_list = data["hooks"].setdefault("UserPromptSubmit", [])
 
-    if "stop" in components:
-        _install_template(src, dst)
-        stop_list = data["hooks"].setdefault("Stop", [])
-        already_stop = any(
-            any(_CAPTURE_HOOK_MARKER in (h.get("command") or "")
-                for h in (entry.get("hooks") or []))
-            for entry in stop_list
-        )
-        if already_stop:
-            print("settings.json already has Stop hook — no change")
-        else:
-            stop_list.append({"hooks": [{"type": "command", "command": _hook_command(dst), "timeout": 35}]})
-            print(f"patched: {settings} (Stop hook registered)")
+    hook_cmd = f"bash {dst}"
+    turn_cmd = f"bash {turn_dst}"
 
-    if "turn" in components:
-        _install_template(turn_src, turn_dst)
-        submit_list = data["hooks"].setdefault("UserPromptSubmit", [])
-        already_turn = any(
-            any(_TURN_HOOK_MARKER in (h.get("command") or "")
+    already_stop = any(
+        any(_CAPTURE_HOOK_MARKER in (h.get("command") or "")
+            for h in (entry.get("hooks") or []))
+        for entry in stop_list
+    )
+    if already_stop:
+        print(f"settings.json already has Stop hook — no change")
+    else:
+        stop_list.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 35}]})
+        print(f"patched: {settings} (Stop hook registered)")
+
+    already_turn = any(
+        any(_TURN_HOOK_MARKER in (h.get("command") or "")
+            for h in (entry.get("hooks") or []))
+        for entry in submit_list
+    )
+    if already_turn:
+        print(f"settings.json already has UserPromptSubmit hook — no change")
+    else:
+        submit_list.append({"hooks": [{"type": "command", "command": turn_cmd, "timeout": 5}]})
+        print(f"patched: {settings} (UserPromptSubmit hook registered)")
+
+    pt_src, pt_dst = _per_turn_recall_hook_paths()
+    if pt_src.exists():
+        pt_dst.parent.mkdir(parents=True, exist_ok=True)
+        pt_dst.write_bytes(pt_src.read_bytes())
+        pt_dst.chmod(pt_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        print(f"installed: {pt_dst}")
+
+        pt_cmd = f"bash {pt_dst}"
+        already_pt = any(
+            any(_PER_TURN_RECALL_HOOK_MARKER in (h.get("command") or "")
                 for h in (entry.get("hooks") or []))
             for entry in submit_list
         )
-        if already_turn:
-            print("settings.json already has UserPromptSubmit hook — no change")
+        if already_pt:
+            print("settings.json already has per-turn recall hook — no change")
         else:
-            submit_list.append({"hooks": [{"type": "command", "command": _hook_command(turn_dst), "timeout": 5}]})
-            print(f"patched: {settings} (UserPromptSubmit hook registered)")
-
-    if "recall" in components:
-        src_recall, dst_recall, _ = _session_recall_hook_paths()
-        if src_recall.exists():
-            _install_template(src_recall, dst_recall)
-            ss_list = data["hooks"].setdefault("SessionStart", [])
-            already_recall = any(
-                any(_SESSION_RECALL_HOOK_MARKER in (h.get("command") or "")
-                    for h in (entry.get("hooks") or []))
-                for entry in ss_list
+            submit_list.append(
+                {"hooks": [{"type": "command", "command": pt_cmd, "timeout": 5}]}
             )
-            if already_recall:
-                print("settings.json already has SessionStart hook — no change")
-            else:
-                ss_list.append({
-                    "matcher": "startup|resume|clear|compact",
-                    "hooks": [{"type": "command", "command": _hook_command(dst_recall), "timeout": 30}],
-                })
-                print(f"patched: {settings} (SessionStart hook registered)")
-        else:
-            print(f"WARN: recall hook template missing in package data: {src_recall}")
+            print(f"patched: {settings} (per-turn recall hook registered)")
     else:
-        print("skipped: SessionStart recall hook (not in --components)")
+        print(f"WARN: per-turn recall hook template missing in package data: {pt_src}")
 
-    settings.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+    src_recall, dst_recall, _ = _session_recall_hook_paths()
+    if src_recall.exists():
+        dst_recall.parent.mkdir(parents=True, exist_ok=True)
+        dst_recall.write_bytes(src_recall.read_bytes())
+        dst_recall.chmod(dst_recall.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        print(f"installed: {dst_recall}")
+
+        ss_list = data["hooks"].setdefault("SessionStart", [])
+        recall_cmd = f"bash {dst_recall}"
+        already_recall = any(
+            any(_SESSION_RECALL_HOOK_MARKER in (h.get("command") or "")
+                for h in (entry.get("hooks") or []))
+            for entry in ss_list
+        )
+        if already_recall:
+            print("settings.json already has SessionStart hook — no change")
+        else:
+            ss_list.append({
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [{"type": "command", "command": recall_cmd, "timeout": 30}],
+            })
+            print(f"patched: {settings} (SessionStart hook registered)")
+    else:
+        print(f"WARN: recall hook template missing in package data: {src_recall}")
+
+    settings.write_text(_json.dumps(data, indent=2))
 
     code_msg = _patch_claude_code_config("install")
     print(code_msg)
@@ -699,6 +643,7 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
     _, dst, settings = _capture_hook_paths()
     _, turn_dst = _turn_hook_paths()
     _, dst_recall, _ = _session_recall_hook_paths()
+    _, pt_dst = _per_turn_recall_hook_paths()
 
     if dst.exists():
         dst.unlink()
@@ -718,12 +663,19 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
     else:
         print(f"(not present) {dst_recall}")
 
+    if pt_dst.exists():
+        pt_dst.unlink()
+        print(f"removed: {pt_dst}")
+    else:
+        print(f"(not present) {pt_dst}")
+
     if settings.exists():
         data = _load_settings(settings)
         changed = False
         for key, marker in (
             ("Stop", _CAPTURE_HOOK_MARKER),
             ("UserPromptSubmit", _TURN_HOOK_MARKER),
+            ("UserPromptSubmit", _PER_TURN_RECALL_HOOK_MARKER),
         ):
             entries = data.get("hooks", {}).get(key, [])
             kept = [
@@ -739,7 +691,7 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
                 changed = True
                 print(f"patched: {settings} ({key} entry removed)")
         if changed:
-            settings.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            settings.write_text(_json.dumps(data, indent=2))
         else:
             print(f"(no hook entry to remove) {settings}")
 
@@ -755,7 +707,7 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
                 data["hooks"]["SessionStart"] = kept_ss
             else:
                 data["hooks"].pop("SessionStart", None)
-            settings.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            settings.write_text(_json.dumps(data, indent=2))
             print(f"patched: {settings} (SessionStart entry removed)")
         else:
             print(f"(no SessionStart entry to remove) {settings}")
@@ -775,6 +727,7 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     src, dst, settings = _capture_hook_paths()
     turn_src, turn_dst = _turn_hook_paths()
     src_recall, dst_recall, _ = _session_recall_hook_paths()
+    pt_src, pt_dst = _per_turn_recall_hook_paths()
 
     print(f"Stop template:        {src}  {'PRESENT' if src.exists() else 'MISSING'}")
     print(f"Stop installed:       {dst}  {'PRESENT' if dst.exists() else 'MISSING'}")
@@ -782,6 +735,8 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     print(f"Turn installed:       {turn_dst}  {'PRESENT' if turn_dst.exists() else 'MISSING'}")
     print(f"Recall template:      {src_recall}  {'PRESENT' if src_recall.exists() else 'MISSING'}")
     print(f"Recall installed:     {dst_recall}  {'PRESENT' if dst_recall.exists() else 'MISSING'}")
+    print(f"Per-turn template:    {pt_src}  {'PRESENT' if pt_src.exists() else 'MISSING'}")
+    print(f"Per-turn installed:   {pt_dst}  {'PRESENT' if pt_dst.exists() else 'MISSING'}")
 
     data = _load_settings(settings)
     stop_list = data.get("hooks", {}).get("Stop", [])
@@ -802,9 +757,15 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
             for h in (entry.get("hooks") or []))
         for entry in ss_list
     )
+    pt_wired = any(
+        any(_PER_TURN_RECALL_HOOK_MARKER in (h.get("command") or "")
+            for h in (entry.get("hooks") or []))
+        for entry in submit_list
+    )
     print(f"Claude Code settings.json Stop:             {settings}  {'WIRED' if wired else 'NOT WIRED'}")
     print(f"Claude Code settings.json UserPromptSubmit: {settings}  {'WIRED' if turn_wired else 'NOT WIRED'}")
     print(f"Claude Code settings.json SessionStart:     {settings}  {'WIRED' if recall_wired else 'NOT WIRED'}")
+    print(f"Claude Code settings.json per-turn recall:  {settings}  {'WIRED' if pt_wired else 'NOT WIRED'}")
 
     desktop_cfg = _cli._claude_desktop_config_path()
     if desktop_cfg is None:
@@ -815,7 +776,7 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
         desktop_wired = False
     else:
         try:
-            d = _json.loads(desktop_cfg.read_text(encoding="utf-8"))
+            d = _json.loads(desktop_cfg.read_text())
             desktop_wired = "iai-mcp" in d.get("mcpServers", {})
             desktop_line = f"Claude Desktop: {desktop_cfg}  {'WIRED' if desktop_wired else 'NOT WIRED'}"
         except (OSError, ValueError):
@@ -827,11 +788,12 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
         dst.exists() and wired
         and turn_dst.exists() and turn_wired
         and dst_recall.exists() and recall_wired
+        and pt_dst.exists() and pt_wired
     )
     desktop_problem = desktop_cfg is not None and desktop_cfg.exists() and not desktop_wired
 
     if ok and not desktop_problem:
-        print(f"\nstatus: ACTIVE — Stop + UserPromptSubmit + SessionStart hooks wired "
+        print(f"\nstatus: ACTIVE — Stop + UserPromptSubmit + SessionStart + per-turn hooks wired "
               f"(Claude Code{'; Desktop also wired' if desktop_wired else ''})")
         return 0
     msg = []

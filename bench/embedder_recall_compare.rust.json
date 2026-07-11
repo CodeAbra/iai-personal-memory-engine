@@ -1,0 +1,3023 @@
+{
+  "backend": "rust",
+  "model_revision_sha": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+  "dataset_id": "xiaowu0162/longmemeval-cleaned",
+  "dataset_revision_sha": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+  "split": "S",
+  "seed": 42,
+  "n_questions_requested": 500,
+  "n_questions": 500,
+  "granularity": "session",
+  "embedder_model_key": "bge-small-en-v1.5",
+  "embedder_hf_id": "BAAI/bge-small-en-v1.5",
+  "retrieval_prong": "X_retrieve_flat_cosine",
+  "per_question": [
+    {
+      "qid": "e47becba",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "118b2229",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "51a45a95",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "58bf7951",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "1e043500",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "c5e8278d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "6ade9755",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "6f9b354f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "58ef2f1c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "f8c5f88b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "5d3d2817",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "7527f7e2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "c960da58",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "3b6f954b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "726462e0",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "94f70d80",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "66f24dbb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "ad7109d1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "af8d2e46",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "dccbc061",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "c8c3f81d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "8ebdbe50",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "6b168ec8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "75499fd8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "21436231",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "95bcc1c8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "0862e8bf",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "853b0a1d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "a06e4cfe",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "37d43f65",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "b86304ba",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "d52b4f67",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "25e5aa4f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "caf9ead2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "8550ddae",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "60d45044",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "3f1e9474",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "86b68151",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "577d4d32",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "ec81a493",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "15745da0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "e01b8e2f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "bc8a6e93",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "ccb36322",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "001be529",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "b320f3f8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "19b5f2b3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "4fd1909e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "545bd2b5",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "8a137a7f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "76d63226",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "86f00804",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "8e9d538c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "311778f1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "c19f7a0b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "4100d0a0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "29f2956b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "1faac195",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "faba32e5",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "f4f1d8a4",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "c14c00dd",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "36580ce8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "3d86fd0a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "a82c026e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "0862e8bf_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "15745da0_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "bc8a6e93_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "19b5f2b3_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "29f2956b_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "f4f1d8a4_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-user"
+    },
+    {
+      "qid": "0a995998",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "6d550036",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_59c863d7",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "b5ef892d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "e831120c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "3a704032",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_d84a3211",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "aae3761f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_f2262a51",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "dd2973ad",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "c4a1ceb8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_a56e767c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "6cb6f249",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "46a3abf7",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "36b9f61e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "28dc39ac",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_2f8be40d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2e6d26dc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_15e38248",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "88432d0a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "80ec1f4f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "d23cf73b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_7fce9456",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "d682f1a2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "7024f17c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_5501fe77",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_2ba83207",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2318644b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2ce6a0f2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_d12ceb0e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "00ca467f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "b3c15d39",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_31ff4165",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "eeda8a6d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2788b940",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "60bf93ed",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "9d25d4e0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "129d1232",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "60472f9c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_194be4b3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a9f6b44c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "d851d5ba",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "5a7937c8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_ab202e7f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_e05b82a6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_731e37d7",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "edced276",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "10d9b85a",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "e3038f8c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2b8f3739",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "1a8a66a6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "c2ac3c61",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "bf659f65",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_372c3eed",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_2f91af09",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "81507db6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "88432d0a_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "80ec1f4f_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "eeda8a6d_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "60bf93ed_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "edced276_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_372c3eed_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "8a2466db",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "06878be2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "75832dbd",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "0edc2aef",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "35a27287",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "32260d93",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "195a1a1b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "afdc33df",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "caf03d32",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "54026fce",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "06f04340",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "6b7dfb22",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "1a1907b4",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "09d032c9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "38146c39",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "d24813b1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "57f827a0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "95228167",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "505af2f5",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "75f70248",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "d6233ab6",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "1da05512",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "fca70973",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "b6025781",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "a89d7624",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "b0479f84",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "1d4e3b97",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "07b6f563",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "1c0ddc50",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "0a34ad58",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-preference"
+    },
+    {
+      "qid": "d3ab962e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2311e44b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "cc06de0d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a11281a2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "4f54b7c9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "85fa3a3f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "9aaed6a3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "1f2b8d4f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "e6041065",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "51c32626",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "d905b33f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "7405e8b1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "f35224e0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "6456829e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a4996e51",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "3c1045c8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "60036106",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "681a1674",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "e25c3b8d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "4adc0475",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "4bc144e2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "ef66a6e5",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "5025383b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a1cc6108",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "9ee3ecd6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "3fdac837",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "91b15a6e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "27016adc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "720133ac",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "77eafa52",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "8979f9ec",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "0100672e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a96c20ee",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "92a0aa75",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "3fe836c9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "1c549ce4",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "6c49646a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "1192316e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "0ea62687",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "67e0d0f2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "bb7c3b45",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "ba358f49",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "61f8c8f8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "60159905",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "ef9cf60a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "73d42213",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "bc149d6b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "099778bb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "09ba9854",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "d6062bb9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "157a136e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "c18a7dc8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a3332713",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "55241a1f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a08a253f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "f0e564bc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "078150f1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "8cf4d046",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a346bb18",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "37f165cf",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "8e91e7d9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "87f22b4a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "e56a43b9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "efc3f7c2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "21d02d0d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "2311e44b_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "6456829e_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "e5ba910e_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "a96c20ee_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "ba358f49_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "09ba9854_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "multi-session"
+    },
+    {
+      "qid": "gpt4_59149c77",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_f49edff3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "71017276",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "b46e15ed",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_fa19884c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "0bc8ad92",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "af082822",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_4929293a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_b5700ca9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "9a707b81",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_1d4ab0c9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_e072b769",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "0db4c65d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_1d80365e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7f6b06db",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_6dc9b45b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_8279ba02",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_18c2b244",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_a1b77f9c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_1916e0ea",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7a0daae1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_468eb063",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7abb270c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_1e4a8aeb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_4fc4f797",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "4dfccbf7",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_61e13b3c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_45189cb4",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "2ebe6c90",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_e061b84f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "370a8ff4",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_d6585ce8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_4ef30696",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_ec93e27f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "6e984301",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "8077ef71",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_f420262c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_8e165409",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_74aed68e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "bcbe585f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_21adecb5",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "5e1b23de",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_98f46fc6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_af6db32f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "eac54adc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7ddcf75f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_a2d1d1f6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_85da3956",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_b0863698",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_68e94287",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_e414231e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7ca326fa",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7bc6cf22",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "2ebe6c92",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_e061b84g",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "71017277",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "b46e15ee",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_d6585ce9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_1e4a8aec",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_f420262d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_59149c78",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_e414231f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_4929293b",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_468eb064",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_fa19884d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "9a707b82",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "eac54add",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "4dfccbf8",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "0bc8ad93",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "6e984302",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_8279ba03",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_b5700ca0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_68e94288",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2655b836",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2487a7cb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_76048e76",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2312f94c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "0bb5a684",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "08f4fc43",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "2c63a862",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_385a5000",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "2a1811e2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "bbf86515",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_5dcc0aab",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_0b2f1d21",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "f0853d11",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_6ed717ea",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_70e84552",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "a3838d2b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_93159ced",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2d58bcd6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_65aabe59",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "982b5123",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "b9cfe692",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_4edbafa2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "c8090214",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_483dd43c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "e4e14d04",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "c9f37c46",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2c50253f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "dcfa8644",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_b4a80587",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_9a159967",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "cc6d1ec1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_8c8961ae",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_d9af6064",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_7de946e7",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "d01c6aa8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "993da5e2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "a3045048",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_d31cdae3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_cd90e484",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_88806d6e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_4cd9eba1",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_93f6379c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "b29f3365",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2f56ae70",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "6613b389",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_78cf46a3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_0a05b494",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_1a1dc16d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_2f584639",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_213fd887",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_5438fa52",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_c27434e8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_fe651585",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "8c18457d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_70e84552_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_93159ced_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "982b5123_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "c8090214_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_c27434e8_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "gpt4_fe651585_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "qid": "6a1eabeb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "6aeb4375",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "830ce83f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "852ce960",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "945e3d21",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "d7c942c3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "71315a70",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "89941a93",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "ce6d2d27",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "9ea5eabc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "07741c44",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "a1eacc2a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "184da446",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "031748ae",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "4d6b87c8",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "0f05491a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "08e075c7",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "f9e8c073",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "41698283",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "2698e78f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "b6019101",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "45dc21b6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "5a4f22c0",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "6071bd76",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "e493bb7c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "618f13b2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "72e3ee87",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "c4ea545c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "01493427",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "6a27ffc2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "2133c1b5",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "18bc8abd",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "db467c8c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "7a87bd0c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "e61a7584",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "1cea1afa",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "ed4ddc30",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "8fb83627",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "b01defab",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "22d2cb42",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "0e4e4c46",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "4b24c848",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "7e974930",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "603deb26",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "59524333",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "5831f84d",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "eace081b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "affe2881",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "50635ada",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "e66b632c",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "0ddfec37",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "f685340e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "cc5ded98",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "dfde3500",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "69fee5aa",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "7401057b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "cf22b7bf",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "a2f3aa27",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "c7dc5443",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "06db6396",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "3ba21379",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "9bbe84a2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "10e09553",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "dad224aa",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "ba61f0b9",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "42ec0761",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "5c40ec5b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "c6853660",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "26bdc477",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "0977f2af",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "6aeb4375_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "031748ae_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "2698e78f_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "2133c1b5_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "0ddfec37_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "f685340e_abs",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "89941a94",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "07741c45",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "knowledge-update"
+    },
+    {
+      "qid": "7161e7e2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "c4f10528",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "89527b6b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "e9327a54",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "4c36ccef",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "6ae235be",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "7e00a6cb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "1903aded",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "ceb54acb",
+      "recall_at_5": 0,
+      "recall_at_10": 0,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "f523d9fe",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "0e5e2d1a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "fea54f57",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "cc539528",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "dc439ea3",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "18dcd5a5",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "488d3006",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "58470ed2",
+      "recall_at_5": 0,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "8cf51dda",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "1d4da289",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "8464fc84",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "8aef76bc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "71a3fd6b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "2bf43736",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "70b3e69b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "8752c811",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "3249768e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "1b9b7252",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "1568498a",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "6222b6eb",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "e8a79c70",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "d596882b",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "e3fc4d6e",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "51b23612",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "3e321797",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "e982271f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "352ab8bd",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "fca762bc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "7a8d0b71",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "a40e080f",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "8b9d4367",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "5809eb10",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "41275add",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "4388e9dd",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "4baee567",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "561fabcd",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "b759caee",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "ac031881",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "28bcfaac",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "16c90bf4",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "c8f1aeed",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "eaca4986",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "c7cf7dfd",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "e48988bc",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "1de5cff2",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "65240037",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    },
+    {
+      "qid": "778164c6",
+      "recall_at_5": 1,
+      "recall_at_10": 1,
+      "question_type": "single-session-assistant"
+    }
+  ],
+  "aggregate": {
+    "recall_at_5": 0.962,
+    "recall_at_10": 0.978
+  },
+  "n_errors": 0,
+  "wall_seconds": 4452.03,
+  "generated_at_utc": "2026-05-27T19:32:16.188484+00:00"
+}

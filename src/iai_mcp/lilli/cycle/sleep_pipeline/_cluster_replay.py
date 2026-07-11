@@ -26,32 +26,34 @@ def step_cluster_replay(
     lookback_windows = 5
 
     from iai_mcp.events import write_event
-    from iai_mcp.store import RECORDS_TABLE
 
     now = self._now()
     lookback_cutoff = now - timedelta(seconds=window_sec * lookback_windows)
-    tbl = self._store.db.open_table(RECORDS_TABLE)
 
+    # Stream only (id, last_reviewed) within the lookback window instead of
+    # materializing the full record corpus. The streaming surface cannot sort
+    # in SQL, so order in Python; the secondary id tie-break makes the window
+    # walk deterministic on equal timestamps.
+    lookback_cutoff_str = lookback_cutoff.strftime("%Y-%m-%d %H:%M:%S")
     try:
-        lookback_cutoff_str = lookback_cutoff.strftime("%Y-%m-%d %H:%M:%S")
-        df = (
-            tbl.search()
-            .where(
-                f"last_reviewed >= '{lookback_cutoff_str}'"
+        rows = list(
+            self._store.iter_record_columns(
+                ["id", "last_reviewed"],
+                batch_size=2048,
+                where=f"last_reviewed >= '{lookback_cutoff_str}'",
             )
-            .to_pandas()
         )
     except (OSError, ValueError, RuntimeError, StoreError) as exc:
         logger.debug("cluster_replay query failed: %s", exc)
-        df = None
+        rows = []
+    rows.sort(key=lambda r: (r["last_reviewed"], r["id"]))
 
     clusters: list[list[Any]] = []
-    if df is not None and not df.empty and "last_reviewed" in df.columns:
-        df_sorted = df.sort_values("last_reviewed").reset_index(drop=True)
+    if rows:
         window_td = timedelta(seconds=window_sec)
         current_cluster: list[Any] = []
         current_window_end = None
-        for _, row in df_sorted.iterrows():
+        for row in rows:
             ts = row["last_reviewed"]
             try:
                 py = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts

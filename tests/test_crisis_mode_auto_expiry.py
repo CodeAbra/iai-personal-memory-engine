@@ -50,8 +50,40 @@ def _state_with_crisis(
 
 class TestPredicate:
 
+    def test_future_since_ts_returns_reanchor_not_forever_stuck(self):
+        # A since_ts 1 hour in the future (clock skew or forward corruption)
+        # must NOT wedge crisis on forever. The predicate re-anchors to now
+        # (backfilled_since_ts) so the 72h safety net can still fire.
+        future_ts = (NOW + timedelta(hours=1)).isoformat()
+        state = _state_with_crisis(True, future_ts)
+        expired, ctx = daemon._check_crisis_mode_expiry(state, NOW)
+        assert expired is False
+        assert "backfilled_since_ts" in ctx
+        assert ctx["backfilled_since_ts"] == NOW.isoformat()
+
+    def test_future_since_ts_reanchor_then_expires_after_threshold(self):
+        # After the re-anchor to now, a subsequent tick at now+threshold+1 s
+        # sees an anchor equal to now and must fire expiry.
+        future_ts = (NOW + timedelta(hours=1)).isoformat()
+        state = _state_with_crisis(True, future_ts)
+        # First tick: re-anchors to NOW.
+        expired, ctx = daemon._check_crisis_mode_expiry(state, NOW)
+        assert expired is False
+        anchored_ts = ctx["backfilled_since_ts"]
+        # Simulate the watchdog writing back the anchored ts (as the real tick does).
+        state["crisis_mode_since_ts"] = anchored_ts
+        # Second tick: well within threshold — still not expired.
+        tick_just_before = NOW + timedelta(seconds=THRESHOLD_SEC - 1)
+        expired2, _ = daemon._check_crisis_mode_expiry(state, tick_just_before)
+        assert expired2 is False
+        # Third tick: just past threshold — must expire.
+        tick_just_after = NOW + timedelta(seconds=THRESHOLD_SEC + 1)
+        expired3, ctx3 = daemon._check_crisis_mode_expiry(state, tick_just_after)
+        assert expired3 is True
+        assert ctx3["expired_after_sec"] == THRESHOLD_SEC + 1
+
     def test_legacy_load_no_since_ts_returns_backfill(self):
-        # Areg's live wedge shape: crisis_mode=True, no since_ts. Predicate
+        # Alice's live wedge shape: crisis_mode=True, no since_ts. Predicate
         # backfills since_ts to first-observation time and does NOT emit.
         state = _state_with_crisis(True, None)
         expired, ctx = daemon._check_crisis_mode_expiry(state, NOW)
@@ -123,19 +155,48 @@ class TestSetSiteStamps:
         assert rec_after["crisis_mode"] is False
         assert rec_after.get("crisis_mode_since_ts") is None
 
+    def test_last_resort_clear_nulls_since_ts(self, tmp_path):
+        # The last-resort clear branch in step_crisis_recluster (used when the
+        # primary S2/fallback clear returns falsey) must write BOTH
+        # crisis_mode=False AND crisis_mode_since_ts=None to prevent a stale
+        # timestamp surviving a future re-entry.
+        from iai_mcp.lifecycle_state import load_state as _ls, save_state as _ss
+        from iai_mcp.lifecycle_state import default_state
+
+        state_path = tmp_path / "lifecycle_state.json"
+        seed = default_state()
+        seed["crisis_mode"] = True
+        seed["crisis_mode_since_ts"] = "2026-06-01T00:00:00+00:00"
+        _ss(seed, state_path)
+
+        # Simulate what the last-resort block does directly.
+        rec = _ls(state_path)
+        rec["crisis_mode"] = False
+        rec["crisis_mode_since_ts"] = None
+        _ss(rec, state_path)
+
+        result = _ls(state_path)
+        assert result["crisis_mode"] is False
+        assert result.get("crisis_mode_since_ts") is None
+
 
 class TestR1RecallGuardActivation:
 
     def test_recall_guard_reads_lifecycle_state_not_daemon_state(
         self, monkeypatch: pytest.MonkeyPatch,
     ):
-        # The honest-degrade guard reads from
+        # The Phase 105 honest-degrade guard reads from
         # iai_mcp.lifecycle_state.load_state (the file that actually carries
         # the crisis_mode flag). If a future refactor re-introduces the
         # wrong-file-read regression, this test fails — the monkeypatch of
         # lifecycle_state.load_state has no effect on the guard's response.
+        import iai_mcp.core as _core
         from iai_mcp.core import dispatch
         from iai_mcp.store import MemoryStore
+
+        # Clear the TTL cache so the monkeypatched load_state is actually
+        # called on the first recall, not returned a stale cache hit.
+        _core._CRISIS_STATE_CACHE.clear()
 
         monkeypatch.setattr(
             "iai_mcp.lifecycle_state.load_state",
@@ -148,8 +209,9 @@ class TestR1RecallGuardActivation:
         store = MemoryStore()
         resp = dispatch(store, "memory_recall", {"cue": "test"})
 
-        assert resp == {
-            "hits": [],
-            "_degraded": True,
-            "_reason": "daemon_consolidation_stuck",
-        }
+        # The degraded tier returns a full-shape recall response even on an
+        # empty store; pin the crisis-degrade contract (flag + reason + an
+        # organically empty hit list) rather than an exact key set.
+        assert resp["_degraded"] is True
+        assert resp["_reason"] == "daemon_consolidation_stuck"
+        assert resp["hits"] == []

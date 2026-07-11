@@ -3,11 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import pytest
 
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.core import _seed_l0_identity
-from iai_mcp.session import SessionStartPayload, assemble_session_start
+from iai_mcp.session import assemble_session_start
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 

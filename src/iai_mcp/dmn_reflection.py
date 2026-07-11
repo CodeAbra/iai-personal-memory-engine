@@ -17,62 +17,87 @@ def _first_50_chars(s: str) -> str:
 class ReflectionAgent:
 
     def synthesize(self, store, window_hours: int) -> MemoryRecord:
-        from iai_mcp.events import query_events  # noqa: F401  (kept for symmetry)
+        import json as _json
+
+        from iai_mcp.events import query_events
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=window_hours)
 
-        recs = store.all_records()
-        in_window: list = []
-        for r in recs:
-            created = getattr(r, "created_at", None)
-            if created is None:
+        def _parse_created(raw) -> "datetime | None":
+            # created_at arrives as a datetime on one driver and an ISO string
+            # on the other; a parser that handles only one shape silently
+            # skips EVERY record and reports an empty day.
+            if isinstance(raw, datetime):
+                dt = raw
+            elif isinstance(raw, str):
+                try:
+                    dt = datetime.fromisoformat(raw)
+                except ValueError:
+                    return None
+            else:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        # Columns-only stream: the window count needs no record decrypt — the
+        # only surfaces decrypted are the five community-label records below.
+        captured_count = 0
+        community_counts: Counter = Counter()
+        community_newest: dict[str, tuple[datetime, str]] = {}
+        for row in store.iter_record_columns(
+            ["id", "community_id", "created_at", "provenance_json", "tags_json"],
+            batch_size=2048,
+        ):
+            created = _parse_created(row.get("created_at"))
+            if created is None or created < cutoff:
+                continue
+            # Reflections must never re-ingest prior reflections. The tag is
+            # the reliable plaintext marker (provenance_json is encrypted at
+            # rest on a keyed store, so the provenance probe below only works
+            # on plaintext stores — a secondary net, not the gate).
+            tags_raw = row.get("tags_json") or ""
+            if isinstance(tags_raw, str) and '"dmn_reflection"' in tags_raw:
+                continue
+            prov_raw = row.get("provenance_json")
+            if prov_raw and isinstance(prov_raw, str):
+                try:
+                    prov_list = _json.loads(prov_raw)
+                except (TypeError, ValueError):
+                    prov_list = []
+                if any(
+                    isinstance(p, dict) and p.get("synthesized_by") == "dmn_reflection"
+                    for p in prov_list
+                ):
+                    continue
+            captured_count += 1
+            cid = row.get("community_id")
+            if cid:
+                cid_s = str(cid)
+                community_counts[cid_s] += 1
+                prev = community_newest.get(cid_s)
+                if prev is None or created > prev[0]:
+                    community_newest[cid_s] = (created, str(row.get("id")))
+
+        topics: list[str] = []
+        for cid_s, _n in community_counts.most_common(5):
+            newest = community_newest.get(cid_s)
+            if newest is None:
                 continue
             try:
-                if getattr(created, "tzinfo", None) is None:
-                    created = created.replace(tzinfo=timezone.utc)
-            except (TypeError, ValueError, AttributeError):
+                rec = store.get(UUID(newest[1]))
+            except (ValueError, TypeError):
                 continue
-            if created < cutoff:
-                continue
-            prov_list = getattr(r, "provenance", None) or []
-            if any(
-                (p.get("synthesized_by") == "dmn_reflection" if isinstance(p, dict) else False)
-                for p in prov_list
-            ):
-                continue
-            in_window.append(r)
-
-        captured_count = len(in_window)
-
-        community_to_records: dict[UUID, list] = {}
-        for r in in_window:
-            cid = getattr(r, "community_id", None)
-            if cid is None:
-                continue
-            community_to_records.setdefault(cid, []).append(r)
-
-        community_counts: Counter = Counter(
-            {cid: len(rlist) for cid, rlist in community_to_records.items()}
-        )
-
-        community_labels: dict[UUID, str] = {}
-        for cid, rlist in community_to_records.items():
-            top = max(rlist, key=lambda r: getattr(r, "created_at", now))
-            community_labels[cid] = _first_50_chars(
-                getattr(top, "literal_surface", "")
-            )
-
-        top_cids = [cid for cid, _ in community_counts.most_common(5)]
-        topics: list[str] = [
-            community_labels[cid]
-            for cid in top_cids
-            if community_labels.get(cid)
-        ]
+            label = _first_50_chars(getattr(rec, "literal_surface", "") if rec else "")
+            # A reflection record identified by its surface prefix must not
+            # become a topic.
+            if label and not label.startswith("Daily reflection:"):
+                topics.append(label)
 
         recall_events = query_events(
             store,
-            kind="memory_recall",
+            kind="recall_dispatched",
             since=cutoff,
             limit=10000,
         )
@@ -94,22 +119,16 @@ class ReflectionAgent:
             "ts": now.isoformat(),
         }
 
-        # Embed the reflection's literal_surface so the record is retrievable by
-        # vector/cosine recall. Hardcoding a zero vector (the old behaviour) made
-        # every daily-reflection semantic record permanently invisible to recall
-        # and fed zero-norm vectors into the scoring matmul (divide-by-zero
-        # warnings). If the native embed fails, fall back to a zero vector flagged
-        # embedding_pending=1 so the daemon's reembed-pending path fills it later
-        # (never silently leave an unretrievable zero record).
-        embed_dim = int(store.embed_dim)
-        embedding_pending = 0
+        # A real embedding, never a zero vector: zero-vector records score
+        # 0.000 against every cue yet still occupy ANN slots — they surface as
+        # junk hits on every degraded recall lane. Embed failure marks the
+        # record so the pipeline step SKIPS the insert instead of storing junk.
         try:
             from iai_mcp.embed import embedder_for_store
-
             embedding = list(embedder_for_store(store).embed(literal_surface))
-        except Exception:  # noqa: BLE001 -- degrade to deferred reembed, never zero-and-forget
-            embedding = [0.0] * embed_dim
-            embedding_pending = 1
+        except Exception:  # noqa: BLE001 -- reflection must not raise on embed
+            embedding = [0.0] * int(store.embed_dim)
+            provenance_entry["embed_failed"] = True
 
         return MemoryRecord(
             id=uuid4(),
@@ -117,7 +136,6 @@ class ReflectionAgent:
             literal_surface=literal_surface,
             aaak_index="",
             embedding=embedding,
-            embedding_pending=embedding_pending,
             community_id=None,
             centrality=0.5,
             detail_level=1,
@@ -131,7 +149,7 @@ class ReflectionAgent:
             created_at=now,
             updated_at=now,
             language="en",
-            tags=[],
+            tags=["dmn_reflection"],
             s5_trust_score=0.5,
             profile_modulation_gain={},
             schema_version=SCHEMA_VERSION_V4,
@@ -163,15 +181,18 @@ class MetaAnalyst:
 
         for ev in events_list:
             kind = ev.get("kind") or ""
-            if kind == "memory_recall":
+            # The event vocabulary the store actually writes: every dispatch
+            # emits recall_dispatched, every insert passes the
+            # pattern-separation gate.
+            if kind == "recall_dispatched":
                 recall_count += 1
-            elif kind == "memory_capture":
+            elif kind == "pattern_separation_pass":
                 capture_count += 1
-            elif kind == "sleep_step_completed":
-                data = ev.get("data") or {}
-                step_name = data.get("step")
-                if step_name == "HIPPO_CLEANUP":
-                    sleep_cycles_count += 1
+            elif kind == "cls_consolidation_run":
+                # The one per-completed-cycle event that lands in the store
+                # events table (sleep_step_completed goes only to the
+                # lifecycle-log sink and is invisible to query_events).
+                sleep_cycles_count += 1
             elif kind == "essential_variable_breach":
                 breach_count += 1
             elif kind == "erasure_agent_pass":

@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-import pytest
 
 import iai_mcp.concurrency
 import iai_mcp.daemon_state

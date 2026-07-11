@@ -37,7 +37,7 @@ def _count_iai_mcp_processes() -> dict[str, int]:
 
 
 def _isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
-    sock_dir = tmp_path / "sock"
+    sock_dir = Path(f"/tmp/iai-no-spawn-{os.getpid()}-{id(tmp_path)}")
     sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
 
@@ -124,7 +124,7 @@ def test_no_spawn_completes_in_under_2s(tmp_path):
 
     assert proc.returncode == 0, f"stderr={proc.stderr!r}"
     assert duration < 2.0, (
-        f"--no-spawn took {duration:.3f}s; budget is <2.0s. "
+        f"--no-spawn took {duration:.3f}s; R3 budget is <2.0s. "
         f"Hook would block session teardown."
     )
 
@@ -143,11 +143,11 @@ def test_no_spawn_does_not_spawn_daemon(tmp_path):
     delta_daemon = after["daemon"] - before["daemon"]
     delta_core = after["core"] - before["core"]
     assert delta_daemon <= 0, (
-        f"--no-spawn spawned {delta_daemon} new daemon(s); spawn budget violated. "
+        f"--no-spawn spawned {delta_daemon} new daemon(s); R3 violated. "
         f"before={before} after={after}"
     )
     assert delta_core <= 0, (
-        f"--no-spawn spawned {delta_core} new core(s); spawn budget violated. "
+        f"--no-spawn spawned {delta_core} new core(s); R3 violated. "
         f"before={before} after={after}"
     )
 

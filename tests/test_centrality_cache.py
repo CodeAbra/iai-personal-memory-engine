@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -58,7 +58,7 @@ def _make_record(store: MemoryStore, text: str, seed: int) -> MemoryRecord:
 
 @pytest.fixture
 def seeded_store(tmp_path: Path) -> MemoryStore:
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     store.root = tmp_path
     for i in range(15):
         store.insert(_make_record(store, f"fact-{i}", i + 1))
@@ -95,7 +95,7 @@ def test_C2_cache_round_trips_centrality(seeded_store):
 
     cached = runtime_graph_cache.try_load(seeded_store)
     assert cached is not None, "cache should be populated after build"
-    _assignment, _rich_club, node_payload, _max_degree = cached
+    _assignment, _rich_club, node_payload, _max_degree, _node_degrees = cached
     assert node_payload is not None and len(node_payload) > 0
 
     for nid, live in live_cent.items():
@@ -142,7 +142,7 @@ def test_C3_missing_centrality_fallback_inline(seeded_store):
 
 
 def test_C4_cache_version_bumped_to_05_13_v1():
-    assert runtime_graph_cache.CACHE_VERSION == "62-02-v5"
+    assert runtime_graph_cache.CACHE_VERSION == "62-02-v6"
 
 
 def test_C4_legacy_cache_invalidated(seeded_store, tmp_path: Path):

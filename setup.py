@@ -10,19 +10,31 @@ register a custom build_py subclass that:
 Both operations write into build_lib, never into the source tree, so an
 editable checkout stays clean.
 
-Editable installs (pip install -e .) skip the npm build entirely.  The
-install script (scripts/install.sh) builds the wrapper separately; the
-resolver falls back to mcp-wrapper/dist/ on an editable install.
+Editable installs (pip install -e .) skip the npm build entirely.  The owner's
+install script (scripts/install.sh) builds the wrapper separately; the resolver
+falls back to mcp-wrapper/dist/ on an editable install.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from setuptools import setup
 from setuptools.command.build_py import build_py as _OrigBuildPy
+from setuptools_rust import Binding, RustExtension
+
+# Platform-conditional native features (why this lives here and not in
+# pyproject's static ext-modules table): on macOS the embedder's matmuls
+# MUST link Apple Accelerate BLAS — without it a 512-token encode runs a
+# naive matmul and takes seconds instead of milliseconds, starving every
+# consumer of the embedder. accelerate-src does not build on Linux, so the
+# feature is added only on darwin.
+_NATIVE_FEATURES = ["extension-module"]
+if sys.platform == "darwin":
+    _NATIVE_FEATURES.append("accelerate")
 
 _REPO_ROOT = Path(__file__).parent
 _WRAPPER_SRC = _REPO_ROOT / "mcp-wrapper"
@@ -55,8 +67,8 @@ class _BuildWithWrapper(_OrigBuildPy):
     """
 
     def run(self) -> None:
-        # Editable installs must never trigger npm. The install script builds
-        # the wrapper as a separate step.
+        # FIRM REQUIREMENT: editable installs must never trigger npm.
+        # The owner's install script builds the wrapper as a separate step.
         if self.editable_mode:
             super().run()
             return
@@ -140,4 +152,15 @@ class _BuildWithWrapper(_OrigBuildPy):
                 shutil.copy2(src, build_lib_root / dest_name)
 
 
-setup(cmdclass={"build_py": _BuildWithWrapper})
+setup(
+    cmdclass={"build_py": _BuildWithWrapper},
+    rust_extensions=[
+        RustExtension(
+            "iai_mcp_native",
+            path="rust/iai_mcp_native/Cargo.toml",
+            binding=Binding.PyO3,
+            features=_NATIVE_FEATURES,
+            args=["--no-default-features"],
+        )
+    ],
+)

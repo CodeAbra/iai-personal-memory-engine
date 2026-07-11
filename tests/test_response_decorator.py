@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 def test_apply_profile_is_noop_on_default_state():
     from iai_mcp import profile

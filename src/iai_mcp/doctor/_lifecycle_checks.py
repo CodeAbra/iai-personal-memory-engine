@@ -113,9 +113,11 @@ def check_a_daemon_alive() -> CheckResult:
 
 
 async def _socket_connect_probe(socket_path: Path, timeout: float) -> str | None:
-    from iai_mcp._ipc import open_ipc_connection
     try:
-        reader, writer = await open_ipc_connection(str(socket_path), timeout=timeout)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=str(socket_path)),
+            timeout=timeout,
+        )
     except FileNotFoundError:
         return "FileNotFoundError"
     except ConnectionRefusedError:
@@ -134,16 +136,11 @@ async def _socket_connect_probe(socket_path: Path, timeout: float) -> str | None
 
 def check_b_socket_fresh() -> CheckResult:
     socket_path = _resolve_socket_path()
-    # Windows binds TCP loopback and records the port in a sidecar file — there
-    # is no AF_UNIX socket file — so check whichever endpoint actually exists
-    # for this platform. (The connect probe below is already cross-platform.)
-    from iai_mcp._ipc import IS_WINDOWS, _port_file_path
-    endpoint = _port_file_path() if IS_WINDOWS else socket_path
-    if not endpoint.exists():
+    if not socket_path.exists():
         return CheckResult(
             "(b) socket file fresh",
             False,
-            f"{endpoint} does not exist",
+            f"{socket_path} does not exist",
         )
 
     t0 = time.monotonic()
@@ -172,8 +169,7 @@ def check_b_socket_fresh() -> CheckResult:
 
 def check_c_lock_healthy() -> CheckResult:
     import errno as _errno
-    from iai_mcp._filelock import LOCK_NB, LOCK_SH, LOCK_UN
-    from iai_mcp._filelock import flock as _flock
+    import fcntl as _fcntl
 
     lock_path = _resolve_hippo_db_path().parent / ".lock"
     if not lock_path.exists():
@@ -184,12 +180,10 @@ def check_c_lock_healthy() -> CheckResult:
         )
     fd = None
     try:
-        # O_RDWR required on Windows (msvcrt.locking needs write access);
-        # harmless on POSIX since flock ignores open mode.
-        fd = os.open(str(lock_path), os.O_RDWR)
+        fd = os.open(str(lock_path), os.O_RDONLY)
         try:
-            _flock(fd, LOCK_SH | LOCK_NB)
-            _flock(fd, LOCK_UN)
+            _fcntl.flock(fd, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
+            _fcntl.flock(fd, _fcntl.LOCK_UN)
             return CheckResult(
                 "(c) lock file healthy",
                 True,
@@ -203,7 +197,7 @@ def check_c_lock_healthy() -> CheckResult:
                     f"{lock_path} held (consolidating or recall active — normal)",
                 )
             raise
-    except Exception as e:  # noqa: BLE001 — flock/OSError/permission all FAIL
+    except Exception as e:  # noqa: BLE001 — fcntl/OSError/permission all FAIL
         logger.debug("check_c: store-lock probe failed: %s", e)
         return CheckResult(
             "(c) lock file healthy",
@@ -447,6 +441,111 @@ def check_k_lifecycle_history_24h() -> CheckResult:
     )
 
 
+def check_y_rss_24h_plateau() -> CheckResult:
+    import statistics as _stats
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    import json as _json
+
+    name = "(y) RSS 24h plateau"
+
+    # Env-aware watchdog-log path (honors IAI_MCP_STORE), resolved locally to
+    # avoid importing the daemon package from the doctor surface.
+    root = os.environ.get("IAI_MCP_STORE")
+    log_path = (Path(root) if root else Path.home() / ".iai-mcp") / ".daemon-watchdog.log"
+
+    if not log_path.exists():
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no watchdog log yet (fresh install or daemon never run)",
+            status="PASS",
+        )
+
+    def _settled_kib(row: dict) -> int | None:
+        """Prefer phys_footprint_kib (excludes MADV_FREE reusable pages); fall back to rss_kib."""
+        v = row.get("phys_footprint_kib")
+        if isinstance(v, int):
+            return v
+        v = row.get("rss_kib")
+        return v if isinstance(v, int) else None
+
+    now = _dt.now(_tz.utc).timestamp()
+    cutoff = now - 24 * 3600
+    samples: list[dict] = []
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    row = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if row.get("kind") != "rss_breadcrumb":
+                    continue
+                ts_raw = row.get("ts")
+                if not isinstance(ts_raw, str):
+                    continue
+                try:
+                    ts = _dt.fromisoformat(ts_raw).timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if ts < cutoff:
+                    continue
+                kib = _settled_kib(row)
+                if kib is None:
+                    continue
+                samples.append({"ts": ts, "kib": kib})
+    except OSError:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="watchdog log unreadable",
+            status="WARN",
+        )
+
+    if len(samples) < 2:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="insufficient samples (need >= 2 within 24h)",
+            status="PASS",
+        )
+
+    # Median-of-thirds: compare the median of the oldest third of samples against
+    # the median of the newest third. This is robust to single-sample transients
+    # (e.g. a VACUUM spike landing on the first or last raw endpoint) while still
+    # detecting a genuine sustained climb across the full window.
+    samples.sort(key=lambda s: s["ts"])
+    third = max(1, len(samples) // 3)
+    base_kib = _stats.median(s["kib"] for s in samples[:third])
+    recent_kib = _stats.median(s["kib"] for s in samples[-third:])
+    delta_mib = (recent_kib - base_kib) / 1024.0
+    span_hr = (samples[-1]["ts"] - samples[0]["ts"]) / 3600.0
+    detail = (
+        f"{delta_mib:+.0f} MiB over {span_hr:.1f}h "
+        f"({base_kib / 1024:.0f} -> {recent_kib / 1024:.0f} MiB, median-of-thirds, n={len(samples)})"
+    )
+
+    if delta_mib > 1024:
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=f"{detail}; resident set climbing — inspect 'iai-mcp daemon rss-stats'",
+            status="FAIL",
+        )
+    if delta_mib > 512:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"{detail}; resident set drifting up",
+            status="WARN",
+        )
+    return CheckResult(name=name, passed=True, detail=detail, status="PASS")
+
+
 def check_l_sleep_cycle_status() -> CheckResult:
     from datetime import datetime as _dt
     from datetime import timezone as _tz
@@ -598,7 +697,7 @@ def check_q_iai_cli_reachable() -> CheckResult:
             passed=True,
             detail=(
                 "iai not in PATH. Re-run `pip install -e .` from the repo "
-                "root to register the v7.6 entry point."
+                "root to register the entry point."
             ),
             status="WARN",
         )

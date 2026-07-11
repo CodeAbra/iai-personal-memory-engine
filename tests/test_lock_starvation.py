@@ -1,14 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import os
-from iai_mcp._filelock import LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN
-from iai_mcp._filelock import flock as _flock
-import tempfile
 import threading
 import time
 from pathlib import Path
 
-import pytest
 
 
 def test_consolidator_acquires_lock_ex_under_continuous_readers(
@@ -34,7 +31,7 @@ def test_consolidator_acquires_lock_ex_under_continuous_readers(
                 acquired = acquire_client_shared_nb(fd, lock_path)
                 if acquired:
                     time.sleep(0.001)
-                    _flock(fd, LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 else:
                     time.sleep(0.001)
         except Exception as exc:
@@ -55,13 +52,13 @@ def test_consolidator_acquires_lock_ex_under_continuous_readers(
         deadline = time.monotonic() + 4.0
         while time.monotonic() < deadline:
             try:
-                _flock(fd_ex, LOCK_EX | LOCK_NB)
+                fcntl.flock(fd_ex, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
             except OSError:
                 time.sleep(0.01)
         if acquired:
-            _flock(fd_ex, LOCK_UN)
+            fcntl.flock(fd_ex, fcntl.LOCK_UN)
         os.close(fd_ex)
     finally:
         clear_consolidation_intent(lock_path)
@@ -122,10 +119,10 @@ def test_recency_read_during_busy_meets_slo(hermetic_store: Path) -> None:
     def _hold_exclusive() -> None:
         fd = os.open(str(lock_path), os.O_RDWR)
         try:
-            _flock(fd, LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_EX)
             ready.set()
             done.wait(timeout=3.0)
-            _flock(fd, LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -179,11 +176,11 @@ def test_check_then_lock_toctou_consolidator_not_starved(
                 acquired = acquire_client_shared_nb(fd, lock_path)
                 if acquired:
                     if check_consolidation_intent(lock_path):
-                        _flock(fd, LOCK_UN)
+                        fcntl.flock(fd, fcntl.LOCK_UN)
                         post_acquire_recheck_count += 1
                     else:
                         time.sleep(0.0005)
-                        _flock(fd, LOCK_UN)
+                        fcntl.flock(fd, fcntl.LOCK_UN)
                 else:
                     time.sleep(0.001)
         except Exception as exc:
@@ -203,15 +200,15 @@ def test_check_then_lock_toctou_consolidator_not_starved(
             _intent_set.wait(timeout=2.0)
 
             try:
-                _flock(fd, LOCK_SH | LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except OSError:
                 return
 
             if check_consolidation_intent(lock_path):
-                _flock(fd, LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
                 post_acquire_recheck_count += 1
             else:
-                _flock(fd, LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -234,13 +231,13 @@ def test_check_then_lock_toctou_consolidator_not_starved(
         deadline = time.monotonic() + 4.0
         while time.monotonic() < deadline:
             try:
-                _flock(fd_ex, LOCK_EX | LOCK_NB)
+                fcntl.flock(fd_ex, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
             except OSError:
                 time.sleep(0.005)
         if acquired:
-            _flock(fd_ex, LOCK_UN)
+            fcntl.flock(fd_ex, fcntl.LOCK_UN)
         os.close(fd_ex)
     finally:
         clear_consolidation_intent(lock_path)
@@ -273,10 +270,10 @@ def test_client_lock_wait_bounded_below_slo(hermetic_store: Path) -> None:
     def _hold_ex() -> None:
         fd = os.open(str(lock_path), os.O_RDWR)
         try:
-            _flock(fd, LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_EX)
             ready.set()
             done.wait(timeout=0.6)
-            _flock(fd, LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -298,7 +295,7 @@ def test_client_lock_wait_bounded_below_slo(hermetic_store: Path) -> None:
             time.sleep(0.01)
         elapsed = time.monotonic() - t0
         if acquired:
-            _flock(fd_sh, LOCK_UN)
+            fcntl.flock(fd_sh, fcntl.LOCK_UN)
     finally:
         os.close(fd_sh)
         t.join(timeout=2.0)

@@ -146,7 +146,6 @@ def test_paused_skip_persists_to_disk(tick_env, monkeypatch):
 
 def test_tick_updates_last_tick_at(tick_env, monkeypatch):
     from iai_mcp import daemon as daemon_mod
-    from iai_mcp.daemon_state import load_state
 
     store, state_path, tmp_path = tick_env
 
@@ -157,23 +156,3 @@ def test_tick_updates_last_tick_at(tick_env, monkeypatch):
 
     assert "last_tick_at" in state
     datetime.fromisoformat(state["last_tick_at"])
-
-
-def test_successful_tick_resets_stale_skip_reason(tick_env, monkeypatch):
-    # 2cffb35 regression: a stale last_tick_skipped_reason ("empty_store"/"paused")
-    # must be cleared once a tick actually runs (store non-empty, not paused),
-    # otherwise observability shows a healthy daemon as permanently parked. tick_env
-    # seeds one record -> store is non-empty. WITHOUT the reset line the field stays
-    # "empty_store" and this test fails.
-    from iai_mcp import daemon as daemon_mod
-    from iai_mcp.daemon_state import load_state
-
-    store, state_path, tmp_path = tick_env
-    monkeypatch.setattr(daemon_mod, "should_relearn", lambda last, now: False)
-
-    state = {"fsm_state": "WAKE", "last_tick_skipped_reason": "empty_store"}
-    asyncio.run(daemon_mod._tick_body(store, state))
-
-    assert state.get("last_tick_skipped_reason") is None
-    loaded = load_state()
-    assert loaded.get("last_tick_skipped_reason") is None

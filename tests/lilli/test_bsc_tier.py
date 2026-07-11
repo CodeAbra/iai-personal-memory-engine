@@ -94,11 +94,12 @@ def test_similarity_random_pair_near_half() -> None:
 
 def _build_golden():
     import iai_mcp.tem as tem
+    from iai_mcp.lilli.tiers.bsc import BSC_ROLE_VOCABULARY
 
     return {
         "schema_version": 1,
-        "tem_role_vocabulary": list(tem.ROLE_VOCABULARY),
-        "roles": {role: tem.role_hv(role).hex() for role in tem.ROLE_VOCABULARY},
+        "tem_role_vocabulary": list(BSC_ROLE_VOCABULARY),
+        "roles": {role: tem.role_hv(role).hex() for role in BSC_ROLE_VOCABULARY},
         "fillers": {
             v: tem.filler_hv(v).hex()
             for v in [
@@ -115,7 +116,7 @@ def _build_golden():
             ]
         },
         "bind_pairs": {
-            f"{role}|{filler}": tem.bind(tem.role_hv(role), tem.filler_hv(filler)).hex()
+            f"{role}|{filler}": bind(tem.role_hv(role), tem.filler_hv(filler)).hex()
             for role, filler in [
                 ("WHEN", "today"),
                 ("WHERE", "home"),
@@ -139,8 +140,9 @@ def _build_golden():
 
 def test_bit_for_bit_with_tem() -> None:
     import iai_mcp.tem as tem
+    from iai_mcp.lilli.tiers.bsc import BSC_ROLE_VOCABULARY
 
-    for role in tem.ROLE_VOCABULARY:
+    for role in BSC_ROLE_VOCABULARY:
         lilli_hv = role_hv(role, D=10000)
         tem_hv = tem.role_hv(role)
         assert lilli_hv == tem_hv, (
@@ -158,7 +160,7 @@ def test_bit_for_bit_with_tem() -> None:
 
     role_a_10k = role_hv("WHEN", D=10000)
     filler_b_10k = filler_hv("today", D=10000)
-    assert bind(role_a_10k, filler_b_10k) == tem.bind(tem.role_hv("WHEN"), tem.filler_hv("today"))
+    assert bind(role_a_10k, filler_b_10k) == bind(tem.role_hv("WHEN"), tem.filler_hv("today"))
 
     lilli_bundle = bundle(
         [("WHEN", tem.filler_hv("today")), ("WHERE", tem.filler_hv("home"))],

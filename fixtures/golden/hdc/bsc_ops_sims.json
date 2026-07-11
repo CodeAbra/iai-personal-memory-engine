@@ -1,0 +1,14 @@
+{
+  "byte_order": "le",
+  "dtype": "f64",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "bsc_ops_sims",
+  "payload": null,
+  "sha256": "93e635c3edf802a7ebcc9039706c863fce016df3f8d92bc2e0d11bf256c3f52b",
+  "shape": [
+    34
+  ],
+  "source": "src/iai_mcp/lilli/core/similarity.py over consecutive bsc_ops bind rows: interleaved [hamming, cosine_packed] for i in range(17)",
+  "subsystem": "hdc"
+}

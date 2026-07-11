@@ -2,41 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import tempfile
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-STATE_PATH: Path = Path.home() / ".iai-mcp" / ".daemon-state.json"
-
-_IS_WINDOWS: bool = platform.system() == "Windows"
-
-
-def _atomic_replace(src: str, dst: Path) -> None:
-    """os.replace, with a brief retry loop on Windows.
-
-    On Windows os.replace maps to MoveFileEx, which fails with
-    PermissionError (WinError 5/ACCESS_DENIED or 32/SHARING_VIOLATION) when
-    another process momentarily holds the destination open. Python's open()
-    on Windows does not request FILE_SHARE_DELETE, so any concurrent reader
-    (`daemon status`, the MCP server, a hook reading first-turn state) can
-    transiently block the replace. The handle is held only briefly, so a few
-    short retries resolve it. POSIX rename is atomic and never sees this, so
-    the path there is unchanged (single attempt, errors propagate).
-    """
-    if not _IS_WINDOWS:
-        os.replace(src, dst)
-        return
-    attempts = 10
-    for i in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if i == attempts - 1:
-                raise
-            time.sleep(0.05)
+DAEMON_STATE_FILENAME: str = ".daemon-state.json"
+STATE_PATH: Path = Path.home() / ".iai-mcp" / DAEMON_STATE_FILENAME
 
 DIGEST_SHOW_THRESHOLD_HOURS: int = 18
 
@@ -44,21 +15,41 @@ FIRST_TURN_TTL_HOURS: int = 24
 MAX_FIRST_TURN_ENTRIES: int = 100
 
 
+def daemon_state_path(store_root: Path | str | None = None) -> Path:
+    """Resolve the daemon runtime-state file path under the active store root.
+
+    Mirrors ``lifecycle_state_path``: an explicit ``store_root`` wins; absent
+    that, the ``IAI_MCP_STORE`` environment variable is honored (read at call
+    time, so every caller of ``load_state``/``save_state`` picks up the
+    currently active store without a signature change); absent both, the
+    module-level ``STATE_PATH`` is returned as the home-rooted default,
+    keeping default resolution byte-identical to the pre-existing constant.
+    """
+    if store_root is not None:
+        return Path(store_root) / DAEMON_STATE_FILENAME
+    env = os.environ.get("IAI_MCP_STORE")
+    if env:
+        return Path(env) / DAEMON_STATE_FILENAME
+    return STATE_PATH
+
+
 def load_state() -> dict:
-    if not STATE_PATH.exists():
+    target = daemon_state_path()
+    if not target.exists():
         return {}
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return json.loads(target.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def save_state(state: dict) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    target = daemon_state_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         prefix=".daemon-state.",
         suffix=".tmp",
-        dir=str(STATE_PATH.parent),
+        dir=str(target.parent),
     )
     try:
         with os.fdopen(fd, "w") as f:
@@ -66,7 +57,7 @@ def save_state(state: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
-        _atomic_replace(tmp, STATE_PATH)
+        os.replace(tmp, target)
     except (OSError, TypeError, ValueError):
         try:
             os.unlink(tmp)

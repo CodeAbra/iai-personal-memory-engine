@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, TypedDict
 
+from iai_mcp.events import TELEMETRY_MEMORY_RELIEF
 from iai_mcp.exceptions import (
     SleepCheckpointError,
     SleepPipelineError,
@@ -121,6 +122,10 @@ class SleepPipeline:
         )
         self._s2_coordinator = s2_coordinator
         self._loop = loop
+
+        # Holds the per-step resident-set snapshot taken at step start so the
+        # completion event can report the gross (pre-relief) delta.
+        self._current_step_rss_before: dict[str, Any] | None = None
 
     def _get_state_path(self) -> Path:
         if self._lifecycle_state_path is not None:
@@ -276,11 +281,23 @@ class SleepPipeline:
 
 
     def _emit_step_started(self, step: SleepStep) -> None:
+        from iai_mcp.lilli.cycle.sleep_pipeline._rss_probe import capture_step_snapshot
+
+        # RSS + pool + NRT only (no vmmap subprocess) — the per-step path must
+        # stay microsecond-cheap; the region-count trend is sampled by the
+        # watchdog breadcrumb on its own cadence.
+        snap_before = capture_step_snapshot(include_vmmap=False)
+        self._current_step_rss_before = snap_before
         try:
             self._event_log.append({
                 "event": "sleep_step_started",
                 "step": step.name,
                 "step_num": step.value,
+                "rss_kib": snap_before.get("rss_kib"),
+                "vmmap_region_count": snap_before.get("vmmap_region_count"),
+                "vm_allocate_kib": snap_before.get("vm_allocate_kib"),
+                "pa_pool_bytes": snap_before.get("pa_pool_bytes"),
+                "numba_nrt_alloc_count": snap_before.get("numba_nrt_alloc_count"),
             })
         except (OSError, ValueError) as exc:
             logger.debug("best-effort sleep_step_started event failed: %s", exc)
@@ -288,16 +305,43 @@ class SleepPipeline:
     def _emit_step_completed(
         self, step: SleepStep, duration_sec: float, **payload: Any,
     ) -> None:
+        from iai_mcp.lilli.cycle.sleep_pipeline._rss_probe import capture_step_snapshot
+
+        # The after-snapshot is the gross, pre-relief resident set: the
+        # page-reclaim postlude runs after this hook, and its net figure is
+        # carried by the separate memory_relief event (joinable on step).
+        snap_after = capture_step_snapshot(include_vmmap=False)
+        snap_before = getattr(self, "_current_step_rss_before", None) or {}
+        rss_before = snap_before.get("rss_kib")
+        rss_after = snap_after.get("rss_kib")
+        rss_delta_kib = (
+            rss_after - rss_before
+            if isinstance(rss_before, int) and isinstance(rss_after, int)
+            else None
+        )
         try:
             self._event_log.append({
                 "event": "sleep_step_completed",
                 "step": step.name,
                 "step_num": step.value,
                 "duration_sec": round(duration_sec, 3),
+                "rss_kib_before": rss_before,
+                "rss_kib_after": rss_after,
+                "rss_delta_kib": rss_delta_kib,
+                "vmmap_region_count_before": snap_before.get("vmmap_region_count"),
+                "vmmap_region_count_after": snap_after.get("vmmap_region_count"),
+                "vm_allocate_kib_before": snap_before.get("vm_allocate_kib"),
+                "vm_allocate_kib_after": snap_after.get("vm_allocate_kib"),
+                "pa_pool_bytes_before": snap_before.get("pa_pool_bytes"),
+                "pa_pool_bytes_after": snap_after.get("pa_pool_bytes"),
+                "numba_nrt_alloc_count_before": snap_before.get("numba_nrt_alloc_count"),
+                "numba_nrt_alloc_count_after": snap_after.get("numba_nrt_alloc_count"),
                 **payload,
             })
         except (OSError, ValueError) as exc:
             logger.debug("best-effort sleep_step_completed event failed: %s", exc)
+        finally:
+            self._current_step_rss_before = None
 
     def _check_interrupt(
         self,
@@ -386,6 +430,17 @@ class SleepPipeline:
         SleepStep.CLUSTER_SUMMARY,
         SleepStep.RECALL_INDEX_REBUILD,
     )
+
+    # Steps whose bodies materialize large transients (clustering / columnar
+    # to-pandas paths). After each, a memory-relief postlude hands idle
+    # allocator pages back to the OS. Not a step — a loop-tail call gated on
+    # this set, so the step order and the WAL recovery index stay frozen.
+    HEAVY_RELIEF_STEPS: frozenset[SleepStep] = frozenset({
+        SleepStep.CRISIS_RECLUSTER,
+        SleepStep.RECONSOLIDATION,
+        SleepStep.CLUSTER_REPLAY,
+        SleepStep.OPTIMIZE_HIPPO,
+    })
 
     _QUARANTINE_STRIKE_THRESHOLD: int = 3
 
@@ -509,6 +564,25 @@ class SleepPipeline:
             )
             completed_steps.append(step)
             step_payloads[step] = payload
+
+            if step in self.HEAVY_RELIEF_STEPS:
+                try:
+                    from iai_mcp.lilli.cycle.sleep_pipeline._memory_relief import (
+                        _step_memory_relief,
+                    )
+
+                    relief = _step_memory_relief(label=step.name)
+                    self._event_log.append({
+                        "event": TELEMETRY_MEMORY_RELIEF,
+                        "step": step.name,
+                        "step_num": step.value,
+                        **relief,
+                    })
+                except Exception as exc:  # noqa: BLE001 -- relief never aborts a cycle
+                    logger.debug(
+                        "best-effort memory relief after %s failed: %s",
+                        step.name, exc,
+                    )
 
         try:
             from iai_mcp.sleep import _emit_cls_consolidation_run

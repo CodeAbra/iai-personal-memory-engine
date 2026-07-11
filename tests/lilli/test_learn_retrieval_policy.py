@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 from uuid import uuid4
 
-import pytest
 
 def test_retrieval_feedback_dataclass():
     from iai_mcp.learn import RetrievalFeedback

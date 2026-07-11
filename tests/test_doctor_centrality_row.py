@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from unittest import mock
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -168,7 +166,7 @@ def test_recall_timing_event_emitted_with_payload_shape(
     import iai_mcp.pipeline as _pipeline
     monkeypatch.setattr(_pipeline, "write_event", _spy)
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     store.root = tmp_path
     emb = _DetEmbedder(dim=store.embed_dim)
     for i in range(6):
@@ -217,7 +215,7 @@ def test_recall_timing_write_event_failure_does_not_break_recall(
 
     monkeypatch.setattr(_pipeline, "write_event", _boom)
 
-    store = MemoryStore(path=tmp_path / "hippo")
+    store = MemoryStore(path=tmp_path / "lancedb")
     store.root = tmp_path
     emb = _DetEmbedder(dim=store.embed_dim)
     for i in range(4):

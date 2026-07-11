@@ -21,13 +21,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.87.0
+        with:
+          components: rustfmt, clippy
       - name: Install with dev extras
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Correctness gate
-        run: pytest -m "not perf and not slow and not live"
+        run: pytest --timeout=600 -m "not perf and not slow and not live"
       - name: Build wheel
         run: pip wheel . --no-deps -w dist
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 from uuid import uuid4
 
-import pytest
 
 from iai_mcp.events import write_event
 from iai_mcp.store import MemoryStore

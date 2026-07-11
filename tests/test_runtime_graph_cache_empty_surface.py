@@ -12,7 +12,6 @@ import pytest
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -27,13 +26,11 @@ def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     )
     yield fake
 
-
 @pytest.fixture
 def store(tmp_path: Path) -> MemoryStore:
-    s = MemoryStore(path=tmp_path / "hippo")
+    s = MemoryStore(path=tmp_path / "lancedb")
     s.root = tmp_path
     return s
-
 
 def _make_record(rid: UUID, surface: str = "topic") -> MemoryRecord:
     rng = random.Random(rid.int)
@@ -63,7 +60,6 @@ def _make_record(rid: UUID, surface: str = "topic") -> MemoryRecord:
         language="en",
     )
 
-
 def _write_encrypted_cache(store: MemoryStore, path: Path, data: dict) -> None:
     from iai_mcp import runtime_graph_cache
     from iai_mcp.crypto import encrypt_field
@@ -75,7 +71,6 @@ def _write_encrypted_cache(store: MemoryStore, path: Path, data: dict) -> None:
         runtime_graph_cache._CACHE_AAD,
     )
     path.write_text(ciphertext, encoding="ascii")
-
 
 def test_decrypt_failure_skips_cache_write(store, tmp_path):
     from iai_mcp import retrieve, runtime_graph_cache
@@ -99,14 +94,13 @@ def test_decrypt_failure_skips_cache_write(store, tmp_path):
 
     loaded = runtime_graph_cache.try_load(store)
     assert loaded is not None, "cache should have been persisted by build_runtime_graph"
-    _, _, payload, _ = loaded
+    _, _, payload, _, _ = loaded
 
     assert str(r_a.id) in payload, "clean record must be cached"
     assert str(r_b.id) not in payload, (
         "poisoned record (decrypt-fail) must NOT be in the cache — "
-        "an empty surface there is the poisoning bug"
+        "an empty surface there is the V2-03 poisoning bug"
     )
-
 
 def test_pipeline_falls_back_to_store_on_empty_surface(store, tmp_path):
     from iai_mcp import pipeline, retrieve
@@ -127,7 +121,6 @@ def test_pipeline_falls_back_to_store_on_empty_surface(store, tmp_path):
         "instead got "
         f"{out.literal_surface!r}"
     )
-
 
 def test_runtime_graph_cache_drops_poisoned_entries_on_load(
     store, tmp_path, capsys
@@ -183,16 +176,16 @@ def test_runtime_graph_cache_drops_poisoned_entries_on_load(
         "outer decode must succeed; if this fails the fixture is wrong, "
         "not the production code"
     )
-    _assignment, _rich_club, payload, _max_degree = loaded
+    _assignment, _rich_club, payload, _max_degree, _node_degrees = loaded
 
     assert payload is not None
     assert str(good_id) in payload, "well-formed entry must survive rehydrate"
     assert str(bad_id) not in payload, (
-        "poisoned (surface='') entry must be dropped"
+        "poisoned (surface='') entry must be dropped — that is V2-03 fix"
     )
 
     captured = capsys.readouterr()
     assert "runtime_graph_cache_drop_poisoned_entry" in captured.err, (
-        "drop must emit a structured stderr event for observability; "
+        "drop must emit a structured stderr event for OPS-12 observability; "
         f"saw stderr={captured.err!r}"
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import sys
@@ -30,7 +31,35 @@ from _recall_helpers import (  # noqa: E402,F401
 )
 
 
-_TEST_PASSPHRASE = "iai-mcp-test-passphrase-2026-04-30"
+_TEST_PASSPHRASE = "iai-mcp-test-passphrase"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _lilli_fast_fsync():
+    """Set LILLI_FSYNC_MODE=fast for the duration of the test session when the
+    lilli storage driver is active and the caller has not already chosen a mode.
+
+    The lilli engine defaults to F_FULLFSYNC on macOS, which flushes the drive
+    controller's DRAM cache to NAND on every commit.  At n=1000 commits per
+    property-test run that adds minutes of latency and trips the pytest-timeout
+    wall.  Test runs verify logical correctness, not power-loss durability, so
+    plain os.fsync is correct here.  Production keeps the F_FULLFSYNC default
+    because this fixture never runs outside pytest.
+
+    The prior value is saved and restored around the yield so in-process tools
+    that inspect LILLI_FSYNC_MODE after the session do not see the test value.
+    """
+    prior = os.environ.get("LILLI_FSYNC_MODE")
+    if (
+        os.environ.get("LILLI_STORAGE_DRIVER") == "lilli"
+        and prior is None
+    ):
+        os.environ["LILLI_FSYNC_MODE"] = "fast"
+    yield
+    if prior is None:
+        os.environ.pop("LILLI_FSYNC_MODE", None)
+    else:
+        os.environ["LILLI_FSYNC_MODE"] = prior
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +88,6 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     import iai_mcp.daemon as _daemon
     import iai_mcp.crypto as _crypto
     import iai_mcp.backup as _backup
-    import iai_mcp.lilli.profile.knobs as _knobs
     monkeypatch.setattr(_hippo, "_DEFAULT_IAI_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_store, "DEFAULT_STORAGE_PATH", fake_root, raising=False)
     monkeypatch.setattr(_conc, "SOCKET_PATH", fake_root / ".daemon.sock", raising=False)
@@ -81,16 +109,8 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
         _daemon, "SESSION_START_CACHE_PATH",
         fake_root / ".session-start-payload.cached.md", raising=False,
     )
-    monkeypatch.setattr(
-        _daemon, "SESSION_START_CACHE_META_PATH",
-        fake_root / ".session-start-payload.cached.meta.json", raising=False,
-    )
     monkeypatch.setattr(_crypto, "_DEFAULT_STORE_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_backup, "DEFAULT_STORE_PATH", str(fake_root), raising=False)
-    monkeypatch.setattr(
-        _knobs, "PROFILE_OVERRIDES_PATH",
-        fake_root / ".profile-knobs.json", raising=False,
-    )
     yield fake_root
 
 
@@ -103,6 +123,66 @@ def _clear_autoflush_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
 def _crypto_passphrase_env(monkeypatch: pytest.MonkeyPatch) -> None:
     if "IAI_MCP_CRYPTO_PASSPHRASE" not in os.environ:
         monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", _TEST_PASSPHRASE)
+
+
+_GUARDED_ENV = (
+    "IAI_MCP_STORE",
+    "LILLI_STORAGE_DRIVER",
+    "IAI_MCP_CRYPTO_PASSPHRASE",
+    "LILLI_FSYNC_MODE",
+    "IAI_MCP_EMBED_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_globals(_lilli_fast_fsync, _crypto_passphrase_env):
+    """Snapshot the load-bearing process-global env vars at setup and restore
+    the exact prior state at teardown.
+
+    A test that mutates one of these vars with a raw ``os.environ`` write would
+    otherwise leak it into every later test in the same process; the leaked
+    value redirects ``MemoryStore(path=None)`` to a wrong or deleted store root
+    (wrong-key reads, empty-store, unable-to-open).  This restores the pristine
+    baseline after each test, so collection order can never poison the suite.
+
+    The snapshot is taken after the baseline env fixtures (fast fsync, the test
+    passphrase) have run, so it captures the intended baseline rather than a
+    pre-baseline empty.  Only the guarded keys are touched -- never a blanket
+    ``os.environ.clear()``, which would wipe HOME/HF_HOME and break the
+    hermetic fixtures.  Restore is symmetric (pop-if-was-absent, set-otherwise),
+    so it composes safely with monkeypatch's own teardown.
+
+    After the env restore, stale (closed) entries are swept from the lilli
+    connection registry so it cannot grow unbounded across the whole suite, and
+    a final ``gc.collect()`` reclaims any already-released background loop or
+    thread objects.  The sweep drops ONLY connections that report themselves
+    closed (identity-checked, mirroring the registry's own self-heal); it never
+    clears the whole registry and never touches a live or borrowed handle.  The
+    gc runs LAST and only reclaims already-released objects -- it is not the
+    mechanism that closes a store (the explicit drains make closure observable).
+    """
+    snapshot = {k: os.environ.get(k) for k in _GUARDED_ENV}
+    yield
+    for key, value in snapshot.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+    try:
+        from iai_mcp.lillibrain import connection as _lilli_conn
+
+        registry = _lilli_conn._LILLI_CONN_REGISTRY
+        for path, conn in list(registry.items()):
+            if getattr(conn, "is_closed", False):
+                # Identity check: only drop the slot if it still maps to this
+                # closed connection, so a concurrent re-register is not clobbered.
+                if registry.get(path) is conn:
+                    registry.pop(path, None)
+    except Exception:  # noqa: BLE001 -- not yet installed in some minimal envs
+        pass
+
+    gc.collect()
 
 
 _AUTOFLUSH_OPT_OUT_ENV = "IAI_MCP_TEST_NO_AUTOFLUSH"
@@ -260,6 +340,23 @@ def hermetic_store(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(dead_socket))
     yield store_root
+
+
+@pytest.fixture
+def _pdf_fixture(tmp_path):
+    """Build a 1-page PDF in tmp_path on demand for ingestion tests.
+
+    Skipped if reportlab is not installed (dev-only dep).
+    """
+    try:
+        from reportlab.pdfgen import canvas
+    except ImportError:
+        pytest.skip("reportlab not installed (dev-only PDF fixture builder)")
+    pdf_path = tmp_path / "fixture.pdf"
+    c = canvas.Canvas(str(pdf_path))
+    c.drawString(100, 750, "This is a test PDF body for the upload integration test.")
+    c.save()
+    yield pdf_path
 
 
 @pytest.fixture(autouse=True)

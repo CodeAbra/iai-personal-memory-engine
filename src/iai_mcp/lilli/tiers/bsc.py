@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
+from iai_mcp.lilli.core import hd_backend as backend
 from iai_mcp.lilli.core.seed import hv_from_seed, seed_from_str
 from iai_mcp.lilli.core.similarity import hamming
 
@@ -92,6 +93,8 @@ def bind(a: bytes, b: bytes) -> bytes:
         raise ValueError(
             f"bind requires equal-length hypervectors, got {len(a)} and {len(b)}"
         )
+    if backend.use_rust():
+        return bytes(backend.native().bsc_bind(a, b))
     aa = np.frombuffer(a, dtype=np.uint8)
     bb = np.frombuffer(b, dtype=np.uint8)
     return np.bitwise_xor(aa, bb).tobytes()
@@ -131,6 +134,38 @@ def bundle(
     if n > max_pairs:
         from iai_mcp.lilli.errors import BundleCapacityError
 
+        # Emit-then-raise: the saturation signal must be recorded before raising,
+        # including when no store is threaded through (degrade to a log-only emit).
+        if store is not None:
+            try:
+                from iai_mcp import events
+
+                events.write_event(
+                    store,
+                    _TELEMETRY_ROLE_SATURATION_KIND,
+                    {
+                        "D": D,
+                        "n_pairs": n,
+                        "max_pairs": max_pairs,
+                        "ratio": n / max_pairs,
+                        "fatal": True,
+                    },
+                    severity="error",
+                    domain="lilli.tiers.bsc",
+                )
+            except Exception:  # noqa: BLE001 — telemetry must never mask the raise
+                log.error(
+                    "role_saturation (fatal) telemetry emit failed", exc_info=True
+                )
+        else:
+            log.error(
+                "BSC bundle saturation at D=%d: %d > %d pairs "
+                "(no store for telemetry)",
+                D,
+                n,
+                max_pairs,
+            )
+
         raise BundleCapacityError(
             f"BSC bundle at D={D} accepts at most {max_pairs} pairs "
             f"({BSC_CAPACITY_DIVISOR}:1 capacity ratio); got {n}. "
@@ -138,11 +173,16 @@ def bundle(
             f"(semantic, higher capacity)."
         )
 
-    bound: list[np.ndarray] = []
-    for role, filler in pairs:
-        bound.append(np.frombuffer(bind(role_hv(role, D=D), filler), dtype=np.uint8))
+    bound_bytes: list[bytes] = [
+        bind(role_hv(role, D=D), filler) for role, filler in pairs
+    ]
 
-    stacked_bytes = np.stack(bound)
+    if backend.use_rust():
+        return bytes(backend.native().bsc_bundle(bound_bytes, D))
+
+    stacked_bytes = np.stack(
+        [np.frombuffer(hv, dtype=np.uint8) for hv in bound_bytes]
+    )
     bits = np.unpackbits(stacked_bytes, axis=1).astype(np.int32)
     sums = bits.sum(axis=0)
     voted = (sums * 2 >= n).astype(np.uint8)
@@ -150,6 +190,8 @@ def bundle(
 
 
 def permute(hv: bytes, shift: int) -> bytes:
+    if backend.use_rust():
+        return bytes(backend.native().bsc_permute(hv, shift))
     bits = np.unpackbits(np.frombuffer(hv, dtype=np.uint8))
     shifted = np.roll(bits, shift)
     return np.packbits(shifted).tobytes()
@@ -158,6 +200,8 @@ def permute(hv: bytes, shift: int) -> bytes:
 def similarity(a: bytes, b: bytes) -> float:
     if len(a) != len(b):
         return 0.0
+    if backend.use_rust():
+        return 1.0 - float(backend.native().bsc_hamming(a, b))
     return 1.0 - hamming(a, b)
 
 

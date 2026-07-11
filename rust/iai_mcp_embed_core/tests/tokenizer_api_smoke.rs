@@ -1,6 +1,6 @@
-//! Tokenizer-API smoke verification — Wave 0.
+//! Tokenizer-API smoke verification.
 //!
-//! Assumption A2 (LOW confidence): the `with_truncation` method
+//! RESEARCH.md Assumption A2 (LOW confidence): the `with_truncation` method
 //! signature on `tokenizers::Tokenizer` 0.23.1 may not match what we assumed
 //! from the HF Python API. This smoke compiles + invokes the actual code path
 //! that Wave 1 will hard-code in `bert.rs`, so if A2 is wrong the failure
@@ -30,7 +30,7 @@ fn truncation_api_compiles_and_runs() {
 
     // The API under test — this is the exact call signature Wave 1 will use
     // in bert.rs::BertEmbedder::load(). If the field names or method names
-    // differ from the additive-mask convention, this fails at compile or at runtime.
+    // differ from RESEARCH.md Pattern 9, this fails at compile or at runtime.
     let trunc = TruncationParams {
         max_length: 512,
         strategy: TruncationStrategy::LongestFirst,

@@ -6,7 +6,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -33,10 +32,10 @@ def built_wrapper() -> Path:
 
 @pytest.fixture(scope="module")
 def daemon_sock() -> "Path":
-    sock_dir_ctx = tempfile.TemporaryDirectory(prefix="iai-sock-")
-    sock_dir = Path(sock_dir_ctx.name)
+    sock_dir = Path(f"/tmp/iai-mcp-tools-{os.getpid()}")
+    sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
-    store_dir = Path(tempfile.mkdtemp(prefix="iai-store-"))
+    store_dir = sock_dir / "store"
     store_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
@@ -44,7 +43,7 @@ def daemon_sock() -> "Path":
     env["IAI_MCP_STORE"] = str(store_dir)
     env.setdefault(
         "IAI_MCP_CRYPTO_PASSPHRASE",
-        "iai-mcp-test-passphrase-2026-04-30",
+        "iai-mcp-test-passphrase",
     )
     env["IAI_DAEMON_IDLE_SHUTDOWN_SECS"] = "300"
     env["PYTHONPATH"] = str(REPO / "src") + os.pathsep + env.get("PYTHONPATH", "")
@@ -91,8 +90,7 @@ def daemon_sock() -> "Path":
     except OSError:
         pass
     try:
-        sock_dir_ctx.cleanup()
-        shutil.rmtree(store_dir, ignore_errors=True)
+        shutil.rmtree(sock_dir, ignore_errors=True)
     except OSError:
         pass
 
@@ -143,7 +141,7 @@ def _initialize(proc: subprocess.Popen, rpc_id: int = 1) -> None:
     proc.stdin.flush()
 
 
-def test_wrapper_lists_twelve_tools(built_wrapper: Path, daemon_sock: Path) -> None:
+def test_wrapper_lists_all_tools(built_wrapper: Path, daemon_sock: Path) -> None:
     proc = _spawn_wrapper(built_wrapper, daemon_sock)
     try:
         _initialize(proc, 1)
@@ -153,6 +151,7 @@ def test_wrapper_lists_twelve_tools(built_wrapper: Path, daemon_sock: Path) -> N
         names = {t["name"] for t in tools}
         assert names == {
             "memory_recall",
+            "memory_search",
             "memory_reinforce",
             "memory_contradict",
             "memory_consolidate",
@@ -165,6 +164,7 @@ def test_wrapper_lists_twelve_tools(built_wrapper: Path, daemon_sock: Path) -> N
             "camouflaging_status",
             "memory_capture",
             "episodes_recent",
+            "memory_temporal_recall",
         }
     finally:
         proc.terminate()

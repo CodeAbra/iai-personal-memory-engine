@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from iai_mcp import core
-from iai_mcp._ipc import start_ipc_server
 
 
 class _ThreadedFakeDaemon:
@@ -47,7 +44,7 @@ class _ThreadedFakeDaemon:
 
             async def _serve() -> None:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                self._server, _addr, _cleanup = await start_ipc_server(_handle)
+                self._server = await asyncio.start_unix_server(_handle, path=str(self.path))
                 self._ready.set()
                 async with self._server:
                     await self._server.serve_forever()
@@ -84,13 +81,10 @@ class _ThreadedFakeDaemon:
 
 
 @pytest.fixture
-def tmp_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def tmp_socket(tmp_path: Path) -> Path:
     candidate = tmp_path / "d.sock"
     if len(str(candidate)) > 100:
         candidate = Path(tempfile.mkdtemp(prefix="iai-sock-")) / "d.sock"
-    # Per-test endpoint isolation: start_ipc_server + open_ipc_connection resolve
-    # through this (unix socket on POSIX, TCP "<path>.port" on Windows).
-    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(candidate))
     return candidate
 
 
@@ -119,8 +113,7 @@ async def _run_fake_server(
                 pass
 
     sock.parent.mkdir(parents=True, exist_ok=True)
-    server, _addr, _cleanup = await start_ipc_server(_handle)
-    return server
+    return await asyncio.start_unix_server(_handle, path=str(sock))
 
 
 def test_consent_false_short_circuits_no_socket_touch(
@@ -129,12 +122,10 @@ def test_consent_false_short_circuits_no_socket_touch(
 
     async def _explode(*args, **kwargs):
         raise AssertionError(
-            "C2 violation: daemon connection reached with consent=False"
+            "C2 violation: asyncio.open_unix_connection reached with consent=False"
         )
 
-    # Patch the actual connection entry point core uses (cross-platform), not
-    # the POSIX-only asyncio.open_unix_connection.
-    monkeypatch.setattr("iai_mcp._ipc.open_ipc_connection", _explode)
+    monkeypatch.setattr(asyncio, "open_unix_connection", _explode)
 
     result = asyncio.run(
         core.handle_initiate_sleep_mode({"consent": False, "reason": "not ready"})

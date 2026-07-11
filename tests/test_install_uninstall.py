@@ -26,9 +26,9 @@ def _dry_run_env() -> dict[str, str]:
 @pytest.fixture(autouse=True)
 def _scripts_exist() -> None:
     if not INSTALL_SH.exists():
-        pytest.skip(f"{INSTALL_SH} missing — create scripts/install.sh first")
+        pytest.skip(f"{INSTALL_SH} missing")
     if not UNINSTALL_SH.exists():
-        pytest.skip(f"{UNINSTALL_SH} missing — create scripts/uninstall.sh first")
+        pytest.skip(f"{UNINSTALL_SH} missing")
 
 
 @pytest.mark.skipif(not _bash_available(), reason="bash unavailable")

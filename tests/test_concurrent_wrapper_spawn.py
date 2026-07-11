@@ -37,7 +37,7 @@ def test_launchagent(tmp_path):
     if os.environ.get("IAI_MCP_SKIP_LAUNCHCTL_TESTS") == "1":
         pytest.skip("IAI_MCP_SKIP_LAUNCHCTL_TESTS=1")
 
-    sock_dir = tmp_path / "sock"
+    sock_dir = Path(f"/tmp/iai-cspawn-{os.getpid()}-{id(tmp_path) & 0xFFFFFF:x}")
     sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
     if sock_path.exists():

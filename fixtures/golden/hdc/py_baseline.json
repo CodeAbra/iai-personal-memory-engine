@@ -1,0 +1,15 @@
+{
+  "bsc_bundle_ns": 45916.216587647796,
+  "bsc_bundle_vote_ns": 33654.92499433458,
+  "from_embedding_ns": 155285.8124487102,
+  "hamming_ns": 1990.3474999591706,
+  "iters": {
+    "bsc_bundle": 5000,
+    "bsc_bundle_vote": 5000,
+    "from_embedding": 2000,
+    "hamming": 50000
+  },
+  "machine": "arm64 Darwin",
+  "method": "timeit",
+  "python": "3.12.13"
+}

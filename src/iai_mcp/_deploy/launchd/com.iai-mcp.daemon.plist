@@ -17,18 +17,18 @@
     <true/>
 
     <!--
-      KeepAlive policy uses ONLY `Crashed=true`. With this policy,
-      launchd respawns ONLY on a non-zero exit (the lifecycle state
-      machine exits 0 gracefully on Hibernation; an MCP wrapper
-      kickstart is the sole wake mechanism in steady state).
-      `SuccessfulExit=false` is intentionally absent: the exit code
-      is uniformly 0 for graceful shutdown, so that key would cause
-      a respawn loop.
+      KeepAlive: `SuccessfulExit=false` respawns after ANY unsuccessful
+      death — including SIGKILL (jetsam/OOM), which launchd does NOT count
+      as `Crashed`. Graceful paths (Hibernation, `daemon stop` SIGTERM
+      handler) exit 0 = successful, so launchd leaves the job down and the
+      MCP wrapper kickstart stays the sole wake mechanism in steady state.
     -->
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>
         <true/>
+        <key>SuccessfulExit</key>
+        <false/>
     </dict>
 
     <key>ThrottleInterval</key>
@@ -87,6 +87,14 @@
           ownership the same way under either install path.
         -->
         <key>IAI_MCP_LAUNCHD_MANAGED</key>
+        <string>1</string>
+        <!-- mimalloc page decommit: return freed pages to the OS immediately
+             instead of holding them resident until the heap next re-grows. -->
+        <key>MIMALLOC_DECOMMIT_DELAY</key>
+        <string>0</string>
+        <key>MIMALLOC_SEGMENT_DECOMMIT_DELAY</key>
+        <string>0</string>
+        <key>MIMALLOC_ALLOW_DECOMMIT</key>
         <string>1</string>
         <key>LIFECYCLE_DROWSY_AFTER_SEC</key>
         <string>300</string>

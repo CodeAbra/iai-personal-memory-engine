@@ -1,0 +1,38 @@
+{
+  "n_records": 500,
+  "pass": true,
+  "per_column": {
+    "data_json": {
+      "bytes_compressed": 39930,
+      "bytes_uncompressed": 38298,
+      "n_values": 500,
+      "ratio_reduction": -0.042613
+    },
+    "literal_surface": {
+      "bytes_compressed": 233018,
+      "bytes_uncompressed": 412665,
+      "n_values": 500,
+      "ratio_reduction": 0.435334
+    },
+    "profile_modulation_gain_json": {
+      "bytes_compressed": 61132,
+      "bytes_uncompressed": 71999,
+      "n_values": 500,
+      "ratio_reduction": 0.150933
+    },
+    "provenance_json": {
+      "bytes_compressed": 113560,
+      "bytes_uncompressed": 202112,
+      "n_values": 500,
+      "ratio_reduction": 0.438133
+    }
+  },
+  "seed": 20260618,
+  "total": {
+    "bytes_compressed": 447640,
+    "bytes_uncompressed": 725074,
+    "n_values": 2000,
+    "ratio_reduction": 0.382629
+  },
+  "zstd_level": 3
+}

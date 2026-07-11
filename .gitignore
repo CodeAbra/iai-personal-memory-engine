@@ -63,3 +63,6 @@ Thumbs.db
 *.lancedb
 lancedb/
 runtime_*.json
+
+# Rust build output
+target/

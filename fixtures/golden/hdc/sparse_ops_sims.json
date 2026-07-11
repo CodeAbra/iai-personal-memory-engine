@@ -1,0 +1,14 @@
+{
+  "byte_order": "le",
+  "dtype": "f64",
+  "format": "raw_bytes",
+  "generated_by": "scripts/golden/dump_hdc_ops.py",
+  "name": "sparse_ops_sims",
+  "payload": null,
+  "sha256": "ae2cc60d29de85c7ed46adf5bb27e89a62bdafc75e3f8822473568055af8b86e",
+  "shape": [
+    4
+  ],
+  "source": "src/iai_mcp/lilli/tiers/sparse_vsa.py jaccard similarity for pairs [(a,b),(a,c),(b,c),(a,a)]",
+  "subsystem": "hdc"
+}
