@@ -460,6 +460,7 @@ fn main() {
             // Dock/Finder re-activation must bring a window back, or the app
             // looks broken ("won't open"). Re-create it and let the supervisor
             // re-point it at the server on its next tick.
+            #[cfg(target_os = "macos")]
             RunEvent::Reopen {
                 has_visible_windows,
                 ..
