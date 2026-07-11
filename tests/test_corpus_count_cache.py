@@ -443,7 +443,10 @@ def test_cached_count_never_raises_and_degrades_to_filtered_count(store):
         )
         store.db._conn.commit()
 
-    # Live counts with filters
+    # Live counts with filters. The tombstone above was a raw SQL bypass —
+    # invisible to the hooked write paths that keep the cache exact — so clear
+    # the cache first, or the baseline reads a legitimately-stale value.
+    _force_empty_count_cache(store)
     live_active = store.active_records_count()
     live_pending = store.pending_records_count()
     live_edges = store.edges_count()
@@ -762,6 +765,10 @@ def test_write_path_untombstone_active_tracks(store):
         )
         store.db._conn.commit()
 
+    # Raw SQL bypass — same discipline as the final read below: hooked write
+    # paths keep the cache exact, but a raw UPDATE is invisible to them, so
+    # clear before reading the baseline.
+    _force_empty_count_cache(store)
     before = store.active_records_count()
 
     # Un-tombstone

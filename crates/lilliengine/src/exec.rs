@@ -2308,7 +2308,7 @@ type OrderedTag = (u8, SortKey);
 /// decodes unrelated columns such as the embedding BLOB), maintained
 /// incrementally on insert/update/delete (no-op when unbuilt), cleared on
 /// rollback and tainted commit.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrderedColIndex {
     /// The single column this index covers (e.g. `"ts"` for events).
     column: String,

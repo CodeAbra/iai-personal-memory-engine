@@ -64,7 +64,7 @@ WATCHDOG_PROBE_TIMEOUT_SEC: float = float(
 WATCHDOG_FAILURE_DEBOUNCE_N: int = int(
     os.environ.get("IAI_MCP_WATCHDOG_FAILURE_DEBOUNCE_N", "3"),
 )
-# Watchdog ceiling (4.0 GiB). Calibrated against the current
+# Watchdog ceiling (4.0 GiB). Recalibrated 2026-06-19 against the post-v9.3
 # corpus (25k+ episodic records, 270 MB SQLite, 17+ MB hnsw, plus the steady-state
 # warm-on-WAKE cache footprint and the deferred-capture drain loop). The previous
 # 2.5 GiB cap was set in mid-June when the corpus + warm caches sat near 1.72 GiB;
@@ -140,16 +140,34 @@ async def _hippea_cascade_loop(
     store, shutdown: asyncio.Event, *, _clock=time.monotonic,
 ) -> None:
     from iai_mcp import retrieve
-    from iai_mcp.daemon_state import load_state, save_state
+    from iai_mcp.daemon_state import daemon_state_path, load_state, save_state
     from iai_mcp.hippea_cascade import _install_warm, compute_and_fetch_warm
     from iai_mcp.lock_protocol import check_consolidation_intent
     # late import so the package attribute is re-fetched and a monkeypatch stays visible
     from iai_mcp.daemon import write_event
 
+    # mtime short-circuit: this loop polls a small JSON file around the clock
+    # and the file is idle almost always — skip the read+parse when it has not
+    # changed since the last tick and that tick carried no pending request.
+    _last_state_mtime_ns: "int | None" = None
+    _last_had_pending = False
     while not shutdown.is_set():
         try:
-            state = await asyncio.to_thread(load_state)
-            req = state.get("hippea_cascade_request") or {}
+            try:
+                _mtime_ns = daemon_state_path().stat().st_mtime_ns
+            except OSError:
+                _mtime_ns = None
+            if (
+                _mtime_ns is not None
+                and _mtime_ns == _last_state_mtime_ns
+                and not _last_had_pending
+            ):
+                req = {}
+            else:
+                _last_state_mtime_ns = _mtime_ns
+                state = await asyncio.to_thread(load_state)
+                req = state.get("hippea_cascade_request") or {}
+                _last_had_pending = bool(req.get("pending"))
             if req.get("pending"):
                 elapsed = _clock() - _pkg()._last_cascade_completed_at
                 if elapsed < HIPPEA_CASCADE_MIN_INTERVAL_SEC:

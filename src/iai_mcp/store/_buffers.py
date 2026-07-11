@@ -51,15 +51,27 @@ def flush_record_buffer(store: "MemoryStore") -> int:
         else:
             _record_buffer.pop(store_id, None)
         _record_last_flush_at[store_id] = datetime.now(timezone.utc)
-        # Invalidate the store-level corpus-count cache so the next call to
-        # active_records_count() recomputes the live SQL count rather than
-        # serving a pre-flush stale value.  Guarded against a missing or not-yet-
-        # constructed cache (e.g. a bare HippoDB access without a MemoryStore).
+        # The flush's count delta is known exactly (rows are classified by the
+        # same predicates the COUNT queries use), so shift the cached values in
+        # place — dropping them here forced a full filtered scan per flush.
+        # Guarded against a missing or not-yet-constructed cache (e.g. a bare
+        # HippoDB access without a MemoryStore).
         try:
             _cc = getattr(store, "_corpus_count_cache", None)
             if _cc is not None:
-                _cc.invalidate("active")
-        except Exception:  # noqa: BLE001 -- cache invalidation MUST NOT crash flush
+                _n_active = _n_pending = 0
+                for _r in pending:
+                    if _r.get("tombstoned_at") is not None:
+                        continue
+                    if int(_r.get("embedding_pending", 0) or 0):
+                        _n_pending += 1
+                    else:
+                        _n_active += 1
+                if _n_active:
+                    _cc.adjust("active", _n_active)
+                if _n_pending:
+                    _cc.adjust("pending", _n_pending)
+        except Exception:  # noqa: BLE001 -- cache adjustment MUST NOT crash flush
             pass
         # Upsert each flushed row into the resident exact-cosine matrix. The
         # flushed items are DICTS (the same shape written to SQL above), not

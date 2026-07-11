@@ -750,10 +750,10 @@ def background_store_work(
 # Serializes the cache-MISS rebuild of the runtime graph across concurrent
 # callers. The rebuild streams the whole corpus and spawns a child for community
 # detection plus centrality; under a stale or absent cache several callers can
-# fire at once and each run the full rebuild, spawning redundant children. A
-# single-flight guard around the rebuild section collapses them to one: the
-# first caller rebuilds and saves the cache, the rest re-check the
-# freshly-saved cache and take the light path. The
+# fire at once and each run the full rebuild, spawning redundant children.
+# A single-flight guard around the rebuild
+# section collapses them to one: the first caller rebuilds and saves the
+# cache, the rest re-check the freshly-saved cache and take the light path. The
 # daemon's callers run in `asyncio.to_thread` worker threads, so a threading
 # lock serializes them. The cheap cache-hit probe runs OUTSIDE this lock, so the
 # common warm path stays lock-free.
@@ -844,7 +844,7 @@ def _warm_graph_bundle_if_valid(store: MemoryStore):
     if cache_key != runtime_graph_cache._cache_key(store):
         return None
     dirty_delta = runtime_graph_cache.get_dirty_counter() - dirty_at_build
-    if dirty_delta > runtime_graph_cache._FUSE_DIRTY_THRESHOLD:
+    if dirty_delta > runtime_graph_cache._fuse_dirty_threshold(store):
         return None
     if (time.monotonic() - built_mono) > runtime_graph_cache._FUSE_MAX_AGE_SECONDS:
         return None
@@ -866,18 +866,46 @@ def _memoize_graph_bundle(store: MemoryStore, bundle) -> None:
         log.warning("warm graph bundle memoization failed: %s", exc)
 
 
+_REFRESH_COOLDOWN_SECONDS: float = 120.0
+
+
+def _refresh_cooldown_s() -> float:
+    import os
+
+    raw = os.environ.get("IAI_MCP_GRAPH_REFRESH_COOLDOWN_S")
+    if raw is None:
+        return _REFRESH_COOLDOWN_SECONDS
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _REFRESH_COOLDOWN_SECONDS
+    return val if val >= 0 else _REFRESH_COOLDOWN_SECONDS
+
+
 def _refresh_graph_bundle_async(store: MemoryStore) -> "threading.Thread | None":
     """Single-flight background rebuild + re-memoization of the warm bundle.
 
+    Rate-limited: a full-corpus refresh costs seconds of CPU, and ambient
+    write churn re-keys the memo far more often than the graph meaningfully
+    changes. Between refreshes the stale-while-revalidate serve stays correct
+    (the sync hook keeps nodes live; recall reads the index). An EXPLICIT
+    freshness demand is never throttled — invalidation unlinks the disk cache,
+    which routes the next build INLINE, bypassing this refresher entirely.
+
     Returns the refresher thread (for deterministic joins in tests), or None
-    when a refresh is already in flight.
+    when a refresh is already in flight or inside the cooldown window.
     """
+    now_mono = time.monotonic()
+    last = getattr(store, "_graph_refresh_last_mono", 0.0)
+    if now_mono - last < _refresh_cooldown_s():
+        return None
     latch = getattr(store, "_graph_refresh_inflight", None)
     if latch is None:
         latch = threading.Lock()
         store._graph_refresh_inflight = latch
     if not latch.acquire(blocking=False):
         return None
+    store._graph_refresh_last_mono = now_mono
 
     def _refresh() -> None:
         try:

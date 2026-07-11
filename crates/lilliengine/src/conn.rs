@@ -94,6 +94,12 @@ pub struct PersistedTableIndex {
     /// admits a built one into `id_caches`.
     #[serde(default)]
     pub id_index: IdIndex,
+    /// The built ORDER BY index, persisted under the SAME fingerprint so a cold
+    /// process serves its first ordered scan from the sidecar instead of paying
+    /// the population scan. Unbuilt when the writer never ran an ordered query
+    /// on the table; the load path only admits a built one into `ordered_caches`.
+    #[serde(default)]
+    pub ordered_index: OrderedColIndex,
 }
 
 /// A transferable snapshot of built index pairs (Arc-backed — cloning copies
@@ -102,7 +108,7 @@ pub struct PersistedTableIndex {
 /// by [`Connection::adopt_built_indexes`] on a freshly-opened reader.
 #[derive(Debug, Clone, Default)]
 pub struct IndexSnapshot {
-    tables: Vec<(String, i64, ColIndex, IdIndex)>,
+    tables: Vec<(String, i64, ColIndex, IdIndex, OrderedColIndex)>,
 }
 
 /// A single result column's description, mirroring the DB-API `description`
@@ -399,7 +405,8 @@ impl Connection {
         // `open_read_only` (both route through `from_store`), so the daemon-down
         // RO recall reader loads-not-rebuilds for free. The id-index rides the
         // same gate, so a warm boot serves `WHERE id = ?` with no build scan.
-        let (mut col_caches, mut id_caches) = load_col_indexes(&store, &meta, &catalog, &root_map);
+        let (mut col_caches, mut id_caches, ordered_caches) =
+            load_col_indexes(&store, &meta, &catalog, &root_map);
         // A read-write connection maintains its indexes per committed write, so
         // it must own private postings: materialize the copy-on-write clone HERE,
         // once, on the open (boot) path — never lazily on the first awake-path
@@ -459,7 +466,7 @@ impl Connection {
             id_caches,
             conflict_caches: HashMap::new(),
             col_caches,
-            ordered_caches: HashMap::new(),
+            ordered_caches,
             bare_count_cache: HashMap::new(),
             parse_cache: HashMap::new(),
         })
@@ -528,7 +535,15 @@ impl Connection {
                 .get(table)
                 .cloned()
                 .unwrap_or_default();
-            tables.push((table.clone(), generation, cidx.clone(), iidx));
+            // The ordered index rides the same generation stamp: rebuilt from
+            // scratch by every fresh reader otherwise (its population scan is
+            // the dominant reopen cost after the col/id indexes are adopted).
+            let oidx = self
+                .ordered_caches
+                .get(table)
+                .cloned()
+                .unwrap_or_default();
+            tables.push((table.clone(), generation, cidx.clone(), iidx, oidx));
         }
         IndexSnapshot { tables }
     }
@@ -540,7 +555,7 @@ impl Connection {
     /// table is skipped (the lazy build stays the always-correct fallback);
     /// an already-built local index is never overwritten.
     pub fn adopt_built_indexes(&mut self, snapshot: &IndexSnapshot) {
-        for (table, generation, cidx, iidx) in &snapshot.tables {
+        for (table, generation, cidx, iidx, oidx) in &snapshot.tables {
             let already_built = self
                 .col_caches
                 .get(table)
@@ -568,7 +583,25 @@ impl Connection {
             {
                 self.id_caches.insert(table.clone(), iidx.clone());
             }
+            if oidx.is_built() && !self
+                .ordered_caches
+                .get(table)
+                .map(|o| o.is_built())
+                .unwrap_or(false)
+            {
+                self.ordered_caches.insert(table.clone(), oidx.clone());
+            }
         }
+    }
+
+    /// True when `table`'s ORDER BY index is resident and built — exposed so
+    /// integration tests can assert a sidecar load or a snapshot adoption
+    /// admitted it without paying the population scan.
+    pub fn ordered_index_is_built(&self, table: &str) -> bool {
+        self.ordered_caches
+            .get(table)
+            .map(|o| o.is_built())
+            .unwrap_or(false)
     }
 
     /// Parse `sql` into its AST, reusing a cached parse when one exists.
@@ -702,6 +735,15 @@ impl Connection {
             } else {
                 IdIndex::new()
             };
+            // The ordered index is persisted only when the writer already
+            // built one (it exists per ORDER BY usage, never force-built) —
+            // an unbuilt default round-trips as "nothing to adopt".
+            let ordered_snapshot = self
+                .ordered_caches
+                .get(&table)
+                .filter(|o| o.is_built())
+                .cloned()
+                .unwrap_or_default();
             let generation = self.meta.col_generation(&self.store, &table)?;
             let row_count = tree.count_cells().map_err(open_err)?;
             tables.push(PersistedTableIndex {
@@ -711,6 +753,7 @@ impl Connection {
                 row_count,
                 index: col_snapshot,
                 id_index: id_snapshot,
+                ordered_index: ordered_snapshot,
             });
         }
 
@@ -1801,8 +1844,12 @@ fn load_col_indexes(
     meta: &MetaTable,
     catalog: &Catalog,
     root_map: &BTreeMap<String, u32>,
-) -> (HashMap<String, ColIndex>, HashMap<String, IdIndex>) {
-    let empty = || (HashMap::new(), HashMap::new());
+) -> (
+    HashMap<String, ColIndex>,
+    HashMap<String, IdIndex>,
+    HashMap<String, OrderedColIndex>,
+) {
+    let empty = || (HashMap::new(), HashMap::new(), HashMap::new());
     let sidecar = col_index_sidecar_path(store.path());
     let Some(envelope) = cached_sidecar_envelope(&sidecar) else {
         return empty();
@@ -1812,6 +1859,7 @@ fn load_col_indexes(
     }
     let mut loaded: HashMap<String, ColIndex> = HashMap::new();
     let mut loaded_ids: HashMap<String, IdIndex> = HashMap::new();
+    let mut loaded_ordered: HashMap<String, OrderedColIndex> = HashMap::new();
     for entry in &envelope.tables {
         let Some(&root) = root_map.get(&entry.table) else {
             continue;
@@ -1843,9 +1891,15 @@ fn load_col_indexes(
         if entry.id_index.is_built() {
             loaded_ids.insert(entry.table.clone(), entry.id_index.clone());
         }
+        // The ordered index rides the SAME fingerprint gate; only a built one
+        // (the writer had run an ordered query on the table) is admitted, so a
+        // cold process serves its first ORDER BY from the sidecar scan-free.
+        if entry.ordered_index.is_built() {
+            loaded_ordered.insert(entry.table.clone(), entry.ordered_index.clone());
+        }
         loaded.insert(entry.table.clone(), entry.index.clone());
     }
-    (loaded, loaded_ids)
+    (loaded, loaded_ids, loaded_ordered)
 }
 
 /// How many distinct sidecar paths the process-wide decoded-envelope cache

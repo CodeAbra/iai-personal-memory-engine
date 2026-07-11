@@ -124,6 +124,8 @@ def test_small_drift_does_not_trigger_betweenness_rebuild(
     # drift of 4 forces a rebuild.
     monkeypatch.setenv("IAI_MCP_RGC_DRIFT_ABS", "3")
     monkeypatch.setenv("IAI_MCP_RGC_DRIFT_FRAC", "0.0")
+    # The refresher joins below must be deterministic, not cooldown-gated.
+    monkeypatch.setenv("IAI_MCP_GRAPH_REFRESH_COOLDOWN_S", "0")
 
     _seed_connected(store, n=16, seed_base=200)
     runtime_graph_cache.invalidate(store)

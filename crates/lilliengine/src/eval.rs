@@ -608,7 +608,7 @@ const CLASS_BLOB: u8 = 3;
 
 /// A within-class sort key that orders numbers, text, and blobs correctly while
 /// remaining `Ord` (numbers compare by value, including int↔real).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SortKey {
     /// The NULL placeholder; never participates in a within-class compare.
     Null,

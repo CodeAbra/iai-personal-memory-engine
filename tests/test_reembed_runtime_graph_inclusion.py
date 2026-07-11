@@ -277,20 +277,25 @@ def test_reembed_flip_changes_both_counts_and_cache_key(store):
     Both-count guard:
     - active must increase by the number of rows flipped
     - pending must decrease by the same number
-    - _cache_key before-reembed != _cache_key after-reembed (raw pending
-      count is folded in unwindowed so a single flip changes the key)
+    - the on-disk warm-graph cache is GONE after the flip: the key
+      deliberately ignores pending rows (they are never graph nodes, and
+      keying on them re-keyed the bundle on every ambient capture), so the
+      flip's freshness demand travels as an explicit unlink instead
 
     The existing reembed-inclusion assertions above verify the newly-embedded
     row lands in the warm graph; this test verifies the count arithmetic and
-    key-change property independently of graph structure.
+    invalidation property independently of graph structure.
     """
     recs = _seed_connected(store, n=8, seed_base=300)
     pid = _insert_pending(store, "both-count gate pending surface")
 
+    # A real cache file must exist so the unlink assertion below has teeth.
+    retrieve.build_runtime_graph(store)
+    assert runtime_graph_cache._cache_path(store).exists()
+
     # Snapshot counts before reembed
     active_before = store.active_records_count()
     pending_before = store.pending_records_count()
-    key_before = runtime_graph_cache._cache_key(store)
 
     # Clear the count cache (no-op on HEAD, meaningful once the count cache lands)
     _force_empty_count_cache_reembed_ext(store)
@@ -305,7 +310,6 @@ def test_reembed_flip_changes_both_counts_and_cache_key(store):
     # Counts after reembed
     active_after = store.active_records_count()
     pending_after = store.pending_records_count()
-    key_after = runtime_graph_cache._cache_key(store)
 
     # (a) active must increase by 1
     assert active_after == active_before + 1, (
@@ -321,10 +325,11 @@ def test_reembed_flip_changes_both_counts_and_cache_key(store):
         "will hold the stale higher value and fail here"
     )
 
-    # (c) _cache_key must change (raw pending is folded in unwindowed)
-    assert key_after != key_before, (
-        f"_cache_key must change after a reembed flip so the warm build "
-        f"re-streams the newly-embedded row; key before={key_before}, "
-        f"key after={key_after} — a cache that keeps the stale pending count "
-        "leaves the key unchanged and the embedded row stays absent from recall"
+    # (c) the flip's freshness demand is an explicit unlink of the warm-graph
+    # cache — a missing file refuses every stale serve, so the next build
+    # re-streams the corpus including the newly-embedded row
+    assert not runtime_graph_cache._cache_path(store).exists(), (
+        "the wake sequence must unlink the warm-graph cache after a reembed "
+        "flip; a surviving cache file lets the next build serve a graph that "
+        "omits the newly-embedded row"
     )

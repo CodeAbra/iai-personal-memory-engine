@@ -116,6 +116,28 @@ class CorpusCountCache:
             if gen == self._gen:
                 self._data[key] = value
 
+    def adjust(self, key: str, delta: int) -> None:
+        """Shift a cached count by a known-exact *delta* instead of dropping it.
+
+        The hot write paths (capture flush, pending insert, reembed flip) know
+        their exact count delta; dropping the value there forces the next read
+        into a full filtered COUNT — on the lilli engine a scan of every leaf
+        page, paid over and over under ambient write churn. A miss stays a
+        miss (there is nothing to shift; the next read recomputes).
+
+        The generation is bumped either way: an in-flight recompute snapshotted
+        its generation BEFORE this write committed, so its COUNT may predate
+        the write — ``put_if_gen`` must refuse it exactly as it would after an
+        ``invalidate``. Fires ``on_invalidate`` after the lock is released, so
+        downstream staleness signals (RO pools) see adjusted writes exactly as
+        they see invalidating ones.
+        """
+        with self._lock:
+            self._gen += 1
+            if key in self._data:
+                self._data[key] += delta
+        self._fire_on_invalidate()
+
     def invalidate(self, *keys: str) -> None:
         """Remove the named *keys* from the cache.
 

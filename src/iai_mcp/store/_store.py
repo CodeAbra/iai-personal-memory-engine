@@ -289,6 +289,17 @@ class MemoryStore:
 
         self.db.register_corpus_count_invalidate(_invalidate_corpus_count_via_weakref)
 
+        _weak_adjust = weakref.WeakMethod(self._adjust_corpus_count)
+
+        def _adjust_corpus_count_via_weakref(key: str, delta: int) -> None:
+            fn = _weak_adjust()
+            if fn is not None:
+                fn(key, delta)
+
+        _register_adjust = getattr(self.db, "register_corpus_count_adjust", None)
+        if _register_adjust is not None:
+            _register_adjust(_adjust_corpus_count_via_weakref)
+
         # Resident exact-cosine authority: the object is constructed eagerly so
         # the write seams below always have somewhere to feed, but the matrix
         # itself stays cold until the first exact_top_k call (lazy build keeps
@@ -325,6 +336,19 @@ class MemoryStore:
         """
         try:
             self._corpus_count_cache.invalidate(*keys)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _adjust_corpus_count(self, key: str, delta: int) -> None:
+        """Shift one cached corpus count by a known-exact write delta.
+
+        The exact-delta twin of ``_invalidate_corpus_count``: hot write paths
+        that know precisely how many rows they changed keep the cached value
+        live instead of forcing the next reader into a full filtered COUNT.
+        Best-effort, same as the invalidation funnel.
+        """
+        try:
+            self._corpus_count_cache.adjust(key, delta)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1192,12 +1216,20 @@ class MemoryStore:
 
         def _on_flushed(batch: list) -> None:
             # The async write queue calls on_flushed AFTER adapter.add writes the
-            # rows to SQL, so the active count in SQL has already increased.
-            # Invalidate before notifying the graph hook so any hook that
-            # immediately reads the count sees the post-flush live value.
+            # rows to SQL, so the active count in SQL has already increased by
+            # exactly the batch's active rows — shift the cached count in place
+            # before notifying the graph hook so any hook that immediately
+            # reads the count sees the post-flush live value.
             try:
-                self._invalidate_corpus_count("active")
-            except Exception:  # noqa: BLE001 -- invalidation must not crash flush
+                n_active = sum(
+                    1
+                    for rec in batch
+                    if getattr(rec, "tombstoned_at", None) is None
+                    and not int(getattr(rec, "embedding_pending", 0) or 0)
+                )
+                if n_active:
+                    self._adjust_corpus_count("active", n_active)
+            except Exception:  # noqa: BLE001 -- adjustment must not crash flush
                 pass
             for rec in batch:
                 fire_hook("insert", rec)
@@ -1533,7 +1565,7 @@ class MemoryStore:
         """Resolve a record id by an exact tag match.
 
         Indexed equality lookup on ``record_tags(record_id, tag)`` — no scan
-        of ``records.tags_json``. Falls back to the LIKE-scan only when
+        of ``records.tags_json``. Falls back to the legacy LIKE-scan only when
         the one-time backfill (``migrate_record_tags_backfill``) failed for
         this store instance, so a store whose tag index could not be
         populated still resolves correctly rather than silently returning
@@ -1548,7 +1580,7 @@ class MemoryStore:
         still exists in ``records`` wins. ``record_tags`` rows are written
         in the same relative order as their owning ``records`` row (each
         record's tags are upserted immediately after that record's insert, in
-        the same transaction), so this reproduces the LIKE-scan's
+        the same transaction), so this reproduces the pre-index LIKE-scan's
         natural table-scan (insertion order) first-match semantics. The
         existence re-check also guards against an orphaned ``record_tags``
         row surviving a swallowed ``_delete_record_tags`` failure.
@@ -1632,7 +1664,7 @@ class MemoryStore:
         return True
 
     def _find_record_by_tag_like_scan(self, tag: str) -> UUID | None:
-        """The LIKE-scan fallback path
+        """The pre-index LIKE-scan implementation, kept as the fallback path
         for the backfill-failed edge case only (never a silent per-call
         fallback — gated on ``_record_tags_backfill_ok`` in
         ``find_record_by_tag``).
@@ -1831,7 +1863,7 @@ class MemoryStore:
         # A concurrent WAL checkpoint fences the snapshot ("read-only snapshot
         # invalidated") — but because the cursor advances by id, a reopen
         # resumes exactly where it left off instead of re-scanning from the
-        # start. Forward progress is therefore guaranteed at any corpus size.
+        # start. Forward progress is therefore guaranteed at any corpus size:
         import sqlite3 as _sqlite3
 
         from iai_mcp.hippo._ro_pool import _RO_SNAPSHOT_FENCE_MARKER

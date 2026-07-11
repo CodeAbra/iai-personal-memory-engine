@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -35,6 +36,23 @@ rebuild_ready: threading.Event = threading.Event()
 CACHE_VERSION: str = "62-02-v6"
 
 _STALENESS_WINDOW: int = 10
+
+
+def _quantize_count(count: int) -> int:
+    """Quantize a corpus count for the cache key: fixed 10-wide steps below
+    200, then geometric ~5%-wide buckets (monotone across the seam).
+
+    A FIXED step at production scale flips the key every few ambient captures,
+    and every flip re-keys the warm bundle and spawns a full-corpus background
+    refresh — the daemon burns a core rebuilding a graph nobody asked to
+    change. Geometric buckets keep the flip rate proportional to how much the
+    corpus actually changed at any scale.
+    """
+    if count < 0:
+        return count
+    if count < 200:
+        return count // _STALENESS_WINDOW
+    return 20 + int(math.log(count / 200.0) / math.log(1.05))
 LEGACY_CACHE_VERSION_PLAINTEXT: str = "06-02-v1"
 
 _CACHE_AAD: bytes = b"runtime-graph-cache:v3"
@@ -45,6 +63,23 @@ CACHE_FILENAME: str = "runtime_graph_cache.json"
 _FUSE_MAX_AGE_SECONDS: float = 25.0 * 3600.0
 
 _FUSE_DIRTY_THRESHOLD: int = 50
+
+
+def _fuse_dirty_threshold(store: Any) -> int:
+    """Corpus-scaled dirty fuse: 50 writes is a rewrite at test scale but a
+    normal hour of ambient churn at 37k records — a fixed fuse there declares
+    the warm bundle stale over and over for a corpus that barely moved. ~2% of
+    the corpus, floored at the base constant so small corpora keep
+    byte-identical fuse behavior."""
+    try:
+        _cc = getattr(store, "_corpus_count_cache", None)
+        n = _cc.get("active") if _cc is not None else None
+        if n is None:
+            n = int(store.active_records_count())
+        return max(_FUSE_DIRTY_THRESHOLD, int(n) // 50)
+    except Exception:  # noqa: BLE001 -- fuse sizing must never break a read
+        return _FUSE_DIRTY_THRESHOLD
+
 
 _dirty_counter: int = 0
 _DIRTY_COUNTER_LOCK = threading.Lock()
@@ -637,11 +672,10 @@ def _cache_key(store: Any) -> tuple:
         try:
             _cached_active = _cc.get("active")
             _cached_edges = _cc.get("edges")
-            _cached_pending = _cc.get("pending")
         except Exception:  # noqa: BLE001 -- cache access must never break key derivation
-            _cached_active = _cached_edges = _cached_pending = None
+            _cached_active = _cached_edges = None
     else:
-        _cached_active = _cached_edges = _cached_pending = None
+        _cached_active = _cached_edges = None
 
     if _cached_active is not None:
         records_count = int(_cached_active)
@@ -665,26 +699,16 @@ def _cache_key(store: Any) -> tuple:
             except (OSError, ValueError, KeyError, AttributeError):
                 edges_count = -1
 
-    # Raw pending count, NOT bucketed: a re-embed flips a row from pending to
-    # embedded, dropping the count by one. Dividing by the staleness window
-    # would re-absorb that single flip and keep serving the pre-re-embed graph,
-    # which omits the now-embedded row. The raw count makes the flip change the
-    # key so the warm build re-streams the corpus including the embedded row.
-    if _cached_pending is not None:
-        pending_count = int(_cached_pending)
-    else:
-        try:
-            pending_count = int(store.pending_records_count())
-        except (OSError, ValueError, KeyError, AttributeError):
-            pending_count = -1
-
+    # Pending rows are deliberately NOT part of the key: they are never graph
+    # nodes (the active predicate excludes them), so a fresh capture landing
+    # as pending changes nothing the graph serves — keying on it re-keyed the
+    # warm bundle on EVERY ambient capture. The pending->active flip that DOES
+    # change the graph invalidates explicitly at the data-operation boundary
+    # (the wake sequence unlinks this cache), which no key term can miss.
     embed_dim = int(getattr(store, "embed_dim", 0))
-    rc_window = records_count // _STALENESS_WINDOW if records_count >= 0 else records_count
-    ec_window = edges_count // _STALENESS_WINDOW if edges_count >= 0 else edges_count
     return (
-        rc_window,
-        ec_window,
-        pending_count,
+        _quantize_count(records_count),
+        _quantize_count(edges_count),
         SCHEMA_VERSION_CURRENT,
         embed_dim,
         CACHE_VERSION,
@@ -742,15 +766,13 @@ def consult_overlay(store: Any) -> "tuple | _OverlayBypass":
     if data.get("cache_version") != CACHE_VERSION:
         return _OverlayBypass("parity_mismatch")
 
+    # Parity rides the TAIL of the key (schema version, embed dim, cache
+    # version) whatever the key's arity — positional indexing here is how a
+    # key-shape change silently bypassed the overlay on every recall.
     saved_key = tuple(data.get("key", []))
-    if len(saved_key) < 6:
+    if len(saved_key) < 3:
         return _OverlayBypass("parity_mismatch")
-    current_parity = _parity_components(store)
-    if saved_key[3] != current_parity[0]:
-        return _OverlayBypass("parity_mismatch")
-    if saved_key[4] != current_parity[1]:
-        return _OverlayBypass("parity_mismatch")
-    if saved_key[5] != current_parity[2]:
+    if tuple(saved_key[-3:]) != tuple(_parity_components(store)):
         return _OverlayBypass("parity_mismatch")
 
     snapshot_generation = data.get("generation", 0)
@@ -777,7 +799,7 @@ def consult_overlay(store: Any) -> "tuple | _OverlayBypass":
         age_ms = 0
 
     dirty = get_dirty_counter()
-    if age_sec > _FUSE_MAX_AGE_SECONDS or dirty > _FUSE_DIRTY_THRESHOLD:
+    if age_sec > _FUSE_MAX_AGE_SECONDS or dirty > _fuse_dirty_threshold(store):
         _emit_freshness_fuse_tripped(store, age_ms=age_ms)
         return _OverlayBypass("fuse_tripped", age_ms=age_ms)
 
@@ -1229,15 +1251,11 @@ def _load_last_good_structural_uncached(store: Any) -> "tuple | None":
         return None
     if data.get("cache_version") != CACHE_VERSION:
         return None
+    # Parity is the key's TAIL whatever its arity (see consult_overlay).
     saved_key = tuple(data.get("key", []))
-    if len(saved_key) < 6:
+    if len(saved_key) < 3:
         return None
-    current_parity = _parity_components(store)
-    if saved_key[3] != current_parity[0]:
-        return None
-    if saved_key[4] != current_parity[1]:
-        return None
-    if saved_key[5] != current_parity[2]:
+    if tuple(saved_key[-3:]) != tuple(_parity_components(store)):
         return None
     try:
         assignment = _decode_assignment(data["assignment"])
@@ -1270,15 +1288,11 @@ def load_last_good_centrality(store: Any) -> "dict[UUID, float] | None":
         return None
     if data.get("cache_version") != CACHE_VERSION:
         return None
+    # Parity is the key's TAIL whatever its arity (see consult_overlay).
     saved_key = tuple(data.get("key", []))
-    if len(saved_key) < 6:
+    if len(saved_key) < 3:
         return None
-    current_parity = _parity_components(store)
-    if saved_key[3] != current_parity[0]:
-        return None
-    if saved_key[4] != current_parity[1]:
-        return None
-    if saved_key[5] != current_parity[2]:
+    if tuple(saved_key[-3:]) != tuple(_parity_components(store)):
         return None
     centrality_raw = data.get("centrality")
     if not isinstance(centrality_raw, dict) or not centrality_raw:
@@ -1667,7 +1681,7 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
             except Exception:  # noqa: BLE001 -- a probe failure must never drop a warm-up
                 structural_source = "cold_degrade"  # fail toward rebuilding
             cache_is_warm = structural_source in ("overlay", "normal")
-            if cache_is_warm and get_dirty_counter() <= _FUSE_DIRTY_THRESHOLD:
+            if cache_is_warm and get_dirty_counter() <= _fuse_dirty_threshold(store):
                 return {
                     "rebuilt": False,
                     "skipped": "warm_and_below_dirty_threshold",

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-07-10
+
+### Changed
+
+- **Lower idle CPU.** Corpus counters now update incrementally instead of
+  rescanning, fresh readers inherit the writer's sort index instead of
+  rebuilding it, and the graph cache no longer re-streams the whole corpus on
+  ambient captures — cutting background rebuild churn substantially.
+
 ## [2.0.0] — 2026-07-10
 
 ### Changed

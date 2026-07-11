@@ -420,8 +420,9 @@ def test_v2_plaintext_lazy_migrates_to_v3(store):
         "max_degree": 1,
         "saved_at": "2026-04-29T00:00:00Z",
     }
-    if len(legacy_data["key"]) >= 6:
-        legacy_data["key"][5] = runtime_graph_cache.LEGACY_CACHE_VERSION_PLAINTEXT
+    # The cache version is the LAST key component whatever the key arity —
+    # mirror the loader's expected-legacy-key derivation exactly.
+    legacy_data["key"][-1] = runtime_graph_cache.LEGACY_CACHE_VERSION_PLAINTEXT
     path.write_text(json.dumps(legacy_data), encoding="utf-8")
 
     loaded = runtime_graph_cache.try_load(store)

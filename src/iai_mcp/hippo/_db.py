@@ -27,7 +27,7 @@ from iai_mcp.crypto import (
     is_encrypted,
 )
 
-# AccessMode is defined in __init__.py.  It must be available
+# AccessMode is defined in __init__.py (DEFINE-IN-INIT).  It must be available
 # at class-body execution time because HippoDB.__init__ uses it as a default
 # argument value.  Since __init__.py defines AccessMode before triggering this
 # sub-module import, the partially-initialised package module already carries it.
@@ -558,6 +558,10 @@ class HippoDB:
         # counts that changed.  None until a MemoryStore registers it; HippoDB
         # fires it hook-isolated (try/except) and never calls it when None.
         self._corpus_count_invalidate: "Callable | None" = None
+        # Exact-delta twin: fires with (key, delta) where the write's count
+        # delta is known exactly, so the cached count shifts instead of being
+        # dropped and recounted by a full filtered scan on the next read.
+        self._corpus_count_adjust: "Callable | None" = None
         # Exact-cosine authority feed callback — registered by MemoryStore
         # eagerly at construction time.  Fires with (record_id: str, vec) at
         # the reembed pending->active flag flip so the resident matrix stays
@@ -1312,6 +1316,17 @@ class HippoDB:
         """
         self._corpus_count_invalidate = cb
 
+    def register_corpus_count_adjust(self, cb: "Callable") -> None:
+        """Register the exact-delta twin of the invalidation callback.
+
+        The callback receives ``(key, delta)``. HippoDB fires it where the
+        write's count delta is known exactly (a pending insert is +1 pending;
+        a reembed flip is +1 active / -1 pending), so the cached value shifts
+        in place instead of forcing the next reader into a full filtered
+        COUNT scan. When absent, the fire sites fall back to invalidation.
+        """
+        self._corpus_count_adjust = cb
+
     def mark_ro_pool_stale(self) -> None:
         """Bump the RO pool's staleness generation. No-raise, no-op on stdlib.
 
@@ -1466,19 +1481,30 @@ class HippoDB:
                     "recency_pending_feed callback failed id=%s: %s", record_id, _exc
                 )
 
-        # A new pending row increases the pending count while leaving the active
-        # count unchanged.  Invalidate only the pending key so the next
-        # pending_records_count() recomputes the live value.
-        _cci = self._corpus_count_invalidate
-        if _cci is not None:
+        # A new pending row increases the pending count by exactly one while
+        # leaving the active count unchanged — shift the cached value in place
+        # (fall back to invalidation when no adjust callback is registered).
+        _cca = self._corpus_count_adjust
+        if _cca is not None:
             try:
-                _cci("pending")
+                _cca("pending", 1)
             except Exception as _exc:  # noqa: BLE001 -- hook isolation
                 _log.debug(
-                    "corpus_count_invalidate callback failed (pending) id=%s: %s",
+                    "corpus_count_adjust callback failed (pending) id=%s: %s",
                     record_id,
                     _exc,
                 )
+        else:
+            _cci = self._corpus_count_invalidate
+            if _cci is not None:
+                try:
+                    _cci("pending")
+                except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                    _log.debug(
+                        "corpus_count_invalidate callback failed (pending) id=%s: %s",
+                        record_id,
+                        _exc,
+                    )
         # Direct RO-pool staleness bump for the bare-HippoDB case (no
         # MemoryStore, so no CorpusCountCache.on_invalidate hook exists).
         # Idempotent with the cache-hook route when a MemoryStore IS present.
@@ -1506,8 +1532,8 @@ class HippoDB:
         """Embed pending rows, optionally bounded by batch size and resident set.
 
         The deferred-embed pass of the two-phase capture drain. With the defaults
-        (both bounds 0) it embeds every pending row in one pass — the behaviour
-        direct-write recovery and the wake sequence rely on.
+        (both bounds 0) it embeds every pending row in one pass — the
+        behaviour direct-write recovery and the wake sequence rely on.
 
         When ``batch_size`` is positive the rows are embedded in windows of that
         size, each window committed before the next is read, with an allocator
@@ -1647,23 +1673,34 @@ class HippoDB:
                         _log.debug(
                             "exact_index_feed callback failed id=%s: %s", rid, _exc
                         )
-                # Invalidate BOTH the active and pending corpus-count cache keys:
-                # the row transitions from pending to active, so both counts change.
-                # Firing per-flip is correct and idempotent (invalidate is no-raise
-                # on subsequent calls for the same key).  Both keys MUST be cleared —
-                # invalidating only one leaves the other stale and the raw-pending
-                # rebuild trigger (runtime_graph_cache.py) misses the count change.
-                _cci = self._corpus_count_invalidate
-                if _cci is not None:
+                # The flip moves exactly one row from pending to active: shift
+                # BOTH cached counts in place (touching only one leaves the
+                # other stale). Falls back to invalidation when no adjust
+                # callback is registered.
+                _cca = self._corpus_count_adjust
+                if _cca is not None:
                     try:
-                        _cci("active", "pending")
+                        _cca("active", 1)
+                        _cca("pending", -1)
                     except Exception as _exc:  # noqa: BLE001 -- hook isolation
                         _log.debug(
-                            "corpus_count_invalidate callback failed (active,pending)"
+                            "corpus_count_adjust callback failed (active,pending)"
                             " id=%s: %s",
                             rid,
                             _exc,
                         )
+                else:
+                    _cci = self._corpus_count_invalidate
+                    if _cci is not None:
+                        try:
+                            _cci("active", "pending")
+                        except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                            _log.debug(
+                                "corpus_count_invalidate callback failed (active,pending)"
+                                " id=%s: %s",
+                                rid,
+                                _exc,
+                            )
             if window_count > 0:
                 # Direct RO-pool staleness bump for the bare-HippoDB case (no
                 # MemoryStore, so no CorpusCountCache.on_invalidate hook

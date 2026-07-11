@@ -825,3 +825,56 @@ fn persisted_id_index_serves_warm_boot_without_scan() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// persisted_ordered_index_loads_built
+//
+// Build the ORDER BY index lazily via one ordered read, persist, reopen: the
+// fresh connection must hold the ordered index pre-built (no population scan)
+// and serve the same rows as the connection that built it.
+// ---------------------------------------------------------------------------
+#[test]
+fn persisted_ordered_index_loads_built() {
+    fn probe_ordered(conn: &mut Connection) -> Vec<String> {
+        let mut cur = conn
+            .execute("SELECT src FROM edges ORDER BY src LIMIT 10", vec![])
+            .unwrap();
+        cur.fetchall()
+            .iter()
+            .map(|r| match r.get_index(0) {
+                Some(Value::Text(s)) => s.clone(),
+                other => panic!("expected text src, got {other:?}"),
+            })
+            .collect()
+    }
+
+    let f = EdgeFixture::seeded(50);
+    let expected: Vec<String>;
+    {
+        let mut conn = f.open();
+        expected = probe_ordered(&mut conn);
+        assert!(
+            conn.ordered_index_is_built("edges"),
+            "the ordered probe must have built the ORDER BY index"
+        );
+        conn.persist_col_indexes().unwrap();
+    }
+
+    let mut loaded = f.open();
+    assert!(
+        loaded.ordered_index_is_built("edges"),
+        "a fresh open over the sidecar must admit the ordered index pre-built"
+    );
+    assert_eq!(
+        probe_ordered(&mut loaded),
+        expected,
+        "the loaded ordered index must serve the same rows as the builder"
+    );
+
+    let mut loaded_ro = f.open_ro();
+    assert!(
+        loaded_ro.ordered_index_is_built("edges"),
+        "a read-only open must admit the persisted ordered index too"
+    );
+    assert_eq!(probe_ordered(&mut loaded_ro), expected);
+}
