@@ -317,7 +317,9 @@ def shutdown_ipc(addr: str | tuple[str, int] | None = None) -> None:
         pass
 
 
-def make_sync_ipc_socket() -> tuple[socket.socket, str | tuple[str, int]]:
+def make_sync_ipc_socket(
+    addr: str | Path | None = None,
+) -> tuple[socket.socket, str | tuple[str, int]]:
     """
     Create a synchronous (blocking) client socket and the address to connect to.
 
@@ -327,6 +329,12 @@ def make_sync_ipc_socket() -> tuple[socket.socket, str | tuple[str, int]]:
 
     On Windows the caller must also call ``send_sync_auth_token(sock)`` after
     ``connect()`` and before sending any application messages.
+
+    An explicit ``addr`` overrides the default resolution (env var /
+    ``SOCKET_PATH``) on POSIX — needed by call sites whose socket path is
+    computed elsewhere (a test-injected instance method, a per-store
+    override) rather than read from the process env. Ignored on Windows,
+    where the port is always resolved from the daemon port file.
     """
     if IS_WINDOWS:
         port = _read_port()
@@ -337,8 +345,11 @@ def make_sync_ipc_socket() -> tuple[socket.socket, str | tuple[str, int]]:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         return s, ("127.0.0.1", port)
 
-    env = os.environ.get("IAI_DAEMON_SOCKET_PATH")
-    path = env if env else str(SOCKET_PATH)
+    if addr is not None:
+        path = str(addr)
+    else:
+        env = os.environ.get("IAI_DAEMON_SOCKET_PATH")
+        path = env if env else str(SOCKET_PATH)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     return s, path
 

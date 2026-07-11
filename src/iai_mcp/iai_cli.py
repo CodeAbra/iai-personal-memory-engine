@@ -627,7 +627,7 @@ def _relay_rpc(method: str, params: dict, timeout: float = 900.0):
     req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     deadline = _time.monotonic() + timeout
     try:
-        s, _addr = make_sync_ipc_socket()
+        s, _addr = make_sync_ipc_socket(addr=_daemon_socket_path())
         s.settimeout(timeout)
         s.connect(_addr)
         send_sync_auth_token(s)

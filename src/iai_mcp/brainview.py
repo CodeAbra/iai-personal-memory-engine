@@ -348,7 +348,7 @@ class BrainView:
         deadline = time.monotonic() + budget
         try:
             from iai_mcp._ipc import make_sync_ipc_socket, send_sync_auth_token
-            s, _addr = make_sync_ipc_socket()
+            s, _addr = make_sync_ipc_socket(addr=self._socket_path())
             s.settimeout(budget)
             s.connect(_addr)
             send_sync_auth_token(s)
@@ -1229,7 +1229,7 @@ class BrainView:
         if not IS_WINDOWS and not sock_path.is_socket():
             return {"status": "daemon_down", "reason": "daemon socket not present"}
         try:
-            s, _addr = make_sync_ipc_socket()
+            s, _addr = make_sync_ipc_socket(addr=sock_path)
             # All three are fire-and-forget control messages that reply
             # immediately (the pipeline runs later); a short timeout suffices.
             s.settimeout(5.0)
