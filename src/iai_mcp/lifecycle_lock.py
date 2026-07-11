@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,12 +51,16 @@ def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
 
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+    # os.kill(pid, 0) is the POSIX "is alive?" idiom, but on Windows
+    # os.kill rejects signal 0 with OSError [WinError 87] (invalid parameter)
+    # even for a live process. Skip it there and go straight to psutil below.
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
 
     try:
         import psutil

@@ -134,10 +134,10 @@ def _try_get_embedding_fast(text: str, cue: str) -> list[float] | None:
     socket_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
     if socket_path:
         try:
-            import socket as _socket
-            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            from iai_mcp._ipc import make_sync_ipc_socket
+            s, addr = make_sync_ipc_socket()
             s.settimeout(0.1)
-            s.connect(socket_path)
+            s.connect(addr)
             s.close()
         except (OSError, ConnectionRefusedError, FileNotFoundError):
             return None

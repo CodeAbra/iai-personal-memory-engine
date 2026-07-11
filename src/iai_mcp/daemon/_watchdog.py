@@ -817,10 +817,9 @@ def _check_crisis_mode_expiry(
 
 
 async def _probe_status_roundtrip(sock_path: str, read_timeout: float) -> bool:
+    from iai_mcp._ipc import open_ipc_connection
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(sock_path), timeout=5.0
-        )
+        reader, writer = await open_ipc_connection(sock_path, timeout=5.0)
     except (FileNotFoundError, ConnectionRefusedError, OSError):
         return False
     except asyncio.TimeoutError:

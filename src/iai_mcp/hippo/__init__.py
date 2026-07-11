@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import enum
 import errno
-import fcntl
 import logging
 import os
 import re

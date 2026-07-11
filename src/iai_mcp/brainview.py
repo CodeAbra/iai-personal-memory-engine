@@ -347,9 +347,11 @@ class BrainView:
         budget = timeout if timeout is not None else self._RELAY_TIMEOUT_S
         deadline = time.monotonic() + budget
         try:
-            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            from iai_mcp._ipc import make_sync_ipc_socket, send_sync_auth_token
+            s, _addr = make_sync_ipc_socket()
             s.settimeout(budget)
-            s.connect(str(self._socket_path()))
+            s.connect(_addr)
+            send_sync_auth_token(s)
             s.sendall((json.dumps(req) + "\n").encode("utf-8"))
             buf = b""
             while not buf.endswith(b"\n") and len(buf) < self._RELAY_MAX_RESP:
@@ -1219,15 +1221,20 @@ class BrainView:
         import socket as _socket
         from datetime import datetime, timezone
 
+        from iai_mcp._ipc import IS_WINDOWS, make_sync_ipc_socket, send_sync_auth_token
         sock_path = self._socket_path()
-        if not sock_path.is_socket():
+        # is_socket() is meaningless on Windows (TCP loopback, not a filesystem
+        # object). Skip that check and let the port-file lookup below fail
+        # instead if the daemon isn't running.
+        if not IS_WINDOWS and not sock_path.is_socket():
             return {"status": "daemon_down", "reason": "daemon socket not present"}
         try:
-            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s, _addr = make_sync_ipc_socket()
             # All three are fire-and-forget control messages that reply
             # immediately (the pipeline runs later); a short timeout suffices.
             s.settimeout(5.0)
-            s.connect(str(sock_path))
+            s.connect(_addr)
+            send_sync_auth_token(s)
             req = {"type": ctype, "ts": datetime.now(timezone.utc).isoformat()}
             s.sendall((json.dumps(req) + "\n").encode("utf-8"))
             buf = b""

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import logging
 import os
 import re
@@ -12,6 +11,7 @@ import sqlite3
 import threading
 import time
 import weakref
+from iai_mcp import _filelock as fcntl
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path

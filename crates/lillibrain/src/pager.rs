@@ -14,11 +14,12 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use fs4::FileExt as Fs4FileExt;
 use parking_lot::Mutex;
+
+use crate::pos_io::PosIo;
 
 use crate::consts::{
     DB_MAGIC, HDR_DB_SIZE_OFFSET, HDR_FIRST_FREELIST_OFFSET, HDR_FREELIST_COUNT_OFFSET,

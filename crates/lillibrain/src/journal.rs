@@ -16,11 +16,11 @@
 //! ```
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use crate::consts::PAGE_SIZE;
 use crate::error::Result;
+use crate::pos_io::PosIo;
 
 /// Journal magic: exactly 12 bytes.
 pub const JOURNAL_MAGIC: [u8; 12] = *b"LILLI-JRNL\x00\x00";

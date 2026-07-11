@@ -113,11 +113,9 @@ def check_a_daemon_alive() -> CheckResult:
 
 
 async def _socket_connect_probe(socket_path: Path, timeout: float) -> str | None:
+    from iai_mcp._ipc import open_ipc_connection
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(path=str(socket_path)),
-            timeout=timeout,
-        )
+        reader, writer = await open_ipc_connection(str(socket_path), timeout=timeout)
     except FileNotFoundError:
         return "FileNotFoundError"
     except ConnectionRefusedError:

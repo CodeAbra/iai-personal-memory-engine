@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import secrets
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -191,17 +192,25 @@ class CryptoKey:
         if not path.exists():
             return None
         st = os.stat(path)
-        if st.st_mode & 0o077 != 0:
+        # Unix permission-mode check. On Windows os.stat returns a default
+        # mode that isn't meaningful (there's no chmod), and file access is
+        # gated by ACLs — the setter handles that via icacls.
+        if sys.platform != "win32" and st.st_mode & 0o077 != 0:
             raise CryptoKeyError(
                 f"crypto key file at {path} has insecure mode "
                 f"0o{st.st_mode & 0o777:03o}; expected 0o600 "
                 f"(run: chmod 0o600 {path})"
             )
-        if st.st_uid != os.geteuid():
-            raise CryptoKeyError(
-                f"crypto key file at {path} is owned by uid={st.st_uid}; "
-                f"current process runs as uid={os.geteuid()} (refusing to read)"
-            )
+        # Unix uid check; on Windows there is no numeric uid concept and
+        # os.geteuid does not exist. Access is enforced via ACLs (icacls) at
+        # write time; skip the check on Windows.
+        if sys.platform != "win32":
+            euid = os.geteuid()  # type: ignore[attr-defined]
+            if st.st_uid != euid:
+                raise CryptoKeyError(
+                    f"crypto key file at {path} is owned by uid={st.st_uid}; "
+                    f"current process runs as uid={euid} (refusing to read)"
+                )
         raw = path.read_bytes()
         if len(raw) != KEY_BYTES:
             raise CryptoKeyError(
@@ -221,14 +230,29 @@ class CryptoKey:
             except OSError:
                 pass
         tmp = final.parent / f"{final.name}.tmp.{os.getpid()}"
-        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        # os.open defaults to text mode on Windows, which translates raw 0x0A
+        # bytes in the AES key to 0x0D0A and silently corrupts it. os.O_BINARY
+        # forces byte-exact writes; POSIX defines the flag as a no-op.
+        _o_binary = getattr(os, "O_BINARY", 0)
+        fd = os.open(
+            str(tmp),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | _o_binary,
+            0o600,
+        )
         try:
-            os.fchmod(fd, 0o600)
+            # os.fchmod does not exist on Windows; the initial mode bits already
+            # ran through the umask, and Windows access control is handled via
+            # icacls elsewhere.
+            _fchmod = getattr(os, "fchmod", None)
+            if _fchmod is not None:
+                _fchmod(fd, 0o600)
             os.write(fd, key)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.rename(str(tmp), str(final))
+        # On Windows os.rename fails if the destination already exists; use
+        # os.replace which is atomic on POSIX and does replace-if-exists on Win.
+        os.replace(str(tmp), str(final))
 
 
     def get_or_create(self) -> bytes:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import logging
 import os
 from pathlib import Path
+
+from iai_mcp import _filelock as fcntl
 
 logger = logging.getLogger(__name__)
 
