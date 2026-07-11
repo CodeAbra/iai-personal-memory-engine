@@ -29,6 +29,7 @@ jobs:
 
       - name: Add macOS universal targets
         if: matrix.platform == 'macos-latest'
+        working-directory: desktop/src-tauri
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Linux system dependencies
