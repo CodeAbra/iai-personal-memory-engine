@@ -940,6 +940,20 @@ def _flush_buffered_edges_for_build(store: MemoryStore) -> None:
         log.debug("edge-buffer flush before graph build failed: %s", exc)
 
 
+def _replay_runtime_edge(graph, row: dict) -> None:
+    """Replay an edge only when both endpoints are active graph nodes."""
+    src = UUID(row["src"])
+    dst = UUID(row["dst"])
+    if not graph.has_node(src) or not graph.has_node(dst):
+        return
+    graph.add_edge(
+        src,
+        dst,
+        weight=float(row["weight"]),
+        edge_type=row["edge_type"],
+    )
+
+
 def build_runtime_graph(store: MemoryStore):
     # Memoize the corpus COUNT(*) probes for the duration of this one build. The
     # cache-key derivation, the drift gate, and the impl each ask for the active
@@ -1198,12 +1212,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
             if _edge_rows_since_yield >= _edge_chunk_rows:
                 _yield_to_event_loop()
                 _edge_rows_since_yield = 0
-            graph.add_edge(
-                UUID(row["src"]),
-                UUID(row["dst"]),
-                weight=float(row["weight"]),
-                edge_type=row["edge_type"],
-            )
+            _replay_runtime_edge(graph, row)
 
     try:
         deg_values = [d for _, d in graph.degrees()]
@@ -1609,12 +1618,7 @@ def build_runtime_graph_incremental(store: MemoryStore):
                 if edge_rows_since_yield >= edge_chunk_rows:
                     _yield_to_event_loop()
                     edge_rows_since_yield = 0
-                graph.add_edge(
-                    UUID(row["src"]),
-                    UUID(row["dst"]),
-                    weight=float(row["weight"]),
-                    edge_type=row["edge_type"],
-                )
+                _replay_runtime_edge(graph, row)
 
         try:
             deg_values = [d for _, d in graph.degrees()]

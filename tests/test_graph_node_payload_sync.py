@@ -176,6 +176,6 @@ def test_B6_cache_version_bump_invalidates_old_cache(store):
             f,
         )
 
-    assert runtime_graph_cache.CACHE_VERSION == "62-02-v6"
+    assert runtime_graph_cache.CACHE_VERSION == "62-02-v7"
 
     assert runtime_graph_cache.try_load(store) is None
