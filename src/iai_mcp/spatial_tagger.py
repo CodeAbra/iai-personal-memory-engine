@@ -38,6 +38,11 @@ def tag(
             wing = components[i + 1]
             break
 
+    if wing is None and any(
+        part in {"IAI-MCP", "iai-mcp", "iai_mcp"} for part in components
+    ):
+        wing = "IAI-MCP"
+
     if wing is None:
         for part in components:
             if part in DEFAULT_WINGS:
