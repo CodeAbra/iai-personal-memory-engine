@@ -127,10 +127,10 @@ def warm_dispatch_surface(store: Any) -> dict:
     These are one-time per-process costs that otherwise land on the FIRST
     real recall. The daemon runs this BEFORE binding its socket — a memory
     that answers the socket before its recall surface is resident is not
-    awake yet — and the full warm-up re-invokes it as its first shape (an
-    idempotent no-op then). All read-only: an embed produces a vector and
-    discards it, and load_recall_structural only reads/decodes the on-disk
-    cache. Returns a summary dict; never raises.
+    awake yet — then starts the remaining warm-up shapes without repeating
+    this encode. All read-only: an embed produces a vector and discards it,
+    and load_recall_structural only reads/decodes the on-disk cache. Returns
+    a summary dict; never raises.
     """
     _t0 = time.perf_counter()
     try:
@@ -156,6 +156,7 @@ def run_boot_warmup(
     *,
     probe_count: int = _DEFAULT_PROBE_COUNT,
     k: int = _DEFAULT_K,
+    warm_dispatch: bool = True,
 ) -> dict:
     """Fire the real first-recall read shapes once, write-free.
 
@@ -170,7 +171,8 @@ def run_boot_warmup(
     shapes: dict[str, dict] = {}
     probe_hit_ids: list[str] = []
 
-    shapes["dispatch_surface"] = warm_dispatch_surface(store)
+    if warm_dispatch:
+        shapes["dispatch_surface"] = warm_dispatch_surface(store)
 
     try:
         probes = _sample_probe_embeddings(store, probe_count)
