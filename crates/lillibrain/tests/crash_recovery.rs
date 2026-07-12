@@ -7,7 +7,7 @@
 //! uncommitted gone — with a clean integrity check.
 
 use std::fs::OpenOptions;
-use std::os::unix::fs::FileExt;
+use lillibrain::pos_io::PosIo;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

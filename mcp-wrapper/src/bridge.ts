@@ -4,10 +4,13 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
-function getDaemonSocketPath(): string {
-  return process.env.IAI_DAEMON_SOCKET_PATH
-    ?? path.join(os.homedir(), ".iai-mcp", ".daemon.sock");
-}
+import {
+  type ConnectTarget,
+  authenticateConnection,
+  createDaemonConnection,
+  daemonUnreachableHint,
+  getDaemonConnectTarget,
+} from "./ipc.js";
 const SOCKET_CONNECT_TIMEOUT_MS = 5000;
 const ERR_DAEMON_UNREACHABLE = -32002;
 
@@ -69,29 +72,29 @@ export class PythonCoreBridge {
   private async _doStart(): Promise<void> {
     this.reconnectAttempted = false;
 
+    const target = getDaemonConnectTarget();
+    if (target === null) {
+      throw new DaemonUnreachableError(daemonUnreachableHint());
+    }
     let sock: net.Socket;
     try {
       sock = await this.connectWithTimeout(
-        getDaemonSocketPath(),
+        target,
         SOCKET_CONNECT_TIMEOUT_MS,
       );
     } catch (e) {
-      throw new DaemonUnreachableError(
-        "iai-mcp daemon not running. "
-        + "Run: launchctl load -w ~/Library/LaunchAgents/com.iai-mcp.daemon.plist "
-        + "or run scripts/install.sh"
-      );
+      throw new DaemonUnreachableError(daemonUnreachableHint());
     }
     this.sock = sock;
     this.attachSocketHandlers();
   }
 
   private connectWithTimeout(
-    socketPath: string,
+    target: ConnectTarget,
     timeoutMs: number,
   ): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
-      const sock = net.createConnection(socketPath);
+      const sock = createDaemonConnection(target);
       // Keep a pending/abandoned connect attempt from pinning the event loop
       // (e.g. an in-flight reconnect after socket death). A live connected
       // socket re-refs below so real RPC still holds the process open.
@@ -104,6 +107,13 @@ export class PythonCoreBridge {
       sock.once("connect", () => {
         clearTimeout(t);
         sock.ref();
+        try {
+          authenticateConnection(sock, target);
+        } catch (e) {
+          try { sock.destroy(); } catch {  }
+          reject(e as Error);
+          return;
+        }
         resolve(sock);
       });
       sock.once("error", (e) => {
@@ -193,8 +203,10 @@ export class PythonCoreBridge {
         if (testDelayMs > 0) {
           await new Promise<void>((r) => setTimeout(r, testDelayMs));
         }
+        const retarget = getDaemonConnectTarget();
+        if (retarget === null) throw new Error("daemon endpoint unavailable");
         this.sock = await this.connectWithTimeout(
-          getDaemonSocketPath(),
+          retarget,
           SOCKET_CONNECT_TIMEOUT_MS,
         );
         this.attachSocketHandlers();
@@ -260,6 +272,12 @@ export function sessionOpenSocketPath(): string {
   return path.join(os.homedir(), ".iai-mcp", ".daemon.sock");
 }
 
+function sessionOpenConnectTarget(): ConnectTarget | null {
+  const env = process.env.IAI_DAEMON_SOCKET_PATH;
+  if (env) return env;
+  return getDaemonConnectTarget();
+}
+
 
 export function newSessionId(): string {
   return crypto.randomUUID();
@@ -275,8 +293,19 @@ export function emitSessionOpen(sessionId: string): Promise<void> {
       resolve();
     };
     try {
-      const socketPath = sessionOpenSocketPath();
-      const sock = net.createConnection(socketPath, () => {
+      const target = sessionOpenConnectTarget();
+      if (target === null) {
+        finish();
+        return;
+      }
+      const sock = createDaemonConnection(target, () => {
+        try {
+          authenticateConnection(sock, target);
+        } catch {
+          try { sock.destroy(); } catch {  }
+          finish();
+          return;
+        }
         const msg =
           JSON.stringify({
             type: "session_open",

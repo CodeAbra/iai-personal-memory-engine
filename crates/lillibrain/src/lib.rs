@@ -14,6 +14,7 @@ pub mod codec;
 pub mod consts;
 pub mod error;
 pub mod freelist;
+pub mod pos_io;
 pub mod gates;
 pub mod io;
 pub mod journal;

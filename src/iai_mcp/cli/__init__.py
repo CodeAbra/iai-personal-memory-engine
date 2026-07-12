@@ -74,11 +74,16 @@ def _ensure_crypto_key_present():
 def _try_short_timeout_connect(timeout_ms: int = 250) -> bool:
     import socket as _socket
 
+    from iai_mcp._ipc import make_sync_ipc_socket, send_sync_auth_token
     sock_path = os.environ.get("IAI_DAEMON_SOCKET_PATH") or str(SOCKET_PATH)
-    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        s, _addr = make_sync_ipc_socket(addr=sock_path)
+    except FileNotFoundError:
+        return False
     s.settimeout(timeout_ms / 1000.0)
     try:
-        s.connect(sock_path)
+        s.connect(_addr)
+        send_sync_auth_token(s)
         return True
     except (FileNotFoundError, ConnectionRefusedError, OSError, _socket.timeout):
         return False
@@ -107,8 +112,9 @@ def _send_jsonrpc_request(
 
     async def _runner() -> dict | None:
         try:
+            from iai_mcp._ipc import open_ipc_connection
             reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(sock_path),
+                open_ipc_connection(sock_path),
                 timeout=connect_timeout,
             )
         except (FileNotFoundError, ConnectionRefusedError, OSError, asyncio.TimeoutError):
@@ -146,8 +152,9 @@ def _send_socket_request(req: dict, *, timeout: float = 30.0) -> dict | None:
     async def _runner() -> dict | None:
         _sock = os.environ.get("IAI_DAEMON_SOCKET_PATH") or str(SOCKET_PATH)
         try:
+            from iai_mcp._ipc import open_ipc_connection
             reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(_sock),
+                open_ipc_connection(_sock),
                 timeout=5.0,
             )
         except (FileNotFoundError, ConnectionRefusedError):

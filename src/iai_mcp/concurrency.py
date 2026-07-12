@@ -359,14 +359,20 @@ async def serve_control_socket(
             except (OSError, ConnectionError):  # noqa: BLE001 -- cleanup is best-effort
                 pass
 
-    _server_kwargs = {"cleanup_socket": True} if _supports_cleanup_socket else {}
-    server = await asyncio.start_unix_server(
-        handle, path=str(socket_path), **_server_kwargs,
-    )
-    try:
-        os.chmod(str(socket_path), 0o600)
-    except OSError:
-        pass
+    from iai_mcp._ipc import IS_WINDOWS, start_ipc_server, shutdown_ipc
+    if IS_WINDOWS:
+        server, _actual_addr, _needs_cleanup = await start_ipc_server(
+            handle, socket_path,
+        )
+    else:
+        _server_kwargs = {"cleanup_socket": True} if _supports_cleanup_socket else {}
+        server = await asyncio.start_unix_server(
+            handle, path=str(socket_path), **_server_kwargs,
+        )
+        try:
+            os.chmod(str(socket_path), 0o600)
+        except OSError:
+            pass
 
     try:
         async with server:

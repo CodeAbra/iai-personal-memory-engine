@@ -1653,7 +1653,8 @@ async def _send_to_daemon(
 ) -> dict:
     path_used = socket_path if socket_path is not None else SOCKET_PATH
     try:
-        reader, writer = await asyncio.open_unix_connection(str(path_used))
+        from iai_mcp._ipc import open_ipc_connection
+        reader, writer = await open_ipc_connection(str(path_used))
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         return {"ok": False, "reason": "daemon_not_running", "error": str(exc)}
 

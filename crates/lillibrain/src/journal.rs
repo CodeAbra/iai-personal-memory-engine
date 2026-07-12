@@ -16,7 +16,7 @@
 //! ```
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use crate::pos_io::PosIo;
 use std::path::{Path, PathBuf};
 
 use crate::consts::PAGE_SIZE;

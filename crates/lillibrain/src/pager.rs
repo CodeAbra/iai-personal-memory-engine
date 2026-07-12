@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use crate::pos_io::PosIo;
 use std::path::{Path, PathBuf};
 
 use fs4::FileExt as Fs4FileExt;

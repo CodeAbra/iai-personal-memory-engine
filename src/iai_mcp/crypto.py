@@ -191,17 +191,21 @@ class CryptoKey:
         if not path.exists():
             return None
         st = os.stat(path)
-        if st.st_mode & 0o077 != 0:
-            raise CryptoKeyError(
-                f"crypto key file at {path} has insecure mode "
-                f"0o{st.st_mode & 0o777:03o}; expected 0o600 "
-                f"(run: chmod 0o600 {path})"
-            )
-        if st.st_uid != os.geteuid():
-            raise CryptoKeyError(
-                f"crypto key file at {path} is owned by uid={st.st_uid}; "
-                f"current process runs as uid={os.geteuid()} (refusing to read)"
-            )
+        # POSIX-only ownership/mode gates: Windows has no chmod semantics
+        # (os.stat returns a synthetic mode) and no geteuid — access there is
+        # governed by ACLs, which the write path sets via icacls.
+        if os.name != "nt":
+            if st.st_mode & 0o077 != 0:
+                raise CryptoKeyError(
+                    f"crypto key file at {path} has insecure mode "
+                    f"0o{st.st_mode & 0o777:03o}; expected 0o600 "
+                    f"(run: chmod 0o600 {path})"
+                )
+            if st.st_uid != os.geteuid():
+                raise CryptoKeyError(
+                    f"crypto key file at {path} is owned by uid={st.st_uid}; "
+                    f"current process runs as uid={os.geteuid()} (refusing to read)"
+                )
         raw = path.read_bytes()
         if len(raw) != KEY_BYTES:
             raise CryptoKeyError(
@@ -233,6 +237,11 @@ class CryptoKey:
         finally:
             os.close(fd)
         os.replace(str(tmp), str(final))
+        if os.name == "nt":
+            # 0o600 in the open mode is advisory on Windows; the ACL is the
+            # real gate there.
+            from iai_mcp._ipc import restrict_file_to_current_user
+            restrict_file_to_current_user(final)
 
 
     def get_or_create(self) -> bytes:

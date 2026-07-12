@@ -18,7 +18,7 @@
 //! salt pair guards against replaying a stale frame from a prior cycle.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use crate::pos_io::PosIo;
 use std::path::{Path, PathBuf};
 
 use crate::consts::{

@@ -27,16 +27,22 @@ except ImportError:  # Windows
     SHARED_IS_EXCLUSIVE = True
 
     def flock(fd: int, operation: int) -> None:
+        # msvcrt locks relative to the file position; fcntl.flock does not
+        # move it — save/restore so callers' cursor state survives the shim.
+        _pos = _os.lseek(fd, 0, _os.SEEK_CUR)
         _os.lseek(fd, 0, _os.SEEK_SET)
-        if operation & LOCK_UN:
-            try:
-                _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
-            except OSError:
-                # flock(LOCK_UN) on an unheld lock is a no-op; mirror that.
-                pass
-            return
-        mode = _msvcrt.LK_NBLCK if operation & LOCK_NB else _msvcrt.LK_LOCK
         try:
-            _msvcrt.locking(fd, mode, 1)
-        except OSError as exc:
-            raise OSError(_errno.EAGAIN, "lock held (msvcrt)") from exc
+            if operation & LOCK_UN:
+                try:
+                    _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    # flock(LOCK_UN) on an unheld lock is a no-op; mirror that.
+                    pass
+                return
+            mode = _msvcrt.LK_NBLCK if operation & LOCK_NB else _msvcrt.LK_LOCK
+            try:
+                _msvcrt.locking(fd, mode, 1)
+            except OSError as exc:
+                raise OSError(_errno.EAGAIN, "lock held (msvcrt)") from exc
+        finally:
+            _os.lseek(fd, _pos, _os.SEEK_SET)

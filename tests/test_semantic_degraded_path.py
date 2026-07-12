@@ -209,6 +209,15 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
     finally:
         conn3.close()
 
+    # An out-of-band writer owns its own freshness demand: production flips
+    # travel through the wake sequence, which unlinks the warm-graph cache at
+    # the data-operation boundary — a raw SQL flip must do the same or the
+    # next build may legitimately serve the cached node set (the +1 stays
+    # inside the count bucket). invalidate_at_root exists precisely for
+    # store-handle-free writers like this one.
+    from iai_mcp.runtime_graph_cache import invalidate_at_root
+    invalidate_at_root(hermetic_store)
+
     store3 = MemoryStore(hermetic_store)
     try:
         from iai_mcp.retrieve import build_runtime_graph as _brg
