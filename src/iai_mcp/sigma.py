@@ -21,6 +21,13 @@ SIGMA_N_FLOOR: int = 200
 
 SIGMA_MID_LIFE_THRESHOLD: int = 500
 
+# The native exact APSL kernel materialises an N x N float64 distance matrix.
+# Keep exact parity for the frozen fixtures, then sample the full connected
+# component in bounded batches so a production audit cannot exhaust memory.
+SIGMA_APSL_EXACT_MAX_N: int = 2500
+SIGMA_APSL_SAMPLE_SIZE: int = 512
+SIGMA_APSL_BATCH_SIZE: int = 32
+
 SIGMA_OBSERVATION_KIND: str = "sigma_observation"
 SIGMA_DRIFT_KIND: str = "sigma_drift"
 
@@ -131,6 +138,60 @@ def _largest_component_csr(
     return _induced_csr_from_component(indptr, indices, data, list(largest))
 
 
+def _average_shortest_path_length(
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    n_nodes: int,
+    *,
+    seed: int,
+) -> float:
+    """Return APSL for a connected component with bounded large-N memory."""
+    if n_nodes <= 1:
+        return 0.0
+    if n_nodes <= SIGMA_APSL_EXACT_MAX_N:
+        return float(
+            lilli_graph.average_shortest_path_length(indptr, indices, n_nodes)
+        )
+
+    import scipy.sparse
+    from scipy.sparse.csgraph import dijkstra
+
+    graph = scipy.sparse.csr_matrix(
+        (
+            np.ones(len(indices), dtype=np.uint8),
+            indices,
+            indptr,
+        ),
+        shape=(n_nodes, n_nodes),
+    )
+    sample_size = min(SIGMA_APSL_SAMPLE_SIZE, n_nodes)
+    rng = np.random.default_rng(seed)
+    sources = np.sort(rng.choice(n_nodes, size=sample_size, replace=False))
+
+    distance_sum = 0.0
+    pair_count = 0
+    for offset in range(0, sample_size, SIGMA_APSL_BATCH_SIZE):
+        batch = sources[offset : offset + SIGMA_APSL_BATCH_SIZE]
+        distances = np.asarray(
+            dijkstra(
+                graph,
+                directed=False,
+                unweighted=True,
+                indices=batch,
+                return_predecessors=False,
+            ),
+            dtype=np.float64,
+        )
+        if distances.ndim == 1:
+            distances = distances.reshape(1, -1)
+        finite = np.isfinite(distances)
+        finite[np.arange(len(batch)), batch] = False
+        distance_sum += float(distances[finite].sum())
+        pair_count += int(finite.sum())
+
+    return distance_sum / pair_count if pair_count else 0.0
+
+
 def fast_sigma(
     graph: "MemoryGraph",
     *,
@@ -150,7 +211,9 @@ def fast_sigma(
         return (float("nan"), 0.0, 0.0, 0.0, 0.0)
 
     C = float(lilli_graph.average_clustering(sub_indptr, sub_indices, n))
-    L = float(lilli_graph.average_shortest_path_length(sub_indptr, sub_indices, n))
+    L = _average_shortest_path_length(
+        sub_indptr, sub_indices, n, seed=seed
+    )
 
     Cs: list[float] = []
     Ls: list[float] = []
@@ -174,10 +237,8 @@ def fast_sigma(
             float(lilli_graph.average_clustering(ref_indptr, ref_indices, ref_n))
         )
         Ls.append(
-            float(
-                lilli_graph.average_shortest_path_length(
-                    ref_indptr, ref_indices, ref_n
-                )
+            _average_shortest_path_length(
+                ref_indptr, ref_indices, ref_n, seed=seed + k
             )
         )
 
@@ -244,40 +305,45 @@ def compute_topology_snapshot(graph, *, assignment=None) -> dict:
             "regime": "insufficient_data",
         }
 
-    indptr, indices, data = graph.to_csr_arrays()
-    n_nodes = len(indptr) - 1
-
-    sub_indptr, sub_indices, sub_data, sub_n = _largest_component_csr(
-        indptr, indices, data, n_nodes
-    )
-
-    C = 0.0
-    if sub_n >= 1:
+    sigma_val: Optional[float] = None
+    if N >= SIGMA_N_FLOOR:
         try:
-            C = float(
-                lilli_graph.average_clustering(sub_indptr, sub_indices, sub_n)
-            )
+            raw_sigma, C, L, _Cr, _Lr = fast_sigma(graph)
+            if not math.isnan(raw_sigma):
+                sigma_val = float(raw_sigma)
         except (RuntimeError, ValueError):
             C = 0.0
-
-    L = 0.0
-    if sub_n >= 2 and len(sub_indices) > 0:
-        try:
-            L = float(
-                lilli_graph.average_shortest_path_length(
-                    sub_indptr, sub_indices, sub_n
-                )
-            )
-        except (RuntimeError, ValueError):
             L = 0.0
-
-    sigma_val = compute_sigma(graph)
+    else:
+        indptr, indices, data = graph.to_csr_arrays()
+        n_nodes = len(indptr) - 1
+        sub_indptr, sub_indices, _sub_data, sub_n = _largest_component_csr(
+            indptr, indices, data, n_nodes
+        )
+        C = 0.0
+        if sub_n >= 1:
+            try:
+                C = float(
+                    lilli_graph.average_clustering(sub_indptr, sub_indices, sub_n)
+                )
+            except (RuntimeError, ValueError):
+                C = 0.0
+        L = 0.0
+        if sub_n >= 2 and len(sub_indices) > 0:
+            try:
+                L = _average_shortest_path_length(
+                    sub_indptr, sub_indices, sub_n, seed=42
+                )
+            except (RuntimeError, ValueError):
+                L = 0.0
 
     community_count = 0
-    rich_club_ratio = 0.0
+    # ``rich_club_nodes(..., percent=0.10)`` always returns ceil(10% of N)
+    # nodes for a non-empty graph.  Computing exact betweenness centrality only
+    # to discard the ranking made this constant-size ratio O(V*E).
+    rich_club_ratio = math.ceil(0.10 * N) / N
     try:
         from iai_mcp.community import detect_communities
-        from iai_mcp.richclub import rich_club_nodes
 
         try:
             if assignment is None:
@@ -287,11 +353,6 @@ def compute_topology_snapshot(graph, *, assignment=None) -> dict:
             community_count = int(len(assignment.community_centroids))
         except (RuntimeError, ValueError, TypeError):
             community_count = 0
-        try:
-            rc = rich_club_nodes(graph, percent=0.10)
-            rich_club_ratio = (len(rc) / N) if N > 0 else 0.0
-        except (RuntimeError, ValueError, TypeError):
-            rich_club_ratio = 0.0
     except (ImportError, RuntimeError, TypeError):
         pass
 
