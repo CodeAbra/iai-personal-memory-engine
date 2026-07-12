@@ -761,7 +761,6 @@ def _install_warm_embedder_override(store) -> tuple[object, bool]:
     orig_efs = _embed_mod.embedder_for_store
     try:
         warm = orig_efs(store)
-        warm.embed("warmup")
 
         def _held_embedder_for_store(_store):
             return warm
@@ -1094,8 +1093,14 @@ async def main() -> int:
         try:
             from iai_mcp.daemon._boot_warmup import warm_dispatch_surface
 
+            # Shield keeps the worker alive after the bounded pre-bind wait:
+            # asyncio cannot cancel a running thread, and retaining the task
+            # makes that continuation explicit and observable until shutdown.
+            _wds_task = asyncio.create_task(
+                asyncio.to_thread(warm_dispatch_surface, store)
+            )
             _wds_summary = await asyncio.wait_for(
-                asyncio.to_thread(warm_dispatch_surface, store), timeout=20.0,
+                asyncio.shield(_wds_task), timeout=20.0,
             )
             log.info(
                 "dispatch surface warmed pre-bind in %.0fms",
@@ -1113,7 +1118,7 @@ async def main() -> int:
 
             async def _boot_warmup_task() -> None:
                 try:
-                    await asyncio.to_thread(run_boot_warmup, store)
+                    await asyncio.to_thread(run_boot_warmup, store, warm_dispatch=False)
                 except Exception as _exc:  # noqa: BLE001 -- warm-up must never crash the daemon
                     log.debug("boot_warmup failed: %s", _exc, exc_info=True)
 
@@ -1869,6 +1874,16 @@ async def main() -> int:
             except (OSError, RuntimeError) as exc:
                 log.debug("lifecycle_lock release failed: %s", exc)
     finally:
+        try:
+            if getattr(store, "_write_queue", None) is not None:
+                await store.disable_async_writes()
+        except Exception as exc:  # noqa: BLE001 -- cancellation cleanup must finish
+            log.debug("outer async-write cleanup failed: %s", exc, exc_info=True)
+        try:
+            if lifecycle_lock.is_held_by_self():
+                lifecycle_lock.release()
+        except (OSError, RuntimeError) as exc:
+            log.debug("outer lifecycle-lock release failed: %s", exc)
         _restore_embedder_funnel(_orig_efs, _override_installed)
     return 0
 

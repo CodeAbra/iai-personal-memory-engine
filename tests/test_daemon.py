@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import plistlib
+import threading
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ def _short_socket_paths(tmp_path, monkeypatch):
     sock_dir.mkdir(parents=True, exist_ok=True)
     sock_path = sock_dir / "d.sock"
     monkeypatch.setattr(concurrency, "SOCKET_PATH", sock_path)
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
     return lock_path, sock_path, sock_dir
 
 
@@ -134,6 +136,7 @@ def test_scheduler_tick_survives_exceptions(tmp_path, monkeypatch):
 def test_prewarm_called_once_at_boot(tmp_path, monkeypatch):
     from iai_mcp import daemon as daemon_mod
     from iai_mcp import daemon_state as ds_mod
+    from iai_mcp.daemon import _boot_warmup
 
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
     monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
@@ -152,16 +155,31 @@ def test_prewarm_called_once_at_boot(tmp_path, monkeypatch):
 
     monkeypatch.setattr("iai_mcp.embed.embedder_for_store", _fake_embedder)
 
+    warmup_finished = threading.Event()
+    real_warm_dispatch_surface = _boot_warmup.warm_dispatch_surface
+
+    def _observed_warm_dispatch_surface(store):
+        try:
+            return real_warm_dispatch_surface(store)
+        finally:
+            warmup_finished.set()
+
+    monkeypatch.setattr(
+        _boot_warmup, "warm_dispatch_surface", _observed_warm_dispatch_surface
+    )
+
     async def runner():
         task = asyncio.create_task(daemon_mod.main())
-        await asyncio.sleep(0.15)
-        task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            return await asyncio.to_thread(warmup_finished.wait, 5)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-    asyncio.run(runner())
+    assert asyncio.run(runner()), "daemon did not complete its pre-bind dispatch warmup"
     assert prewarm_calls["n"] == 1, (
         f"prewarm expected once, got {prewarm_calls['n']}"
     )
