@@ -149,6 +149,53 @@ def test_drain_stashes_anchor_and_wake_refreshes_the_pack(tmp_path):
         store.close()
 
 
+def test_replayed_history_never_touches_live_attention(tmp_path):
+    """A drained turn with an old timestamp is history, not the active task:
+    it must neither open/overwrite the working tier nor anchor the pack —
+    otherwise a backlog replay injects a past conversation as the current one."""
+    from iai_mcp import working_tier
+    from iai_mcp.capture import drain_deferred_captures
+    from iai_mcp.store import MemoryStore
+
+    deferred_dir = tmp_path / ".iai-mcp" / ".deferred-captures"
+    deferred_dir.mkdir(parents=True, exist_ok=True)
+    out = deferred_dir / f"old-sess-{int(time.time())}.jsonl"
+    header = {
+        "version": 1,
+        "deferred_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": "old-sess",
+        "cwd": "/tmp",
+    }
+    event = {
+        "text": "an ancient replayed turn that must stay out of live attention",
+        "cue": "session old-sess cue",
+        "tier": "episodic",
+        "role": "user",
+        "ts": "2026-01-01T00:00:00+00:00",
+    }
+    out.write_text(
+        json.dumps(header, ensure_ascii=False) + "\n"
+        + json.dumps(event, ensure_ascii=False) + "\n"
+    )
+
+    store = MemoryStore(path=tmp_path / "store")
+    try:
+        counts = drain_deferred_captures(store)
+        assert counts["events_inserted"] == 1, counts
+
+        assert working_tier.read_task() is None, (
+            "replayed history must not open the active task"
+        )
+        assert not working_tier._cache_path(store).exists(), (
+            "no live snapshot may be persisted from a replayed turn"
+        )
+        assert getattr(store, "_foresight_anchor", None) is None, (
+            "a replayed turn must not anchor the next-turn pack"
+        )
+    finally:
+        store.close()
+
+
 def test_turn_hook_gate_reads_sidecar_not_the_store_file():
     repo = Path(__file__).resolve().parent.parent
     hook = repo / "src" / "iai_mcp" / "_deploy" / "hooks" / "iai-mcp-turn-capture.sh"

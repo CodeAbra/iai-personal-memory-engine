@@ -1437,9 +1437,21 @@ def _drain_deferred_captures_locked(
                             if len(norm_text) > MAX_CAPTURE_LEN:
                                 norm_text = norm_text[:MAX_CAPTURE_LEN]
                             ts_iso = _resolve_ts(ev.get("ts")).isoformat()
-                            if role == "user" and (
-                                newest_live_turn is None
-                                or ts_iso > newest_live_turn[0]
+                            # Anchor only turns near wall-clock now: a backlog
+                            # replay must not aim the next-turn pack at a past
+                            # conversation. Same horizon as the working tier's
+                            # live-attention guard.
+                            from iai_mcp.working_tier import (
+                                WORKING_TIER_IDLE_CLOSE_SEC as _live_horizon,
+                            )
+                            _turn_age = time.time() - _resolve_ts(ev.get("ts")).timestamp()
+                            if (
+                                role == "user"
+                                and _turn_age <= _live_horizon
+                                and (
+                                    newest_live_turn is None
+                                    or ts_iso > newest_live_turn[0]
+                                )
                             ):
                                 newest_live_turn = (ts_iso, norm_text, session_id)
                             tag = _idem_tag(

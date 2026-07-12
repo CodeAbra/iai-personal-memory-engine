@@ -400,6 +400,13 @@ def update_from_record(record: Any, *, store: Any = None) -> None:
             return
 
         now = _turn_ts(record)
+        # The working tier is the LIVE attention scratchpad: only turns near
+        # wall-clock now may touch it. A replayed historical turn (backlog
+        # drain, transcript import, recovery) would otherwise overwrite the
+        # active task with a past that already happened — and the per-turn
+        # hook would inject that stale task as the current one.
+        if (time.time() - now) > WORKING_TIER_IDLE_CLOSE_SEC:
+            return
         stale: WorkingSetEntry | None = None
 
         with _lock:
