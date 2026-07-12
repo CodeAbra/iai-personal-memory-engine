@@ -532,7 +532,12 @@ def compute_assignment_in_child(
             result = _drain_community_only_result(parent_conn, timeout=timeout)
 
             process.join(timeout=5.0)
-            if process.exitcode != 0:
+            # A fully-drained result IS success. exitcode None just means the
+            # child is still tearing down (graph + JIT teardown outgrows the
+            # join window as the corpus scales) — the finally-terminate reaps
+            # it. Raising here threw away a GOOD result and retried the whole
+            # compute every cycle: a permanent full-CPU rebuild loop.
+            if process.exitcode not in (0, None):
                 raise WorkerCrashedError(
                     f"worker exited with code {process.exitcode}"
                 )
@@ -606,7 +611,12 @@ def compute_centrality_in_child(
             result = _drain_community_only_result(parent_conn, timeout=timeout)
 
             process.join(timeout=5.0)
-            if process.exitcode != 0:
+            # A fully-drained result IS success. exitcode None just means the
+            # child is still tearing down (graph + JIT teardown outgrows the
+            # join window as the corpus scales) — the finally-terminate reaps
+            # it. Raising here threw away a GOOD result and retried the whole
+            # compute every cycle: a permanent full-CPU rebuild loop.
+            if process.exitcode not in (0, None):
                 raise WorkerCrashedError(
                     f"worker exited with code {process.exitcode}"
                 )
@@ -1741,7 +1751,12 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
             result = _drain_worker_result(parent_conn, timeout=timeout_s)
 
             process.join(timeout=5.0)
-            if process.exitcode != 0:
+            # A fully-drained result IS success. exitcode None just means the
+            # child is still tearing down (graph + JIT teardown outgrows the
+            # join window as the corpus scales) — the finally-terminate reaps
+            # it. Raising here threw away a GOOD result and retried the whole
+            # compute every cycle: a permanent full-CPU rebuild loop.
+            if process.exitcode not in (0, None):
                 raise WorkerCrashedError(
                     f"worker exited with code {process.exitcode}"
                 )
