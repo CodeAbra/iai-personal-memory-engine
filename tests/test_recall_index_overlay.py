@@ -59,7 +59,7 @@ def test_cache_version_bumped():
     assert rgc.CACHE_VERSION != "62-04-v4", (
         f"CACHE_VERSION must be bumped from 62-04-v4; got {rgc.CACHE_VERSION!r}"
     )
-    assert rgc.CACHE_VERSION == "62-02-v6"
+    assert rgc.CACHE_VERSION == "62-02-v7"
 
 def test_overlay_hit_serves_cached_o1(tmp_path, monkeypatch):
     from iai_mcp import runtime_graph_cache as rgc

@@ -33,7 +33,7 @@ _STRUCTURAL_DECODE_LOCK_GUARD = threading.Lock()
 rebuild_ready: threading.Event = threading.Event()
 
 
-CACHE_VERSION: str = "62-02-v6"
+CACHE_VERSION: str = "62-02-v7"
 
 _STALENESS_WINDOW: int = 10
 

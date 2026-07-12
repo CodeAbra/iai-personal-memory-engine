@@ -142,7 +142,7 @@ def test_C3_missing_centrality_fallback_inline(seeded_store):
 
 
 def test_C4_cache_version_bumped_to_05_13_v1():
-    assert runtime_graph_cache.CACHE_VERSION == "62-02-v6"
+    assert runtime_graph_cache.CACHE_VERSION == "62-02-v7"
 
 
 def test_C4_legacy_cache_invalidated(seeded_store, tmp_path: Path):
