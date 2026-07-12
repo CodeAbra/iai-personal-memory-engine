@@ -102,6 +102,33 @@ def write_turn_direct(
                 updated_at=ts_norm,
             )
 
+        # The daemon is never a gatekeeper: a daemon-down capture must feed
+        # the same freshness surfaces the normal path does, so per-turn
+        # context injection keeps working from files alone. The working
+        # tier's own live-horizon guard keeps replayed history out.
+        try:
+            from iai_mcp.store_watermark import emit as _emit_watermark
+
+            _emit_watermark(db._hippo_dir, ts_norm)
+        except Exception as exc:  # noqa: BLE001 -- sidecar is advisory
+            log.debug("direct-write watermark emit failed: %s", exc)
+        try:
+            from types import SimpleNamespace
+
+            from iai_mcp import working_tier
+
+            working_tier.update_from_record(
+                SimpleNamespace(
+                    created_at=now,
+                    literal_surface=text,
+                    provenance=provenance,
+                    tags=tags,
+                ),
+                store=SimpleNamespace(root=root),
+            )
+        except Exception as exc:  # noqa: BLE001 -- hook isolation
+            log.debug("direct-write working feed failed: %s", exc)
+
         return {
             "status": "inserted",
             "record_id": record_id,
