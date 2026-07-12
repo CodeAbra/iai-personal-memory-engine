@@ -16,12 +16,6 @@ import pytest
 
 pytestmark = [
     pytest.mark.skipif(platform.system() == "Windows", reason="POSIX bash + AF_UNIX"),
-    pytest.mark.skipif(
-        os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-        reason=(
-            "bash hook reads the store via inline stdlib sqlite3 and cannot read the engine format"
-        ),
-    ),
 ]
 
 REPO = Path(__file__).resolve().parent.parent
@@ -36,20 +30,11 @@ def _skip_guards():
 
 
 def _seed_db_and_watermark(home: Path, sid: str, past_ts: str, old_watermark_ts: str) -> None:
+    # The gate reads the writer-stamped store-advance sidecar, never the store
+    # file itself — the sidecar is engine-format-agnostic by design.
     hippo_dir = home / ".iai-mcp" / "hippo"
     hippo_dir.mkdir(parents=True, exist_ok=True)
-    db_path = hippo_dir / "brain.sqlite3"
-    import sqlite3
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE records (created_at TEXT, tombstoned_at TEXT)"
-    )
-    conn.execute(
-        "INSERT INTO records (created_at, tombstoned_at) VALUES (?, NULL)",
-        (past_ts,),
-    )
-    conn.commit()
-    conn.close()
+    (hippo_dir / ".max-created-at").write_text(past_ts)
 
     state_dir = home / ".iai-mcp" / ".capture-state"
     state_dir.mkdir(parents=True, exist_ok=True)

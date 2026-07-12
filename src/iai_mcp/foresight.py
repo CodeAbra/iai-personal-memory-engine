@@ -237,6 +237,30 @@ def _exact_scores(store: Any, cue_vec: "list[float]", k: int) -> "dict[str, floa
         return {}
 
 
+def refresh_from_anchor(store: Any, embedder: Any) -> bool:
+    """Consume the drain-stashed newest-user-turn anchor and refresh the pack.
+
+    The capture drain must never embed (its resident-set discipline depends on
+    it), so it stashes (ts, text, session_id) on the store; the wake-sequence
+    caller — where the embedder is warm anyway — pays the one embed here."""
+    anchor = getattr(store, "_foresight_anchor", None)
+    if anchor is None:
+        return False
+    store._foresight_anchor = None
+    try:
+        _ts, text, session_id = anchor
+        refresh_pack(
+            store,
+            cue_text=text,
+            cue_embedding=embedder.embed(text[:512]),
+            session_id=session_id,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 -- anticipation is additive
+        logger.debug("foresight anchor refresh failed: %s", exc)
+        return False
+
+
 def refresh_pack(
     store: Any,
     *,

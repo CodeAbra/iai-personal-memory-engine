@@ -109,8 +109,14 @@ def write_live_fingerprint(session_id: str, total_size: int) -> None:
 def get_max_created_at() -> str | None:
     import sqlite3 as _sqlite3
     from iai_mcp.hippo._raw_open import open_store_conn
+    from iai_mcp.store_watermark import read as _read_watermark
 
-    db_path = Path.home() / ".iai-mcp" / "hippo" / "brain.sqlite3"
+    store_root = Path.home() / ".iai-mcp" / "hippo"
+    stamped = _read_watermark(store_root)
+    if stamped:
+        return stamped
+
+    db_path = store_root / "brain.sqlite3"
     if not db_path.exists():
         return None
     try:

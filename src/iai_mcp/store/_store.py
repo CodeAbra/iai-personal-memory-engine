@@ -720,6 +720,17 @@ class MemoryStore:
         except Exception as exc:  # noqa: BLE001 -- hook isolation
             logger.debug("working_feed failed: %s", exc)
 
+    def _emit_store_watermark(self, record: "MemoryRecord") -> None:
+        """Stamp the store-advance sidecar the per-turn hooks watch. It lives
+        beside the DB file so readers need no knowledge of the store layout."""
+        try:
+            from iai_mcp.store_watermark import emit
+            created = getattr(record, "created_at", None)
+            sidecar_dir = getattr(self.db, "_hippo_dir", self.root / "hippo")
+            emit(sidecar_dir, created.isoformat() if created is not None else "")
+        except Exception as exc:  # noqa: BLE001 -- sidecar is advisory
+            logger.debug("watermark emit failed: %s", exc)
+
     def _feed_recency_pending(
         self,
         *,
@@ -1130,6 +1141,7 @@ class MemoryStore:
         self._fire_graph_sync_hook("insert", record)
         self._feed_recency(record)
         self._feed_working(record)
+        self._emit_store_watermark(record)
         if _psep_action == GateAction.INSERT and not _psep_cfg.dry_run:
             self.boost_edges(
                 [(record.id, record.id)],

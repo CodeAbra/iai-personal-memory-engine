@@ -228,28 +228,22 @@ os.replace(tmp, offset)
 # entirely.  Contacting the default daemon socket would surface the wrong
 # store context.  Explicit IAI_DAEMON_SOCKET_PATH always wins.
 #
-# DB and watermark reads are HOME-based regardless of IAI_MCP_STORE, matching
-# the behavior of the manual cmd_session_refresh_if_stale command in cli.py.
-# Only the socket RPC is store-guarded.
+# Sidecar and watermark reads are HOME-based regardless of IAI_MCP_STORE,
+# matching the behavior of the manual cmd_session_refresh_if_stale command in
+# cli.py. Only the socket RPC is store-guarded.
 try:
-    import sqlite3 as _sq3
-
     # --- Helper functions (all HOME-based, no IAI_MCP_STORE awareness) ---
 
     def _gate_get_max_created_at():
-        db = home / ".iai-mcp" / "hippo" / "brain.sqlite3"
-        if not db.exists():
-            return None
+        # The store-advance sidecar is stamped by the writers on every record
+        # write. The hook must never open the store file itself — its on-disk
+        # engine format is not a hook contract.
         try:
-            conn = _sq3.connect(f"file:{db}?mode=ro", uri=True)
-            try:
-                row = conn.execute(
-                    "SELECT MAX(created_at) FROM records WHERE tombstoned_at IS NULL"
-                ).fetchone()
-                return row[0] if row and row[0] else None
-            finally:
-                conn.close()
-        except Exception:
+            raw = (home / ".iai-mcp" / "hippo" / ".max-created-at").read_text(
+                encoding="utf-8"
+            ).strip()
+            return raw or None
+        except OSError:
             return None
 
     def _gate_utc_iso(ts):

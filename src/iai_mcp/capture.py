@@ -659,6 +659,35 @@ def _drain_write_pending(
             extra={"record_id": record_id, "err_type": type(exc).__name__},
         )
 
+    # A pending row is arrived memory: stamp the store-advance sidecar the
+    # per-turn hooks watch, and feed the working tier — ambient turns must
+    # update the active task exactly like fully-embedded inserts do.
+    try:
+        from iai_mcp.store_watermark import emit as _emit_watermark
+
+        _emit_watermark(
+            getattr(store.db, "_hippo_dir", store.root / "hippo"),
+            now.isoformat(),
+        )
+    except Exception as exc:  # noqa: BLE001 -- sidecar is advisory
+        log.debug("drain_pending_watermark_emit_failed: %s", exc)
+    try:
+        from types import SimpleNamespace
+
+        from iai_mcp import working_tier
+
+        working_tier.update_from_record(
+            SimpleNamespace(
+                created_at=now,
+                literal_surface=text,
+                provenance=provenance_list,
+                tags=tags,
+            ),
+            store=store,
+        )
+    except Exception as exc:  # noqa: BLE001 -- hook isolation
+        log.debug("drain_pending_working_feed_failed: %s", exc)
+
     return {"status": "inserted", "record_id": record_id, "reason": f"tier={tier}"}
 
 
@@ -1203,6 +1232,10 @@ def _drain_deferred_captures_locked(
     # matches capture_turn's own idem-check, which remains the correctness backstop
     # — the pre-check can only save the embed, never drop a genuinely-new record.
     seen_this_run: set[str] = set()
+    # Newest user turn seen this pass (ts_iso, text, session_id) — the drain's
+    # anchor for one next-turn pack refresh at the end of the pass. Tracked
+    # regardless of dedup outcome: a re-seen turn is still the current context.
+    newest_live_turn: "tuple[str, str, str] | None" = None
 
     for fpath in sorted(deferred_dir.iterdir()):
         if not fpath.is_file():
@@ -1404,6 +1437,11 @@ def _drain_deferred_captures_locked(
                             if len(norm_text) > MAX_CAPTURE_LEN:
                                 norm_text = norm_text[:MAX_CAPTURE_LEN]
                             ts_iso = _resolve_ts(ev.get("ts")).isoformat()
+                            if role == "user" and (
+                                newest_live_turn is None
+                                or ts_iso > newest_live_turn[0]
+                            ):
+                                newest_live_turn = (ts_iso, norm_text, session_id)
                             tag = _idem_tag(
                                 session_id,
                                 role,
@@ -1614,6 +1652,14 @@ def _drain_deferred_captures_locked(
             _step_memory_relief(label="deferred_drain")
         except Exception as exc:  # noqa: BLE001 -- relief is advisory, never fatal
             log.debug("drain_post_relief_failed: %s", exc)
+
+    # Stash the newest user turn as the next-turn pack anchor. The drain
+    # itself never embeds (its resident-set discipline depends on that); the
+    # wake-sequence pass — where the embedder is warm anyway — consumes the
+    # anchor and refreshes the pack once, so anticipation tracks the
+    # conversation's current point instead of thrashing per replayed event.
+    if newest_live_turn is not None:
+        store._foresight_anchor = newest_live_turn
 
     return counts
 

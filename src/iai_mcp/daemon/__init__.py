@@ -1321,6 +1321,13 @@ async def main() -> int:
                 log.warning("pending_embed_pass: embedder unavailable: %s", _emb_exc)
             result = store.db.pending_embeddings_wake_sequence(embedder=_emb)
             log.warning("pending_embed_pass: result=%s", result)
+            if _emb is not None:
+                try:
+                    from iai_mcp.foresight import refresh_from_anchor
+
+                    refresh_from_anchor(store, _emb)
+                except Exception:  # noqa: BLE001 -- anticipation is additive
+                    log.debug("pending-embed pack refresh failed", exc_info=True)
             if isinstance(result, dict) and result.get("action") != "skip":
                 try:
                     _rgc.invalidate(store)
