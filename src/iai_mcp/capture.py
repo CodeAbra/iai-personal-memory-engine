@@ -136,15 +136,9 @@ QUARANTINE_MAX_ATTEMPTS: int = 2
 
 
 def _pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    from iai_mcp.lifecycle_lock import pid_exists
+
+    return pid_exists(pid)
 
 
 def _strip_processing_marker(

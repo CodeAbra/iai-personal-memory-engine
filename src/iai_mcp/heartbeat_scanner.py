@@ -33,15 +33,9 @@ class HeartbeatEntry:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    from iai_mcp.lifecycle_lock import pid_exists
+
+    return pid_exists(pid)
 
 
 def _parse_heartbeat_file(path: Path) -> tuple[int, str, datetime] | None:

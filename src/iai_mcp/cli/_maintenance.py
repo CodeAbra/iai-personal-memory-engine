@@ -69,11 +69,9 @@ def _maintenance_compact_preflight_daemon_alive() -> str | None:
     pid = state.get("daemon_pid")
     if not isinstance(pid, int) or pid <= 0:
         return None
-    try:
-        _os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return None
-    except OSError:
+    from iai_mcp.lifecycle_lock import pid_exists
+
+    if not pid_exists(pid):
         return None
     try:
         import psutil

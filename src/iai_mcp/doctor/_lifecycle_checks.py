@@ -65,20 +65,15 @@ def check_a_daemon_alive() -> CheckResult:
             f"daemon_pid={pid!r} is not a valid PID (corrupt state?)",
         )
 
+    from iai_mcp.lifecycle_lock import _is_pid_alive
+
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"PID {pid} in state but no process found",
-        )
-    except PermissionError:
-        return CheckResult(
-            "(a) daemon process alive",
-            False,
-            f"PID {pid} exists but is not owned by this user",
-        )
+        if not _is_pid_alive(pid):
+            return CheckResult(
+                "(a) daemon process alive",
+                False,
+                f"PID {pid} is not a live iai_mcp.daemon process",
+            )
     except OSError as e:
         return CheckResult(
             "(a) daemon process alive",

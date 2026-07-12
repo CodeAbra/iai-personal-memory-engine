@@ -45,6 +45,37 @@ def _current_hostname() -> str:
     return socket.gethostname()
 
 
+def pid_exists(pid: int) -> bool:
+    """Generic pid liveness, safe on every platform.
+
+    psutil-first: the POSIX ``os.kill(pid, 0)`` idiom raises ``OSError``
+    (WinError 87) for a HEALTHY pid on Windows, so a kill-0-only probe reads
+    live processes as dead — lock stealers, crash-quarantine misjudgments,
+    scanner crashes. The kill-0 fallback survives only for a stripped
+    environment and never declares death on an unreliable probe result.
+    """
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            return bool(psutil.pid_exists(pid))
+        except Exception:  # noqa: BLE001 -- defensive against backend quirks
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False

@@ -131,16 +131,9 @@ _CONSOLIDATION_INTENT_TTL_S: float = 900.0
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    from iai_mcp.lifecycle_lock import pid_exists
+
+    return pid_exists(pid)
     return True
 
 
