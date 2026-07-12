@@ -1,22 +1,29 @@
 #!/bin/sh
-# IAI-MCP Stop hook — ambient WRITE-side capture.
+# IAI-MCP Stop hook — turn-boundary checkpoint for ambient capture.
 #
-# Fires when a Claude Code session ends. Reads the session's JSONL transcript,
-# batch-captures user + assistant turns into the iai-mcp episodic tier through
-# `iai-mcp capture-transcript --no-spawn`. Never spawns a daemon — if the
-# daemon is unreachable the call defers events to
-# ~/.iai-mcp/.deferred-captures/ for the daemon to drain on next socket
-# activation.
+# Claude Code fires Stop after EVERY assistant response, not at session end.
+# This hook therefore does two cheap incremental things per response:
+#   1. `iai-mcp capture-turn-deferred` — appends only the transcript lines
+#      newer than the per-session offset (the response that just finished)
+#      to the session's live spool. Same offset the UserPromptSubmit hook
+#      maintains; it is NEVER deleted here — wiping it forces the next
+#      capture to re-read the whole transcript from line 0, and a full
+#      re-capture per response floods the deferred spool by gigabytes on
+#      long-running sessions.
+#   2. Rotates {session_id}.live.jsonl so the drain can claim the turns.
 #
-# Fail-safe by design: any error exits 0 so session teardown is never blocked.
+# Full-transcript capture (`iai-mcp capture-transcript`) stays a manual
+# import/recovery tool — it must not run on a per-response event.
+#
+# Fail-safe by design: any error exits 0 so the response is never blocked.
 # Logs go to ~/.iai-mcp/logs/capture-YYYY-MM-DD.log for audit.
 #
 # Hook payload (stdin JSON from Claude Code) contains:
-#   - session_id       (UUID of the session that just ended)
+#   - session_id       (UUID of the active session)
 #   - transcript_path  (absolute path to the session JSONL) — available in
 #                      newer Claude Code builds; we fall back to scanning the
 #                      per-project transcript dir for the matching session_id.
-#   - cwd              (working directory at session end)
+#   - cwd              (working directory at fire time)
 
 set -u  # no -e: we must not abort on errors, fail-safe is paramount
 input=$(cat 2>/dev/null || true)
@@ -124,40 +131,40 @@ if [ -z "$iai_cli" ]; then
   exit 0
 fi
 
-# Atomically rename the active-writer marker so the drain can see it on the
-# next WAKE/DROWSY pass. Target name uses `.live-${epoch}.jsonl` so it never
-# collides with the safety-net output shape `${session_id}-${epoch}.jsonl`
-# in the same second. Also clean the per-session offset state — the session
-# is ending, no further per-turn writes will reference it.
+# Incremental catch-up FIRST: the assistant response that just finished is in
+# the transcript past the offset but not yet in the live spool (the per-turn
+# hook only fires on the NEXT user prompt, which may never come). 30s hard
+# timeout; `timeout` is in coreutils (macOS: brew install coreutils).
+if command -v timeout >/dev/null 2>&1; then
+  result=$(timeout 30 "$iai_cli" capture-turn-deferred \
+    --session-id "$session_id" \
+    --transcript-path "$transcript_path" \
+    --max-turns-per-call 1000 2>&1)
+elif command -v gtimeout >/dev/null 2>&1; then
+  result=$(gtimeout 30 "$iai_cli" capture-turn-deferred \
+    --session-id "$session_id" \
+    --transcript-path "$transcript_path" \
+    --max-turns-per-call 1000 2>&1)
+else
+  result=$("$iai_cli" capture-turn-deferred \
+    --session-id "$session_id" \
+    --transcript-path "$transcript_path" \
+    --max-turns-per-call 1000 2>&1)
+fi
+rc=$?
+
+# THEN atomically rename the active-writer marker so the drain can claim the
+# fully-captured turn on its next pass. Target name uses `.live-${epoch}.jsonl`
+# so it never collides with the bulk-import output shape
+# `${session_id}-${epoch}-${pid}.jsonl` in the same second. The per-session
+# offset state is deliberately left in place — it is line-count-relative to
+# the transcript, not to the live file, and stays valid across rotations.
 if [ -n "$session_id" ]; then
   live_file="$HOME/.iai-mcp/.deferred-captures/${session_id}.live.jsonl"
   if [ -f "$live_file" ]; then
     mv "$live_file" "$HOME/.iai-mcp/.deferred-captures/${session_id}.live-$(date +%s).jsonl" 2>/dev/null || true
   fi
-  offset_state="$HOME/.iai-mcp/.capture-state/${session_id}.offset"
-  [ -f "$offset_state" ] && rm -f "$offset_state" 2>/dev/null
 fi
-
-# Run capture with a 30s hard timeout — if it hangs, the session must still
-# end cleanly. `timeout` is in coreutils (macOS: brew install coreutils). We
-# fall back to a background kill loop if absent.
-if command -v timeout >/dev/null 2>&1; then
-  result=$(timeout 30 "$iai_cli" capture-transcript --no-spawn \
-    --session-id "$session_id" \
-    --max-turns 100000 \
-    "$transcript_path" 2>&1)
-elif command -v gtimeout >/dev/null 2>&1; then
-  result=$(gtimeout 30 "$iai_cli" capture-transcript --no-spawn \
-    --session-id "$session_id" \
-    --max-turns 100000 \
-    "$transcript_path" 2>&1)
-else
-  result=$("$iai_cli" capture-transcript --no-spawn \
-    --session-id "$session_id" \
-    --max-turns 100000 \
-    "$transcript_path" 2>&1)
-fi
-rc=$?
 
 {
   echo "$ts rc=$rc result=$result"

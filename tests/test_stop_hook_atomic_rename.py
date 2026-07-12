@@ -1,3 +1,9 @@
+"""Stop-hook contract: the hook fires after EVERY assistant response, so it
+must (a) run the cheap incremental capture-turn-deferred — never the
+full-transcript capture, which floods the spool by gigabytes on long
+sessions — (b) capture BEFORE rotating the live spool so the final response
+lands in the rotated file, and (c) leave the per-session offset state alone —
+wiping it forces a full transcript re-read on the next capture."""
 from __future__ import annotations
 
 import json
@@ -61,7 +67,7 @@ def _run_hook(home: Path, session_id: str, transcript: Path) -> subprocess.Compl
         timeout=20,
     )
 
-def test_stop_hook_renames_live_file_before_capture_transcript(tmp_path):
+def test_stop_hook_captures_incrementally_then_renames_live_file(tmp_path):
     home = tmp_path
     deferred = home / ".iai-mcp" / ".deferred-captures"
     deferred.mkdir(parents=True, exist_ok=True)
@@ -84,14 +90,42 @@ def test_stop_hook_renames_live_file_before_capture_transcript(tmp_path):
 
     assert shim_log.exists(), "shim must have been called"
     shim_argv = shim_log.read_text()
-    assert "capture-transcript" in shim_argv
-    assert "--no-spawn" in shim_argv
+    assert "capture-turn-deferred" in shim_argv
+    assert "--transcript-path" in shim_argv
+    assert "capture-transcript" not in shim_argv, (
+        "full-transcript capture on a per-response event floods the spool"
+    )
 
+    # The capture runs BEFORE the rotation: at CLI time the live spool is
+    # still under its active name, so the just-captured turn is included in
+    # the file the drain claims.
     snap_path = Path(str(shim_log) + ".dirsnap")
     assert snap_path.exists(), "directory snapshot must be recorded by the shim"
-    snap = snap_path.read_text()
-    assert f"{sid}.live.jsonl" not in snap.splitlines(), snap
-    assert renamed[0].name in snap
+    snap = snap_path.read_text().splitlines()
+    assert f"{sid}.live.jsonl" in snap, snap
+    assert renamed[0].name not in snap, snap
+
+def test_stop_hook_preserves_the_per_turn_offset_state(tmp_path):
+    home = tmp_path
+    deferred = home / ".iai-mcp" / ".deferred-captures"
+    deferred.mkdir(parents=True, exist_ok=True)
+
+    sid = "SESSION-OFFSET-1"
+    offset = home / ".iai-mcp" / ".capture-state" / f"{sid}.offset"
+    offset.parent.mkdir(parents=True, exist_ok=True)
+    offset.write_text("42")
+
+    _install_shim(home, home / "shim.log")
+    transcript = _make_transcript(home, sid)
+
+    result = _run_hook(home, sid, transcript)
+    assert result.returncode == 0
+
+    assert offset.exists(), (
+        "the offset is transcript-relative and must survive the response "
+        "boundary — deleting it forces a full re-read next capture"
+    )
+    assert offset.read_text() == "42"
 
 def test_rename_target_does_not_collide_with_safety_net_output(tmp_path):
     home = tmp_path
@@ -130,5 +164,5 @@ def test_stop_hook_no_op_if_no_live_file(tmp_path):
     assert result.returncode == 0
 
     assert list(deferred.iterdir()) == []
-    assert shim_log.exists(), "shim still gets called as the safety net"
-    assert "capture-transcript" in shim_log.read_text()
+    assert shim_log.exists(), "the incremental capture still runs"
+    assert "capture-turn-deferred" in shim_log.read_text()

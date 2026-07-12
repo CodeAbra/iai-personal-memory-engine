@@ -1261,6 +1261,16 @@ def _drain_deferred_captures_locked(
                 continue
         candidates.append(fpath)
 
+    # Oldest backlog first: a capped pass must make net progress on the tail,
+    # not re-chew whichever session id happens to sort alphabetically first.
+    def _mtime_or_inf(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return float("inf")
+
+    candidates.sort(key=_mtime_or_inf)
+
     for fpath in candidates:
         if cap_hit:
             break
