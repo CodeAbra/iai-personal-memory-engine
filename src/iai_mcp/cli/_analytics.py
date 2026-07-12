@@ -99,6 +99,11 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     from iai_mcp.store import MemoryStore
     store = MemoryStore()
+    verbose = bool(getattr(args, "verbose", False))
+
+    def _progress(i: int, n: int) -> None:
+        if verbose:
+            print(f"[{i + 1}/{n}] migrating...")
 
     # --reembed-from-text owns --resume / --rollback when combined with it:
     # resume continues the reembed from its last committed window, rollback
@@ -124,13 +129,40 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         )
         return 0
 
+    if bool(getattr(args, "reembed_to_configured_provider", False)):
+        from iai_mcp.embed import Embedder
+        from iai_mcp.migrate import migrate_reembed_to_current_dim
+
+        target = Embedder()
+        dry_run = bool(getattr(args, "dry_run", False))
+        batch_size = int(getattr(args, "reembed_batch_size", 256))
+        result = migrate_reembed_to_current_dim(
+            store,
+            target,
+            dry_run=dry_run,
+            progress=_progress,
+            force=True,
+            batch_size=batch_size,
+        )
+        prefix = "[dry-run] would re-embed" if dry_run else "re-embedded"
+        count = result.get("would_update", result.get("updated", 0))
+        print(
+            f"{prefix} {count} records from {result['source_dim']}d to "
+            f"{result['target_dim']}d with {target.model_key}"
+        )
+        if result.get("restart_required"):
+            print(
+                "restart IAE before recall so the vector indexes reopen at the new dimension"
+            )
+        return 0
+
     if bool(getattr(args, "rollback", False)):
         from iai_mcp import migrate
         return migrate._rollback(store.db, store)
     if bool(getattr(args, "resume", False)):
         from iai_mcp import migrate
-        from iai_mcp.embed import embedder_for_store
-        target = embedder_for_store(store)
+        from iai_mcp.embed import Embedder
+        target = Embedder()
         return migrate._resume(store.db, store, target)
 
     if bool(getattr(args, "rederive_timestamps", False)):
@@ -171,11 +203,6 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     from_v = int(getattr(args, "from_", 1))
     to_v = int(getattr(args, "to", 2))
     dry_run = bool(getattr(args, "dry_run", False))
-    verbose = bool(getattr(args, "verbose", False))
-
-    def _progress(i: int, n: int) -> None:
-        if verbose:
-            print(f"[{i + 1}/{n}] migrating...")
 
     if from_v == 1 and to_v == 2:
         from iai_mcp.migrate import migrate_v1_to_v2

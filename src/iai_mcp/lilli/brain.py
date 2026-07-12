@@ -65,11 +65,11 @@ class Brain:
             raise RuntimeError(
                 "Brain.recall requires hippo_conn (MemoryStore-like instance)"
             )
-        from iai_mcp.embed import embedder_for_store
+        from iai_mcp.embed import embed_query, embedder_for_store
         from iai_mcp.retrieve import recall as _retrieve_recall
 
         embedder = embedder_for_store(self.hippo_conn)
-        cue_embedding = embedder.embed(cue)
+        cue_embedding = embed_query(embedder, cue)
         response = _retrieve_recall(
             self.hippo_conn,
             cue_embedding=cue_embedding,

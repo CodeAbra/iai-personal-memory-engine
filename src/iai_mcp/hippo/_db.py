@@ -939,12 +939,19 @@ class HippoDB:
 
         active_label_count = len(self._label_map)
         hnsw_loaded_count = self._hnsw.get_current_count()
-        if active_label_count != sqlite_count or hnsw_loaded_count != sqlite_count:
+        vectors_match = self._loaded_hnsw_matches_sqlite_sample()
+        if (
+            active_label_count != sqlite_count
+            or hnsw_loaded_count != sqlite_count
+            or not vectors_match
+        ):
             _log.info(
-                "Boot integrity check: labels=%d hnsw=%d sqlite=%d — rebuilding",
+                "Boot integrity check: labels=%d hnsw=%d sqlite=%d "
+                "vectors_match=%s — rebuilding",
                 active_label_count,
                 hnsw_loaded_count,
                 sqlite_count,
+                vectors_match,
             )
             self._rebuild_index_from_sqlite()
 
@@ -953,6 +960,37 @@ class HippoDB:
         # after any boot-integrity rebuild so the rebuild above takes the
         # fresh-alloc fallback path (the standby is intentionally absent then).
         self._allocate_standby_index(cap)
+
+    def _loaded_hnsw_matches_sqlite_sample(self) -> bool:
+        """Reject a stale on-disk ANN after a model or dimension migration."""
+        rows = self._conn.execute(
+            "SELECT vec_label, embedding FROM records"
+            " WHERE tombstoned_at IS NULL"
+            " AND COALESCE(embedding_pending, 0) = 0"
+            " ORDER BY vec_label LIMIT 3"
+        ).fetchall()
+        rows += self._conn.execute(
+            "SELECT vec_label, embedding FROM records"
+            " WHERE tombstoned_at IS NULL"
+            " AND COALESCE(embedding_pending, 0) = 0"
+            " ORDER BY vec_label DESC LIMIT 3"
+        ).fetchall()
+        try:
+            for row in rows:
+                stored = np.frombuffer(row["embedding"], dtype=np.float32)
+                indexed = self._hnsw.get_items([int(row["vec_label"])])[0]
+                norm = float(np.linalg.norm(stored))
+                expected = stored if norm == 0.0 else stored / norm
+                if indexed.shape != expected.shape or not np.allclose(
+                    indexed,
+                    expected,
+                    rtol=1e-4,
+                    atol=1e-5,
+                ):
+                    return False
+        except (RuntimeError, ValueError, IndexError):
+            return False
+        return True
 
     def _allocate_standby_index(self, cap: int) -> None:
         from iai_mcp.hippo import (

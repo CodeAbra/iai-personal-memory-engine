@@ -621,30 +621,32 @@ def check_u_recall_centrality_regression() -> CheckResult:
 def check_v_native_embedder() -> CheckResult:
     import math
 
+    backend = "unknown"
     try:
-        import iai_mcp_native  # noqa: F401
-        from iai_mcp.embed import Embedder
+        from iai_mcp.embed import Embedder, embed_query
 
         emb = Embedder()
-        assert emb._backend == "rust", f"backend={emb._backend!r}"
-        vec = emb.embed("smoke")
-        assert len(vec) == 384, f"expected 384 dims, got {len(vec)}"
+        backend = emb._backend
+        vec = embed_query(emb, "smoke")
+        assert len(vec) == emb.DIM, f"expected {emb.DIM} dims, got {len(vec)}"
         assert all(math.isfinite(float(x)) for x in vec[:3]), (
             "non-finite values in output"
         )
     except Exception as exc:  # noqa: BLE001
+        remedy = (
+            "rebuild with: cd rust/iai_mcp_native && maturin develop --release"
+            if backend in {"unknown", "rust"}
+            else "check IAI_MCP_EMBED_URL and the loopback embedder service"
+        )
         return CheckResult(
-            name="(v) native Rust embedder",
+            name="(v) configured embedder",
             passed=False,
-            detail=(
-                f"{type(exc).__name__}: {exc} — rebuild with: "
-                "cd rust/iai_mcp_native && maturin develop --release"
-            ),
+            detail=f"{type(exc).__name__}: {exc} — {remedy}",
         )
     return CheckResult(
-        name="(v) native Rust embedder",
+        name="(v) configured embedder",
         passed=True,
-        detail="encode ok, backend=rust, 384-dim",
+        detail=f"encode ok, backend={backend}, {emb.DIM}-dim, model={emb.model_key}",
     )
 
 

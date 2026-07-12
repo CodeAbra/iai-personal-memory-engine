@@ -403,12 +403,21 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     m.add_argument(
+        "--reembed-to-configured-provider",
+        action="store_true",
+        help=(
+            "Re-embed every record with the configured embedding provider, "
+            "including dimension changes. Uses the crash-safe staging-table "
+            "migration and retains the previous table until cleanup."
+        ),
+    )
+    m.add_argument(
         "--reembed-batch-size",
         type=int,
         default=256,
         help=(
-            "Records per id-ordered window for --reembed-from-text. Bounds "
-            "memory; embed calls are streamed within each window. Default 256."
+            "Records per batch for --reembed-from-text or "
+            "--reembed-to-configured-provider. Default 256."
         ),
     )
     m.add_argument(

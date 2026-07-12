@@ -101,7 +101,7 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
     """
     try:
         from iai_mcp.cue_router import _classify_cue
-        from iai_mcp.embed import embedder_for_store
+        from iai_mcp.embed import embed_query, embedder_for_store
         from iai_mcp.pipeline import K_CANDIDATES
         from iai_mcp.core._serializers import _hit_to_json
         from iai_mcp.types import MemoryHit
@@ -109,7 +109,7 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
         cue_mode, _cue_intent, _triggered_pattern = _classify_cue(params.get("cue", ""))
 
         embedder = embedder_for_store(store)
-        _cue_vec = embedder.embed(params["cue"])
+        _cue_vec = embed_query(embedder, params["cue"])
 
         _ann_pairs = store.query_similar(_cue_vec, k=K_CANDIDATES)
         _candidate_recs: dict = {_r.id: _r for _r, _s in _ann_pairs}
@@ -368,7 +368,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 mode=cue_mode,
             )
         else:
-            from iai_mcp.embed import embedder_for_store
+            from iai_mcp.embed import embed_query, embedder_for_store
             from iai_mcp.pipeline import recall_for_response
             try:
                 from iai_mcp.daemon_state import load_state as _ds_load
@@ -400,7 +400,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     _encode_ms: "float | None" = None
                     _encode_t0 = _time.perf_counter()
                     try:
-                        _cue_vec = embedder.embed(params["cue"])
+                        _cue_vec = embed_query(embedder, params["cue"])
                         _encode_ms = (_time.perf_counter() - _encode_t0) * 1000.0
                         _trace_mark("encode")
                     except Exception as _emb_exc:
@@ -960,9 +960,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         except Exception as exc:  # noqa: BLE001 -- one lane failing must not blank the other
             logger.debug("memory_search lexical lane failed: %s", exc)
         try:
-            from iai_mcp.embed import embedder_for_store
+            from iai_mcp.embed import embed_query, embedder_for_store
 
-            vec = embedder_for_store(store).embed(query[:512])
+            vec = embed_query(embedder_for_store(store), query[:512])
             for sem_rank, (rec, cos) in enumerate(store.query_similar(list(vec), k=k)):
                 rid = str(rec.id)
                 if rid in merged:
@@ -1248,7 +1248,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
     if method == "memory_temporal_recall":
         from iai_mcp.events import flush_event_buffer, query_events
-        from iai_mcp.embed import embedder_for_store
+        from iai_mcp.embed import embed_query, embedder_for_store
         from iai_mcp.store._store import _normalize_ts_for_compare
 
         try:
@@ -1284,7 +1284,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             cue_vec: list[float] | None = None
             if cue:
                 embedder = embedder_for_store(store)
-                cue_vec = embedder.embed(cue)
+                cue_vec = embed_query(embedder, cue)
             record_hits = store.query_similar_temporal(
                 vec=cue_vec, as_of=as_of_norm, k=limit,
             )

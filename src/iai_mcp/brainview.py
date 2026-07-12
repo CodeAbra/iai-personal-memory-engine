@@ -1189,9 +1189,9 @@ class BrainView:
         if not query:
             return {"hits": []}
         try:
-            from iai_mcp.embed import embedder_for_store
+            from iai_mcp.embed import embed_query, embedder_for_store
 
-            emb = embedder_for_store(self.store).embed(query[:512])
+            emb = embed_query(embedder_for_store(self.store), query[:512])
             raw = self.store.query_similar(list(emb), k=max(1, min(int(k), 24)))
         except Exception as exc:  # noqa: BLE001 -- search is navigation, degrade to empty
             logger.warning("brainview search failed: %s", exc)
