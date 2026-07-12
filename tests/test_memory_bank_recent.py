@@ -317,3 +317,37 @@ def test_recent_append_decrypts_without_knowing_record_id(iai_home):
 
     with pytest.raises(InvalidTag):
         decrypt_field(raw_line, store._key(), associated_data=store._ad(rec.id))
+
+
+def test_short_writes_never_tear_a_line(iai_home, monkeypatch):
+    """A ciphertext line is several KB; a partial os.write must be completed,
+    not dropped — a torn line is an undecryptable AES-GCM frame (observed
+    live: mid-window lines failing InvalidTag under concurrent appends)."""
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=iai_home / ".iai-mcp" / "store")
+    try:
+        real_write = os.write
+
+        def _dribble(fd, data):
+            return real_write(fd, bytes(data)[:7])
+
+        monkeypatch.setattr(os, "write", _dribble)
+        for i in range(3):
+            append_recent_record(
+                store,
+                _make_record(embed_dim=store.embed_dim, text=f"short write probe {i}"),
+            )
+        monkeypatch.setattr(os, "write", real_write)
+
+        recent = _recent_dir(iai_home)
+        window_file = next(iter(recent.glob("window-*.jsonl")))
+        window_aad = window_file.name[len("window-"):-len(".jsonl")].encode()
+        key = store._key()
+        lines = [l for l in window_file.read_text().splitlines() if l.strip()]
+        assert len(lines) == 3
+        for line in lines:
+            payload = json.loads(decrypt_field(line, key, associated_data=window_aad))
+            assert payload["text"].startswith("short write probe")
+    finally:
+        store.close()

@@ -225,9 +225,26 @@ def append_recent_record(
             0o600,
         )
         try:
-            os.fchmod(fd, 0o600)
-            os.write(fd, line)
-            os.fsync(fd)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            # Cross-PROCESS exclusive lock around the whole line: the thread
+            # lock above only serializes this process, and a ciphertext line
+            # is several KB — an interleaved or short write tears it into an
+            # undecryptable AES-GCM frame (observed: mid-file lines of a
+            # window failing InvalidTag under concurrent daemon + offline
+            # drain appends). The short-write loop finishes a partial write
+            # for the same reason.
+            from iai_mcp import _flock as _fl
+
+            _fl.flock(fd, _fl.LOCK_EX)
+            try:
+                view = memoryview(line)
+                while view:
+                    written = os.write(fd, view)
+                    view = view[written:]
+                os.fsync(fd)
+            finally:
+                _fl.flock(fd, _fl.LOCK_UN)
         finally:
             os.close(fd)
 
