@@ -358,8 +358,25 @@ try:
                     # Lazy import: only in the trigger branch to keep common-path import-light.
                     import socket as _sock
                     import sys as _sys
+                    import time as _time
+
+                    # Unresponsive-daemon backoff: a reply that never comes
+                    # costs the full socket timeout on EVERY prompt, so one
+                    # timed-out attempt opens a cooldown window during which
+                    # the RPC is skipped. A successful reply clears it.
+                    _cooldown = home / ".iai-mcp" / ".capture-state" / f"{session_id}.refresh-cooldown"
+                    _COOLDOWN_SEC = 600
+                    _skip_rpc = False
+                    try:
+                        if (_time.time() - _cooldown.stat().st_mtime) < _COOLDOWN_SEC:
+                            _skip_rpc = True
+                    except OSError:
+                        pass
+                    if _skip_rpc:
+                        raise SystemExit(0)
 
                     _MAX_REPLY = 2 * 1024 * 1024  # 2 MB buffer cap
+                    _replied = False
                     _conn = None
                     try:
                         _conn = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
@@ -393,6 +410,7 @@ try:
                         nl_pos = buf.find(b"\n")
                         frame = buf[:nl_pos] if nl_pos >= 0 else buf
                         if frame:
+                            _replied = True
                             try:
                                 resp_obj = json.loads(frame.decode("utf-8"))
                                 result_obj = resp_obj.get("result") or {}
@@ -420,6 +438,14 @@ try:
                                 _conn.close()
                             except Exception:
                                 pass
+                        try:
+                            if _replied:
+                                _cooldown.unlink(missing_ok=True)
+                            else:
+                                _cooldown.parent.mkdir(parents=True, exist_ok=True)
+                                _cooldown.touch()
+                        except OSError:
+                            pass
 except Exception:
     pass
 '

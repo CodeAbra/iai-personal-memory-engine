@@ -113,9 +113,31 @@ def _l0_segment(store: MemoryStore) -> str:
     return f"{aaak}\n{cleaned}"
 
 
+def _pinned_hi_detail_ids(store: MemoryStore) -> "list[UUID]":
+    """Id-only predicate scan on plain columns — the pinned set is tiny and
+    the composer must never materialize the corpus (this runs inside the
+    per-message refresh RPC; a full decrypt sweep at 35k records took
+    minutes and presented as a hung daemon)."""
+    db = store.db
+    with db._conn_lock:
+        rows = db._conn.execute(
+            "SELECT id FROM records"
+            " WHERE tombstoned_at IS NULL"
+            " AND pinned = 1 AND detail_level >= 4"
+        ).fetchall()
+    out: list[UUID] = []
+    for row in rows:
+        try:
+            out.append(UUID(row["id"]))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
 def _l1_segment(store: MemoryStore, max_records: int = 10) -> str:
     try:
-        records = store.all_records()
+        ids = _pinned_hi_detail_ids(store)
+        records = list(store.get_batch(ids).values())
     except (OSError, RuntimeError, ValueError):
         return ""
     pinned_hi_detail = [
@@ -145,11 +167,15 @@ def _l2_segments(
     if not top:
         return []
 
+    member_ids = [
+        mid
+        for cid in top
+        for mid in assignment.mid_regions.get(cid, [])[:3]
+    ]
     try:
-        records = store.all_records()
+        by_uuid = store.get_batch(member_ids)
     except (OSError, RuntimeError, ValueError):
         return []
-    by_uuid = {r.id: r for r in records}
 
     summaries: list[str] = []
     max_chars = L2_PER_COMMUNITY_TOKENS * 4
@@ -188,10 +214,9 @@ def _rich_club_segment_with_budget(
     if not rich_club:
         return ""
     try:
-        records = store.all_records()
+        by_uuid = store.get_batch(rich_club)
     except (OSError, RuntimeError, ValueError):
         return ""
-    by_uuid = {r.id: r for r in records}
 
     lines: list[str] = []
     running = 0
@@ -218,9 +243,13 @@ def _recent_thread_segment(
     max_records: int = 5,
     pending_live_events: "list | None" = None,
 ) -> str:
+    # Recent-N via the ordered top-K fast path; the composer runs inside the
+    # per-message refresh RPC and must never materialize the corpus (a full
+    # decrypt sweep at 35k records took minutes and presented as a hung
+    # daemon). Pending-event dedup goes through the indexed tag lookup.
     try:
-        records = store.all_records()
-    except (OSError, RuntimeError, ValueError):
+        records = store._recent_user_turns_candidate_rows(max(4 * max_records, 40))
+    except (OSError, RuntimeError, ValueError, AttributeError):
         return ""
 
     candidates = [r for r in records if r.id != L0_RECORD_UUID]
@@ -228,12 +257,6 @@ def _recent_thread_segment(
     if pending_live_events is not None:
         from iai_mcp.capture import _idem_tag as _cap_idem_tag
         from iai_mcp.store import _PendingTurn
-
-        store_idem_set: set = set()
-        for r in candidates:
-            for tag in (r.tags or []):
-                if tag.startswith("idem:"):
-                    store_idem_set.add(tag)
 
         seen_pending: set = set()
         for ev in pending_live_events:
@@ -245,8 +268,13 @@ def _recent_thread_segment(
             ts_iso = ev["ts_iso"]
             text = ev.get("text", "")
             idem = _cap_idem_tag(ev_session, role, ts_iso, text, source_uuid=src_uuid)
-            if idem in store_idem_set or idem in seen_pending:
+            if idem in seen_pending:
                 continue
+            try:
+                if store.find_record_by_tag(idem) is not None:
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                pass
             seen_pending.add(idem)
             candidates.append(_PendingTurn(
                 text=text,
