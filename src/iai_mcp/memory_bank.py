@@ -350,6 +350,7 @@ def read_recent_records(*, key: bytes | None = None) -> Iterator[dict[str, Any]]
         except OSError as exc:
             log.warning("read_recent_records: cannot read %s: %s", fpath, exc)
             continue
+        undecryptable = 0
         for line_no, raw in enumerate(text.splitlines(), start=1):
             line = raw.strip()
             if not line:
@@ -358,13 +359,10 @@ def read_recent_records(*, key: bytes | None = None) -> Iterator[dict[str, Any]]
                 plaintext = decrypt_field(
                     line, resolved_key, associated_data=window_aad
                 )
-            except (InvalidTag, ValueError) as exc:
-                log.warning(
-                    "read_recent_records: skipping line %d in %s: %s",
-                    line_no,
-                    fpath.name,
-                    exc,
-                )
+            except (InvalidTag, ValueError):
+                # Torn lines from the pre-flock concurrent-append era fail in
+                # bulk; one summary per file, not thousands of lines per read.
+                undecryptable += 1
                 continue
             try:
                 obj = json.loads(plaintext)
@@ -384,6 +382,12 @@ def read_recent_records(*, key: bytes | None = None) -> Iterator[dict[str, Any]]
                 )
                 continue
             yield obj
+        if undecryptable:
+            log.warning(
+                "read_recent_records: %s: %d undecryptable line(s) skipped",
+                fpath.name,
+                undecryptable,
+            )
 
 
 def bank_recall_substring(
