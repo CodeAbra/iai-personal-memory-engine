@@ -76,11 +76,21 @@ def test_wedge_after_n_consecutive_failures_kills():
     assert _evaluate(probe_ok=False, consecutive=DEBOUNCE_N) == ("kill", "wedge")
 
 
-def test_wedge_not_grace_covered():
+def test_wedge_is_grace_covered():
+    # A cold boot serves no socket until the store open + embedder warmup
+    # finish, and that window grows with the corpus. Killing on a debounced
+    # probe failure inside grace turns every legitimately-slow boot into a
+    # crashloop (observed live at 35k records: wedge-kill at ~30s, forever).
     assert _evaluate(probe_ok=False, consecutive=DEBOUNCE_N, uptime=1.0) == (
-        "kill",
-        "wedge",
+        "none",
+        "healthy",
     )
+
+
+def test_wedge_after_grace_still_kills():
+    assert _evaluate(
+        probe_ok=False, consecutive=DEBOUNCE_N, uptime=GRACE + 1.0
+    ) == ("kill", "wedge")
 
 
 def test_leak_kills_even_at_normal_pressure():

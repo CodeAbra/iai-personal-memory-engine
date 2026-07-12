@@ -390,8 +390,13 @@ def _evaluate_watchdog(
     if leak:
         return ("kill", "leak")
 
+    # Grace covers the wedge too: a cold boot legitimately serves no socket
+    # until the store open + embedder warmup complete, and that window grows
+    # with the corpus. A wedge verdict before grace expires kills every boot
+    # at the first debounced probe — a crashloop where the daemon never gets
+    # far enough to serve (observed live at 35k records: death at ~30s).
     mem_trigger = (not in_grace) and (pressure and big)
-    wedge_trigger = not probe_ok
+    wedge_trigger = (not in_grace) and (not probe_ok)
 
     if not (mem_trigger or wedge_trigger):
         return ("none", "healthy")
@@ -622,9 +627,12 @@ def _self_kill(reason: str, kind: str) -> None:
         pass
     if hasattr(signal, "SIGKILL"):
         os.kill(os.getpid(), signal.SIGKILL)
-    # No SIGKILL on this platform (Windows): os.kill from a background thread
-    # cannot deliver it, so a wedged daemon would never die — hard-exit.
-    os._exit(1)
+    else:
+        # No SIGKILL on this platform (Windows): os.kill from a background
+        # thread cannot deliver it, so a wedged daemon would never die —
+        # hard-exit. POSIX must NOT fall through here: the _exit races the
+        # pending SIGKILL and wins, reporting a clean exit code for a kill.
+        os._exit(1)
 
 
 def _capture_blackbox(
