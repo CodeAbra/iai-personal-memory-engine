@@ -97,6 +97,27 @@ def test_doctor_row_n_hid_idle_source_macos() -> None:
     assert "HIDIdleTime" in result.detail
 
 
+def test_doctor_row_n_hid_idle_source_linux_logind() -> None:
+    fake_status = IdleStatus(
+        hid_idle_sec=None,
+        pmset_recent_sleep=False,
+        available_signals=["logind"],
+    )
+
+    with patch(
+        "iai_mcp.idle_detector.IdleDetector.status",
+        return_value=fake_status,
+    ):
+        from iai_mcp.doctor import check_n_hid_idle_source
+
+        result = check_n_hid_idle_source()
+
+    assert result.status == "PASS"
+    assert result.passed is True
+    assert "logind IdleHint: not idle" in result.detail
+    assert "available: logind" in result.detail
+
+
 def test_doctor_row_n_hid_idle_source_missing() -> None:
     fake_status = IdleStatus(
         hid_idle_sec=None,
