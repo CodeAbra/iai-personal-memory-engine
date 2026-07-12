@@ -154,10 +154,10 @@ def recall(
     # vector (degraded, never a crash into recall).
     if cue_text and (not cue_embedding or not any(cue_embedding)):
         try:
-            from iai_mcp.embed import embedder_for_store
+            from iai_mcp.embed import embed_query, embedder_for_store
             # Full cue, same as the primary path — the encoder truncates at
             # its own token limit; a char slice here would rank differently.
-            cue_embedding = list(embedder_for_store(store).embed(cue_text))
+            cue_embedding = list(embed_query(embedder_for_store(store), cue_text))
         except Exception as exc:  # noqa: BLE001 -- degraded beats dead
             log.warning("recall cue re-embed failed, using caller vector: %s", exc)
 

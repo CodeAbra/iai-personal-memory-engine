@@ -347,8 +347,17 @@ Measured on an Apple M2 Max (64 GB). The harnesses are the proof — run them yo
 | `IAI_MCP_PYTHON` | — | Absolute path to the venv Python (for the MCP host config) |
 | `IAI_MCP_RECALL_CONCURRENCY` | `2` | Maximum cued `memory_recall` calls dispatched concurrently by the socket daemon |
 | `IAI_MCP_RECALL_SLOT_WAIT_SEC` | `0.25` | How long an overflow cued recall waits for a slot before returning `_degraded: recall_busy` |
+| `IAI_MCP_EMBED_PROVIDER` | `native` | `native` for built-in BGE or `http` for a replaceable loopback provider |
+| `IAI_MCP_EMBED_URL` | — | Loopback endpoint or base URL for the `http` provider |
+| `IAI_MCP_EMBED_DIM` | `384` | Vector dimension; required for the `http` provider |
+| `IAI_MCP_EMBED_MODEL_ID` | — | Model identifier; required for the `http` provider |
+| `IAI_MCP_EMBED_TIMEOUT_SEC` | `30` | Local provider request timeout |
 
-The old `IAI_MCP_EMBED_MODEL` knob is gone — the embedder is a single built-in English-only model. There are many internal tuning knobs (`IAI_MCP_*`), but you shouldn't need to touch them.
+The built-in Rust BGE model remains the zero-configuration default. Setting the
+provider to `http` replaces it completely: the native model is not constructed,
+downloaded, or run. This makes multilingual and domain-specific embedders
+possible without adding a Python ML stack to iai-mcp. See
+[`docs/EMBEDDERS.md`](docs/EMBEDDERS.md) for the protocol and migration steps.
 
 ---
 

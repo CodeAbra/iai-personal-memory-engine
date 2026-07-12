@@ -11,8 +11,8 @@ per-release log see [`CHANGELOG.md`](../CHANGELOG.md).
 |---|---|
 | Python | 3.11–3.12 (CPython) |
 | OS | macOS or Linux. The daemon uses `fcntl.flock` and Unix-socket IPC. Windows support is in beta. WSL2 works as a Linux target. |
-| RAM | 8+ GB comfortable. The `bge-small-en-v1.5` embedder occupies ~600 MB resident once loaded. |
-| Disk | ~5 GB free for model weights + store + WAL. Model weights live in `~/.cache/huggingface/` (~130 MB). |
+| RAM | 8+ GB comfortable. The default `bge-small-en-v1.5` embedder occupies ~600 MB resident once loaded; external-provider usage depends on the selected model. |
+| Disk | ~5 GB free for model weights + store + WAL. Default model weights live in `~/.cache/huggingface/` (~130 MB); external-provider usage varies. |
 | Toolchain (source build only) | A Rust toolchain is needed when compiling the native extension from source. On Linux, `libssl-dev` and `pkg-config` (or your distro's equivalents). |
 
 The native extension (`iai_mcp_native` — the embedder, graph algorithms, and

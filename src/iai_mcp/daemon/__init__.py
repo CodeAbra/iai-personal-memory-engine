@@ -761,7 +761,6 @@ def _install_warm_embedder_override(store) -> tuple[object, bool]:
     orig_efs = _embed_mod.embedder_for_store
     try:
         warm = orig_efs(store)
-
         def _held_embedder_for_store(_store):
             return warm
 

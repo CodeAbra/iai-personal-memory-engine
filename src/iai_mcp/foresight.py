@@ -210,9 +210,9 @@ def _blended_cue(store: Any, cue_embedding: "list[float]") -> "list[float]":
         goal = (entry.goal or "").strip() if entry is not None else ""
         if len(goal) < 12:
             return list(cue_embedding)
-        from iai_mcp.embed import embedder_for_store  # noqa: PLC0415
+        from iai_mcp.embed import embed_query, embedder_for_store  # noqa: PLC0415
 
-        goal_vec = embedder_for_store(store).embed(goal[:512])
+        goal_vec = embed_query(embedder_for_store(store), goal[:512])
         blended = [
             (1.0 - weight) * a + weight * b
             for a, b in zip(cue_embedding, goal_vec)
@@ -249,10 +249,12 @@ def refresh_from_anchor(store: Any, embedder: Any) -> bool:
     store._foresight_anchor = None
     try:
         _ts, text, session_id = anchor
+        from iai_mcp.embed import embed_query
+
         refresh_pack(
             store,
             cue_text=text,
-            cue_embedding=embedder.embed(text[:512]),
+            cue_embedding=embed_query(embedder, text[:512]),
             session_id=session_id,
         )
         return True

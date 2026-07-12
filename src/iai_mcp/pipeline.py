@@ -14,7 +14,7 @@ from uuid import UUID
 import numpy as np
 
 from iai_mcp.community import CommunityAssignment
-from iai_mcp.embed import Embedder
+from iai_mcp.embed import Embedder, embed_query
 from iai_mcp.events import TELEMETRY_EMBED_NATIVE_FAILURE, write_event
 from iai_mcp.exceptions import (
     NativeError,
@@ -739,7 +739,7 @@ def _recall_core(
             )
 
     try:
-        cue_emb = embedder.embed(cue)
+        cue_emb = embed_query(embedder, cue)
     except Exception as exc:
         write_event(
             store,

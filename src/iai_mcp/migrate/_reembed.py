@@ -89,35 +89,18 @@ def _stage_record_to_table(
     rec: MemoryRecord,
     new_embedding: list[float],
 ) -> None:
-    if not rec.structure_hv:
-        from iai_mcp.tem import bind_structure
-        rec.structure_hv = bind_structure(rec)
-    new_rec = MemoryRecord(
-        id=rec.id,
-        tier=rec.tier,
-        literal_surface=rec.literal_surface,
-        aaak_index=rec.aaak_index,
-        embedding=new_embedding,
-        structure_hv=rec.structure_hv,
-        community_id=rec.community_id,
-        centrality=rec.centrality,
-        detail_level=rec.detail_level,
-        pinned=rec.pinned,
-        stability=rec.stability,
-        difficulty=rec.difficulty,
-        last_reviewed=rec.last_reviewed,
-        never_decay=rec.never_decay,
-        never_merge=rec.never_merge,
-        provenance=rec.provenance,
-        created_at=rec.created_at,
-        updated_at=rec.updated_at,
-        tags=rec.tags,
-        language=rec.language,
-        s5_trust_score=rec.s5_trust_score,
-        profile_modulation_gain=rec.profile_modulation_gain,
-        schema_version=rec.schema_version,
-    )
-    target_tbl.add([store._to_row(new_rec)])
+    # Copy the authoritative SQL row byte-for-byte and replace only the vector.
+    # Rebuilding from MemoryRecord would drop storage-only fields such as
+    # vec_label, tombstones and pending state, and would decrypt/re-encrypt text.
+    with store.db.ro_conn() as conn:
+        source_row = conn.execute(
+            "SELECT * FROM records WHERE id = ?", (str(rec.id),)
+        ).fetchone()
+    if source_row is None:
+        raise ValueError(f"source record disappeared during re-embedding: {rec.id}")
+    staged_row = dict(source_row)
+    staged_row["embedding"] = new_embedding
+    target_tbl.add([staged_row])
 
 
 def _stage_loop(
@@ -132,56 +115,99 @@ def _stage_loop(
     started_idx: int = 0,
     already_staged_ids: Optional[set[str]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
+    batch_size: int = 256,
 ) -> tuple[int, list[str]]:
     staged_count = 0
     failures: list[str] = []
-    staged_ids: list[str] = list(already_staged_ids or [])
-    skipped_set: set[str] = set(staged_ids)
+    skipped_set: set[str] = set(already_staged_ids or [])
 
     idx = started_idx
-    for rec in source_iter:
-        rec_id_str = str(rec.id)
-        if rec_id_str in skipped_set:
-            continue
-        if progress is not None:
-            try:
-                progress(idx, total)
-            except (TypeError, ValueError):
-                pass
+    pending_batch: list[MemoryRecord] = []
+
+    def flush_batch(batch: list[MemoryRecord]) -> None:
+        nonlocal idx, staged_count
+        if not batch:
+            return
         try:
-            new_embedding = target_embedder.embed(rec.literal_surface)
-            _stage_record_to_table(store, target_tbl, rec, new_embedding)
+            batch_method = getattr(target_embedder, "embed_batch", None)
+            if callable(batch_method):
+                vectors = batch_method([rec.literal_surface for rec in batch])
+            else:
+                vectors = [target_embedder.embed(rec.literal_surface) for rec in batch]
+            if len(vectors) != len(batch):
+                raise ValueError(
+                    f"embed_batch returned {len(vectors)} vectors for {len(batch)} records"
+                )
         except (KeyboardInterrupt, SystemExit):
             raise
         except (OSError, ValueError, RuntimeError) as exc:
+            batch_ids = [str(rec.id) for rec in batch]
             log.warning(
-                "migrate_reembed_per_row_failed",
-                extra={
-                    "record_id": rec_id_str,
-                    "error": str(exc)[:160],
+                "migrate_reembed_batch_failed",
+                extra={"record_ids": batch_ids, "error": str(exc)[:160]},
+            )
+            failures.extend(batch_ids)
+            idx += len(batch)
+            return
+
+        last_staged_id: str | None = None
+        for rec, new_embedding in zip(batch, vectors, strict=True):
+            rec_id_str = str(rec.id)
+            if progress is not None:
+                try:
+                    progress(idx, total)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                _stage_record_to_table(store, target_tbl, rec, new_embedding)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except (OSError, ValueError, RuntimeError) as exc:
+                log.warning(
+                    "migrate_reembed_per_row_failed",
+                    extra={"record_id": rec_id_str, "error": str(exc)[:160]},
+                )
+                failures.append(rec_id_str)
+                idx += 1
+                continue
+
+            staged_count += 1
+            last_staged_id = rec_id_str
+            idx += 1
+
+        # One fsynced checkpoint per provider batch keeps the migration
+        # crash-safe without rewriting a growing JSON list for every row.
+        # Resume reconstructs the authoritative staged-id set from the table.
+        if last_staged_id is not None:
+            _progress_write(
+                store,
+                {
+                    "started_at": started_at_iso,
+                    "ts": int(time.time()),
+                    "row_index": idx - 1,
+                    "last_rid": last_staged_id,
+                    "total": total,
+                    "target_dim": target_dim,
+                    "target_model_key": getattr(
+                        target_embedder, "model_key", "unknown"
+                    ),
+                    "failures": failures,
                 },
             )
-            failures.append(rec_id_str)
-            idx += 1
-            continue
 
-        staged_count += 1
-        staged_ids.append(rec_id_str)
-        _progress_write(
-            store,
-            {
-                "started_at": started_at_iso,
-                "ts": int(time.time()),
-                "row_index": idx,
-                "last_rid": rec_id_str,
-                "total": total,
-                "target_dim": target_dim,
-                "target_model_key": getattr(target_embedder, "model_key", "unknown"),
-                "staged_ids": staged_ids,
-                "failures": failures,
-            },
-        )
-        idx += 1
+    effective_batch_size = (
+        max(1, int(batch_size))
+        if bool(getattr(target_embedder, "supports_batch", False))
+        else 1
+    )
+    for rec in source_iter:
+        if str(rec.id) in skipped_set:
+            continue
+        pending_batch.append(rec)
+        if len(pending_batch) >= effective_batch_size:
+            flush_batch(pending_batch)
+            pending_batch = []
+    flush_batch(pending_batch)
 
     return staged_count, failures
 
@@ -211,7 +237,7 @@ def _validate_and_swap(
 ) -> dict:
     orig = store.db.open_table(RECORDS_TABLE).count_rows()
     staged = store.db.open_table(STAGING_TABLE).count_rows()
-    if orig > 0 and staged < orig * 0.99:
+    if staged != orig or failures:
         log.error(
             "migrate_reembed_validate_failed",
             extra={
@@ -222,8 +248,8 @@ def _validate_and_swap(
             },
         )
         raise RuntimeError(
-            f"reembed staging produced {staged}/{orig} rows "
-            f"({staged/max(orig,1):.3%}); refusing to swap. Inspect tables "
+            f"reembed staging produced {staged}/{orig} rows with "
+            f"{len(failures)} failures; refusing to swap. Inspect tables "
             f"manually or run `iai-mcp migrate --rollback`."
         )
 
@@ -244,11 +270,29 @@ def _validate_and_swap(
     except (OSError, ValueError, RuntimeError) as exc:
         log.error("migration_reembed event write failed: %s", exc)
 
+    from iai_mcp.hippo import HippoDB, _txn
+
+    if not isinstance(store.db, HippoDB):
+        raise RuntimeError(
+            f"re-embed table swap requires a Hippo store, got {type(store.db).__name__}"
+        )
     ts = int(time.time())
     old_name = f"{OLD_TABLE_PREFIX}{ts}"
-    _swap_tables_filesystem(store.db, source=RECORDS_TABLE, dest=old_name)
-    _swap_tables_filesystem(store.db, source=STAGING_TABLE, dest=RECORDS_TABLE)
-
+    # The two renames and dimension metadata are one storage transition. A
+    # crash can therefore expose either the complete old layout or the
+    # complete new layout, never a 1024d table advertised as 384d.
+    with store.db._conn_lock:
+        with _txn(store.db._conn):
+            store.db._conn.execute(
+                f"ALTER TABLE [{RECORDS_TABLE}] RENAME TO [{old_name}]"
+            )
+            store.db._conn.execute(
+                f"ALTER TABLE [{STAGING_TABLE}] RENAME TO [{RECORDS_TABLE}]"
+            )
+            store.db._conn.execute(
+                "UPDATE [_hippo_meta] SET value = ? WHERE key = 'embed_dim'",
+                (str(target_dim),),
+            )
     store._embed_dim = target_dim
 
     _progress_clear(store)
@@ -261,6 +305,7 @@ def _validate_and_swap(
         "failures": len(failures),
         "duration_sec": duration_sec,
         "old_table": old_name,
+        "restart_required": True,
     }
 
 
@@ -269,14 +314,24 @@ def migrate_reembed_to_current_dim(
     target_embedder,
     dry_run: bool = False,
     progress: Optional[Callable[[int, int], None]] = None,
+    *,
+    force: bool = False,
+    batch_size: int = 256,
 ) -> dict:
     t0 = time.time()
+
+    # A caller may migrate in the same process that just captured records.
+    # Make the buffered writes authoritative before counting or staging them;
+    # otherwise a small corpus can be swapped as an apparently empty table.
+    from iai_mcp.store import flush_record_buffer
+
+    flush_record_buffer(store)
 
     source_dim = int(store.embed_dim)
     target_dim = int(target_embedder.DIM)
     started_at_iso = datetime.now(timezone.utc).isoformat()
 
-    if source_dim == target_dim:
+    if source_dim == target_dim and not force:
         try:
             write_event(
                 store,
@@ -329,6 +384,7 @@ def migrate_reembed_to_current_dim(
         total=total,
         started_at_iso=started_at_iso,
         progress=progress,
+        batch_size=batch_size,
     )
 
     duration_sec = time.time() - t0
@@ -504,7 +560,11 @@ def _resume(db, store: MemoryStore, target_embedder) -> int:
         already_staged: set[str] = set()
     else:
         target_tbl = db.open_table(STAGING_TABLE)
-        already_staged = set(progress_state.get("staged_ids") or [])
+        with db.ro_conn() as conn:
+            already_staged = {
+                str(row[0])
+                for row in conn.execute(f"SELECT id FROM [{STAGING_TABLE}]").fetchall()
+            }
 
     source_dim = int(store.embed_dim)
     started_at_iso = progress_state.get(

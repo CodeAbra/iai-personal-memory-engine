@@ -141,10 +141,12 @@ def _recall_daemon_down_post_warm(
         degraded_semantic_recall as _degrade,
         EMBED_DIM,
     )
+    from iai_mcp.embed import embed_query
 
     try:
-        _test_vec = embedder.embed(cue)
-        if not isinstance(_test_vec, (list, tuple)) or len(_test_vec) != EMBED_DIM:
+        _test_vec = embed_query(embedder, cue)
+        expected_dim = int(getattr(embedder, "DIM", EMBED_DIM))
+        if not isinstance(_test_vec, (list, tuple)) or len(_test_vec) != expected_dim:
             raise ValueError(f"embed returned unexpected dim {len(_test_vec) if hasattr(_test_vec, '__len__') else '?'}")
     except Exception as exc:  # noqa: BLE001
         logger.debug("daemon_down_local_embed_failed: %s", exc)

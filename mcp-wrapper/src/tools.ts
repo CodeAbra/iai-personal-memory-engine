@@ -52,7 +52,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           type: "string",
           description:
             "Natural-language query to match against stored memories. " +
-            "Embedded server-side via bge-small-en-v1.5 (384d) unless " +
+            "Embedded server-side by the configured provider unless " +
             "`cue_embedding` is supplied.",
         },
         budget_tokens: {
@@ -74,7 +74,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           items: { type: "number" },
           description:
             "Optional pre-computed embedding vector for the cue " +
-            "(EMBED_DIM=384 floats; bge-small-en-v1.5). " +
+            "(its dimension must match the current store). " +
             "When omitted, the daemon embeds the cue server-side. " +
             "Used by memory_contradict and tests that need byte-stable embeddings.",
         },
@@ -167,7 +167,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           items: { type: "number" },
           description:
             "Optional pre-computed embedding vector for the contradicting " +
-            "fact (EMBED_DIM=384 floats; bge-small-en-v1.5). When omitted, " +
+            "fact (its dimension must match the current store). When omitted, " +
             "the daemon embeds new_fact server-side.",
         },
       },
