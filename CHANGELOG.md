@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-07-11
+
+### Added
+
+- **Linux idle sensing.** On Linux the daemon now reads idle state from
+  systemd-logind (IdleHint / IdleSinceHint), mirroring the macOS HID-idle check
+  and working across X11 and Wayland. Contributed by joerybka.
+
+### Fixed
+
+- **More accurate timestamp re-derivation.** `migrate --rederive-timestamps` no
+  longer matches an internal transcript event (e.g. a queue operation) ahead of
+  the real user or assistant turn, so re-derivation stops silently doing nothing
+  on collapsed-timestamp groups. Contributed by joerybka.
+
 ## [2.1.0] — 2026-07-11
 
 ### Added
