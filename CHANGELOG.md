@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-07-11
+
+### Added
+
+- **Windows support.** The engine now runs on Windows end to end. The Rust storage
+  engine compiles and runs there through a cross-platform positional-I/O layer, and
+  the daemon talks over a local TCP loopback with a per-start token handshake in
+  place of a Unix socket. Community port contributed by danielhertz.
+
+### Fixed
+
+- **Reliable liveness checks.** Every process-alive check now goes through one
+  canonical probe, so a healthy daemon is never misreported as dead (previously
+  possible on Windows).
+- **Foresight on live turns only.** The anticipation pack now refreshes only on a
+  live turn, not while replaying historical events, so replay no longer thrashes
+  next-turn anticipation.
+
 ## [2.0.3] — 2026-07-11
 
 ### Fixed
