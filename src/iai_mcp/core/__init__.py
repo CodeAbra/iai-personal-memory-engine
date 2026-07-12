@@ -1117,6 +1117,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             tier=params.get("tier", "episodic"),
             session_id=params.get("session_id", "-"),
             role=params.get("role", "user"),
+            live_turn=True,
         )
         try:
             from iai_mcp.store import flush_record_buffer

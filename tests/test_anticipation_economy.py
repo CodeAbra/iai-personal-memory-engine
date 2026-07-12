@@ -49,7 +49,7 @@ def _foresight_env(monkeypatch):
 def _turn(store, text, session):
     result = capture_turn(
         store, cue="", text=text, tier="episodic",
-        session_id=session, role="user",
+        session_id=session, role="user", live_turn=True,
     )
     flush_record_buffer(store)
     return result

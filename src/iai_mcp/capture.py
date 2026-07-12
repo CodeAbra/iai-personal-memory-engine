@@ -337,7 +337,13 @@ def capture_turn(
     provenance_extra: dict | None = None,
     extra_tags: "list[str] | None" = None,
     near_dup_gate: bool = False,
+    live_turn: bool = False,
 ) -> dict[str, Any]:
+    # live_turn=True marks a genuinely-live conversational turn and is the
+    # only thing that refreshes the next-turn foresight pack. Replay and
+    # bulk-ingest callers must leave it False: a replayed historical turn
+    # overwriting the live pack is anticipation of a past that already
+    # happened, and it costs an extra embed per event.
     # near_dup_gate=True runs the cosine near-duplicate gate even for
     # conversational-shaped records (episodic + user/assistant), AFTER the
     # exact-key idem check misses. Bulk ingest (study/teach) needs it: idem
@@ -526,12 +532,9 @@ def capture_turn(
         )
 
     # Anticipate the next turn while the cue embedding is already in hand:
-    # a live conversational user turn refreshes the next-turn memory pack.
-    # Bulk/file sources are not turns; failures never fail the capture.
-    if role == "user" and tier == "episodic" and (
-        (provenance_extra or {}).get("source")
-        not in ("upload", "study", "brainview")
-    ):
+    # only a genuinely-live conversational user turn refreshes the next-turn
+    # memory pack. Failures never fail the capture.
+    if live_turn and role == "user" and tier == "episodic":
         try:
             from iai_mcp.foresight import refresh_pack
             refresh_pack(
