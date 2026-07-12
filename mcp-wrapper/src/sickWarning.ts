@@ -36,7 +36,10 @@ export async function probeDaemonDoctor(
   });
 }
 
-export function emitSickWarningIfNeeded(exitCode: number | null): void {
+export function emitSickWarningIfNeeded(
+  exitCode: number | null,
+  write: (message: string) => unknown = process.stderr.write.bind(process.stderr),
+): void {
   if (exitCode === null || exitCode === 0) {
     return;
   }
@@ -44,7 +47,7 @@ export function emitSickWarningIfNeeded(exitCode: number | null): void {
     `iai-mcp warning: daemon doctor reports FAIL (exit=${exitCode}). ` +
     "Run `iai-mcp doctor` for details. Memory tools may fall back to bank-recall.\n";
   try {
-    process.stderr.write(msg);
+    write(msg);
   } catch {
   }
 }

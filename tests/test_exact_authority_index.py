@@ -15,7 +15,6 @@ import sys
 import threading
 
 import numpy as np
-import pytest
 
 from iai_mcp.store._exact_index import ExactCosineIndex
 
@@ -51,12 +50,13 @@ def _decode_matrix(rows: list[tuple[str, bytes]], dim: int = EMBED_DIM) -> np.nd
 
 
 def _normalize_rows(m: np.ndarray) -> np.ndarray:
-    """L2-normalize each row; zero-norm rows stay zero."""
-    norms = np.linalg.norm(m, axis=1, keepdims=True)
-    safe = np.where(norms == 0, 1.0, norms)
-    out = m / safe
-    out[norms.squeeze(-1) == 0] = 0.0
-    return out.astype(np.float32)
+    """L2-normalize row by row, matching build/upsert bit-for-bit."""
+    out = np.zeros_like(m, dtype=np.float32)
+    for index, row in enumerate(m):
+        norm = float(np.linalg.norm(row))
+        if norm != 0.0:
+            out[index] = (row / norm).astype(np.float32)
+    return out
 
 
 def _brute_force_top_k(

@@ -143,7 +143,7 @@ class TestPlistRendersFdFloor:
         assert "SoftResourceLimits" in rendered
         assert "NumberOfFiles" in rendered
 
-        import defusedxml.ElementTree as ET
+        import xml.etree.ElementTree as ET
 
         root = ET.fromstring(rendered)
         top_dict = root.find("dict")

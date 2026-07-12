@@ -24,12 +24,21 @@ class _StubLMESession:
 def _patch_adapter(monkeypatch, qids: list[str] | None = None) -> None:
     sessions = [_StubLMESession(qid) for qid in (qids or [])]
 
+    def _stub_cleaned_init(self, revision=None):
+        self.revision = revision or "test-revision"
+
     def _stub_load_dataset(self, split="S"):
         yield from sessions
 
     from bench.adapters.longmemeval import LongMemEvalAdapter
     from bench.adapters.longmemeval_cleaned import CleanedLongMemEvalAdapter
 
+    monkeypatch.setattr(
+        CleanedLongMemEvalAdapter,
+        "__init__",
+        _stub_cleaned_init,
+        raising=True,
+    )
     monkeypatch.setattr(
         LongMemEvalAdapter, "load_dataset", _stub_load_dataset, raising=True
     )

@@ -40,18 +40,9 @@ def _insert_pending(store, surface: str) -> str:
     return pid
 
 
-def test_pending_to_embedded_flip_changes_cache_key(hermetic_store: Path) -> None:
-    """A pending->embedded transition must change _cache_key, driven through the
-    PRODUCTION write paths (not a raw out-of-band SQLite write).
-
-    With no pending rows the key carries pending_count 0; inserting a pending row
-    via ``insert_pending_row`` bumps it to 1; the ``pending_embeddings_wake_sequence``
-    re-embed flips it back to 0 — proving the raw pending term is not absorbed by
-    the count window. Each transition fires the corpus-count invalidation callback,
-    so ``_cache_key`` (which now reads the count cache, not a live probe) observes
-    every transition.
-    """
-    from iai_mcp.runtime_graph_cache import _cache_key
+def test_pending_to_embedded_flip_invalidates_snapshot(hermetic_store: Path) -> None:
+    """Pending rows do not churn the graph key; becoming active unlinks its snapshot."""
+    from iai_mcp.runtime_graph_cache import _cache_key, _cache_path
     from iai_mcp.store import MemoryStore, flush_record_buffer
 
     store = MemoryStore(hermetic_store)
@@ -65,6 +56,12 @@ def test_pending_to_embedded_flip_changes_cache_key(hermetic_store: Path) -> Non
         # Pending appearance through the production write path (fires cb('pending')).
         _insert_pending(store, "pending probe surface carrying real text")
         key_with_pending = _cache_key(store)
+        assert key_with_pending == key_no_pending
+
+        # Give the production invalidation boundary a real snapshot to remove.
+        cache_path = _cache_path(store)
+        cache_path.write_text("{}")
+        assert cache_path.exists()
 
         # Re-embed flip 1->0 through the production wake sequence
         # (fires cb('active','pending')).
@@ -76,10 +73,10 @@ def test_pending_to_embedded_flip_changes_cache_key(hermetic_store: Path) -> Non
 
         key_after_reembed = _cache_key(store)
 
-        # The pending appearance changed the key.
-        assert key_with_pending != key_no_pending
-        # The load-bearing assertion: the 1->0 re-embed flip MUST change the key.
-        assert key_after_reembed != key_with_pending
+        # The +1 active row remains in the same quantized count bucket, so the
+        # explicit unlink — not key churn — carries the freshness demand.
+        assert key_after_reembed == key_with_pending
+        assert not cache_path.exists()
     finally:
         store.close()
 
@@ -114,7 +111,7 @@ def test_ordinary_insert_within_window_keeps_key_stable(
 
 def test_cache_key_parity_triple_still_addressable(hermetic_store: Path) -> None:
     """The parity components (schema, embed_dim, cache_version) sit at the new
-    positions [3],[4],[5] and CACHE_VERSION is still the last element — the
+    positions [2],[3],[4] and CACHE_VERSION is still the last element — the
     insertion-point invariant the legacy [:-1] slice and the parity gates rely on.
     """
     from iai_mcp import runtime_graph_cache as rgc
@@ -124,11 +121,11 @@ def test_cache_key_parity_triple_still_addressable(hermetic_store: Path) -> None
     store = MemoryStore(hermetic_store)
     try:
         key = _cache_key(store)
-        assert len(key) == 6
+        assert len(key) == 5
         schema, embed_dim, cache_version = _parity_components(store)
-        assert key[3] == schema
-        assert key[4] == embed_dim
-        assert key[5] == cache_version
+        assert key[2] == schema
+        assert key[3] == embed_dim
+        assert key[4] == cache_version
         assert key[-1] == rgc.CACHE_VERSION
     finally:
         store.close()
