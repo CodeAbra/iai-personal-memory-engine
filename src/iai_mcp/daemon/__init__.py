@@ -491,11 +491,14 @@ async def _tick_body(
 
             def _s4_body():
                 from iai_mcp import retrieve as _retrieve_s4
-                with _retrieve_s4.background_store_work("s4_background_scan"):
-                    return s4_background_scan(store, 50)
+                with _retrieve_s4.background_store_work("s4_background_scan") as _gate_ok:
+                    if not _gate_ok:
+                        return False
+                    s4_background_scan(store, 50)
+                    return True
 
-            await asyncio.to_thread(_s4_body)
-            state["_last_s4bg_ts"] = _now_iso
+            if await asyncio.to_thread(_s4_body):
+                state["_last_s4bg_ts"] = _now_iso
     except Exception:  # noqa: BLE001 -- tick step MUST NOT crash
         log.debug("tick step 0.6 (s4_background_scan) failed", exc_info=True)
 
@@ -520,11 +523,16 @@ async def _tick_body(
 
                 def _forage_body():
                     from iai_mcp import retrieve as _retrieve_forage
-                    with _retrieve_forage.background_store_work("forage_for_connections"):
+                    with _retrieve_forage.background_store_work("forage_for_connections") as _gate_ok:
+                        if not _gate_ok:
+                            return None
                         return forage_for_connections(store, 3)
 
                 _foraged = await asyncio.to_thread(_forage_body)
-                state["_last_forage_ts"] = _now_iso
+                if _foraged is None:
+                    _foraged = 0
+                else:
+                    state["_last_forage_ts"] = _now_iso
                 if _foraged > 0:
                     await asyncio.to_thread(
                         write_event, store, "self_foraging_pass",
@@ -1117,9 +1125,22 @@ async def main() -> int:
             from iai_mcp import runtime_graph_cache as _rgc_mod
 
             def _boot_preload_body() -> None:
+                import time as _time
+
                 from iai_mcp import retrieve as _retrieve_preload
-                with _retrieve_preload.background_store_work("boot_preload"):
-                    _retrieve_preload.build_runtime_graph(store)
+                # Boot-once task: on a busy gate keep waiting in bounded
+                # rounds instead of piling on; if the gate never frees, the
+                # graph builds lazily on the first recall that needs it.
+                for _ in range(20):
+                    with _retrieve_preload.background_store_work("boot_preload") as _gate_ok:
+                        if _gate_ok:
+                            _retrieve_preload.build_runtime_graph(store)
+                            return
+                    _time.sleep(15)
+                log.warning(
+                    "boot_preload skipped: gate stayed busy; the runtime graph"
+                    " will build lazily"
+                )
 
             async def _boot_preload() -> None:
                 try:
@@ -1143,7 +1164,9 @@ async def main() -> int:
 
             def _drain_body():
                 from iai_mcp import retrieve as _retrieve_drain
-                with _retrieve_drain.background_store_work("drain_deferred_captures"):
+                with _retrieve_drain.background_store_work("drain_deferred_captures") as _gate_ok:
+                    if not _gate_ok:
+                        return {}
                     return _drain(store)
 
             async def _drain_and_report() -> None:

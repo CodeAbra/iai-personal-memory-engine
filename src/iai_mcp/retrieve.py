@@ -699,10 +699,13 @@ def background_store_work(
     """Low-priority single-flight gate around one boot-fleet task's heavy body.
 
     Acquires ``_BACKGROUND_STORE_WORK_GATE`` with a bounded wait; on a timeout,
-    sleeps with linear backoff and retries up to ``max_retries`` times. If the
-    gate still cannot be acquired (or acquisition itself raises — a gate bug
-    must never block a boot task), the body runs anyway with a warning log:
-    fail-open, because completion always outweighs contention purity.
+    sleeps with linear backoff and retries up to ``max_retries`` times. Yields
+    True when the gate is held (or when acquisition itself raised — a gate bug
+    must never block a boot task). Yields False when the gate stayed busy: the
+    caller must SKIP its heavy body and retry on its next cadence. Running
+    anyway was tried and disproven — every gate-timeout task piling on at once
+    summed resident sets past the watchdog's hard cap and the SIGKILL lost all
+    of them; a deferred task completes later, a killed daemon completes nothing.
 
     Intended to wrap only the synchronous, heavy store-work body of a boot
     task inside its own ``asyncio.to_thread`` call — never the async
@@ -710,6 +713,7 @@ def background_store_work(
     (recall is reader-isolated and must never acquire this gate).
     """
     acquired = False
+    gate_broken = False
     waited_total = 0.0
     try:
         for attempt in range(max_retries + 1):
@@ -722,6 +726,7 @@ def background_store_work(
                     name, attempt, exc,
                 )
                 acquired = False
+                gate_broken = True
                 break
             if acquired:
                 break
@@ -733,15 +738,15 @@ def background_store_work(
                 )
                 time.sleep(backoff_s)
                 waited_total += max_wait_s + backoff_s
-        if not acquired:
+        if not acquired and not gate_broken:
             log.warning(
                 "background_store_work gate not acquired for %s after %d "
-                "retries (~%.1fs waited) -- running anyway (fail-open)",
+                "retries (~%.1fs waited) -- deferring to the next cycle",
                 name, max_retries, waited_total,
             )
-        else:
+        elif acquired:
             log.debug("background_store_work gate acquired for %s", name)
-        yield
+        yield acquired or gate_broken
     finally:
         if acquired:
             _BACKGROUND_STORE_WORK_GATE.release()

@@ -8,7 +8,9 @@ foraging, deferred-capture drain) to 1, without ever gating recall itself
 Five groups:
 1. serialization -- observed max concurrency == 1, fair ordering
 2. completion under contention -- a long holder + waiters all complete
-3. fail-open -- a gate that cannot acquire still runs the body, with a warning
+3. deferral -- a busy gate yields False so the caller skips its cycle (a
+   stampede of timed-out tasks summed resident sets past the watchdog kill);
+   only a BROKEN gate (acquire raising) yields True without the lock
 4. recall ungated -- source-level wiring pin (dispatch never touches the gate)
 5. wiring pins -- each of the four boot launch sites routes its heavy body
    through the gate (source-level, mirroring the lifecycle-tick pause-gate
@@ -144,12 +146,13 @@ class TestCompletionUnderContention:
 
 
 # ---------------------------------------------------------------------------
-# Group 3: fail-open -- a gate that cannot acquire still runs the body
+# Group 3: deferral -- a busy gate yields False (caller skips its cycle);
+# only a BROKEN gate yields True without holding the lock
 # ---------------------------------------------------------------------------
 
 
-class TestFailOpen:
-    def test_acquire_always_timing_out_still_runs_body(self, monkeypatch, caplog) -> None:
+class TestDeferral:
+    def test_acquire_always_timing_out_yields_false(self, monkeypatch, caplog) -> None:
         monkeypatch.setattr(
             retrieve._BACKGROUND_STORE_WORK_GATE, "acquire", lambda timeout=None: False,
         )
@@ -157,14 +160,19 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="iai_mcp.retrieve"):
             with retrieve.background_store_work(
                 "always-times-out", max_wait_s=0.01, max_retries=2, backoff_base_s=0.01,
-            ):
-                ran.append(True)
+            ) as gate_ok:
+                if gate_ok:
+                    ran.append(True)
 
-        assert ran == [True], "the body must still run when the gate cannot be acquired"
+        assert ran == [], (
+            "a busy gate must yield False so the caller defers — running "
+            "anyway is the stampede that summed resident sets past the "
+            "watchdog kill"
+        )
         assert any(
-            "not acquired" in rec.message and "fail-open" in rec.message
+            "not acquired" in rec.message and "deferring" in rec.message
             for rec in caplog.records
-        ), "a warning must be logged when the gate falls back to fail-open"
+        ), "a warning must be logged when the gate defers the caller"
 
     def test_acquire_raising_still_runs_body(self, monkeypatch, caplog) -> None:
         def _boom(timeout=None):
@@ -175,12 +183,13 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="iai_mcp.retrieve"):
             with retrieve.background_store_work(
                 "acquire-raises", max_wait_s=0.01, max_retries=1, backoff_base_s=0.01,
-            ):
-                ran.append(True)
+            ) as gate_ok:
+                if gate_ok:
+                    ran.append(True)
 
         assert ran == [True], (
             "a broken gate (acquire raising) must never prevent the body from "
-            "running -- fail-open over contention purity"
+            "running — a gate bug must not silence the boot fleet"
         )
         assert any(
             "acquire raised" in rec.message for rec in caplog.records
@@ -206,8 +215,8 @@ class TestFailOpen:
             "release() must not be called when the gate was never acquired"
         )
 
-    def test_real_semaphore_not_corrupted_after_fail_open(self) -> None:
-        # End-to-end sanity: after a fail-open episode (forced via a very
+    def test_real_semaphore_not_corrupted_after_deferral(self) -> None:
+        # End-to-end sanity: after a deferral episode (forced via a very
         # short max_wait against a currently-held gate), the real semaphore
         # must still be usable by a subsequent caller -- no leaked permit,
         # no corrupted internal count.
@@ -225,14 +234,15 @@ class TestFailOpen:
         t.start()
         assert outer_entered.wait(timeout=5.0), "outer holder never entered the gate"
 
-        # A short-budget caller contends against the held gate and falls
-        # back to fail-open (never blocks the test).
+        # A short-budget caller contends against the held gate and defers
+        # (never blocks the test, never runs its body).
         ran = []
         with retrieve.background_store_work(
-            "fails-open-while-held", max_wait_s=0.05, max_retries=1, backoff_base_s=0.01,
-        ):
-            ran.append(True)
-        assert ran == [True]
+            "defers-while-held", max_wait_s=0.05, max_retries=1, backoff_base_s=0.01,
+        ) as gate_ok:
+            if gate_ok:
+                ran.append(True)
+        assert ran == [], "a contending short-budget caller must defer, not run"
 
         release_outer.set()
         t.join(timeout=5.0)
