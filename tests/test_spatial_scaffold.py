@@ -72,6 +72,16 @@ def test_R2_spatial_tagger_path_heuristic_correctness() -> None:
     assert room == "iai_mcp", room
     assert drawer == "store", drawer
 
+    desktop_wing, _, _ = SpatialTagger.tag(
+        None, "/Users/alice/Desktop/Client/iai_mcp/store.py",
+    )
+    assert desktop_wing == "Client", desktop_wing
+
+    substring_wing, _, _ = SpatialTagger.tag(
+        None, "/Users/alice/project/src/not_iai_mcp_helper/store.py",
+    )
+    assert substring_wing == "src", substring_wing
+
     wing2, room2, drawer2 = SpatialTagger.tag(
         None, "/Users/alice/Documents/notes/today.md",
     )
