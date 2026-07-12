@@ -99,4 +99,5 @@ markers = [
   "slow: opt-in via --runslow (subprocess-heavy bench-shim resolution tests)",
   "perf: opt-in via --perf (wall-clock latency benches, out of the default correctness gate)",
   "live: opt-in via --live (real daemon-subprocess E2E gate, out of the default correctness gate)",
+  "literature: cross-check against published reference values",
 ]

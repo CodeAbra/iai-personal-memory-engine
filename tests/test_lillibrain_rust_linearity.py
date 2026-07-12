@@ -291,8 +291,12 @@ def test_rss_plateau_across_batches(tmp_path: Path) -> None:
     cache; the plateau shape is then the store's alone.
     """
     per_batch = 5_000
-    fill_batches = 7
-    plateau_batches = 6
+    # 8192 cached 8 KiB pages hold more than the raw record payload: B-tree
+    # structure, splits and transaction churn delay full cache residency past
+    # the naive 64 MiB / RECORD_LEN estimate.  Fill through 60k rows so the
+    # samples start after the observed cache-fill cliff rather than measuring it.
+    fill_batches = 12
+    plateau_batches = 4
     plateau = _measure_plateau_in_child(
         tmp_path / "plateau.lilli",
         per_batch=per_batch,
