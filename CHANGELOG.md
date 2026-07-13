@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] — 2026-07-12
+
+### Fixed
+
+- **No duplicate startup work.** The daemon no longer warms its dispatch surface
+  twice at boot, and a cancelled startup cleans up its locks properly.
+- **Cleaner graph.** A stale edge can no longer resurrect a deleted record as an
+  empty graph node.
+- **Path classification.** IAI-MCP checkouts are classified by exact path
+  component instead of a loose substring match.
+
+### Changed
+
+- **Faster topology on large graphs.** Shortest-path work is bounded above ~2,500
+  nodes with a deterministic estimator (within 0.2% of exact), avoiding a large
+  N×N allocation.
+- **Reproducible test suite.** The default suite no longer depends on
+  machine-specific state, so it runs cleanly in fresh environments.
+
+All of the above contributed by Marsu6996.
+
 ## [2.2.1] — 2026-07-12
 
 ### Fixed
