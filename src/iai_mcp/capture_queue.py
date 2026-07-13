@@ -10,7 +10,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from iai_mcp import _filelock as fcntl
+from iai_mcp import _flock as fcntl
 
 
 DEFAULT_QUEUE_DIR: Path = Path.home() / ".iai-mcp" / "pending"

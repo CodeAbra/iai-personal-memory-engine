@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from iai_mcp import _filelock as fcntl
+from iai_mcp import _flock as fcntl
 
 DEFAULT_LOG_DIR: Path = Path.home() / ".iai-mcp" / "logs"
 
