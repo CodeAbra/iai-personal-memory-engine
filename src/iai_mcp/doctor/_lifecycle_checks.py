@@ -165,7 +165,8 @@ def check_b_socket_fresh() -> CheckResult:
 
 def check_c_lock_healthy() -> CheckResult:
     import errno as _errno
-    import fcntl as _fcntl
+
+    from iai_mcp import _filelock as _fcntl
 
     lock_path = _resolve_hippo_db_path().parent / ".lock"
     if not lock_path.exists():

@@ -6,7 +6,6 @@ import faulthandler
 import json
 import logging
 import os
-import resource
 import signal
 import sys
 import threading
@@ -127,6 +126,11 @@ _DAEMON_NOFILE_FLOOR_DEFAULT: int = 8192
 
 
 def _raise_fd_limit() -> None:
+    if sys.platform == "win32":
+        return
+
+    import resource
+
     try:
         floor = int(
             os.environ.get("IAI_MCP_DAEMON_NOFILE_FLOOR", _DAEMON_NOFILE_FLOOR_DEFAULT)
@@ -1054,7 +1058,7 @@ async def main() -> int:
 
         shutdown = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        for sig in filter(None, (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None))):
             try:
                 loop.add_signal_handler(sig, shutdown.set)
             except (NotImplementedError, RuntimeError):

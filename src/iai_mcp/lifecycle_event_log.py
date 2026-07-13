@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import gzip
 import json
 import os
@@ -9,6 +8,8 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from iai_mcp import _filelock as fcntl
 
 DEFAULT_LOG_DIR: Path = Path.home() / ".iai-mcp" / "logs"
 

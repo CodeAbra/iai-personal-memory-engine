@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import fcntl
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -10,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 
+from iai_mcp import _filelock as fcntl
 from iai_mcp.lifecycle_event_log import LifecycleEventLog
 from iai_mcp.lifecycle_state import (
     LIFECYCLE_STATE_PATH,
