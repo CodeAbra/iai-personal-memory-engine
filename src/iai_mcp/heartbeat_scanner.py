@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -35,11 +36,26 @@ class HeartbeatEntry:
 def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    # os.kill(pid, 0) is the POSIX "is alive?" idiom, but on Windows os.kill
+    # rejects signal 0 with OSError [WinError 87] even for a live process,
+    # so gate it on non-Windows and use psutil there.
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        import psutil
+    except ImportError:
+        return True
+    try:
+        psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
         return False
-    except PermissionError:
+    except psutil.AccessDenied:
         return True
     return True
 

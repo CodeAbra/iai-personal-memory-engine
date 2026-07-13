@@ -5,7 +5,6 @@ F_FULLFSYNC on macOS forces the drive controller's DRAM cache to NAND.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import sys
 from pathlib import Path
@@ -15,6 +14,13 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 _DARWIN: bool = sys.platform == "darwin"
+
+# F_FULLFSYNC is a macOS-only fcntl. Only import fcntl there — other platforms
+# (Windows, Linux) do not need it and Windows does not ship it in the stdlib.
+if _DARWIN:
+    import fcntl  # noqa: F401  (used inside the _DARWIN-gated branches below)
+else:
+    fcntl = None  # type: ignore[assignment]
 
 
 def _full_flush_disabled() -> bool:

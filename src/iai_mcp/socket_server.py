@@ -251,24 +251,32 @@ class SocketServer:
 
 
     async def serve(self, socket_path: Path | None = None) -> None:
+        from iai_mcp._ipc import IS_WINDOWS, start_ipc_server, shutdown_ipc
+
         if socket_path is None:
             env_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
             socket_path = Path(env_path) if env_path else SOCKET_PATH
 
-        sig = inspect.signature(asyncio.start_unix_server)
-        supports_cleanup_socket = "cleanup_socket" in sig.parameters
-
         # One JSON-RPC request is one line; a relayed document upload
         # (base64, ≤25 MB raw) must fit the StreamReader line buffer.
         _line_limit = 64 * 1024 * 1024
-        inherited = _inherit_activated_socket()
-        if inherited is not None:
+        inherited = None if IS_WINDOWS else _inherit_activated_socket()
+        needs_manual_cleanup = False
+        actual_addr: Any = str(socket_path)
+
+        if IS_WINDOWS:
+            server, actual_addr, needs_manual_cleanup = await start_ipc_server(
+                self.handle, socket_path
+            )
+        elif inherited is not None:
             server = await asyncio.start_unix_server(
                 self.handle,
                 sock=inherited,
                 limit=_line_limit,
             )
         else:
+            sig = inspect.signature(asyncio.start_unix_server)
+            supports_cleanup_socket = "cleanup_socket" in sig.parameters
             cleanup_stale_socket(socket_path)
             socket_path.parent.mkdir(parents=True, exist_ok=True)
             server_kwargs: dict[str, Any] = (
@@ -284,6 +292,7 @@ class SocketServer:
                 os.chmod(str(socket_path), 0o600)
             except OSError:
                 pass
+            needs_manual_cleanup = not supports_cleanup_socket
 
         try:
             async with server:
@@ -291,8 +300,11 @@ class SocketServer:
                 server.close()
                 await server.wait_closed()
         finally:
-            if inherited is None and not supports_cleanup_socket:
-                try:
-                    socket_path.unlink()
-                except (FileNotFoundError, OSError):
-                    pass
+            if needs_manual_cleanup:
+                if IS_WINDOWS:
+                    shutdown_ipc(actual_addr)
+                elif inherited is None:
+                    try:
+                        socket_path.unlink()
+                    except (FileNotFoundError, OSError):
+                        pass

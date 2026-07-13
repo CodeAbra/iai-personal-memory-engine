@@ -623,12 +623,14 @@ def _relay_rpc(method: str, params: dict, timeout: float = 900.0):
     import socket as _socket
     import time as _time
 
+    from iai_mcp._ipc import make_sync_ipc_socket, send_sync_auth_token
     req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     deadline = _time.monotonic() + timeout
     try:
-        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s, _addr = make_sync_ipc_socket(addr=_daemon_socket_path())
         s.settimeout(timeout)
-        s.connect(str(_daemon_socket_path()))
+        s.connect(_addr)
+        send_sync_auth_token(s)
         s.sendall((_json.dumps(req) + "\n").encode("utf-8"))
         buf = b""
         while not buf.endswith(b"\n") and len(buf) < (64 << 20):

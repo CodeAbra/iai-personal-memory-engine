@@ -6,11 +6,15 @@ import faulthandler
 import json
 import logging
 import os
-import resource
 import signal
 import sys
 import threading
 import time
+
+try:
+    import resource  # POSIX-only; Windows raises ModuleNotFoundError
+except ModuleNotFoundError:
+    resource = None  # type: ignore[assignment]
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -127,6 +131,11 @@ _DAEMON_NOFILE_FLOOR_DEFAULT: int = 8192
 
 
 def _raise_fd_limit() -> None:
+    if resource is None:
+        # Windows has no rlimit; the process default handle table is already
+        # far above what iai-mcp needs, so there is nothing to raise.
+        return
+
     try:
         floor = int(
             os.environ.get("IAI_MCP_DAEMON_NOFILE_FLOOR", _DAEMON_NOFILE_FLOOR_DEFAULT)
@@ -1048,7 +1057,17 @@ async def main() -> int:
 
         shutdown = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        # SIGHUP does not exist on Windows; filter with getattr rather than
+        # AttributeError-crashing at tuple construction.
+        _shutdown_sigs = tuple(
+            s for s in (
+                getattr(signal, "SIGTERM", None),
+                getattr(signal, "SIGINT", None),
+                getattr(signal, "SIGHUP", None),
+            )
+            if s is not None
+        )
+        for sig in _shutdown_sigs:
             try:
                 loop.add_signal_handler(sig, shutdown.set)
             except (NotImplementedError, RuntimeError):
