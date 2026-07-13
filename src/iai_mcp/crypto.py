@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import secrets
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -191,17 +192,25 @@ class CryptoKey:
         if not path.exists():
             return None
         st = os.stat(path)
-        if st.st_mode & 0o077 != 0:
+        # Unix permission-mode check. On Windows os.stat returns a default
+        # mode that isn't meaningful (there's no chmod), and file access is
+        # gated by ACLs — the setter handles that via icacls.
+        if sys.platform != "win32" and st.st_mode & 0o077 != 0:
             raise CryptoKeyError(
                 f"crypto key file at {path} has insecure mode "
                 f"0o{st.st_mode & 0o777:03o}; expected 0o600 "
                 f"(run: chmod 0o600 {path})"
             )
-        if st.st_uid != os.geteuid():
-            raise CryptoKeyError(
-                f"crypto key file at {path} is owned by uid={st.st_uid}; "
-                f"current process runs as uid={os.geteuid()} (refusing to read)"
-            )
+        # Unix uid check; Windows has no numeric uid concept and
+        # os.geteuid does not exist. Access is enforced via ACLs (icacls) at
+        # write time; skip the check on Windows.
+        if sys.platform != "win32":
+            euid = os.geteuid()  # type: ignore[attr-defined]
+            if st.st_uid != euid:
+                raise CryptoKeyError(
+                    f"crypto key file at {path} is owned by uid={st.st_uid}; "
+                    f"current process runs as uid={euid} (refusing to read)"
+                )
         raw = path.read_bytes()
         if len(raw) != KEY_BYTES:
             raise CryptoKeyError(
