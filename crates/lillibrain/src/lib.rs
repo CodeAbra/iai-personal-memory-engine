@@ -18,6 +18,7 @@ pub mod gates;
 pub mod io;
 pub mod journal;
 pub mod pager;
+pub mod pos_io;
 pub mod py;
 pub mod store;
 pub mod wal;

@@ -7,12 +7,12 @@
 //! uncommitted gone — with a clean integrity check.
 
 use std::fs::OpenOptions;
-use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use lillibrain::consts::{HDR_WRITE_VERSION_OFFSET, PAGE_SIZE, WRITE_VERSION_WAL};
+use lillibrain::pos_io::PosIo;
 use lillibrain::journal::journal_path_for;
 use lillibrain::wal::{wal_path_for, WalWriter};
 use lillibrain::{Store, StoreError};

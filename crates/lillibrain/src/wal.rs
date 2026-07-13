@@ -18,8 +18,9 @@
 //! salt pair guards against replaying a stale frame from a prior cycle.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+
+use crate::pos_io::PosIo;
 
 use crate::consts::{
     PAGE_SIZE, WAL_FORMAT_VERSION, WAL_FRAME_HEADER_SIZE, WAL_FRAME_SIZE, WAL_HEADER_SIZE,
