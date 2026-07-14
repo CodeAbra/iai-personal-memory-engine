@@ -21,12 +21,23 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Prebuild the MCP wrapper on the host
+        working-directory: mcp-wrapper
+        run: |
+          npm ci --prefer-offline
+          npm run build
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21
         env:
           CIBW_BUILD: "cp311-* cp312-*"
           CIBW_SKIP: "*-musllinux_* *_i686 *_ppc64le *_s390x *-win32 *-win_arm64"
           CIBW_ARCHS_MACOS: "arm64 x86_64"
+          # The arm64 runner needs the x86_64 Rust std to cross-compile that wheel.
+          CIBW_BEFORE_ALL_MACOS: rustup target add x86_64-apple-darwin aarch64-apple-darwin
           # The manylinux build container has no Rust toolchain; install it
           # (pinned to the repo's rust-toolchain.toml channel) plus the OpenSSL
           # headers the native extension links against.
