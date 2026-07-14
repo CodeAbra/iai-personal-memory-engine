@@ -23,6 +23,7 @@ SYSTEMD_TARGET: Path = Path.home() / ".config" / "systemd" / "user" / "iai-mcp-d
 
 DAEMON_LABEL: str = "com.iai-mcp.daemon"
 SERVICE_NAME: str = "iai-mcp-daemon.service"
+SCHTASKS_TASK_NAME: str = "iai-mcp-daemon"
 
 CONSENT_BANNER: str = """\
 ==============================================================================
@@ -54,6 +55,10 @@ def _is_macos() -> bool:
 
 def _is_linux() -> bool:
     return platform.system() == "Linux"
+
+
+def _is_windows() -> bool:
+    return platform.system() == "Windows"
 
 
 def _ensure_crypto_key_present():

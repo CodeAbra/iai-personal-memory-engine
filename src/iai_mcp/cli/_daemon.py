@@ -62,6 +62,61 @@ def _render_systemd_unit() -> str:
     return text
 
 
+def _find_pythonw() -> str:
+    # Prefer pythonw.exe so the daemon runs with no console window; fall back to
+    # the current interpreter if the windowless variant is not alongside it.
+    exe = Path(sys.executable)
+    pythonw = exe.parent / "pythonw.exe"
+    if pythonw.exists():
+        return str(pythonw)
+    return sys.executable
+
+
+def _render_schtasks_xml() -> str:
+    pythonw = _find_pythonw()
+    username = os.environ.get("USERNAME", "")
+    # No <WorkingDirectory>: the Task Scheduler engine rejects a working
+    # directory set via XML when the path contains spaces (e.g. the default
+    # %APPDATA% under "C:\\Users\\First Last\\..."), failing the launch with
+    # 0x8007010B "The directory name is invalid" — even though the path exists
+    # and CreateProcess accepts it fine outside the scheduler. The daemon never
+    # depends on cwd (all state lives under ~/.iai-mcp via absolute paths), so
+    # we omit it and let the task default to %windir%\\system32.
+    return f"""\
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>iai-mcp sleep daemon — background memory consolidation for Claude Code</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{username}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{username}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Hidden>true</Hidden>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>{pythonw}</Command>
+      <Arguments>-m iai_mcp.daemon</Arguments>
+    </Exec>
+  </Actions>
+</Task>"""
+
+
 def _prompt_consent(stream_out=None) -> bool:
     from iai_mcp import cli as _cli
     if stream_out is None:
@@ -124,13 +179,59 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
     elif _cli._is_linux():
         content = _render_systemd_unit()
         target = _cli.SYSTEMD_TARGET
+    elif _cli._is_windows():
+        content = _render_schtasks_xml()
+        target = None
     else:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)
         return 1
 
     if dry_run:
-        print(f"# Would install to: {target}")
+        if target is not None:
+            print(f"# Would install to: {target}")
+        else:
+            print(f"# Would create scheduled task: {_cli.SCHTASKS_TASK_NAME}")
         print(content)
+        return 0
+
+    _cli._ensure_crypto_key_present()
+
+    if _cli._is_windows():
+        import subprocess as _sp
+        import tempfile as _tmpmod
+
+        # schtasks /Create ingests the task definition as a UTF-16 XML file.
+        fd, xml_path = _tmpmod.mkstemp(suffix=".xml", prefix="iai-mcp-task-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-16") as f:
+                f.write(content)
+            result = _sp.run(
+                [
+                    "schtasks", "/Create",
+                    "/TN", _cli.SCHTASKS_TASK_NAME,
+                    "/XML", xml_path,
+                    "/F",
+                ],
+                check=False, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(
+                    f"schtasks /Create failed ({result.returncode}): "
+                    f"{result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                return 1
+        finally:
+            try:
+                os.unlink(xml_path)
+            except OSError:
+                pass
+
+        _sp.run(
+            ["schtasks", "/Run", "/TN", _cli.SCHTASKS_TASK_NAME],
+            check=False, capture_output=True,
+        )
+        print(f"Installed scheduled task: {_cli.SCHTASKS_TASK_NAME}")
         return 0
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -140,9 +241,7 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
     except OSError:
         pass
 
-    _cli._ensure_crypto_key_present()
-
-    uid = os.getuid()
+    uid = os.getuid() if hasattr(os, "getuid") else 0
     if _cli._is_macos():
         _cli.subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}", str(target)],
@@ -211,7 +310,7 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
             print("Uninstall cancelled.", file=sys.stderr)
             return 1
 
-    uid = os.getuid()
+    uid = os.getuid() if hasattr(os, "getuid") else 0
     if _cli._is_macos():
         if _cli.LAUNCHD_TARGET.exists():
             _cli.subprocess.run(
@@ -236,6 +335,16 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
                 ["systemctl", "--user", "daemon-reload"],
                 check=False, capture_output=True,
             )
+    elif _cli._is_windows():
+        import subprocess as _sp
+        _sp.run(
+            ["schtasks", "/End", "/TN", _cli.SCHTASKS_TASK_NAME],
+            check=False, capture_output=True,
+        )
+        _sp.run(
+            ["schtasks", "/Delete", "/TN", _cli.SCHTASKS_TASK_NAME, "/F"],
+            check=False, capture_output=True,
+        )
 
     _remove_state_files()
     print("Daemon uninstalled. State files removed.")
@@ -244,7 +353,7 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_daemon_start(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
-    uid = os.getuid()
+    uid = os.getuid() if hasattr(os, "getuid") else 0
     if _cli._is_macos():
         target = _cli.LAUNCHD_TARGET
         _cli.subprocess.run(
@@ -263,6 +372,12 @@ def cmd_daemon_start(args: argparse.Namespace) -> int:
         _cli.subprocess.run(
             ["systemctl", "--user", "start", _cli.SERVICE_NAME],
             check=False,
+        )
+    elif _cli._is_windows():
+        import subprocess as _sp
+        _sp.run(
+            ["schtasks", "/Run", "/TN", _cli.SCHTASKS_TASK_NAME],
+            check=False, capture_output=True,
         )
     else:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)

@@ -819,8 +819,11 @@ def write_deferred_event(
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     # O_CREAT mode applies only on create; enforce 0600 on every open so a
     # pre-existing 0644 file is tightened too (idempotent, best-effort).
+    # os.fchmod is POSIX-only (absent on Windows, where ACLs govern access);
+    # guard with hasattr, matching crypto.py / memory_bank.py.
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
     except OSError:
         pass
     try:
