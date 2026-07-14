@@ -33,19 +33,19 @@ def cmd_crypto_status(args: argparse.Namespace) -> int:
         st = path.stat()
         mode_octal = f"0o{st.st_mode & 0o777:03o}"
         length = st.st_size
-        status["mode"] = mode_octal
-        status["uid"] = st.st_uid
         # POSIX mode bits and euid ownership are the security model on
         # macOS/Linux; on Windows os.geteuid() does not exist and st_mode/st_uid
         # are synthetic (access is governed by ACLs, which crypto.py sets via
         # icacls). Report the POSIX-specific assessments only where they mean
-        # something, mirroring the os.name guard in crypto.py's read path.
-        if _os.name != "nt":
-            status["mode_secure"] = (st.st_mode & 0o077 == 0)
-            status["uid_matches_process"] = (st.st_uid == _os.geteuid())
-        else:
-            status["mode_secure"] = None
-            status["uid_matches_process"] = None
+        # something, mirroring the os.name guard in crypto.py's read path. Key
+        # insertion order (mode, mode_secure, uid, uid_matches_process) is kept
+        # identical to the pre-Windows code so the POSIX JSON output is unchanged.
+        status["mode"] = mode_octal
+        status["mode_secure"] = (st.st_mode & 0o077 == 0) if _os.name != "nt" else None
+        status["uid"] = st.st_uid
+        status["uid_matches_process"] = (
+            (st.st_uid == _os.geteuid()) if _os.name != "nt" else None
+        )
         status["length_bytes"] = length
         status["length_valid"] = (length == KEY_BYTES)
         status["passphrase_fallback_set"] = bool(

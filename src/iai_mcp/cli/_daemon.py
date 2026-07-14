@@ -73,8 +73,12 @@ def _find_pythonw() -> str:
 
 
 def _render_schtasks_xml() -> str:
-    pythonw = _find_pythonw()
-    username = os.environ.get("USERNAME", "")
+    from xml.sax.saxutils import escape as _xml_escape
+    # Escape the interpolated values: a Windows account name or interpreter path
+    # may legally contain '&' (and, defensively, '<'/'>'), which would otherwise
+    # produce malformed XML that schtasks /Create rejects.
+    pythonw = _xml_escape(_find_pythonw())
+    username = _xml_escape(os.environ.get("USERNAME", ""))
     # No <WorkingDirectory>: the Task Scheduler engine rejects a working
     # directory set via XML when the path contains spaces (e.g. the default
     # %APPDATA% under "C:\\Users\\First Last\\..."), failing the launch with
@@ -194,9 +198,9 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
         print(content)
         return 0
 
-    _cli._ensure_crypto_key_present()
-
     if _cli._is_windows():
+        _cli._ensure_crypto_key_present()
+
         import subprocess as _sp
         import tempfile as _tmpmod
 
@@ -240,6 +244,8 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
         os.chmod(target, 0o644)
     except OSError:
         pass
+
+    _cli._ensure_crypto_key_present()
 
     uid = os.getuid() if hasattr(os, "getuid") else 0
     if _cli._is_macos():
