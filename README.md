@@ -489,7 +489,7 @@ It's an operational design choice about how memory should behave, not a clinical
 
 ## Authors
 
-By Areg Aramovich Noya, in collaboration with the team at [lcgc.dev](https://lcgc.dev).
+By Areg Aramovich Noya and Lilli Noya, in collaboration with the team at [lcgc.dev](https://lcgc.dev).
 
 I built this because I needed it. It works for me. If it works for you, take it.
 
