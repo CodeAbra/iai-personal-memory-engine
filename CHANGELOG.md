@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] — 2026-07-14
+
+### Fixed
+
+- **Backups now include your memories.** The backup command was archiving legacy
+  file names and missed the actual database, so a restore could recover an empty
+  store. It now captures the whole store directory crash-consistently (with its
+  write-ahead log), skips rebuildable indexes, and warns loudly if no database is
+  found.
+- **Prebuilt wheels build on Linux and macOS.** Release wheels now build the
+  bundled MCP wrapper on the host (the Linux build container has no Node) and
+  install the x86_64 Rust target, so the macOS and Linux wheels build alongside
+  the Windows one.
+
 ## [2.3.0] — 2026-07-13
 
 ### Added
