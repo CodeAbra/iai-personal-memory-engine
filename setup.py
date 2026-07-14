@@ -17,6 +17,7 @@ falls back to mcp-wrapper/dist/ on an editable install.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -82,7 +83,14 @@ class _BuildWithWrapper(_OrigBuildPy):
         self._stage_native_stubs()
 
     def _build_ts_wrapper(self) -> None:
-        """Compile the TypeScript wrapper and stage the JS output into build_lib."""
+        """Compile the TypeScript wrapper and stage the JS output into build_lib.
+
+        When npm is unavailable (containerized wheel builds: manylinux and
+        friends have no Node), a prebuilt ``mcp-wrapper/dist/`` compiled on
+        the host is staged as-is. ``IAI_MCP_WRAPPER_PREBUILT=1`` forces the
+        prebuilt path even when npm exists. With npm present and no force
+        flag, the wrapper is always recompiled so a dev checkout can never
+        package stale JS."""
         if not (_WRAPPER_SRC / "package.json").exists():
             raise RuntimeError(
                 "mcp-wrapper/package.json not found.  The TypeScript source must be "
@@ -90,32 +98,42 @@ class _BuildWithWrapper(_OrigBuildPy):
                 "ensure MANIFEST.in includes the mcp-wrapper source."
             )
 
+        dist_dir = _WRAPPER_SRC / "dist"
         npm_exe = shutil.which("npm")
-        if npm_exe is None:
-            raise RuntimeError(
-                "Node.js/npm is required to build the MCP wrapper.  "
-                "Install Node.js >=18 and ensure 'npm' is on your PATH, then retry."
+        force_prebuilt = os.environ.get("IAI_MCP_WRAPPER_PREBUILT") == "1"
+
+        if npm_exe is not None and not force_prebuilt:
+            # Install exact locked dependencies.
+            subprocess.run(
+                [npm_exe, "ci", "--prefer-offline"],
+                cwd=str(_WRAPPER_SRC),
+                check=True,
             )
 
-        # Install exact locked dependencies.
-        subprocess.run(
-            [npm_exe, "ci", "--prefer-offline"],
-            cwd=str(_WRAPPER_SRC),
-            check=True,
-        )
+            # Compile TypeScript → dist/*.js
+            subprocess.run(
+                [npm_exe, "run", "build"],
+                cwd=str(_WRAPPER_SRC),
+                check=True,
+            )
 
-        # Compile TypeScript → dist/*.js
-        subprocess.run(
-            [npm_exe, "run", "build"],
-            cwd=str(_WRAPPER_SRC),
-            check=True,
-        )
-
-        dist_dir = _WRAPPER_SRC / "dist"
-        if not dist_dir.exists():
+            if not dist_dir.exists():
+                raise RuntimeError(
+                    f"Expected {dist_dir} after 'npm run build' but the directory is absent.  "
+                    "Check the TypeScript compiler output above for errors."
+                )
+        elif dist_dir.exists():
+            print(
+                f"npm {'forced off' if force_prebuilt else 'not found'}; "
+                f"staging prebuilt MCP wrapper from {dist_dir}"
+            )
+        else:
             raise RuntimeError(
-                f"Expected {dist_dir} after 'npm run build' but the directory is absent.  "
-                "Check the TypeScript compiler output above for errors."
+                "Node.js/npm is required to build the MCP wrapper.  "
+                "Install Node.js >=18 and ensure 'npm' is on your PATH, or "
+                "compile the wrapper on the host first (npm ci && npm run "
+                "build in mcp-wrapper/) so mcp-wrapper/dist/ ships prebuilt "
+                "into this build environment."
             )
 
         # Stage the freshly built JS into the wheel build directory
