@@ -60,12 +60,9 @@ def backup(output: Path | None = None) -> Path:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         output = store_dir / f"brain-backup-{ts}.tar.gz"
 
-    items_to_include = []
+    items_to_include: "list[tuple[Path, str]]" = []
 
     for name in [
-        "records.lance",
-        "edges.lance",
-        "events.lance",
         ".crypto.key",
         "config.json",
         "lifecycle_state.json",
@@ -75,9 +72,34 @@ def backup(output: Path | None = None) -> Path:
         if p.exists():
             items_to_include.append((p, name))
 
-    bank_dir = store_dir / "bank"
-    if bank_dir.exists():
-        items_to_include.append((bank_dir, "bank"))
+    # The memory database itself: everything under hippo/ except what is
+    # rebuilt from the DB at boot (RO snapshot, ANN index, column index),
+    # transient locks, and temp litter. The DB travels together with its
+    # WAL/SHM so a live-store snapshot stays crash-consistent — recovery
+    # replays it exactly like a power loss. Globbing the directory instead
+    # of hardcoding file names means an engine file rename can never again
+    # silently drop the database from the backup set.
+    hippo_dir = store_dir / "hippo"
+    if hippo_dir.exists():
+        for p in sorted(hippo_dir.iterdir()):
+            name = p.name
+            if name == ".lock" or name.startswith("tmp"):
+                continue
+            if name.endswith((".ro", ".hnsw", ".colindex")):
+                continue
+            items_to_include.append((p, f"hippo/{name}"))
+
+    for bank_name in ("bank", ".memory-bank"):
+        bank_dir = store_dir / bank_name
+        if bank_dir.exists():
+            items_to_include.append((bank_dir, bank_name))
+
+    if not any(arc.startswith("hippo/brain.") for _, arc in items_to_include):
+        logger.warning(
+            "backup: no database file found under %s — the archive holds "
+            "config/key material only",
+            hippo_dir,
+        )
 
     with tarfile.open(str(output), "w:gz") as tar:
         for full_path, arcname in items_to_include:
