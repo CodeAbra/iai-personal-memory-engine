@@ -755,6 +755,9 @@ _NOISE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("startswith", "<command-name>"),
     ("startswith", "Base directory for this skill:"),
     ("startswith", "<task-notification>"),
+    ("startswith", "<local-command-stdout>"),
+    ("startswith", "<local-command-caveat>"),
+    ("startswith", "This session is being continued from a previous conversation"),
     ("equals",     "[Request interrupted by user]"),
 )
 
