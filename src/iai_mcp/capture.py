@@ -700,10 +700,10 @@ def capture_transcript(
 ) -> dict[str, Any]:
     path = Path(transcript_path).expanduser()
     if not path.exists():
-        return {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 1,
+        return {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 1, "filtered": 0,
                 "reason": f"transcript not found: {path}"}
 
-    counts = {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 0}
+    counts = {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 0, "filtered": 0}
     seen = 0
     with path.open() as fh:
         for line in fh:
@@ -731,6 +731,9 @@ def capture_transcript(
                 text = str(content).strip()
             if not text:
                 continue
+            if _is_noise(text):
+                counts["filtered"] += 1
+                continue
             result = capture_turn(
                 store,
                 cue=f"session {session_id} turn {seen}",
@@ -755,6 +758,9 @@ _NOISE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("startswith", "<command-name>"),
     ("startswith", "Base directory for this skill:"),
     ("startswith", "<task-notification>"),
+    ("startswith", "<local-command-stdout>"),
+    ("startswith", "<local-command-caveat>"),
+    ("startswith", "This session is being continued from a previous conversation"),
     ("equals",     "[Request interrupted by user]"),
 )
 

@@ -123,6 +123,9 @@ _NOISE_STARTSWITH = (
     "<command-name>",
     "Base directory for this skill:",
     "<task-notification>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "This session is being continued from a previous conversation",
 )
 _NOISE_EQUALS = ("[Request interrupted by user]",)
 

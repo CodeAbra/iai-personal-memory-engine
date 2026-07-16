@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Noise filter no longer misses local-command output and compaction
+  summaries.** The ambient-capture noise filter gained patterns for
+  `<local-command-stdout>` / `<local-command-caveat>` blocks and for the
+  "This session is being continued from a previous conversation" text Claude
+  Code injects after a context-compaction, so neither ends up stored as a
+  real conversational turn.
+- **The `capture-transcript` recovery path now applies the same noise
+  filter.** `capture_transcript()` parsed transcript lines with its own
+  inline logic and never called the shared noise filter, so a manual/recovery
+  import could re-introduce compaction summaries and other noise that the
+  live per-turn and per-session capture paths already reject. It now skips
+  those lines the same way, and tallies them under a new `filtered` count so
+  the totals still reconcile with lines seen. Added regression tests for the
+  filter patterns and for `capture_transcript`'s filtering behavior.
+
 ## [2.3.1] — 2026-07-14
 
 ### Fixed
