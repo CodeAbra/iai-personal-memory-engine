@@ -157,6 +157,73 @@ def _should_drain_on_drowsy_edge(prev, current) -> bool:
     return prev is _L.WAKE and current is _L.DROWSY
 
 
+def _wake_valve_due(
+    now_mono: float,
+    last_probe_mono: float,
+    floor_sec: float,
+    inflight: bool,
+    is_wake: bool,
+) -> bool:
+    """Should the WAKE drain-valve probe fire on this tick?
+
+    The valve exists because the drowsy-edge drain never runs while the
+    heartbeat (e.g. an open editor) keeps the FSM parked in WAKE forever --
+    without it, captures can sit in the spool for days. ``floor_sec <= 0``
+    disables the valve outright; it only ever probes while the FSM is
+    actually in WAKE, never while a previous probe/drain is still in flight.
+    """
+    if floor_sec <= 0:
+        return False
+    if not is_wake:
+        return False
+    if inflight:
+        return False
+    return (now_mono - last_probe_mono) >= floor_sec
+
+
+def _spool_backlog_over_threshold(
+    snapshot: dict,
+    baseline_bytes: float | None,
+    min_bytes: float,
+) -> tuple[bool, float]:
+    """Is ``snapshot`` (from ``spool_backlog_snapshot``) worth draining?
+
+    ``spool_backlog_snapshot`` only reports the raw total size of the live
+    spool files, not a per-session drain delta (the persisted drain-offset
+    is a line count, not a byte count, so it cannot be subtracted from a
+    byte total). The delta this valve actually cares about -- growth since
+    the last probe -- is tracked here via ``baseline_bytes``, a caller-owned
+    latch.
+
+    Returns ``(should_drain, new_baseline_bytes)``:
+    - ``baseline_bytes is None`` (first-ever probe): never fires on bytes
+      alone -- it only calibrates the baseline. A nonzero
+      ``finalized_files`` still fires even during calibration, since those
+      files are already-final, stalled work with no growth signal to wait
+      on.
+    - Otherwise: fires when ``finalized_files > 0`` or the live total has
+      grown by at least ``min_bytes`` since the baseline.
+    - If the live total is BELOW the baseline (a live file was rotated away
+      or removed), the baseline is reset to the current total without firing
+      on bytes -- an old baseline must never look like unbounded growth
+      after a spool shrink.
+    - The caller is expected to reset the baseline to the returned value
+      after every probe that actually fires (whatever the drain's outcome),
+      so a drain that made no progress cannot re-fire every floor forever.
+    """
+    finalized = snapshot.get("finalized_files", 0)
+    live_total = snapshot.get("live_bytes_total", 0)
+
+    if baseline_bytes is None:
+        return (finalized > 0, live_total)
+
+    if live_total < baseline_bytes:
+        return (False, live_total)
+
+    should_drain = finalized > 0 or (live_total - baseline_bytes) >= min_bytes
+    return (should_drain, baseline_bytes if not should_drain else live_total)
+
+
 def _sleep_pipeline_gate(daemon_state: dict | None) -> bool:
     # Module-level so it is directly unit-testable without assembling the
     # daemon. Returns False (pipeline must NOT run) when scheduler_paused is
@@ -267,16 +334,23 @@ async def _consume_force_wake(ds: dict, state_machine: Any) -> dict:
     return updated
 
 
-def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
+def _run_drowsy_drain(
+    store,
+    *,
+    drain_fn,
+    write_event_fn,
+    event_name: str = "deferred_drain_drowsy",
+    phase: str = "drowsy",
+) -> None:
     try:
         result = drain_fn(store)
     except Exception as e:  # noqa: BLE001 -- lifecycle_tick MUST NOT crash
-        log.warning("drowsy drain failed: %s", e, exc_info=True)
+        log.warning("%s drain failed: %s", phase, e, exc_info=True)
         try:
             write_event_fn(
                 store,
                 "deferred_drain_failed",
-                {"error": str(e)[:200], "phase": "drowsy"},
+                {"error": str(e)[:200], "phase": phase},
                 severity="warning",
             )
         except Exception:  # noqa: BLE001 -- event write inside boundary guard
@@ -288,12 +362,12 @@ def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
         try:
             write_event_fn(
                 store,
-                "deferred_drain_drowsy",
+                event_name,
                 result,
                 severity="info",
             )
         except Exception:  # noqa: BLE001 -- event write non-critical
-            log.debug("failed to write deferred_drain_drowsy event")
+            log.debug("failed to write %s event", event_name)
 
 
 def _kick_drowsy_rgc_rebuild(store) -> None:
@@ -1323,6 +1397,17 @@ async def main() -> int:
         PENDING_EMBED_FLOOR_SEC: float = float(
             os.environ.get("IAI_MCP_PENDING_EMBED_FLOOR_SEC", "300")
         )
+        # WAKE drain valve: an escape hatch for the capture spool. Without
+        # it, the drain only runs at startup and on the WAKE->DROWSY edge --
+        # and a heartbeat source that never goes idle (e.g. an open IDE)
+        # keeps the FSM parked in WAKE forever, so captures can wait in the
+        # spool for days. floor_sec <= 0 disables the valve entirely.
+        WAKE_DRAIN_FLOOR_SEC: float = float(
+            os.environ.get("IAI_MCP_WAKE_DRAIN_FLOOR_SEC", "600")
+        )
+        WAKE_DRAIN_MIN_BYTES: float = float(
+            os.environ.get("IAI_MCP_WAKE_DRAIN_MIN_BYTES", "65536")
+        )
 
         _last_active_monotonic: list[float] = [time.monotonic()]
         _prev_lifecycle_state: list = [_LifecycleState.WAKE]
@@ -1333,6 +1418,9 @@ async def main() -> int:
         _sleep_fail_backoff_until: list[float] = [0.0]
         _last_pending_embed_mono: list[float] = [0.0]
         _pending_embed_inflight: list[bool] = [False]
+        _last_wake_valve_probe_mono: list[float] = [0.0]
+        _wake_valve_inflight: list[bool] = [False]
+        _wake_valve_baseline_bytes: list = [None]
 
         def _pending_embed_pass_sync() -> None:
             from iai_mcp import runtime_graph_cache as _rgc
@@ -1546,6 +1634,57 @@ async def main() -> int:
                             await _pending_embed_pass()
                         except Exception:  # noqa: BLE001 -- wake sequence non-fatal
                             log.debug("lifecycle_tick pending_embeddings_wake_sequence failed", exc_info=True)
+
+                    # WAKE drain valve: a bounded, windowed probe that fires
+                    # only while the FSM is parked in WAKE -- the case the
+                    # drowsy-edge drain above never covers when the heartbeat
+                    # never goes idle. The probe timestamp is updated whether
+                    # or not it actually finds enough backlog to drain, so a
+                    # quiet spool does not re-probe every tick. drain_fn
+                    # itself is single-flight and kill-switched, so calling
+                    # it repeatedly from here is safe.
+                    if _wake_valve_due(
+                        now_mono,
+                        _last_wake_valve_probe_mono[0],
+                        WAKE_DRAIN_FLOOR_SEC,
+                        _wake_valve_inflight[0],
+                        current is _LifecycleState.WAKE,
+                    ):
+                        _last_wake_valve_probe_mono[0] = now_mono
+                        _wake_valve_inflight[0] = True
+                        try:
+                            from iai_mcp.capture import (
+                                drain_capture_backlog,
+                                spool_backlog_snapshot,
+                            )
+
+                            _wv_snapshot = await asyncio.to_thread(
+                                spool_backlog_snapshot,
+                            )
+                            _wv_should_drain, _wv_new_baseline = (
+                                _spool_backlog_over_threshold(
+                                    _wv_snapshot,
+                                    _wake_valve_baseline_bytes[0],
+                                    WAKE_DRAIN_MIN_BYTES,
+                                )
+                            )
+                            _wake_valve_baseline_bytes[0] = _wv_new_baseline
+                            if _wv_should_drain:
+                                await asyncio.to_thread(
+                                    _run_drowsy_drain,
+                                    store,
+                                    drain_fn=drain_capture_backlog,
+                                    write_event_fn=write_event,
+                                    event_name="deferred_drain_wake_valve",
+                                    phase="wake_valve",
+                                )
+                        except Exception:  # noqa: BLE001 -- wake drain valve non-fatal
+                            log.debug(
+                                "lifecycle_tick wake drain valve failed",
+                                exc_info=True,
+                            )
+                        finally:
+                            _wake_valve_inflight[0] = False
 
                     # A pending-embed backlog must never wait on the drowsy
                     # edge alone: a daemon that boots straight into SLEEP (or

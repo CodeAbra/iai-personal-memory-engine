@@ -1158,6 +1158,46 @@ def write_deferred_captures(
     return out_path
 
 
+def spool_backlog_snapshot(deferred_dir: Path | None = None) -> dict[str, int]:
+    """Cheap, drain-free estimate of how much backlog is sitting in the spool.
+
+    Used as a trigger signal only (e.g. the WAKE drain valve) -- it never
+    opens capture content or any per-session offset file, only ``stat()``s
+    the spool directory entries, so it is safe to call frequently even under
+    heavy backlog. ``live_bytes_total`` is the raw total size of the still-
+    open ``*.live.jsonl`` files; callers that need a *delta* (growth since
+    the last probe) track their own baseline against this total -- the
+    per-session drain-offset is a line count, not a byte count, so it cannot
+    be subtracted from a byte size here. False positives are fine and
+    expected; the expensive verification happens in the drain itself.
+    """
+    if deferred_dir is None:
+        deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    snapshot = {"finalized_files": 0, "live_bytes_total": 0}
+    if not deferred_dir.exists():
+        return snapshot
+
+    try:
+        with os.scandir(deferred_dir) as it:
+            for entry in it:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                name = entry.name
+                if _PROCESSING_MARKER_RE.search(name) or _CRASH_ATTEMPT_RE.search(name):
+                    snapshot["finalized_files"] += 1
+                    continue
+                if not _LIVE_ACTIVE_RE.search(name):
+                    continue
+                try:
+                    snapshot["live_bytes_total"] += entry.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        return snapshot
+
+    return snapshot
+
+
 def drain_capture_backlog(store: MemoryStore) -> dict[str, int]:
     """Drain both the rotated/crashed deferred files and the still-open live
     spools (incremental, offset-tracked) into the store."""
