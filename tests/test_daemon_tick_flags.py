@@ -156,3 +156,102 @@ def test_tick_updates_last_tick_at(tick_env, monkeypatch):
 
     assert "last_tick_at" in state
     datetime.fromisoformat(state["last_tick_at"])
+
+
+def test_last_tick_skipped_reason_cleared_after_normal_tick(tick_env, monkeypatch):
+    """A stale `last_tick_skipped_reason` from a prior skip must not survive
+    a subsequent tick that actually runs (regression: the flag used to be
+    fossilized forever once set)."""
+    from iai_mcp import daemon as daemon_mod
+
+    store, state_path, tmp_path = tick_env
+
+    monkeypatch.setattr(daemon_mod, "should_relearn", lambda last, now: False)
+
+    state = {
+        "fsm_state": "WAKE",
+        "scheduler_paused": True,
+    }
+    asyncio.run(daemon_mod._tick_body(store, state))
+    assert state.get("last_tick_skipped_reason") == "paused"
+
+    state["scheduler_paused"] = False
+    asyncio.run(daemon_mod._tick_body(store, state))
+
+    assert "last_tick_skipped_reason" not in state
+
+
+def test_store_is_empty_check_failure_propagates(tick_env, monkeypatch):
+    """`_store_is_empty` must not swallow a failed check as "store empty" —
+    a broken check is not the same as an empty store. `_tick_body` should
+    let the exception bubble; `_scheduler_tick` turns it into a
+    `tick_error` event instead of silently skipping the tick."""
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp.events import query_events
+
+    store, state_path, tmp_path = tick_env
+
+    real_open_table = store.db.open_table
+
+    def _selective_boom(name):
+        if name == "records":
+            raise RuntimeError("simulated store check failure")
+        return real_open_table(name)
+
+    monkeypatch.setattr(store.db, "open_table", _selective_boom)
+
+    state = {"fsm_state": "WAKE"}
+
+    with pytest.raises(RuntimeError, match="simulated store check failure"):
+        asyncio.run(daemon_mod._tick_body(store, state))
+
+    monkeypatch.setattr(daemon_mod, "TICK_INTERVAL_SEC", 0)
+
+    async def runner():
+        task = asyncio.create_task(daemon_mod._scheduler_tick(store, state))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(runner())
+
+    err_events = query_events(store, kind="tick_error", limit=5)
+    assert len(err_events) >= 1
+    assert "simulated store check failure" in err_events[0]["data"].get("error", "")
+
+
+def test_ann_pool_health_fence_reopens_none_without_ro_pool(tick_env):
+    """No _ro_pool (stdlib driver) -> fence_reopens is None ("not
+    applicable"), never 0 -- 0 would be indistinguishable from "fence
+    active, zero reopens so far"."""
+    from iai_mcp import daemon as daemon_mod
+
+    store, state_path, tmp_path = tick_env
+
+    assert getattr(store.db, "_ro_pool", None) is None
+
+    payload = daemon_mod._ann_pool_health_payload(store)
+
+    assert payload["fence_reopens"] is None
+
+
+def test_ann_pool_health_fence_reopens_reports_pool_count(tick_env, monkeypatch):
+    """With a _ro_pool present, fence_reopens publishes its
+    fence_reopen_count verbatim."""
+    from iai_mcp import daemon as daemon_mod
+
+    store, state_path, tmp_path = tick_env
+
+    class _FakePool:
+        fence_reopen_count = 7
+        writer_fallback_count = 2
+
+    monkeypatch.setattr(store.db, "_ro_pool", _FakePool(), raising=False)
+
+    payload = daemon_mod._ann_pool_health_payload(store)
+
+    assert payload["fence_reopens"] == 7
+    assert payload["writer_fallbacks"] == 2
