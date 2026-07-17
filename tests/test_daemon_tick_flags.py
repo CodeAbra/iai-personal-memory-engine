@@ -179,3 +179,45 @@ def test_last_tick_skipped_reason_cleared_after_normal_tick(tick_env, monkeypatc
     asyncio.run(daemon_mod._tick_body(store, state))
 
     assert "last_tick_skipped_reason" not in state
+
+
+def test_store_is_empty_check_failure_propagates(tick_env, monkeypatch):
+    """`_store_is_empty` must not swallow a failed check as "store empty" —
+    a broken check is not the same as an empty store. `_tick_body` should
+    let the exception bubble; `_scheduler_tick` turns it into a
+    `tick_error` event instead of silently skipping the tick."""
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp.events import query_events
+
+    store, state_path, tmp_path = tick_env
+
+    real_open_table = store.db.open_table
+
+    def _selective_boom(name):
+        if name == "records":
+            raise RuntimeError("simulated store check failure")
+        return real_open_table(name)
+
+    monkeypatch.setattr(store.db, "open_table", _selective_boom)
+
+    state = {"fsm_state": "WAKE"}
+
+    with pytest.raises(RuntimeError, match="simulated store check failure"):
+        asyncio.run(daemon_mod._tick_body(store, state))
+
+    monkeypatch.setattr(daemon_mod, "TICK_INTERVAL_SEC", 0)
+
+    async def runner():
+        task = asyncio.create_task(daemon_mod._scheduler_tick(store, state))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(runner())
+
+    err_events = query_events(store, kind="tick_error", limit=5)
+    assert len(err_events) >= 1
+    assert "simulated store check failure" in err_events[0]["data"].get("error", "")

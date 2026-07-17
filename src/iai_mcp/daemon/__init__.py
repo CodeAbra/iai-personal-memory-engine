@@ -347,11 +347,7 @@ def transition(state: dict, new_fsm: str) -> None:
 
 
 def _store_is_empty(store: MemoryStore) -> bool:
-    try:
-        return store.db.open_table("records").count_rows() == 0
-    except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        log.debug("store empty check failed, assuming empty: %s", exc)
-        return True
+    return store.db.open_table("records").count_rows() == 0
 
 
 def _is_inside_window(
