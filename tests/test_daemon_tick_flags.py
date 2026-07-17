@@ -221,3 +221,37 @@ def test_store_is_empty_check_failure_propagates(tick_env, monkeypatch):
     err_events = query_events(store, kind="tick_error", limit=5)
     assert len(err_events) >= 1
     assert "simulated store check failure" in err_events[0]["data"].get("error", "")
+
+
+def test_ann_pool_health_fence_reopens_none_without_ro_pool(tick_env):
+    """No _ro_pool (stdlib driver) -> fence_reopens is None ("not
+    applicable"), never 0 -- 0 would be indistinguishable from "fence
+    active, zero reopens so far"."""
+    from iai_mcp import daemon as daemon_mod
+
+    store, state_path, tmp_path = tick_env
+
+    assert getattr(store.db, "_ro_pool", None) is None
+
+    payload = daemon_mod._ann_pool_health_payload(store)
+
+    assert payload["fence_reopens"] is None
+
+
+def test_ann_pool_health_fence_reopens_reports_pool_count(tick_env, monkeypatch):
+    """With a _ro_pool present, fence_reopens publishes its
+    fence_reopen_count verbatim."""
+    from iai_mcp import daemon as daemon_mod
+
+    store, state_path, tmp_path = tick_env
+
+    class _FakePool:
+        fence_reopen_count = 7
+        writer_fallback_count = 2
+
+    monkeypatch.setattr(store.db, "_ro_pool", _FakePool(), raising=False)
+
+    payload = daemon_mod._ann_pool_health_payload(store)
+
+    assert payload["fence_reopens"] == 7
+    assert payload["writer_fallbacks"] == 2

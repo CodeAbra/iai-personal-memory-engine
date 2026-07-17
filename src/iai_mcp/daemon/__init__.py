@@ -350,6 +350,23 @@ def _store_is_empty(store: MemoryStore) -> bool:
     return store.db.open_table("records").count_rows() == 0
 
 
+def _ann_pool_health_payload(store: MemoryStore) -> dict:
+    # Module-level so it is directly unit-testable without assembling the
+    # daemon. `fence_reopens` is published as None ("not applicable") when
+    # there is no read-only pool (stdlib driver) -- 0 would be
+    # indistinguishable from "fence active, zero reopens so far".
+    _hp_pool = getattr(store.db, "_ro_pool", None)
+    return {
+        "reuse_collisions": int(getattr(store.db, "_reuse_collision_count", 0)),
+        "fence_reopens": (
+            int(getattr(_hp_pool, "fence_reopen_count", 0) or 0)
+            if _hp_pool is not None
+            else None
+        ),
+        "writer_fallbacks": int(getattr(_hp_pool, "writer_fallback_count", 0) or 0),
+    }
+
+
 def _is_inside_window(
     window: tuple[int, int] | list | None,
     now: datetime,
@@ -1610,18 +1627,7 @@ async def main() -> int:
                     # status surface every tick — a write-only counter
                     # observes nothing. Read via `iai-mcp daemon status`.
                     try:
-                        _hp_pool = getattr(store.db, "_ro_pool", None)
-                        state["ann_pool_health"] = {
-                            "reuse_collisions": int(
-                                getattr(store.db, "_reuse_collision_count", 0)
-                            ),
-                            "fence_reopens": int(
-                                getattr(_hp_pool, "fence_reopen_count", 0) or 0
-                            ),
-                            "writer_fallbacks": int(
-                                getattr(_hp_pool, "writer_fallback_count", 0) or 0
-                            ),
-                        }
+                        state["ann_pool_health"] = _ann_pool_health_payload(store)
                     except Exception:  # noqa: BLE001 -- health publish is best-effort
                         pass
 
