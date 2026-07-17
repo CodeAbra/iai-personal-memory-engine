@@ -257,6 +257,20 @@ def _validate_table_name(name: str) -> str:
     return name
 
 
+# Cache of on-disk-detected driver, keyed by the (string) db path. Populated
+# only once a real header has been read (see _resolve_effective_driver), so a
+# hit here means the file's format is already known and does not need to be
+# re-sniffed. Not lock-protected: under the GIL two racing writers compute the
+# same detected value, so the worst case is a harmless redundant open, not a
+# corrupt cache entry.
+_driver_detect_cache: dict[str, str] = {}
+
+
+def _driver_detect_cache_clear() -> None:
+    """Drop all cached driver detections (test/debugging helper)."""
+    _driver_detect_cache.clear()
+
+
 def _resolve_effective_driver(db_path: str) -> str:
     """Resolve the storage driver for a backing file, on-disk format first.
 
@@ -281,7 +295,23 @@ def _resolve_effective_driver(db_path: str) -> str:
     the store reads it with the driver that wrote it, regardless of the ambient
     variable. The env is honoured only when there is no file to sniff yet (a
     fresh store), so a first open still creates the intended format.
+
+    Once a header has been read successfully, the detected driver is cached
+    for the path and further calls skip the raw ``open()``/``close()``
+    entirely. This matters beyond a micro-optimisation: per POSIX fcntl(2)
+    semantics, closing *any* file descriptor on a path drops *all* POSIX
+    locks the process holds on that file (sqlite.org/howtocorrupt.html
+    §2.2) — repeatedly open()-ing the backing file just to sniff its header
+    was silently stripping the live sqlite connection's lock, leaving the
+    database vulnerable to an external reader deleting the WAL out from
+    under it. Absent files, read errors, and short/empty headers are never
+    cached, so those cases keep re-probing (and honouring the env) exactly
+    as before.
     """
+    cached = _driver_detect_cache.get(db_path)
+    if cached is not None:
+        return cached
+
     from iai_mcp.lillibrain.constants import DB_MAGIC  # noqa: PLC0415
 
     _SQLITE_MAGIC = b"SQLite format 3\x00"
@@ -294,8 +324,10 @@ def _resolve_effective_driver(db_path: str) -> str:
     except OSError:
         header = b""
 
-    if not header:
-        # No file yet (fresh store) or unreadable — honour the env intent.
+    if len(header) < len(DB_MAGIC):
+        # No file yet (fresh store), unreadable, or a short/partial header —
+        # not enough to detect from, so don't cache; honour the env intent
+        # and let the next call re-probe.
         return env_driver
 
     if header[:len(DB_MAGIC)] == DB_MAGIC:
@@ -304,7 +336,8 @@ def _resolve_effective_driver(db_path: str) -> str:
         detected = "stdlib"
     else:
         # Unknown/corrupt header: defer to the env so the writer that produced
-        # it (or the intended driver) reports its own error, unchanged.
+        # it (or the intended driver) reports its own error, unchanged. Not
+        # cached — a later write could still land a recognisable header.
         return env_driver
 
     if detected != env_driver:
@@ -315,6 +348,7 @@ def _resolve_effective_driver(db_path: str) -> str:
             detected,
             env_driver,
         )
+    _driver_detect_cache[db_path] = detected
     return detected
 
 
