@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from iai_mcp.hippo import _db
 from iai_mcp.hippo._db import _resolve_effective_driver
 from iai_mcp.lillibrain.constants import DB_MAGIC
 
@@ -25,6 +26,14 @@ from iai_mcp.lillibrain.constants import DB_MAGIC
 def _write_magic(path: Path, magic: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(magic + b"\x00" * 64)
+
+
+@pytest.fixture(autouse=True)
+def _clear_driver_detect_cache() -> None:
+    """Keep the module-level detection cache from leaking across tests."""
+    _db._driver_detect_cache_clear()
+    yield
+    _db._driver_detect_cache_clear()
 
 
 def test_resolve_driver_prefers_ondisk_lilli_over_unset_env(
@@ -155,3 +164,50 @@ def test_lilli_store_reopens_when_env_unset(
         assert got.literal_surface == surface
     finally:
         reader.close()
+
+
+def test_resolve_driver_does_not_cache_absent_file_then_detects_from_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "absent file" branch must not be cached.
+
+    First call honours the env because the file doesn't exist yet. Once the
+    file is created with a real header, the next call must detect from the
+    header instead of returning the stale env-honouring result — proving the
+    absent-file path was never written to the cache.
+    """
+    db = tmp_path / "hippo" / "brain.sqlite3"  # not created yet
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+    assert _resolve_effective_driver(str(db)) == "stdlib"
+
+    _write_magic(db, DB_MAGIC)
+    assert _resolve_effective_driver(str(db)) == "lilli"
+
+
+def test_resolve_driver_caches_after_header_detection_and_skips_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once detected from a real header, subsequent calls must not reopen the
+    file at all — that raw open()/close() cycle is what silently drops the
+    live sqlite connection's POSIX locks (the WAL-deletion footgun)."""
+    db = tmp_path / "hippo" / "brain.sqlite3"
+    _write_magic(db, DB_MAGIC)
+    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+
+    # First call reads the header and populates the cache.
+    assert _resolve_effective_driver(str(db)) == "lilli"
+
+    open_calls: list[str] = []
+    real_open = open
+
+    def _counting_open(file, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if str(file) == str(db):
+            open_calls.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _counting_open)
+
+    for _ in range(3):
+        assert _resolve_effective_driver(str(db)) == "lilli"
+
+    assert open_calls == []
