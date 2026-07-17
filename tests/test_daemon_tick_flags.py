@@ -156,3 +156,26 @@ def test_tick_updates_last_tick_at(tick_env, monkeypatch):
 
     assert "last_tick_at" in state
     datetime.fromisoformat(state["last_tick_at"])
+
+
+def test_last_tick_skipped_reason_cleared_after_normal_tick(tick_env, monkeypatch):
+    """A stale `last_tick_skipped_reason` from a prior skip must not survive
+    a subsequent tick that actually runs (regression: the flag used to be
+    fossilized forever once set)."""
+    from iai_mcp import daemon as daemon_mod
+
+    store, state_path, tmp_path = tick_env
+
+    monkeypatch.setattr(daemon_mod, "should_relearn", lambda last, now: False)
+
+    state = {
+        "fsm_state": "WAKE",
+        "scheduler_paused": True,
+    }
+    asyncio.run(daemon_mod._tick_body(store, state))
+    assert state.get("last_tick_skipped_reason") == "paused"
+
+    state["scheduler_paused"] = False
+    asyncio.run(daemon_mod._tick_body(store, state))
+
+    assert "last_tick_skipped_reason" not in state

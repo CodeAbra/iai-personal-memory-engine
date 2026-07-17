@@ -605,6 +605,8 @@ async def _tick_body(
         await asyncio.to_thread(save_state, state)
         return
 
+    state.pop("last_tick_skipped_reason", None)
+
     now = datetime.now(timezone.utc)
     try:
         tz = load_user_tz()
