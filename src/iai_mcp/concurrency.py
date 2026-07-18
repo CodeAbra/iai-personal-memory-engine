@@ -173,7 +173,18 @@ async def _dispatch_socket_request(
     from datetime import datetime, timezone
 
     from iai_mcp import __version__ as pkg_version
-    from iai_mcp.daemon_state import save_state
+    from iai_mcp.daemon_state import update_state
+
+    # Handlers mutate the daemon's shared in-memory `state` for coherent
+    # same-process reads, but persistence goes through update_state with a
+    # targeted mutator: a whole-dict save of the long-held shared dict
+    # erases every key another writer persisted since daemon boot.
+    def _persist(*keys: str) -> None:
+        def _apply(d: dict) -> None:
+            for k in keys:
+                d[k] = state[k]
+
+        update_state(_apply)
 
     if req_type == "status":
         fsm_state = state.get("fsm_state", "WAKE")
@@ -226,7 +237,7 @@ async def _dispatch_socket_request(
             "pending": True,
         }
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(_persist, "user_sleep_request")
         except Exception as exc:  # noqa: BLE001 -- socket must never crash daemon
             return {"ok": False, "reason": "state_write_failed", "error": str(exc)[:200]}
         return {"ok": True, "state": "TRANSITIONING"}
@@ -235,7 +246,7 @@ async def _dispatch_socket_request(
         ts = str(req.get("ts", ""))
         state["force_wake_request"] = {"ts": ts, "pending": True}
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(_persist, "force_wake_request")
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reason": "state_write_failed", "error": str(exc)[:200]}
         return {"ok": True, "reason": "wake_queued"}
@@ -244,7 +255,7 @@ async def _dispatch_socket_request(
         ts = str(req.get("ts", ""))
         state["force_rem_request"] = {"ts": ts, "pending": True}
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(_persist, "force_rem_request")
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reason": "state_write_failed", "error": str(exc)[:200]}
         return {"ok": True, "reason": "rem_queued"}
@@ -252,7 +263,7 @@ async def _dispatch_socket_request(
     if req_type == "pause":
         state["scheduler_paused"] = True
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(_persist, "scheduler_paused")
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reason": "state_write_failed", "error": str(exc)[:200]}
         return {"ok": True, "paused": True}
@@ -260,7 +271,7 @@ async def _dispatch_socket_request(
     if req_type == "resume":
         state["scheduler_paused"] = False
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(_persist, "scheduler_paused")
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reason": "state_write_failed", "error": str(exc)[:200]}
         return {"ok": True, "paused": False}
@@ -280,8 +291,20 @@ async def _dispatch_socket_request(
             "ts": ts,
             "pending": True,
         }
+
+        def _persist_session_open(d: dict) -> None:
+            d["last_session_open"] = state["last_session_open"]
+            d["hippea_cascade_request"] = state["hippea_cascade_request"]
+            # Merge only this session's entry: the on-disk map may hold
+            # prunes/consumes this process has not observed.
+            fresh_ft = d.get("first_turn_pending")
+            if not isinstance(fresh_ft, dict):
+                fresh_ft = {}
+            fresh_ft[session_id] = now_iso
+            d["first_turn_pending"] = fresh_ft
+
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(update_state, _persist_session_open)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reason": "state_write_failed", "error": str(exc)[:200]}
         return {"ok": True, "reason": "session_open_queued"}

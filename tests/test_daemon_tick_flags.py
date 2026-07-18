@@ -127,10 +127,14 @@ def test_tick_body_never_calls_run_rem_cycle_user_sleep(tick_env, monkeypatch):
 
 def test_paused_skip_persists_to_disk(tick_env, monkeypatch):
     from iai_mcp import daemon as daemon_mod
-    from iai_mcp.daemon_state import load_state
+    from iai_mcp.daemon_state import load_state, save_state
 
     store, state_path, tmp_path = tick_env
 
+    # scheduler_paused reaches disk when it is SET (the pause handler owns
+    # that key); the tick's own persist must record the skip without
+    # erasing it.
+    save_state({"fsm_state": "WAKE", "scheduler_paused": True})
     state = {
         "fsm_state": "WAKE",
         "scheduler_paused": True,

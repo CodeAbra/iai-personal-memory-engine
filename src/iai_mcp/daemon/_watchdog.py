@@ -140,7 +140,7 @@ async def _hippea_cascade_loop(
     store, shutdown: asyncio.Event, *, _clock=time.monotonic,
 ) -> None:
     from iai_mcp import retrieve
-    from iai_mcp.daemon_state import daemon_state_path, load_state, save_state
+    from iai_mcp.daemon_state import daemon_state_path, load_state
     from iai_mcp.hippea_cascade import _install_warm, compute_and_fetch_warm
     from iai_mcp.lock_protocol import check_consolidation_intent
     # late import so the package attribute is re-fetched and a monkeypatch stays visible
@@ -230,9 +230,12 @@ async def _hippea_cascade_loop(
                         except (OSError, RuntimeError) as exc:
                             log.debug("hippea_cascade_completed event write failed: %s", exc)
                         try:
-                            state = await asyncio.to_thread(load_state)
-                            state["hippea_cascade_request"] = {"pending": False}
-                            await asyncio.to_thread(save_state, state)
+                            from iai_mcp.daemon_state import update_state
+
+                            def _clear_cascade(d: dict) -> None:
+                                d["hippea_cascade_request"] = {"pending": False}
+
+                            await asyncio.to_thread(update_state, _clear_cascade)
                         except (OSError, ValueError) as exc:
                             log.debug("cascade state clear failed: %s", exc)
                     finally:

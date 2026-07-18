@@ -176,6 +176,16 @@ pub struct Catalog {
     rootpage: BTreeMap<String, i64>,
 }
 
+/// The parsed shape of a CREATE [UNIQUE] INDEX statement.
+pub struct CreateIndexDecl {
+    pub table: String,
+    pub index: String,
+    pub column: String,
+    pub if_not_exists: bool,
+    pub is_partial: bool,
+    pub is_unique: bool,
+}
+
 /// One synthesized `sqlite_master` row: the schema-object kind, its name, the
 /// name of the table it belongs to, its root page, and the stored DDL text.
 #[derive(Debug, Clone, PartialEq)]
@@ -623,6 +633,23 @@ impl Catalog {
     }
 
     fn apply_create_index(&mut self, raw: &str) -> Result<()> {
+        let decl = Catalog::parse_create_index(raw)?;
+        let entries = self.indexes.entry(decl.table).or_default();
+        // A bloated meta history replays the same CREATE INDEX many times;
+        // a repeated registration must not multiply the registry. sqlite
+        // identifiers compare case-insensitively.
+        if entries
+            .iter()
+            .any(|(name, _, _, _)| name.eq_ignore_ascii_case(&decl.index))
+        {
+            return Ok(());
+        }
+        entries.push((decl.index, decl.column, decl.is_partial, decl.is_unique));
+        Ok(())
+    }
+
+    /// Parse the shape of a CREATE [UNIQUE] INDEX statement without applying it.
+    pub fn parse_create_index(raw: &str) -> Result<CreateIndexDecl> {
         let tokens = tokenize(raw)?;
         let mut w = Walker::new(&tokens);
         w.advance(); // CREATE
@@ -633,23 +660,40 @@ impl Catalog {
             w.advance(); // UNIQUE
         }
         w.advance(); // INDEX
-        if w.peek_upper() == "IF" {
+        let if_not_exists = w.peek_upper() == "IF";
+        if if_not_exists {
             w.advance(); // IF
             w.advance(); // NOT
             w.advance(); // EXISTS
         }
-        let index_name = w.advance();
+        let index = w.advance();
         w.advance(); // ON
-        let table_name = w.advance();
+        let table = w.advance();
         w.advance(); // (
-        let col_name = w.advance();
+        let column = w.advance();
         w.advance(); // )
         let is_partial = w.peek_upper() == "WHERE";
+        Ok(CreateIndexDecl {
+            table,
+            index,
+            column,
+            if_not_exists,
+            is_partial,
+            is_unique,
+        })
+    }
+
+    /// True when `table` already carries an index registered as `index`
+    /// (case-insensitive, matching sqlite identifier semantics).
+    pub fn has_index(&self, table: &str, index: &str) -> bool {
         self.indexes
-            .entry(table_name)
-            .or_default()
-            .push((index_name, col_name, is_partial, is_unique));
-        Ok(())
+            .get(table)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|(name, _, _, _)| name.eq_ignore_ascii_case(index))
+            })
+            .unwrap_or(false)
     }
 
     /// `PRAGMA index_list(table)` rows, sqlite3-shaped:

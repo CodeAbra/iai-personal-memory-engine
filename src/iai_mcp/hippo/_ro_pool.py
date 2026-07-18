@@ -20,9 +20,17 @@ import os
 import queue
 import sqlite3
 import threading
+import time as _time
 from typing import Any
 
 _log = logging.getLogger(__name__)
+
+
+def _slow_ro_execute_log_ms() -> float:
+    try:
+        return float(os.environ.get("IAI_MCP_SLOW_RO_EXECUTE_LOG_MS", "400"))
+    except ValueError:
+        return 400.0
 
 #: Default fixed pool size; operator-overridable, matching the existing
 #: IAI_MCP_* env-override convention used elsewhere in this codebase.
@@ -103,6 +111,8 @@ class RoConnPool:
         # writer-path fallbacks (each one serializes a recall read behind
         # background writes — a rising count means the pool is not delivering).
         self.fence_reopen_count = 0
+        self.slot_refresh_count = 0
+        self.slot_reopen_count = 0
         self.writer_fallback_count = 0
 
     @staticmethod
@@ -206,7 +216,35 @@ class RoConnPool:
             attempts = 0
             while True:
                 try:
-                    return self._borrowed._slot.conn.execute(sql, params)
+                    _conn = self._borrowed._slot.conn
+                    _t0 = _time.perf_counter()
+                    _cells0: "int | None" = None
+                    try:
+                        _cells0 = int(_conn.cells_visited_count())
+                    except Exception:  # noqa: BLE001 — introspection best-effort
+                        pass
+                    result = _conn.execute(sql, params)
+                    _ms = (_time.perf_counter() - _t0) * 1000.0
+                    if _ms >= _slow_ro_execute_log_ms():
+                        _idx = "n/a"
+                        try:
+                            _cells = (
+                                int(_conn.cells_visited_count()) - _cells0
+                                if _cells0 is not None
+                                else -1
+                            )
+                            _idx = (
+                                f"id_ready={_conn.id_index_ready('records')} "
+                                f"col_ready={_conn.col_index_ready('records')} "
+                                f"cells={_cells}"
+                            )
+                        except Exception:  # noqa: BLE001 — introspection best-effort
+                            pass
+                        _log.warning(
+                            "slow RO execute: %.0fms %s sql=%s",
+                            _ms, _idx, sql[:120],
+                        )
+                    return result
                 except sqlite3.OperationalError as exc:
                     if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
                         raise
@@ -222,10 +260,9 @@ class RoConnPool:
                     )
                     self._pool.fence_reopen_count += 1
                     self._pool._fence_backoff(attempts)
-                    slot = self._borrowed._slot
-                    self._pool._close_slot_conn(slot.conn)
-                    slot.conn = self._pool._open_slot()
-                    slot.generation = self._pool._current_generation()
+                    self._pool._refresh_or_reopen_slot(
+                        self._borrowed._slot, self._pool._current_generation()
+                    )
 
         def __getattr__(self, name: str):
             return getattr(self._borrowed._slot.conn, name)
@@ -282,11 +319,26 @@ class RoConnPool:
         if self._filled < self._size:
             self._ensure_filled()
         slot = self._queue.get()
+        # Any raise between the get() above and the _Borrowed handoff below
+        # abandons a dequeued slot: it is never requeued and _filled never
+        # shrinks, so each raising borrow permanently removes one slot — after
+        # _size of them over a daemon lifetime the next get() blocks FOREVER
+        # and recall hangs with no fallback (the writer-fallback lane catches
+        # raises, not blocks). Give the slot back to the accounting on every
+        # raise; its connection may be torn, so close it and let the next
+        # fill reopen fresh.
+        try:
+            return self._borrow_prepared(slot)
+        except BaseException:
+            self._close_slot_conn(slot.conn)
+            with self._fill_lock:
+                self._filled = max(0, self._filled - 1)
+            raise
+
+    def _borrow_prepared(self, slot: "_Slot") -> "RoConnPool._Borrowed":
         current_gen = self._current_generation()
         if slot.generation < current_gen:
-            self._close_slot_conn(slot.conn)
-            slot.conn = self._open_slot()
-            slot.generation = current_gen
+            self._refresh_or_reopen_slot(slot, current_gen)
 
         attempts = 0
         while True:
@@ -325,11 +377,40 @@ class RoConnPool:
                 )
                 self.fence_reopen_count += 1
                 self._fence_backoff(attempts)
-                self._close_slot_conn(slot.conn)
-                slot.conn = self._open_slot()
-                slot.generation = self._current_generation()
+                self._refresh_or_reopen_slot(slot, self._current_generation())
 
         return RoConnPool._Borrowed(self, slot)
+
+    def _refresh_or_reopen_slot(self, slot: "_Slot", target_gen: int) -> None:
+        """Bring a stale slot to the newest committed snapshot.
+
+        Prefers the engine's in-place snapshot refresh — the connection keeps
+        its adopted indexes for every table whose committed write-generation
+        did not move, so a capture-sized write no longer costs this reader a
+        whole-connection teardown plus lazy index rebuilds. Any refresh
+        failure falls back to the always-correct close + reopen.
+        """
+        refreshed = False
+        _refresh = getattr(slot.conn, "refresh", None)
+        if callable(_refresh):
+            try:
+                _refresh()
+                refreshed = True
+            except Exception as exc:  # noqa: BLE001 -- reopen is the fallback
+                _log.debug(
+                    "RoConnPool: slot refresh failed, reopening instead: %s", exc
+                )
+        # Health counters: a pool that silently degrades to reopen-per-borrow
+        # (e.g. a stale .so without the engine refresh) is indistinguishable
+        # from a healthy one without these — and reopen-per-borrow is the
+        # exact storm the refresh exists to kill.
+        if refreshed:
+            self.slot_refresh_count += 1
+        else:
+            self.slot_reopen_count += 1
+            self._close_slot_conn(slot.conn)
+            slot.conn = self._open_slot()
+        slot.generation = target_gen
 
     def _release(self, slot: _Slot) -> None:
         try:

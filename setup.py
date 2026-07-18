@@ -179,6 +179,10 @@ setup(
             binding=Binding.PyO3,
             features=_NATIVE_FEATURES,
             args=["--no-default-features"],
+            # ALWAYS release: setuptools-rust defaults in-place/develop builds
+            # to the dev profile, and an unoptimized engine must never be the
+            # binary a daemon actually loads.
+            debug=False,
         )
     ],
 )

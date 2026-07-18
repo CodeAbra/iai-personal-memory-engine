@@ -946,20 +946,44 @@ class HippoQuery:
                 except (AttributeError, RuntimeError):
                     pass
             try:
-                labels, distances = db._hnsw.knn_query(
-                    self._ann_vector, k=k_clamped
-                )
-            except RuntimeError as exc:
-                # Defensive: hnswlib still raises this on rare label-map/index
-                # skew. Treat as "no neighbors found" so the insert path's
-                # pattern-separation gate can proceed instead of failing the
-                # whole capture.
-                _log.warning(
-                    "hnswlib knn_query failed (k=%d, hnsw_count=%d, "
-                    "active_count=%d); returning empty result: %s",
-                    k_clamped, hnsw_count, active_count, exc,
-                )
-                return None
+                labels = None
+                distances = None
+                _k_try = k_clamped
+                _last_exc: "RuntimeError | None" = None
+                # Degrade k instead of dying: on a delete-churned index the
+                # graph can be too fragmented to reach k neighbors ("Cannot
+                # return the results in a contiguous 2D array") even with
+                # ef >= k. Half the requested neighbors beat an EMPTY lane —
+                # an empty return silently drops ANN from recall (both the
+                # ranking quality and the escalation paths) until the next
+                # full rebuild.
+                while _k_try >= 1:
+                    try:
+                        labels, distances = db._hnsw.knn_query(
+                            self._ann_vector, k=_k_try
+                        )
+                        break
+                    except RuntimeError as exc:
+                        _last_exc = exc
+                        _k_try //= 2
+                if labels is None:
+                    # Defensive: hnswlib still raises this on rare
+                    # label-map/index skew. Treat as "no neighbors found" so
+                    # the insert path's pattern-separation gate can proceed
+                    # instead of failing the whole capture.
+                    _log.warning(
+                        "hnswlib knn_query failed at every k down from %d "
+                        "(hnsw_count=%d, active_count=%d); returning empty "
+                        "result: %s",
+                        k_clamped, hnsw_count, active_count, _last_exc,
+                    )
+                    return None
+                if _k_try < k_clamped:
+                    _log.warning(
+                        "hnswlib knn_query degraded k=%d -> %d (fragmented "
+                        "index; a full rebuild restores connectivity): %s",
+                        k_clamped, _k_try, _last_exc,
+                    )
             finally:
                 if _ef_raised:
                     try:

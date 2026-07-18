@@ -8,13 +8,15 @@
 //! exempt and may hold any number of keys, including zero — a zero-key interior
 //! root collapses, decreasing tree height while keeping the root page fixed.
 
-use crate::btree::cursor::{build_cell_for, leaf_max_cells, read_full_cell, Cell};
+use crate::btree::cursor::{build_cell_for, leaf_max_cells, read_full_cell, small_cap_active, Cell};
 use crate::btree::overflow::free_overflow_chain;
 use crate::btree::page::{
-    get_sibling, on_page_cell_size, page_kind, raw_leaf_cell_bytes, read_interior_node,
-    read_leaf_cell_raw, read_leaf_header, read_spilled_pointer, write_interior_node,
-    write_leaf_from_raw, PageKind, LEAF_PTR_ARRAY_START, USABLE_END,
+    get_sibling, interior_fits, interior_used_bytes, on_page_cell_size, page_kind,
+    raw_leaf_cell_bytes, read_interior_node, read_leaf_cell_raw, read_leaf_header,
+    read_spilled_pointer, write_interior_node, write_leaf_from_raw, PageKind,
+    LEAF_PTR_ARRAY_START, USABLE_END,
 };
+use crate::btree::split::interior_split_and_insert;
 use crate::consts::OVERFLOW_THRESHOLD;
 use crate::error::{Result, StoreError};
 use crate::freelist::free_page;
@@ -28,6 +30,67 @@ pub fn leaf_min_cells() -> usize {
 /// Minimum key count for a non-root interior node under a small injected ceiling.
 fn interior_min_keys() -> usize {
     leaf_max_cells() / 2
+}
+
+/// Whether a non-root interior node is below minimum occupancy. Byte-driven
+/// by default (under half a page is underfull); the count floor applies only
+/// under a small injected cell ceiling, mirroring the leaf rules. Interior
+/// cells carry variable-length varint keys, so a count threshold derived from
+/// the injected ceiling is meaningless against real byte capacity.
+fn interior_underflows_node(keys: &[i64]) -> bool {
+    if keys.is_empty() {
+        return true;
+    }
+    if small_cap_active() {
+        return keys.len() < interior_min_keys();
+    }
+    interior_used_bytes(keys) < USABLE_END / 2
+}
+
+/// Write an interior node, splitting push-up style when it exceeds one page.
+/// A delete-path parent rewrite can GROW the page (a replacement separator's
+/// varint may be longer than the one it replaces), so every such rewrite must
+/// be prepared to split.
+fn write_interior_or_split(
+    pager: &Pager,
+    path_stack: Vec<(u32, usize)>,
+    page_no: u32,
+    keys: &[i64],
+    children: &[u32],
+) -> Result<()> {
+    if keys.len() <= leaf_max_cells() && interior_fits(keys) {
+        let page = write_interior_node(keys, children)?;
+        pager.write_page(page_no, &page)
+    } else {
+        interior_split_and_insert(pager, path_stack, page_no, keys, children)
+    }
+}
+
+/// Split index for redistributing an over-capacity merged interior node: the
+/// key at the returned index is promoted to the parent; both remaining halves
+/// must fit one page, with the larger half minimized. The pre-merge boundary
+/// is always feasible, so this cannot fail for a node built by a merge of two
+/// valid pages.
+fn interior_byte_midpoint(keys: &[i64]) -> Result<usize> {
+    let cap = leaf_max_cells();
+    let mut best: Option<(usize, usize)> = None;
+    for i in 1..keys.len().saturating_sub(1).max(1) {
+        let left = &keys[..i];
+        let right = &keys[i + 1..];
+        if left.len() > cap || right.len() > cap {
+            continue;
+        }
+        if !interior_fits(left) || !interior_fits(right) {
+            continue;
+        }
+        let larger = interior_used_bytes(left).max(interior_used_bytes(right));
+        if best.map_or(true, |(_, b)| larger < b) {
+            best = Some((i, larger));
+        }
+    }
+    best.map(|(i, _)| i).ok_or_else(|| StoreError::Integrity {
+        detail: "interior redistribute: no split keeps both halves within one page".to_string(),
+    })
 }
 
 /// On-page footprint of a leaf laid out from `(key, full_len)` cells.
@@ -131,12 +194,17 @@ pub fn remove_cell_from_leaf(pager: &Pager, leaf_page_no: u32, key: i64) -> Resu
 // Parent helpers
 // ---------------------------------------------------------------------------
 
-fn update_parent_separator(pager: &Pager, parent_page_no: u32, key_idx: usize, new_key: i64) -> Result<()> {
+fn update_parent_separator(
+    pager: &Pager,
+    parent_stack: Vec<(u32, usize)>,
+    parent_page_no: u32,
+    key_idx: usize,
+    new_key: i64,
+) -> Result<()> {
     let page = pager.read_page(parent_page_no)?;
     let mut node = read_interior_node(&page)?;
     node.keys[key_idx] = new_key;
-    let new_page = write_interior_node(&node.keys, &node.children)?;
-    pager.write_page(parent_page_no, &new_page)
+    write_interior_or_split(pager, parent_stack, parent_page_no, &node.keys, &node.children)
 }
 
 fn remove_from_parent(
@@ -160,7 +228,7 @@ fn remove_from_parent(
     if path_stack.is_empty() {
         return Ok(());
     }
-    if new_keys.len() < interior_min_keys() {
+    if interior_underflows_node(&new_keys) {
         check_interior_underflow(pager, path_stack, parent_page_no)?;
     }
     Ok(())
@@ -178,6 +246,7 @@ fn borrow_fits_receiver(receiver: &[Cell], borrowed: &(i64, Vec<u8>)) -> bool {
 
 fn borrow_from_right_leaf(
     pager: &Pager,
+    parent_stack: Vec<(u32, usize)>,
     leaf_page_no: u32,
     right_sibling_no: u32,
     parent_page_no: u32,
@@ -202,11 +271,12 @@ fn borrow_from_right_leaf(
 
     write_leaf_cells(pager, leaf_page_no, &new_left, left_sibling)?;
     write_leaf_cells(pager, right_sibling_no, &new_right, right_sibling)?;
-    update_parent_separator(pager, parent_page_no, child_idx, new_separator)
+    update_parent_separator(pager, parent_stack, parent_page_no, child_idx, new_separator)
 }
 
 fn borrow_from_left_leaf(
     pager: &Pager,
+    parent_stack: Vec<(u32, usize)>,
     leaf_page_no: u32,
     left_sibling_no: u32,
     parent_page_no: u32,
@@ -227,7 +297,7 @@ fn borrow_from_left_leaf(
 
     write_leaf_cells(pager, left_sibling_no, &new_left, left_sibling)?;
     write_leaf_cells(pager, leaf_page_no, &new_right, right_sibling)?;
-    update_parent_separator(pager, parent_page_no, child_idx - 1, new_separator)
+    update_parent_separator(pager, parent_stack, parent_page_no, child_idx - 1, new_separator)
 }
 
 /// Split combined cells into (left, right) so both halves fit one page, choosing
@@ -295,7 +365,7 @@ fn merge_leaves(
     let (new_left, new_right) = byte_midpoint_split(&merged)?;
     write_leaf_cells(pager, left_page_no, &new_left, right_page_no)?;
     write_leaf_cells(pager, right_page_no, &new_right, right_sibling)?;
-    update_parent_separator(pager, parent_page_no, separator_idx, new_right[0].0)
+    update_parent_separator(pager, path_stack, parent_page_no, separator_idx, new_right[0].0)
 }
 
 /// Fix an underflowing non-root leaf via borrow or merge.
@@ -327,7 +397,9 @@ pub fn rebalance_leaf(pager: &Pager, path_stack: Vec<(u32, usize)>, leaf_page_no
     if let Some(right_no) = right_sibling {
         let (right_cells, _) = read_all_full(pager, right_no)?;
         if right_cells.len() > leaf_min_cells() && borrow_fits_receiver(&recv_cells, &right_cells[0]) {
-            return borrow_from_right_leaf(pager, leaf_page_no, right_no, parent_page_no, child_idx);
+            return borrow_from_right_leaf(
+                pager, parent_stack, leaf_page_no, right_no, parent_page_no, child_idx,
+            );
         }
     }
     // Borrow from left.
@@ -336,7 +408,9 @@ pub fn rebalance_leaf(pager: &Pager, path_stack: Vec<(u32, usize)>, leaf_page_no
         if left_cells.len() > leaf_min_cells() {
             let borrowed = left_cells[left_cells.len() - 1].clone();
             if borrow_fits_receiver(&recv_cells, &borrowed) {
-                return borrow_from_left_leaf(pager, leaf_page_no, left_no, parent_page_no, child_idx);
+                return borrow_from_left_leaf(
+                    pager, parent_stack, leaf_page_no, left_no, parent_page_no, child_idx,
+                );
             }
         }
     }
@@ -356,6 +430,7 @@ pub fn rebalance_leaf(pager: &Pager, path_stack: Vec<(u32, usize)>, leaf_page_no
 
 fn borrow_from_right_interior(
     pager: &Pager,
+    parent_stack: Vec<(u32, usize)>,
     interior_page_no: u32,
     right_sibling_no: u32,
     parent_page_no: u32,
@@ -382,12 +457,12 @@ fn borrow_from_right_interior(
 
     pager.write_page(interior_page_no, &write_interior_node(&new_left_keys, &new_left_children)?)?;
     pager.write_page(right_sibling_no, &write_interior_node(&new_right_keys, &new_right_children)?)?;
-    pager.write_page(parent_page_no, &write_interior_node(&new_parent_keys, &parent.children)?)?;
-    Ok(())
+    write_interior_or_split(pager, parent_stack, parent_page_no, &new_parent_keys, &parent.children)
 }
 
 fn borrow_from_left_interior(
     pager: &Pager,
+    parent_stack: Vec<(u32, usize)>,
     interior_page_no: u32,
     left_sibling_no: u32,
     parent_page_no: u32,
@@ -414,8 +489,7 @@ fn borrow_from_left_interior(
 
     pager.write_page(interior_page_no, &write_interior_node(&new_right_keys, &new_right_children)?)?;
     pager.write_page(left_sibling_no, &write_interior_node(&new_left_keys, &new_left_children)?)?;
-    pager.write_page(parent_page_no, &write_interior_node(&new_parent_keys, &parent.children)?)?;
-    Ok(())
+    write_interior_or_split(pager, parent_stack, parent_page_no, &new_parent_keys, &parent.children)
 }
 
 fn merge_interior_nodes(
@@ -437,22 +511,46 @@ fn merge_interior_nodes(
     let mut merged_children = left.children.clone();
     merged_children.extend_from_slice(&right.children);
 
-    pager.write_page(left_page_no, &write_interior_node(&merged_keys, &merged_children)?)?;
-    free_page(pager, right_page_no)?;
+    if merged_keys.len() <= leaf_max_cells() && interior_fits(&merged_keys) {
+        // True merge.
+        pager.write_page(left_page_no, &write_interior_node(&merged_keys, &merged_children)?)?;
+        free_page(pager, right_page_no)?;
 
-    let mut new_parent_keys = parent.keys[..separator_idx].to_vec();
-    new_parent_keys.extend_from_slice(&parent.keys[separator_idx + 1..]);
-    let mut new_parent_children = parent.children[..separator_idx + 1].to_vec();
-    new_parent_children.extend_from_slice(&parent.children[separator_idx + 2..]);
-    pager.write_page(parent_page_no, &write_interior_node(&new_parent_keys, &new_parent_children)?)?;
+        let mut new_parent_keys = parent.keys[..separator_idx].to_vec();
+        new_parent_keys.extend_from_slice(&parent.keys[separator_idx + 1..]);
+        let mut new_parent_children = parent.children[..separator_idx + 1].to_vec();
+        new_parent_children.extend_from_slice(&parent.children[separator_idx + 2..]);
+        pager.write_page(
+            parent_page_no,
+            &write_interior_node(&new_parent_keys, &new_parent_children)?,
+        )?;
 
-    if path_stack.is_empty() {
+        if path_stack.is_empty() {
+            return Ok(());
+        }
+        if interior_underflows_node(&new_parent_keys) {
+            check_interior_underflow(pager, path_stack, parent_page_no)?;
+        }
         return Ok(());
     }
-    if new_parent_keys.len() < interior_min_keys() {
-        check_interior_underflow(pager, path_stack, parent_page_no)?;
-    }
-    Ok(())
+
+    // Redistribute: the combined cells exceed one page (interior cells carry
+    // variable-length varint keys, so count-balanced siblings need not be
+    // byte-mergeable). Re-split around a promoted separator; the parent keeps
+    // a replaced separator instead of losing one.
+    let split_idx = interior_byte_midpoint(&merged_keys)?;
+    let promoted = merged_keys[split_idx];
+    pager.write_page(
+        left_page_no,
+        &write_interior_node(&merged_keys[..split_idx], &merged_children[..=split_idx])?,
+    )?;
+    pager.write_page(
+        right_page_no,
+        &write_interior_node(&merged_keys[split_idx + 1..], &merged_children[split_idx + 1..])?,
+    )?;
+    let mut new_parent_keys = parent.keys.clone();
+    new_parent_keys[separator_idx] = promoted;
+    write_interior_or_split(pager, path_stack, parent_page_no, &new_parent_keys, &parent.children)
 }
 
 fn check_interior_underflow(
@@ -480,16 +578,39 @@ fn check_interior_underflow(
         None
     };
 
+    let node = read_interior_node(&pager.read_page(interior_page_no)?)?;
+
+    // A donor qualifies when it stays healthy after donating one cell; the
+    // receiver must fit the pulled separator. Count rules apply only under an
+    // injected small ceiling.
     if let Some(right_no) = right_sibling {
         let right = read_interior_node(&pager.read_page(right_no)?)?;
-        if right.keys.len() > interior_min_keys() {
-            return borrow_from_right_interior(pager, interior_page_no, right_no, parent_page_no, child_idx);
+        let donor_ok = if small_cap_active() {
+            right.keys.len() > interior_min_keys()
+        } else {
+            right.keys.len() > 1 && !interior_underflows_node(&right.keys[1..])
+        };
+        let mut probe = node.keys.clone();
+        probe.push(parent.keys[child_idx]);
+        if donor_ok && interior_fits(&probe) {
+            return borrow_from_right_interior(
+                pager, parent_stack, interior_page_no, right_no, parent_page_no, child_idx,
+            );
         }
     }
     if let Some(left_no) = left_sibling {
         let left = read_interior_node(&pager.read_page(left_no)?)?;
-        if left.keys.len() > interior_min_keys() {
-            return borrow_from_left_interior(pager, interior_page_no, left_no, parent_page_no, child_idx);
+        let donor_ok = if small_cap_active() {
+            left.keys.len() > interior_min_keys()
+        } else {
+            left.keys.len() > 1 && !interior_underflows_node(&left.keys[..left.keys.len() - 1])
+        };
+        let mut probe = vec![parent.keys[child_idx - 1]];
+        probe.extend_from_slice(&node.keys);
+        if donor_ok && interior_fits(&probe) {
+            return borrow_from_left_interior(
+                pager, parent_stack, interior_page_no, left_no, parent_page_no, child_idx,
+            );
         }
     }
     if let Some(right_no) = right_sibling {

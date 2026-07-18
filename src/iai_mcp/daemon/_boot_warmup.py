@@ -171,6 +171,24 @@ def run_boot_warmup(
     shapes: dict[str, dict] = {}
     probe_hit_ids: list[str] = []
 
+    # Writer-side read-model publication FIRST: build (once) and publish the
+    # col/id index pairs + committed row counts so every reader-pool slot
+    # adopts them from its first borrow. Without this, readers pay a
+    # whole-table scan per query until the first post-boot commit publishes.
+    _t_pub = time.perf_counter()
+    try:
+        _raw = getattr(store.db, "_writer_raw_conn", None) or getattr(
+            store.db, "_conn", None,
+        )
+        _publish = getattr(_raw, "publish_read_models", None)
+        if callable(_publish):
+            _publish()
+            shapes["read_model_publish"] = {
+                "ms": round((time.perf_counter() - _t_pub) * 1000.0, 1),
+            }
+    except Exception as exc:  # noqa: BLE001 -- publication must not abort the warm-up
+        log.debug("boot_warmup read-model publish failed: %s", exc, exc_info=True)
+
     if warm_dispatch:
         shapes["dispatch_surface"] = warm_dispatch_surface(store)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,10 +18,12 @@ FIXTURES = REPO / "tests" / "fixtures"
 _HF_CACHE = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 HAS_LONGMEMEVAL_CACHE = any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exists() else False
 HAS_BGE_SMALL_CACHE = any(_HF_CACHE.rglob("*bge-small-en*")) if _HF_CACHE.exists() else False
+HAS_HF_HUB = importlib.util.find_spec("huggingface_hub") is not None
 
 pytestmark = pytest.mark.skipif(
-    not (HAS_LONGMEMEVAL_CACHE and HAS_BGE_SMALL_CACHE),
-    reason="LongMemEval-S dataset or bge-small-en-v1.5 model not cached",
+    not (HAS_LONGMEMEVAL_CACHE and HAS_BGE_SMALL_CACHE and HAS_HF_HUB),
+    reason="LongMemEval-S dataset, bge-small-en-v1.5 model, or huggingface_hub "
+    "not available; the harness subprocess needs all three",
 )
 
 

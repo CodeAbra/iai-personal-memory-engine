@@ -46,6 +46,13 @@ from iai_mcp.store._buffers import (
 logger = logging.getLogger(__name__)
 
 
+def _slow_ann_log_threshold_ms() -> float:
+    try:
+        return float(os.environ.get("IAI_MCP_SLOW_ANN_LOG_MS", "500"))
+    except ValueError:
+        return 500.0
+
+
 def _recency_buffer_maxlen() -> int:
     """Return the recency buffer capacity from the environment (default 200).
 
@@ -1189,13 +1196,26 @@ class MemoryStore:
         loop_holder: dict = {}
 
         def _run() -> None:
+            import concurrent.futures as _cf
+
             loop = asyncio.new_event_loop()
+            # Own executor with a bounded, non-waiting shutdown: loop.close()
+            # waits on the DEFAULT executor's workers, and a worker stuck on
+            # a contended write lock keeps this thread alive past every join
+            # timeout — the "async-writes thread leaked" flake. The queue is
+            # stopped and flushed before the loop stops, so cancelling a
+            # leftover pending future here never drops an accepted write.
+            executor = _cf.ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="iai-mcp-async-writes-io",
+            )
+            loop.set_default_executor(executor)
             loop_holder["loop"] = loop
             asyncio.set_event_loop(loop)
             ready.set()
             try:
                 loop.run_forever()
             finally:
+                executor.shutdown(wait=False, cancel_futures=True)
                 loop.close()
 
         thread = threading.Thread(
@@ -1458,8 +1478,9 @@ class MemoryStore:
            ``runtime_graph_cache._cache_key`` unreachable via this method.
 
         Lock ordering: the cache lock is taken and released around the dict
-        read only; ``_conn_lock`` is taken for the SQL COUNT with no cache
-        lock held, so the two locks are never held simultaneously.
+        read only; the SQL COUNT runs on the read-only pool (or its internal
+        ``_conn_lock`` fallback) with no cache lock held, so the cache lock is
+        never held together with a connection lock.
         """
         memo = self._count_memo
         if memo is not None and "active" in memo:
@@ -1479,9 +1500,14 @@ class MemoryStore:
             gen = self._corpus_count_cache.generation()
         except Exception:  # noqa: BLE001
             gen = None
-        # Run the live FILTERED COUNT (no cache lock held).
-        with self.db._conn_lock:
-            row = self.db._conn.execute(
+        # Run the live FILTERED COUNT on the read-only pool: an O(corpus)
+        # count on the lilli engine re-scans every leaf page, and taking the
+        # shared writer's _conn_lock for it made every cache-miss recall wait
+        # behind an active write batch. The RO snapshot is the last committed
+        # state — exactly what a generation-fenced cache entry may hold; the
+        # pool falls back to the _conn_lock path by itself when unhealthy.
+        with self.db.ro_conn() as _ro:
+            row = _ro.execute(
                 "SELECT COUNT(*) FROM records"
                 " WHERE tombstoned_at IS NULL"
                 " AND COALESCE(embedding_pending, 0) = 0"
@@ -2212,6 +2238,10 @@ class MemoryStore:
         q = q.limit(k_effective)
 
         out: list[tuple[MemoryRecord, float]] | None = None
+        _slow_t0 = time.perf_counter()
+        _fetch_ms: float | None = None
+        _decode_ms: float | None = None
+        _rows_fetched = 0
         if os.environ.get("IAI_MCP_ANN_FAST_DECODE_OFF") != "1":
             # The seed query decodes fetched rows directly, skipping the
             # pandas DataFrame round-trip _ann_to_pandas otherwise builds:
@@ -2220,12 +2250,16 @@ class MemoryStore:
             # exercised, byte-for-byte) behind the kill-switch below.
             try:
                 row_dicts = q.to_row_dicts()
+                _fetch_ms = (time.perf_counter() - _slow_t0) * 1000.0
+                _rows_fetched = len(row_dicts)
+                _decode_t0 = time.perf_counter()
                 fast_out: list[tuple[MemoryRecord, float]] = []
                 for row in row_dicts:
                     record = self._from_row(row)
                     distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
                     score = 1.0 - distance
                     fast_out.append((record, score))
+                _decode_ms = (time.perf_counter() - _decode_t0) * 1000.0
                 out = fast_out
             except Exception as exc:  # noqa: BLE001 — fail-safe: never break recall
                 logger.debug(
@@ -2242,6 +2276,18 @@ class MemoryStore:
                 distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
                 score = 1.0 - distance
                 out.append((record, score))
+
+        _total_ms = (time.perf_counter() - _slow_t0) * 1000.0
+        if _total_ms >= _slow_ann_log_threshold_ms():
+            logger.warning(
+                "slow ann seed query: total=%.0fms fetch=%s decode=%s "
+                "rows=%d k_effective=%d",
+                _total_ms,
+                f"{_fetch_ms:.0f}ms" if _fetch_ms is not None else "n/a",
+                f"{_decode_ms:.0f}ms" if _decode_ms is not None else "n/a",
+                _rows_fetched,
+                k_effective,
+            )
 
         out = out[:k]
         if _return_records_only:

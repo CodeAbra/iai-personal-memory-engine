@@ -603,3 +603,44 @@ fn cells_visited_counter_increments_once_per_visited_cell() {
     store.reset_cells_visited_count();
     assert_eq!(store.cells_visited_count(), 0);
 }
+
+#[test]
+fn get_many_binary_seek_matches_per_key_gets() {
+    // Multi-page tree with absent keys, duplicate requests, and page-boundary
+    // targets: the walk's per-page binary seek must return exactly what
+    // per-key gets return, in ascending order, absents skipped, one entry
+    // per duplicated request.
+    let (_d, store, root) = open_tree();
+    let t = store.tree(root);
+    // Payloads sized so leaves hold a handful of cells each -> many pages.
+    for k in (0..3000).step_by(3) {
+        let payload = vec![b'x'; 200 + (k % 7) as usize];
+        t.insert(k as i64, &payload).unwrap();
+    }
+
+    let mut requests: Vec<i64> = Vec::new();
+    for k in (0..3000).step_by(11) {
+        requests.push(k as i64); // mix of present (k%3==0) and absent
+    }
+    requests.push(0);
+    requests.push(0); // duplicate of the first key
+    requests.push(2997); // last present key
+    requests.push(9999); // beyond the tree
+    requests.push(-5); // before the tree
+    requests.sort_unstable();
+
+    let got = t.get_many(&requests).unwrap();
+
+    let mut expected: Vec<(i64, Vec<u8>)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &k in &requests {
+        if !seen.insert(k) {
+            continue;
+        }
+        if let Some(p) = t.get(k).unwrap() {
+            expected.push((k, p));
+        }
+    }
+    assert_eq!(got.len(), expected.len());
+    assert_eq!(got, expected);
+}

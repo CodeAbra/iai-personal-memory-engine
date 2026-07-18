@@ -49,7 +49,10 @@ const COL_INDEX_SIDECAR_NAME: &str = "records.colindex";
 
 /// The persisted-envelope codec version. A load with a mismatched version is
 /// treated as absent (structurally invalidates old files across a codec change).
-const COL_INDEX_FORMAT_VERSION: u32 = 2;
+// v3: SortKey split Number(f64) into exact Int(i64)/Float(f64) variants
+// (large-integer comparison correctness); older envelopes fail decode and
+// are discarded by the load gate, which rebuilds lazily.
+const COL_INDEX_FORMAT_VERSION: u32 = 3;
 
 /// The on-disk sidecar: one committed, self-built [`ColIndex`] snapshot per
 /// catalog-indexed table, each stamped with the fingerprint the load gate
@@ -310,6 +313,11 @@ pub struct Connection {
     /// mutated state inside an open transaction (see the Select arm), so a
     /// rolled-back in-transaction count can never be served later.
     bare_count_cache: HashMap<String, (i64, i64)>,
+    /// Filtered-COUNT cache: `(table, full SQL text)` -> `(generation, count)`.
+    /// Same generation fence and transaction discipline as the bare-count
+    /// cache; keyed on the exact statement text and populated only for
+    /// parameterless statements, so every distinct predicate self-fences.
+    filtered_count_cache: HashMap<(String, String), (i64, i64)>,
     /// Parsed-statement cache: trimmed SQL string → its AST.
     ///
     /// The AST is a pure function of the SQL text — `tokenize` + recursive
@@ -420,40 +428,7 @@ impl Connection {
                 idx.unshare();
             }
         }
-        // Read-only open: for any col-indexed table the sidecar gate did NOT
-        // admit, adopt a same-generation pair from the process-wide
-        // built-index cache (published by an earlier reader that paid the
-        // lazy build), so a burst of reader opens at one write-generation
-        // pays at most ONE build per table. Column-set mismatch declines the
-        // adoption (the lazy path stays the always-correct fallback).
-        if read_only {
-            let cache = built_index_cache();
-            for table in root_map.keys() {
-                if col_caches.contains_key(table) {
-                    continue;
-                }
-                let cols = catalog_col_index_columns(&catalog, table);
-                if cols.is_empty() {
-                    continue;
-                }
-                let Ok(generation) = meta.col_generation(&store, table) else {
-                    continue;
-                };
-                let key = (store.path().to_path_buf(), table.clone(), generation);
-                if let Ok(guard) = cache.lock() {
-                    if let Some((cidx, iidx)) = guard.get(&key) {
-                        if !same_column_set(&cols, cidx.columns()) {
-                            continue;
-                        }
-                        col_caches.insert(table.clone(), cidx.clone());
-                        if iidx.is_built() {
-                            id_caches.insert(table.clone(), iidx.clone());
-                        }
-                    }
-                }
-            }
-        }
-        Ok(Connection {
+        let mut conn = Connection {
             store,
             meta,
             catalog,
@@ -468,8 +443,143 @@ impl Connection {
             col_caches,
             ordered_caches,
             bare_count_cache: HashMap::new(),
+            filtered_count_cache: HashMap::new(),
             parse_cache: HashMap::new(),
-        })
+        };
+        if read_only {
+            conn.adopt_from_built_cache_or_demand();
+        }
+        Ok(conn)
+    }
+
+    /// Read-only adoption sweep: for every col-indexed table without a built
+    /// column index, adopt a same-generation pair from the process-wide
+    /// built-index cache (published by the writer on commit or by an earlier
+    /// reader that paid the lazy build), so a burst of reader opens or
+    /// refreshes at one write-generation pays at most ONE build per table.
+    /// Column-set mismatch declines the adoption (the lazy path stays the
+    /// always-correct fallback).
+    ///
+    /// Demand is recorded for every col-indexed table — on adoption miss AND
+    /// on hit/already-served — so the writer keeps publishing exactly as long
+    /// as read-only traffic keeps opening or refreshing; publication stops one
+    /// demand-TTL after the last reader.
+    fn adopt_from_built_cache_or_demand(&mut self) {
+        let cache = built_index_cache();
+        let tables: Vec<String> = self.root_map.keys().cloned().collect();
+        for table in tables {
+            let cols = catalog_col_index_columns(&self.catalog, &table);
+            if cols.is_empty() {
+                continue;
+            }
+            // Adoption is PER COMPONENT and repeatable: a slot that lazy-built
+            // its col index before the writer's first publication must still
+            // pick up the id index and the row count on a later sweep, or it
+            // serves id lookups and bare counts by whole-table scan for its
+            // whole lifetime.
+            let col_built = self
+                .col_caches
+                .get(&table)
+                .map(|c| c.is_built())
+                .unwrap_or(false);
+            let id_built = self
+                .id_caches
+                .get(&table)
+                .map(|i| i.is_built())
+                .unwrap_or(false);
+            let count_known = self.bare_count_cache.contains_key(&table);
+            if !col_built || !id_built || !count_known {
+                let Ok(generation) = self.meta.col_generation(&self.store, &table) else {
+                    continue;
+                };
+                let key = (self.store.path().to_path_buf(), table.clone(), generation);
+                if let Ok(guard) = cache.lock() {
+                    if let Some((cidx, iidx, row_count)) = guard.get(&key) {
+                        if !col_built && same_column_set(&cols, cidx.columns()) {
+                            self.col_caches.insert(table.clone(), cidx.clone());
+                        }
+                        if !id_built && iidx.is_built() {
+                            self.id_caches.insert(table.clone(), iidx.clone());
+                        }
+                        if let Some(count) = row_count {
+                            self.bare_count_cache
+                                .insert(table.clone(), (generation, *count));
+                        }
+                    }
+                }
+            }
+            record_ro_index_demand(self.store.path(), &table);
+        }
+    }
+
+    /// Re-arm a read-only connection to the newest committed snapshot in
+    /// place — the freshness path that replaces a close + reopen. Tables whose
+    /// committed write-generation did not move keep their col/id/ordered
+    /// indexes; moved tables drop them and re-adopt from the process-wide
+    /// built-index cache (or leave demand for the writer's next commit).
+    /// Returns `Ok(true)` when the visible snapshot moved.
+    pub fn refresh_read_view(&mut self) -> Result<bool> {
+        if !self.is_readonly_mount {
+            return Err(EngineError::parse(
+                "refresh_read_view: connection is not read-only".to_string(),
+            ));
+        }
+        // Committed write-generations under the OUTGOING snapshot, read
+        // before the pager re-arms: an unchanged generation is the proof a
+        // table's indexes are still exact under the incoming snapshot.
+        let mut pre_generations: HashMap<String, i64> = HashMap::new();
+        for table in self.root_map.keys() {
+            if let Ok(g) = self.meta.col_generation(&self.store, table) {
+                pre_generations.insert(table.clone(), g);
+            }
+        }
+        if !self.store.refresh_read_only().map_err(EngineError::from)? {
+            return Ok(false);
+        }
+        // Meta/catalog pages may have moved: re-replay name→root and column
+        // metadata from the refreshed snapshot.
+        self.meta = MetaTable::open(&self.store)?;
+        let mut catalog = Catalog::new();
+        let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
+        self.meta.replay(&self.store, &mut catalog, &mut root_map)?;
+        self.catalog = catalog;
+        self.root_map = root_map;
+        // bare counts are generation-keyed and would self-fence, but entries
+        // for vanished tables would rot forever; parse entries are pure
+        // SQL-text→AST and survive any snapshot.
+        self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
+        let live_tables: std::collections::HashSet<String> =
+            self.root_map.keys().cloned().collect();
+        let mut stale: Vec<String> = Vec::new();
+        for table in &live_tables {
+            // The write-generation is bumped only through col-indexed write
+            // paths; for a table with NO declared col-index columns it is
+            // vacuously unchanged and proves nothing — a lazily-built
+            // IdIndex/ordered index there would silently miss rows committed
+            // since it was built. Always drop those.
+            if catalog_col_index_columns(&self.catalog, table).is_empty() {
+                stale.push(table.clone());
+                continue;
+            }
+            match (
+                pre_generations.get(table),
+                self.meta.col_generation(&self.store, table),
+            ) {
+                (Some(before), Ok(now)) if *before == now => {}
+                _ => stale.push(table.clone()),
+            }
+        }
+        for table in &stale {
+            self.col_caches.remove(table);
+            self.id_caches.remove(table);
+            self.ordered_caches.remove(table);
+        }
+        self.col_caches.retain(|t, _| live_tables.contains(t));
+        self.id_caches.retain(|t, _| live_tables.contains(t));
+        self.ordered_caches.retain(|t, _| live_tables.contains(t));
+        self.adopt_from_built_cache_or_demand();
+        Ok(true)
     }
 
     /// Publish this read-only connection's built index pair for `table` to
@@ -478,6 +588,150 @@ impl Connection {
     /// adopt it instead of paying their own lazy build. No-op when the
     /// table's column index is not built or the generation cannot be read;
     /// an already-published key is left untouched.
+    /// After a successful UNTAINTED commit, publish the live built col/id
+    /// pair for every table with active read-only adoption demand. The
+    /// caches match the committed tree at the post-commit generation (they
+    /// survive clean commits by design); the clone is a refcount bump and
+    /// the writer's next mutation pays one copy-on-write materialization —
+    /// only while readers are actually missing (demand-driven).
+    fn publish_indexes_on_demand(&mut self) {
+        // Demand is keyed to the CATALOG's col-indexed tables, not to the
+        // writer's already-built entries: an insert-only writer (the daemon —
+        // recall reads go to the reader pool) never builds an index of its
+        // own, and filtering on built entries here left it with nothing to
+        // publish while every refreshing reader paid a whole-table scan per
+        // query. The one-time ensure-build below is the write path buying
+        // the read model once; incremental maintenance keeps it current.
+        let demanded: Vec<String> = self
+            .root_map
+            .keys()
+            .filter(|table| !catalog_col_index_columns(&self.catalog, table).is_empty())
+            .filter(|table| ro_index_demand_active(self.store.path(), table))
+            .cloned()
+            .collect();
+        for table in demanded {
+            // Publication is gated on COMMIT density, not on time since the
+            // last publish: a reader adopts only at its exact generation, so
+            // under a steady sparse write stream a last-publish throttle
+            // leaves every reader permanently one generation behind — a
+            // per-query whole-table scan forever. Sparse commits (the live
+            // capture cadence) publish synchronously at every commit; only a
+            // genuine burst (per-row bulk DML, commits within the interval)
+            // suppresses, and its final state drains on the writer's next
+            // statement.
+            if ro_index_commit_spacing_allows(self.store.path(), &table) {
+                if self.ensure_read_model_built(&table).is_err() {
+                    continue;
+                }
+                self.maybe_publish_built_indexes(&table);
+                clear_publish_pending(self.store.path(), &table);
+            } else {
+                record_publish_pending(self.store.path(), &table);
+            }
+        }
+    }
+
+    /// Build the writer's col/id read models for `table` if not yet built
+    /// (no-op when warm). Must not run inside an open transaction — the
+    /// built index would include uncommitted rows.
+    fn ensure_read_model_built(&mut self, table: &str) -> Result<()> {
+        if self.in_transaction || self.is_readonly_mount {
+            return Ok(());
+        }
+        let Some(root) = self.root_map.get(table).copied() else {
+            return Ok(());
+        };
+        let cols = catalog_col_index_columns(&self.catalog, table);
+        if cols.is_empty() {
+            return Ok(());
+        }
+        let col_names = self.catalog.column_names(table)?;
+        let tree = self.store.tree(root);
+        {
+            let entry = self
+                .col_caches
+                .entry(table.to_string())
+                .or_insert_with(|| ColIndex::new(cols));
+            entry.ensure_built(&tree, &col_names)?;
+        }
+        if col_names.iter().any(|c| c == "id") {
+            let id_entry = self.id_caches.entry(table.to_string()).or_default();
+            id_entry.ensure_built(&tree, &col_names)?;
+        }
+        Ok(())
+    }
+
+    /// Ensure-build and publish the read models for every col-indexed table,
+    /// regardless of recorded reader demand or publish throttling. Boot
+    /// warmup calls this once on the writer so the reader pool adopts from
+    /// the very first borrow instead of waiting for the first post-boot
+    /// commit to arrive.
+    pub fn publish_read_models(&mut self) -> Result<()> {
+        if self.is_readonly_mount {
+            return Err(EngineError::parse(
+                "publish_read_models: connection is not read-write".to_string(),
+            ));
+        }
+        if self.in_transaction {
+            return Err(EngineError::parse(
+                "publish_read_models: cannot run inside an open transaction".to_string(),
+            ));
+        }
+        let tables: Vec<String> = self
+            .root_map
+            .keys()
+            .filter(|table| !catalog_col_index_columns(&self.catalog, table).is_empty())
+            .cloned()
+            .collect();
+        for table in tables {
+            self.ensure_read_model_built(&table)?;
+            self.maybe_publish_built_indexes(&table);
+        }
+        Ok(())
+    }
+
+    /// Drain throttle-suppressed publishes once their interval has passed.
+    /// One lock + lookup when nothing is pending. Must not run inside an open
+    /// transaction — the in-memory indexes may then include uncommitted rows,
+    /// which must never leak into another connection's view.
+    fn flush_suppressed_publishes(&mut self) {
+        if self.is_readonly_mount || self.in_transaction {
+            return;
+        }
+        let tables = publish_pending_for(self.store.path());
+        for table in tables {
+            if !ro_index_demand_active(self.store.path(), &table) {
+                clear_publish_pending(self.store.path(), &table);
+                continue;
+            }
+            if ro_index_publish_allowed(self.store.path(), &table) {
+                if self.ensure_read_model_built(&table).is_err() {
+                    continue;
+                }
+                self.maybe_publish_built_indexes(&table);
+                clear_publish_pending(self.store.path(), &table);
+            }
+        }
+    }
+
+    /// Whether this connection holds a built column index for `table` right
+    /// now (adopted or lazily built). Introspection for tests and doctors.
+    pub fn col_index_ready(&self, table: &str) -> bool {
+        self.col_caches
+            .get(table)
+            .map(|c| c.is_built())
+            .unwrap_or(false)
+    }
+
+    /// Whether this connection holds a built id index for `table` right now
+    /// (adopted or lazily built). Introspection for tests and doctors.
+    pub fn id_index_ready(&self, table: &str) -> bool {
+        self.id_caches
+            .get(table)
+            .map(|i| i.is_built())
+            .unwrap_or(false)
+    }
+
     fn maybe_publish_built_indexes(&self, table: &str) {
         let Some(cidx) = self.col_caches.get(table) else {
             return;
@@ -488,6 +742,22 @@ impl Connection {
         let Ok(generation) = self.meta.col_generation(&self.store, table) else {
             return;
         };
+        // The committed row count rides the same publication so adopting
+        // readers serve bare COUNT(*) without a leaf-chain walk. The writer
+        // reads its incrementally-maintained per-tree cell count (one walk
+        // ever, warm thereafter); a read-only publisher only forwards a
+        // count it already holds at this exact generation — it must never
+        // pay a walk here.
+        let row_count: Option<i64> = if !self.is_readonly_mount {
+            self.root_map
+                .get(table)
+                .and_then(|root| self.store.tree(*root).count_cells().ok())
+                .map(|c| c as i64)
+        } else {
+            self.bare_count_cache
+                .get(table)
+                .and_then(|(g, c)| (*g == generation).then_some(*c))
+        };
         let key = (
             self.store.path().to_path_buf(),
             table.to_string(),
@@ -495,18 +765,26 @@ impl Connection {
         );
         let cache = built_index_cache();
         if let Ok(mut guard) = cache.lock() {
-            if guard.contains_key(&key) {
-                return;
-            }
-            if guard.len() >= BUILT_INDEX_CACHE_CAP {
-                guard.clear();
-            }
             let iidx = self
                 .id_caches
                 .get(table)
                 .cloned()
                 .unwrap_or_default();
-            guard.insert(key, (cidx.clone(), iidx));
+            // A same-generation entry is replaced only by a MORE complete
+            // pair: a reader's lazy build publishes col-only (no id, no
+            // count), and leaving it untouched would shadow the writer's
+            // full publication at the same generation — adopters then serve
+            // id lookups by scan for the whole generation.
+            if let Some((_, existing_id, existing_count)) = guard.get(&key) {
+                let more_complete = (iidx.is_built() && !existing_id.is_built())
+                    || (row_count.is_some() && existing_count.is_none());
+                if !more_complete {
+                    return;
+                }
+            } else if guard.len() >= BUILT_INDEX_CACHE_CAP {
+                guard.clear();
+            }
+            guard.insert(key, (cidx.clone(), iidx, row_count));
         }
     }
 
@@ -810,6 +1088,8 @@ impl Connection {
         let trimmed = sql.trim();
         let upper = trimmed.to_ascii_uppercase();
 
+        self.flush_suppressed_publishes();
+
         // Re-validate the read-only snapshot fence for EVERY statement on a
         // read-only mount, unconditionally — not only on a page-cache miss.
         // A page already resident from an earlier read on this connection is
@@ -863,6 +1143,9 @@ impl Connection {
                 self.col_caches.clear();
                 self.ordered_caches.clear();
                 self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
+            } else {
+                self.publish_indexes_on_demand();
             }
             self.txn_tainted = false;
             return Ok(CursorState::empty());
@@ -891,6 +1174,7 @@ impl Connection {
             self.col_caches.clear();
             self.ordered_caches.clear();
             self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
             result.map_err(open_err)?;
             return Ok(CursorState::empty());
         }
@@ -909,6 +1193,14 @@ impl Connection {
             .next()
             .unwrap_or("");
         if matches!(maint_head, "VACUUM" | "ANALYZE" | "REINDEX") {
+            // VACUUM does perform ONE real maintenance action here: it drops
+            // duplicate DDL rows from the meta history (a store written
+            // before no-op DDL suppression carries thousands, taxing every
+            // open and read-only snapshot refresh). Writer-only, never
+            // inside an open transaction (matching sqlite3's VACUUM rule).
+            if maint_head == "VACUUM" && !self.is_readonly_mount && !self.in_transaction {
+                self.meta.compact_ddl_history(&self.store)?;
+            }
             return Ok(CursorState::empty());
         }
 
@@ -985,6 +1277,47 @@ impl Connection {
                         }
                     }
                 }
+                // Filtered COUNT(*), parameterless: same generation fence as
+                // the bare shape, keyed by the exact statement text so every
+                // distinct predicate carries its own entry. The recall path's
+                // liveness probes re-run fixed statements per recall, and the
+                // uncached cost is a whole-table walk with per-row predicate
+                // evaluation.
+                let filtered_count_shape = plan.scan_type == ScanType::Full
+                    && plan.aggregate.as_deref() == Some("count")
+                    && plan.where_clause.is_some()
+                    && plan.params.is_empty()
+                    && plan.named_params.is_none()
+                    && plan.group_by_col.is_none()
+                    && plan.order_by.is_none()
+                    && plan.select_exprs.is_empty()
+                    && !col_cols.is_empty();
+                let filtered_count_key = if filtered_count_shape {
+                    Some((plan.table.clone(), trimmed.to_string()))
+                } else {
+                    None
+                };
+                if let Some(key) = &filtered_count_key {
+                    if !self.in_transaction {
+                        if let (Some(&(cached_gen, cached_count)), Ok(current_gen)) = (
+                            self.filtered_count_cache.get(key),
+                            self.meta.col_generation(&self.store, &plan.table),
+                        ) {
+                            if cached_gen == current_gen {
+                                let label = plan
+                                    .count_alias
+                                    .clone()
+                                    .unwrap_or_else(|| "COUNT(*)".to_string());
+                                let mut cur = CursorState::from_rows(
+                                    vec![label],
+                                    vec![vec![Value::Int(cached_count)]],
+                                );
+                                cur.rowcount = -1;
+                                return Ok(cur);
+                            }
+                        }
+                    }
+                }
                 // Derive the ordered-index column before mutable borrows (same
                 // disjoint-field discipline).  The ordered target is the ORDER BY
                 // column (only when a LIMIT makes an early-stopped walk usable) or
@@ -1042,6 +1375,23 @@ impl Connection {
                         if let Some((_, Value::Int(count))) = row.first() {
                             self.bare_count_cache
                                 .insert(plan.table.clone(), (current_gen, *count));
+                        }
+                    }
+                }
+                if let Some(key) = filtered_count_key {
+                    if !self.in_transaction {
+                        if let (Some(row), Ok(current_gen)) = (
+                            rs.rows.first(),
+                            self.meta.col_generation(&self.store, &plan.table),
+                        ) {
+                            if let Some((_, Value::Int(count))) = row.first() {
+                                const FILTERED_COUNT_CACHE_CAP: usize = 64;
+                                if self.filtered_count_cache.len() >= FILTERED_COUNT_CACHE_CAP {
+                                    self.filtered_count_cache.clear();
+                                }
+                                self.filtered_count_cache
+                                    .insert(key, (current_gen, *count));
+                            }
                         }
                     }
                 }
@@ -1256,6 +1606,7 @@ impl Connection {
             self.col_caches.remove(&table);
             self.ordered_caches.remove(&table);
             self.bare_count_cache.remove(&table);
+        self.filtered_count_cache.retain(|(t, _), _| t != &table);
             let outcome = {
                 let cidx = self.conflict_caches.entry(table.clone()).or_default();
                 execute_insert_many(
@@ -1301,6 +1652,7 @@ impl Connection {
                         self.col_caches.clear();
                         self.ordered_caches.clear();
                         self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
                     } else {
                         // Inside a caller-owned outer transaction: mark it tainted
                         // so that if the caller commits, caches are cleared.
@@ -1321,6 +1673,7 @@ impl Connection {
                 self.col_caches.clear();
                 self.ordered_caches.clear();
                 self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
             }
             self.txn_tainted = false;
         }
@@ -1344,6 +1697,9 @@ impl Connection {
             self.col_caches.clear();
             self.ordered_caches.clear();
             self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
+        } else {
+            self.publish_indexes_on_demand();
         }
         self.txn_tainted = false;
         Ok(())
@@ -1368,6 +1724,7 @@ impl Connection {
         self.col_caches.clear();
         self.ordered_caches.clear();
         self.bare_count_cache.clear();
+        self.filtered_count_cache.clear();
         result.map_err(open_err)
     }
 
@@ -1587,6 +1944,31 @@ impl Connection {
             )));
         };
 
+        // A CREATE INDEX whose name is already registered must not append
+        // another ddl meta row: every reopen replays the whole history, so an
+        // IF-NOT-EXISTS no-op re-recorded per boot grows the meta tree (and
+        // every future open's replay cost) without bound.
+        // Whitespace-normalized head so `CREATE  INDEX` / `CREATE\nINDEX`
+        // cannot bypass the guard and re-grow the meta history.
+        let ddl_upper: String = ddl
+            .trim_start()
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if ddl_upper.starts_with("CREATE INDEX") || ddl_upper.starts_with("CREATE UNIQUE INDEX") {
+            let decl = Catalog::parse_create_index(ddl)?;
+            if self.catalog.has_index(&decl.table, &decl.index) {
+                if decl.if_not_exists {
+                    return Ok(());
+                }
+                return Err(EngineError::parse(format!(
+                    "index {} already exists",
+                    decl.index
+                )));
+            }
+        }
+
         // Capture a RENAME's old/new names before the catalog re-keys.
         let rename = rename_names(ddl);
         let drop_name = drop_table_name(ddl);
@@ -1606,6 +1988,7 @@ impl Connection {
             self.conflict_caches.remove(&old);
             self.ordered_caches.remove(&old);
             self.bare_count_cache.remove(&old);
+        self.filtered_count_cache.retain(|(t, _), _| t != &old);
         }
         if let Some(name) = drop_name {
             self.root_map.remove(&name);
@@ -1614,6 +1997,7 @@ impl Connection {
             self.conflict_caches.remove(&name);
             self.ordered_caches.remove(&name);
             self.bare_count_cache.remove(&name);
+        self.filtered_count_cache.retain(|(t, _), _| t != &name);
         }
         Ok(())
     }
@@ -1931,15 +2315,218 @@ const BUILT_INDEX_CACHE_CAP: usize = 32;
 /// shared (copy-on-write) pair instead of rebuilding. Read-only connections
 /// never mutate their indexes, so the shared postings are never copied.
 ///
-/// Publication happens only from read-only connections (never mid-write,
-/// never inside a transaction), so an uncommitted state can never be cached.
+/// Publication happens from read-only connections after a lazy build, and
+/// from a writer strictly AFTER a successful untainted commit (its
+/// incrementally-maintained pair matches the committed tree at the
+/// post-commit generation) — never mid-write, never inside a transaction, so
+/// an uncommitted state can never be cached.
 static BUILT_INDEX_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex)>>,
+    std::sync::Mutex<
+        HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>,
+    >,
 > = std::sync::OnceLock::new();
 
-fn built_index_cache(
-) -> &'static std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex)>> {
+fn built_index_cache() -> &'static std::sync::Mutex<
+    HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>,
+> {
     BUILT_INDEX_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// `(store path, table)` → the instant a read-only open MISSED its index
+/// adoption. A fresh entry makes the writer publish its live built pair on
+/// each successful commit, so readers at the moving write-generation adopt
+/// instead of paying a whole-table lazy build per open — the reopen storm
+/// that turns sub-second reads into multi-second reads under a write-heavy
+/// window. Demand decays after the sliding [`ro_index_demand_ttl`], so a store with no
+/// active readers pays neither the publish nor the writer's one
+/// copy-on-write materialization per publish-then-mutate cycle.
+static RO_INDEX_DEMAND: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(std::path::PathBuf, String), std::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+/// Sliding demand window: refreshed by every read-only open/refresh adoption
+/// sweep (hit or miss), so publication tracks live reader traffic and stops
+/// one window after the last reader. Must comfortably exceed the longest
+/// expected gap between reads (conversation turns are minutes apart).
+fn ro_index_demand_ttl() -> std::time::Duration {
+    static TTL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        let secs = std::env::var("LILLI_INDEX_DEMAND_TTL_SEC")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(900);
+        std::time::Duration::from_secs(secs)
+    })
+}
+
+const RO_INDEX_DEMAND_CAP: usize = 32;
+
+fn ro_index_demand(
+) -> &'static std::sync::Mutex<HashMap<(std::path::PathBuf, String), std::time::Instant>> {
+    RO_INDEX_DEMAND.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn record_ro_index_demand(path: &std::path::Path, table: &str) {
+    if let Ok(mut guard) = ro_index_demand().lock() {
+        if guard.len() >= RO_INDEX_DEMAND_CAP {
+            guard.clear();
+        }
+        guard.insert(
+            (path.to_path_buf(), table.to_string()),
+            std::time::Instant::now(),
+        );
+    }
+}
+
+fn ro_index_demand_active(path: &std::path::Path, table: &str) -> bool {
+    if let Ok(guard) = ro_index_demand().lock() {
+        if let Some(at) = guard.get(&(path.to_path_buf(), table.to_string())) {
+            return at.elapsed() < ro_index_demand_ttl();
+        }
+    }
+    false
+}
+
+/// Minimum spacing between demand-driven publishes for one table. Every
+/// publish makes the writer's NEXT mutation pay one copy-on-write
+/// materialization of the postings map; a per-row DML stream (nightly decay,
+/// bulk maintenance) autocommits per statement, and publishing on each one
+/// turns that stream O(rows x postings) — the throttle bounds it to one
+/// copy per interval while readers still adopt within the interval of any
+/// burst pause.
+fn ro_index_publish_interval() -> std::time::Duration {
+    static INTERVAL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        // Burst threshold, not a publish rate limit: a commit spaced at least
+        // this far after the previous one publishes synchronously. 250 ms
+        // admits every ambient-capture cadence (an adoption miss costs each
+        // reader slot a ~500 ms in-query index build) while per-row bulk DML
+        // (ms-spaced autocommits) stays suppressed and drains on the next
+        // statement.
+        let ms = std::env::var("LILLI_INDEX_PUBLISH_MIN_INTERVAL_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(250);
+        std::time::Duration::from_millis(ms)
+    })
+}
+
+static RO_INDEX_LAST_PUBLISH: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(std::path::PathBuf, String), std::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+/// `(store path, table)` → the instant of the previous demanded commit.
+/// Burst detector for publication: a commit arriving at least the publish
+/// interval after the previous one is sparse traffic and publishes
+/// synchronously; a tighter cadence is a bulk-DML burst and suppresses
+/// (drained by the writer's next statement).
+static RO_TABLE_LAST_COMMIT: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(std::path::PathBuf, String), std::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+fn ro_index_commit_spacing_allows(path: &std::path::Path, table: &str) -> bool {
+    let registry =
+        RO_TABLE_LAST_COMMIT.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = registry.lock() {
+        let key = (path.to_path_buf(), table.to_string());
+        let ok = publish_spacing_ok(
+            guard.get(&key).map(|at| at.elapsed()),
+            ro_index_publish_interval(),
+        );
+        if guard.len() >= RO_INDEX_DEMAND_CAP {
+            guard.clear();
+        }
+        guard.insert(key, std::time::Instant::now());
+        return ok;
+    }
+    false
+}
+
+/// Whether a publish spaced `since_last` after the previous one may proceed.
+fn publish_spacing_ok(
+    since_last: Option<std::time::Duration>,
+    interval: std::time::Duration,
+) -> bool {
+    match since_last {
+        None => true,
+        Some(age) => age >= interval,
+    }
+}
+
+/// `(store path, table)` set of throttle-suppressed publishes, drained by the
+/// writer's next statement once the publish interval has passed.
+static RO_INDEX_PUBLISH_PENDING: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(std::path::PathBuf, String)>>,
+> = std::sync::OnceLock::new();
+
+fn ro_index_publish_pending(
+) -> &'static std::sync::Mutex<std::collections::HashSet<(std::path::PathBuf, String)>> {
+    RO_INDEX_PUBLISH_PENDING
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn record_publish_pending(path: &std::path::Path, table: &str) {
+    if let Ok(mut guard) = ro_index_publish_pending().lock() {
+        if guard.len() >= RO_INDEX_DEMAND_CAP {
+            guard.clear();
+        }
+        guard.insert((path.to_path_buf(), table.to_string()));
+    }
+}
+
+fn clear_publish_pending(path: &std::path::Path, table: &str) {
+    if let Ok(mut guard) = ro_index_publish_pending().lock() {
+        guard.remove(&(path.to_path_buf(), table.to_string()));
+    }
+}
+
+fn publish_pending_for(path: &std::path::Path) -> Vec<String> {
+    match ro_index_publish_pending().lock() {
+        Ok(guard) => guard
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, t)| t.clone())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn ro_index_publish_allowed(path: &std::path::Path, table: &str) -> bool {
+    let registry = RO_INDEX_LAST_PUBLISH
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = registry.lock() {
+        let key = (path.to_path_buf(), table.to_string());
+        let ok = publish_spacing_ok(
+            guard.get(&key).map(|at| at.elapsed()),
+            ro_index_publish_interval(),
+        );
+        if ok {
+            if guard.len() >= RO_INDEX_DEMAND_CAP {
+                guard.clear();
+            }
+            guard.insert(key, std::time::Instant::now());
+        }
+        return ok;
+    }
+    false
+}
+
+#[cfg(test)]
+mod publish_spacing_tests {
+    use super::publish_spacing_ok;
+    use std::time::Duration;
+
+    #[test]
+    fn first_publish_always_allowed() {
+        assert!(publish_spacing_ok(None, Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn within_interval_blocked_past_interval_allowed() {
+        let interval = Duration::from_millis(1500);
+        assert!(!publish_spacing_ok(Some(Duration::from_millis(10)), interval));
+        assert!(publish_spacing_ok(Some(Duration::from_millis(1501)), interval));
+    }
 }
 
 /// Process-wide memo for the load gate's row-count cross-check, keyed by

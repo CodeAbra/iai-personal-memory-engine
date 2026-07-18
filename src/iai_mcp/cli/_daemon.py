@@ -276,11 +276,9 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
     import time as _time
 
     try:
-        from iai_mcp.daemon_state import load_state, save_state
+        from iai_mcp.daemon_state import update_state
 
-        state = load_state()
-        state["user_requested_shutdown"] = True
-        save_state(state)
+        update_state(lambda d: d.__setitem__("user_requested_shutdown", True))
     except (OSError, ValueError, RuntimeError) as exc:
         logger.debug("sentinel write failed (non-blocking): %s", exc)
 
@@ -604,22 +602,21 @@ def cmd_daemon_resume(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon_configure(args: argparse.Namespace) -> int:
-    from iai_mcp.daemon_state import load_state, save_state
+    from iai_mcp.daemon_state import update_state
 
     key = args.key
     value = getattr(args, "value", None)
-    state = load_state()
 
     if key == "set-budget":
         if value is None:
             print("set-budget requires a float value", file=sys.stderr)
             return 2
-        state["daily_quota_pct_override"] = float(value)
+        mutation = {"daily_quota_pct_override": float(value)}
     elif key == "set-cycle-count":
         if value is None:
             print("set-cycle-count requires an int value", file=sys.stderr)
             return 2
-        state["cycle_count_override"] = int(value)
+        mutation = {"cycle_count_override": int(value)}
     elif key == "set-quiet-window":
         if value is None or "-" not in value:
             print(
@@ -628,15 +625,15 @@ def cmd_daemon_configure(args: argparse.Namespace) -> int:
             )
             return 2
         start, end = value.split("-", 1)
-        state["quiet_window_manual_override"] = [start.strip(), end.strip()]
+        mutation = {"quiet_window_manual_override": [start.strip(), end.strip()]}
     elif key == "disable-claude":
-        state["claude_enabled"] = False
+        mutation = {"claude_enabled": False}
     elif key == "enable-claude":
-        state["claude_enabled"] = True
+        mutation = {"claude_enabled": True}
     else:
         print(f"unknown configure key: {key}", file=sys.stderr)
         return 2
 
-    save_state(state)
+    update_state(lambda d: d.update(mutation))
     print(f"{key} -> {value if value is not None else 'toggled'}")
     return 0

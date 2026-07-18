@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable
 from enum import Enum
 from itertools import combinations
 from uuid import UUID, uuid4
@@ -87,18 +88,24 @@ def _apply_fsrs(record: MemoryRecord, now: datetime) -> MemoryRecord:
     return record
 
 
+#: Edges applied per transaction. One commit (one write-generation bump, one
+#: index publication at most) per chunk instead of per edge; small enough
+#: that a chunk lands in ~a second and the step yields to a foreground read
+#: within one chunk.
+DECAY_CHUNK_EDGES = 400
+
+
 def _decay_edges(
     store: MemoryStore, epsilon: float = DECAY_EPSILON,
     plasticity_gain: float = 1.0,
+    should_defer: "Callable[[int], bool] | None" = None,
 ) -> dict:
     tbl = store.db.open_table(EDGES_TABLE)
     df = tbl.to_pandas()
     if df.empty:
-        return {"decayed": 0, "pruned": 0}
+        return {"decayed": 0, "pruned": 0, "interrupted": False}
 
     now = datetime.now(timezone.utc)
-    decayed = 0
-    pruned = 0
 
     decayable_kinds = (
         "hebbian",
@@ -106,6 +113,12 @@ def _decay_edges(
         "pattern_separation_seed",
         "hebbian_cluster_replay",
     )
+    # Plan first (pure compute off every lock), apply in chunked transactions
+    # second. Applied edges get updated_at=now, so a deferred run resumes for
+    # free: the grace-window check skips them on the next pass — the step is
+    # restart-idempotent without a persisted cursor.
+    updates: list[tuple[str, str, str, float]] = []
+    prunes: list[tuple[str, str, str]] = []
     hebbian = df[df["edge_type"].isin(decayable_kinds)]
     for _, row in hebbian.iterrows():
         try:
@@ -130,7 +143,9 @@ def _decay_edges(
             if days <= DECAY_GRACE_DAYS:
                 continue
 
-            new_weight = float(row["weight"]) * (DECAY_BASE ** ((days - DECAY_GRACE_DAYS) * plasticity_gain))
+            new_weight = float(row["weight"]) * (
+                DECAY_BASE ** ((days - DECAY_GRACE_DAYS) * plasticity_gain)
+            )
 
             src_lit = _uuid_literal(row["src"])
             dst_lit = _uuid_literal(row["dst"])
@@ -138,27 +153,47 @@ def _decay_edges(
             if edge_kind not in decayable_kinds:
                 continue
             if new_weight < epsilon:
-                tbl.delete(
-                    f"src = '{src_lit}' AND dst = '{dst_lit}' "
-                    f"AND edge_type = '{edge_kind}'"
-                )
-                pruned += 1
+                prunes.append((src_lit, dst_lit, edge_kind))
             else:
-                tbl.update(
-                    where=(
-                        f"src = '{src_lit}' AND dst = '{dst_lit}' "
-                        f"AND edge_type = '{edge_kind}'"
-                    ),
-                    values={
-                        "weight": float(new_weight),
-                        "updated_at": now,
-                    },
-                )
-                decayed += 1
+                updates.append((src_lit, dst_lit, edge_kind, float(new_weight)))
         except ValueError:
             continue
 
-    return {"decayed": decayed, "pruned": pruned}
+    from iai_mcp.hippo import _txn
+
+    decayed = 0
+    pruned = 0
+    work: list[tuple[str, tuple]] = [("update", u) for u in updates]
+    work.extend(("prune", p) for p in prunes)
+    for chunk_no, chunk_start in enumerate(range(0, len(work), DECAY_CHUNK_EDGES)):
+        if should_defer is not None and should_defer(chunk_no):
+            return {"decayed": decayed, "pruned": pruned, "interrupted": True}
+        chunk = work[chunk_start:chunk_start + DECAY_CHUNK_EDGES]
+        with store.db._conn_lock:
+            with _txn(store.db._conn):
+                for kind, item in chunk:
+                    if kind == "prune":
+                        src_lit, dst_lit, edge_kind = item
+                        tbl.delete(
+                            f"src = '{src_lit}' AND dst = '{dst_lit}' "
+                            f"AND edge_type = '{edge_kind}'"
+                        )
+                        pruned += 1
+                    else:
+                        src_lit, dst_lit, edge_kind, new_weight = item
+                        tbl.update(
+                            where=(
+                                f"src = '{src_lit}' AND dst = '{dst_lit}' "
+                                f"AND edge_type = '{edge_kind}'"
+                            ),
+                            values={
+                                "weight": new_weight,
+                                "updated_at": now,
+                            },
+                        )
+                        decayed += 1
+
+    return {"decayed": decayed, "pruned": pruned, "interrupted": False}
 
 
 def run_light_consolidation(

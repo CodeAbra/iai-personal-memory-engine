@@ -342,8 +342,9 @@ def optimize_hippo_storage(
             # a foreground read is IN FLIGHT right now (window_s=0.0 keeps
             # only the in-flight branch of the beacon — a merely-recent read
             # must not defer a night cycle or a user-forced optimize).
-            # On the lilli driver VACUUM is a no-op and the checkpoint is
-            # milliseconds, so the window barely exists there.
+            # On the lilli driver VACUUM compacts the meta DDL history (one
+            # bounded single-tree pass) and the checkpoint is milliseconds,
+            # so the window barely exists there.
             try:
                 from iai_mcp.concurrency import foreground_recent  # noqa: PLC0415
                 vacuum_skipped_foreground = foreground_recent(window_s=0.0)

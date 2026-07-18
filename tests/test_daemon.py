@@ -395,10 +395,10 @@ def test_daemon_boot_raise_after_install_restores_funnel(
     pre_install_funnel = _embed_mod.embedder_for_store
     assert pre_install_funnel is _stub_funnel
 
-    def _raising_save_state(state):
+    def _raising_update_state(mutator):
         raise RuntimeError("simulated post-install boot failure")
 
-    monkeypatch.setattr(daemon_mod, "save_state", _raising_save_state)
+    monkeypatch.setattr(daemon_mod, "update_state", _raising_update_state)
 
     with pytest.raises(RuntimeError, match="simulated post-install boot failure"):
         asyncio.run(daemon_mod.main())

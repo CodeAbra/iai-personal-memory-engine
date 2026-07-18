@@ -5,9 +5,23 @@ from pathlib import Path
 
 
 def test_memory_footprint_small_n_under_threshold(tmp_path: Path):
-    from bench.memory_footprint import run_memory_footprint
+    # ru_maxrss is a process-LIFETIME peak: measured in-process late in a
+    # long suite run it reports the suite's accumulated footprint, not the
+    # bench workload's. A fresh subprocess makes the peak attributable to
+    # the workload alone, so the threshold means the same thing standalone
+    # and in-suite.
+    import json
+    import subprocess
+    import sys
 
-    out = run_memory_footprint(n=100, store_path=tmp_path / "store", dim=64)
+    proc = subprocess.run(
+        [sys.executable, "-m", "bench.memory_footprint", "--n", "100", "--dim", "64"],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert proc.returncode in (0, 1), proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
 
     assert "n" in out
     assert "rss_mb_peak" in out

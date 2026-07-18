@@ -426,6 +426,67 @@ impl RawConn {
     /// No-op: each execute already committed.
     fn commit(&self) {}
 
+    /// Re-arm the backing read-only connection to the newest committed
+    /// snapshot in place — the freshness path that replaces a close + reopen.
+    /// Unchanged tables keep their adopted indexes; changed tables re-adopt
+    /// the writer-published pair at the new generation. Returns True when the
+    /// visible snapshot moved. Raises on a read-write backing connection.
+    fn refresh(&mut self, py: Python<'_>) -> PyResult<bool> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
+        };
+        let result = py.allow_threads(|| {
+            let mut guard = lock(&conn);
+            guard.refresh_read_view()
+        });
+        result.map_err(|e| to_pyerr(py, e))
+    }
+
+    /// Whether the backing connection holds a built column index for `table`.
+    fn col_index_ready(&self, table: &str) -> PyResult<bool> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
+        };
+        let guard = lock(&conn);
+        Ok(guard.col_index_ready(table))
+    }
+
+    /// Whether the backing connection holds a built id index for `table`.
+    fn id_index_ready(&self, table: &str) -> PyResult<bool> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
+        };
+        let guard = lock(&conn);
+        Ok(guard.id_index_ready(table))
+    }
+
+    /// Leaf cells visited by this connection's store since the last reset.
+    fn cells_visited_count(&self) -> PyResult<u64> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
+        };
+        let guard = lock(&conn);
+        Ok(guard.cells_visited_count())
+    }
+
+    /// Writer-only: ensure-build and publish the read models for every
+    /// col-indexed table so reader connections adopt them immediately.
+    fn publish_read_models(&self, py: Python<'_>) -> PyResult<()> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
+        };
+        let result = py.allow_threads(|| {
+            let mut guard = lock(&conn);
+            guard.publish_read_models()
+        });
+        result.map_err(|e| to_pyerr(py, e))
+    }
+
     /// Drop this adapter's clone of the shared connection so the shared
     /// strong-count decreases deterministically. When this adapter is the last
     /// live holder, the file/advisory lock is released here and now; otherwise a
@@ -721,6 +782,30 @@ impl Connection {
     fn persist_col_indexes(&self, py: Python<'_>) -> PyResult<()> {
         let mut guard = lock(self.arc()?);
         guard.persist_col_indexes().map_err(|e| to_pyerr(py, e))
+    }
+
+    /// Writer-only: ensure-build and publish the read models (col/id index
+    /// pair + committed row count) for every col-indexed table, so reader
+    /// connections adopt them instead of paying per-query scans.
+    fn publish_read_models(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = Arc::clone(self.arc()?);
+        let result = py.allow_threads(|| {
+            let mut guard = lock(&inner);
+            guard.publish_read_models()
+        });
+        result.map_err(|e| to_pyerr(py, e))
+    }
+
+    /// Whether this connection holds a built column index for `table`.
+    fn col_index_ready(&self, table: &str) -> PyResult<bool> {
+        let guard = lock(self.arc()?);
+        Ok(guard.col_index_ready(table))
+    }
+
+    /// Whether this connection holds a built id index for `table`.
+    fn id_index_ready(&self, table: &str) -> PyResult<bool> {
+        let guard = lock(self.arc()?);
+        Ok(guard.id_index_ready(table))
     }
 
     /// True when an outer BEGIN is open and not yet committed/rolled back.

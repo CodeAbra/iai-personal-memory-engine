@@ -374,6 +374,76 @@ impl Pager {
         self.validate_ro_snapshot_fence()
     }
 
+    /// Re-arm a read-only pager's committed snapshot to the writer's newest
+    /// committed state, in place — the freshness alternative to a close +
+    /// reopen. Returns `Ok(true)` when the visible snapshot moved, `Ok(false)`
+    /// when the store is byte-identical to the current snapshot.
+    ///
+    /// Cache-correctness invariant: after this returns, no cached page may
+    /// differ from the newly-armed committed image. A checkpoint (sidecar
+    /// generation or main-file length moved) rewrites main-file pages
+    /// wholesale, so the whole cache is dropped; otherwise only pages whose
+    /// WAL-overlay image changed are evicted, and every other resident page is
+    /// still valid — main-file pages cannot move without a checkpoint.
+    pub fn refresh_ro_snapshot(&mut self) -> Result<bool> {
+        if !self.read_only {
+            return Err(StoreError::Integrity {
+                detail: "refresh_ro_snapshot: pager is not read-only".to_string(),
+            });
+        }
+        let Some(fence) = self.ro_snapshot_fence.as_ref() else {
+            return Err(StoreError::Integrity {
+                detail: "refresh_ro_snapshot: read-only pager has no snapshot fence".to_string(),
+            });
+        };
+        let current_len = self.with_file(|f| Ok(f.metadata()?.len()))?;
+        let current_generation = read_checkpoint_generation(&fence.wal_path);
+        let new_overlay = read_committed_wal_frames(&fence.wal_path, self.page_size);
+        // Re-read the fence AFTER parsing the overlay: a checkpoint completing
+        // entirely between the two reads would otherwise pair a pre-checkpoint
+        // fence with a post-truncate (empty) overlay — the per-page branch
+        // would evict nothing while cached pre-checkpoint pages are stale.
+        // Any movement across the parse forces the wholesale-clear branch.
+        let recheck_len = self.with_file(|f| Ok(f.metadata()?.len()))?;
+        let recheck_generation = read_checkpoint_generation(&fence.wal_path);
+        let checkpoint_crossed = current_len != fence.main_len
+            || current_generation != fence.generation
+            || recheck_len != current_len
+            || recheck_generation != current_generation;
+        let current_len = recheck_len;
+        let current_generation = recheck_generation;
+        // A journal-mode writer commits straight into main-file pages with no
+        // sidecar generation to fence on, so an unchanged length and an empty
+        // overlay prove nothing — drop the cache wholesale and re-arm.
+        let unfenceable = current_generation.is_none()
+            && fence.generation.is_none()
+            && new_overlay.is_empty()
+            && self.wal_overlay.is_empty();
+        if !unfenceable && !checkpoint_crossed && new_overlay == self.wal_overlay {
+            return Ok(false);
+        }
+        {
+            let mut inner = self.inner.lock();
+            if checkpoint_crossed || unfenceable {
+                inner.cache.clear();
+            } else {
+                for page_no in new_overlay.keys() {
+                    if self.wal_overlay.get(page_no) != new_overlay.get(page_no) {
+                        inner.cache.remove(page_no);
+                    }
+                }
+            }
+        }
+        let wal_path = fence.wal_path.clone();
+        self.wal_overlay = new_overlay;
+        self.ro_snapshot_fence = Some(RoSnapshotFence {
+            main_len: current_len,
+            generation: current_generation,
+            wal_path,
+        });
+        Ok(true)
+    }
+
     /// True when this pager was opened lock-free for read-only access.
     pub fn is_read_only(&self) -> bool {
         self.read_only

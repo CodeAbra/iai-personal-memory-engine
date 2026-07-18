@@ -64,6 +64,81 @@ def _recycle_ro_pool(self, result: dict[str, Any]) -> None:
         result["ro_pool_recycle_error"] = str(exc)[:200]
 
 
+def _prewarm_recall_read_model(
+    self,
+    result: dict[str, Any],
+    interrupt_check: Callable[[], bool] | None,
+) -> None:
+    """Pay the post-rebuild decode and graph build HERE, not on the next recall.
+
+    The rebuild above rewrote the graph-cache snapshot, so the store's decoded
+    structural memos and the warm graph bundle all miss on their next
+    consultation — a cost the first recall after every cycle otherwise pays
+    (whole-map UUID decode plus a full-corpus graph stream). Running the same
+    memoizing loaders from the write side leaves the read side a pure memo
+    hit. Best-effort: a failure can never fail the step, and recall's own
+    lazy paths remain the always-correct fallback.
+
+    Every phase yields to the foreground FIRST: prewarm is pure acceleration,
+    and its heavy stretches hold the interpreter while a live read may be
+    waiting (worst at boot, when the catch-up cycle overlaps the ANN rebuild
+    and every cache is cold — measured to starve the socket outright). A
+    skipped phase costs one lazy warm-up on some later recall; a phase that
+    refuses to yield costs EVERY concurrent read its latency budget.
+    """
+    def _foreground_waiting() -> bool:
+        return bool(interrupt_check and interrupt_check())
+
+    t0 = time.monotonic()
+    try:
+        if _foreground_waiting():
+            result["structural_prewarm_skipped"] = "foreground"
+        else:
+            from iai_mcp import runtime_graph_cache
+
+            runtime_graph_cache.load_recall_structural(self._store)
+            result["structural_prewarm_elapsed_sec"] = round(time.monotonic() - t0, 3)
+    except Exception as exc:  # noqa: BLE001 -- prewarm must not break the step
+        logger.warning("structural_prewarm_failed: %s", exc, exc_info=True)
+        result["structural_prewarm_error"] = str(exc)[:200]
+    t1 = time.monotonic()
+    try:
+        if _foreground_waiting():
+            result["bundle_prewarm_skipped"] = "foreground"
+        else:
+            from iai_mcp import retrieve
+
+            # Drop the memo first: the rebuild above just rewrote the graph
+            # snapshot, so a still-inside-the-fuse memo would ride the
+            # stale-while-revalidate branch — build_runtime_graph would
+            # return the stale bundle and kick the real build ASYNC, after
+            # this step, concurrent with awake recalls: the exact cost this
+            # prewarm exists to front-load.
+            self._store._warm_graph_bundle = None
+            retrieve.build_runtime_graph(self._store)
+            result["bundle_prewarm_elapsed_sec"] = round(time.monotonic() - t1, 3)
+    except Exception as exc:  # noqa: BLE001 -- prewarm must not break the step
+        logger.warning("bundle_prewarm_failed: %s", exc, exc_info=True)
+        result["bundle_prewarm_error"] = str(exc)[:200]
+    # The optimize/erasure steps earlier in this cycle invalidate the exact
+    # authority matrix; this step runs last, so a cold matrix here means no
+    # later step will touch it again — rebuild it now and the recall path
+    # keeps its exact-authority lane instead of degrading until some future
+    # warm-up probe pays the whole-corpus scan.
+    t2 = time.monotonic()
+    try:
+        exact = getattr(self._store, "_exact_index", None)
+        if exact is not None and not exact.is_warm:
+            if _foreground_waiting():
+                result["exact_prewarm_skipped"] = "foreground"
+            else:
+                self._store._build_exact_index_sync()
+                result["exact_prewarm_elapsed_sec"] = round(time.monotonic() - t2, 3)
+    except Exception as exc:  # noqa: BLE001 -- prewarm must not break the step
+        logger.warning("exact_prewarm_failed: %s", exc, exc_info=True)
+        result["exact_prewarm_error"] = str(exc)[:200]
+
+
 def step_recall_index_rebuild(
     self, interrupt_check: Callable[[], bool] | None,
 ) -> tuple[bool, dict[str, Any]]:
@@ -76,6 +151,7 @@ def step_recall_index_rebuild(
         result = runtime_graph_cache._rebuild_and_save_rgc(self._store)
         _persist_col_indexes(self, result)
         _recycle_ro_pool(self, result)
+        _prewarm_recall_read_model(self, result, interrupt_check)
         return True, result
 
     except Exception as exc:  # noqa: BLE001 -- step must not crash the pipeline

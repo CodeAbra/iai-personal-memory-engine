@@ -3231,7 +3231,14 @@ pub fn execute_update(
             col_refile.push((row.clone(), updated, *key));
         }
     }
-    if has_col_index {
+    // The write-generation is the readers' exactness fence for their adopted
+    // col/id indexes and row counts. An UPDATE that touches no indexed column
+    // changes none of those read models — same keys, same indexed values,
+    // same count — so it must NOT bump: a bump here forced every reader to
+    // drop and re-adopt per reinforcement write, and any adoption miss
+    // degraded the recall seed fetch to a whole-table scan. Row DATA
+    // freshness is the pager snapshot fence's job, not the generation's.
+    if has_col_index && touches_indexed_col {
         meta.bump_col_generation(store, table)?;
     }
     guard.commit()?;

@@ -720,7 +720,7 @@ fn cbor_map_shape_round_trip() {
     let bytes = std::fs::read(f.sidecar_path()).unwrap();
     let envelope: lilliengine::conn::PersistedColIndexes =
         ciborium::de::from_reader(bytes.as_slice()).expect("CBOR decode must succeed");
-    assert_eq!(envelope.format_version, 2);
+    assert_eq!(envelope.format_version, 3);
     let edges_table = envelope
         .tables
         .iter()
@@ -809,9 +809,17 @@ fn persisted_id_index_serves_warm_boot_without_scan() {
         let cold_dir = tempdir().unwrap();
         let cold_path = cold_dir.path().join("records.lilli");
         std::fs::copy(&store_path, &cold_path).unwrap();
-        // no sidecar copied → lazy build path.
+        // no sidecar copied → lazy build path. The build's whole-table walk
+        // is not a counted "full scan" (the old >=1 assertion actually
+        // measured the colgen first-touch meta scan, which the replay-time
+        // mirror seeding removed), so the control asserts the direct signal:
+        // without a sidecar no built index exists before the first id
+        // lookup, and the lookup builds it.
         let mut cold = Connection::open(cold_path.to_str().unwrap(), 0).unwrap();
-        cold.reset_full_scan_count();
+        assert!(
+            !cold.id_index_ready("records"),
+            "no sidecar — the cold open must start without a built id index"
+        );
         let mut cur = cold
             .execute(
                 "UPDATE records SET labile_until = '2026-01-01' WHERE id = 'id-000123'",
@@ -820,8 +828,8 @@ fn persisted_id_index_serves_warm_boot_without_scan() {
             .unwrap();
         assert_eq!(cur.rowcount, 1);
         assert!(
-            cold.full_scan_count() >= 1,
-            "the cold (unpersisted) control must pay at least one build scan"
+            cold.id_index_ready("records"),
+            "the first id lookup on a sidecar-less open must pay the lazy build"
         );
     }
 }

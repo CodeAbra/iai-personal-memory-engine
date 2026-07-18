@@ -151,12 +151,11 @@ impl MetaTable {
             )));
         }
 
-        // Sequence number = count of DDL rows already recorded (insertion order).
+        // Sequence number = highest recorded DDL seq + 1 (a count-based seq
+        // collides with surviving rows after a history compaction deletes
+        // duplicates).
         let rows = self.read_rows(store)?;
-        let seq = rows
-            .iter()
-            .filter(|r| r.first() == Some(&Value::Text("ddl".to_string())))
-            .count() as i64;
+        let seq = next_ddl_seq(&rows);
 
         // Allocate the data-tree root via the storage layer.
         let root_page = store.create_tree().map_err(store_err)?;
@@ -195,10 +194,7 @@ impl MetaTable {
     /// inside an outer transaction when one is open.
     pub fn record_ddl(&self, store: &Store, ddl: &str, scope: TxnScope) -> Result<()> {
         let rows = self.read_rows(store)?;
-        let seq = rows
-            .iter()
-            .filter(|r| r.first() == Some(&Value::Text("ddl".to_string())))
-            .count() as i64;
+        let seq = next_ddl_seq(&rows);
         self.append_row(
             store,
             &[
@@ -272,12 +268,36 @@ impl MetaTable {
                         self.hwm_key.borrow_mut().insert(table.clone(), key);
                     }
                 }
+                // Seed the colgen mirror during replay's single scan: a
+                // first-touch `col_generation` otherwise pays a whole-meta
+                // full scan PER TABLE on every fresh handle (boot, read-only
+                // open, read-only snapshot refresh).
+                Some("colgen") if values.len() >= 3 => {
+                    if let (Value::Text(table), Some(v)) = (&values[1], as_int(&values[2])) {
+                        self.colgen.borrow_mut().insert(table.clone(), v);
+                        self.colgen_key.borrow_mut().insert(table.clone(), key);
+                    }
+                }
                 _ => {}
             }
         }
 
         ddl_rows.sort_by_key(|(seq, _)| *seq);
+        // Dedup by exact text, first occurrence wins: a store written before
+        // no-op DDL suppression carries thousands of repeated
+        // CREATE-IF-NOT-EXISTS rows, and parsing each one taxes every open
+        // and every read-only snapshot refresh. "Apply once ≡ apply N times"
+        // holds ONLY for purely additive histories: with a destructive DDL
+        // interleaved (CREATE t → DROP t → CREATE t, identical texts) the
+        // dedup would skip the re-create and replay would end at the DROP —
+        // a live table silently vanishing. Any destructive row disables the
+        // dedup wholesale; correctness over parse savings.
+        let dedup_safe = !ddl_rows.iter().any(|(_, text)| ddl_is_destructive(text));
+        let mut seen_ddl: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (_seq, text) in ddl_rows {
+            if dedup_safe && !seen_ddl.insert(text.clone()) {
+                continue;
+            }
             let stmt = crate::parser::parse(&text)?;
             if let Err(e) = catalog.apply_ddl(&stmt) {
                 // A store may carry a repeated ADD COLUMN meta row (the
@@ -294,6 +314,9 @@ impl MetaTable {
         for (table, root) in root_rows {
             root_map.insert(table.clone(), root);
             catalog.set_rootpage(&table, i64::from(root));
+            // Tables with no persisted colgen row default to 0 here, so no
+            // later first-touch `col_generation` pays its own meta full scan.
+            self.colgen.borrow_mut().entry(table).or_insert(0);
         }
         // Drop any root mapping whose table did not survive replay (e.g. dropped).
         let stale: Vec<String> = root_map
@@ -305,6 +328,51 @@ impl MetaTable {
             root_map.remove(&name);
         }
         Ok(())
+    }
+
+    /// Delete duplicate DDL rows from the meta history, keeping the first
+    /// occurrence (lowest seq) of each distinct text. A store written before
+    /// no-op DDL suppression carries thousands of repeated
+    /// CREATE-IF-NOT-EXISTS rows, and every open and read-only snapshot
+    /// refresh replays them all. Runs in its own write transaction (rolled
+    /// back wholesale on any delete failure); returns the rows removed.
+    pub fn compact_ddl_history(&self, store: &Store) -> Result<usize> {
+        let raw = store.tree(META_TABLE_PAGE).full_scan().map_err(store_err)?;
+        let mut ddl_rows: Vec<(i64, i64, String)> = Vec::new();
+        for (key, payload) in &raw {
+            let (values, _) = decode_record(payload, 0).map_err(store_err)?;
+            if row_kind(&values) == Some("ddl") && values.len() >= 3 {
+                if let (Some(seq), Value::Text(text)) = (as_int(&values[1]), &values[2]) {
+                    ddl_rows.push((seq, *key, text.clone()));
+                }
+            }
+        }
+        // Deleting a "duplicate" is only sound for purely additive histories
+        // (see the replay dedup guard): with a destructive DDL interleaved,
+        // the later identical text is NOT redundant, and deletion here would
+        // be unrecoverable. Refuse wholesale.
+        if ddl_rows.iter().any(|(_, _, text)| ddl_is_destructive(text)) {
+            return Ok(0);
+        }
+        ddl_rows.sort_by_key(|(seq, _, _)| *seq);
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let doomed: Vec<i64> = ddl_rows
+            .iter()
+            .filter(|(_, _, text)| !seen.insert(text.as_str()))
+            .map(|(_, key, _)| *key)
+            .collect();
+        if doomed.is_empty() {
+            return Ok(0);
+        }
+        store.begin_write().map_err(store_err)?;
+        for key in &doomed {
+            if let Err(e) = store.tree(META_TABLE_PAGE).delete(*key) {
+                let _ = store.rollback();
+                return Err(store_err(e));
+            }
+        }
+        store.commit().map_err(store_err)?;
+        Ok(doomed.len())
     }
 
     /// Return the next vec_label for `table`, bumping and persisting its
@@ -509,6 +577,27 @@ impl MetaTable {
     }
 }
 
+/// True when a DDL text can remove or re-shape an object: DROP TABLE, and
+/// ALTER TABLE's DROP COLUMN / RENAME forms. Additive statements (CREATE
+/// TABLE/INDEX, ALTER ... ADD COLUMN) replay idempotently; destructive ones
+/// make text-identical rows non-redundant.
+fn ddl_is_destructive(text: &str) -> bool {
+    let upper = text.trim_start().to_ascii_uppercase();
+    let squished: String = upper.split_whitespace().collect::<Vec<_>>().join(" ");
+    squished.starts_with("DROP ")
+        || (squished.starts_with("ALTER TABLE")
+            && (squished.contains(" DROP ") || squished.contains(" RENAME ")))
+}
+
+/// Highest recorded DDL seq + 1 (0 for a history with no DDL rows).
+fn next_ddl_seq(rows: &[Vec<Value>]) -> i64 {
+    rows.iter()
+        .filter(|r| r.first() == Some(&Value::Text("ddl".to_string())))
+        .filter_map(|r| r.get(1).and_then(as_int))
+        .max()
+        .map_or(0, |m| m + 1)
+}
+
 /// The first cell of a meta row as a kind tag, when it is text.
 fn row_kind(values: &[Value]) -> Option<&str> {
     match values.first() {
@@ -599,6 +688,141 @@ fn ddl_has_if_not_exists(ddl: &str) -> Result<bool> {
 /// Adapt a storage-layer error into the engine error taxonomy.
 fn store_err(e: lillibrain::StoreError) -> EngineError {
     EngineError::parse(format!("meta-table storage error: {e}"))
+}
+
+#[cfg(test)]
+mod ddl_history_tests {
+    use super::{MetaTable, META_TABLE_PAGE};
+    use crate::catalog::Catalog;
+    use crate::exec::TxnScope;
+    use lillibrain::Store;
+    use std::collections::BTreeMap;
+
+    fn open_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("m.lilli")).unwrap();
+        (dir, store)
+    }
+
+    fn ddl_row_count(store: &Store) -> usize {
+        store
+            .tree(META_TABLE_PAGE)
+            .full_scan()
+            .unwrap()
+            .iter()
+            .filter(|(_, p)| {
+                let (values, _) = lillibrain::decode_record(p, 0).unwrap();
+                matches!(values.first(), Some(lillibrain::Value::Text(t)) if t == "ddl")
+            })
+            .count()
+    }
+
+    #[test]
+    fn compaction_keeps_first_occurrence_and_replay_matches() {
+        let (_dir, store) = open_store();
+        let meta = MetaTable::open(&store).unwrap();
+        let mut catalog = Catalog::default();
+        let mut root_map = BTreeMap::new();
+        meta.create_table_scoped(
+            &store,
+            &mut catalog,
+            &mut root_map,
+            "CREATE TABLE t (a TEXT)",
+            TxnScope::Own,
+        )
+        .unwrap();
+        let idx = "CREATE INDEX IF NOT EXISTS ix_a ON t (a)";
+        for _ in 0..5 {
+            meta.record_ddl(&store, idx, TxnScope::Own).unwrap();
+        }
+        assert_eq!(ddl_row_count(&store), 6);
+
+        let removed = meta.compact_ddl_history(&store).unwrap();
+        assert_eq!(removed, 4);
+        assert_eq!(ddl_row_count(&store), 2);
+        assert_eq!(meta.compact_ddl_history(&store).unwrap(), 0, "idempotent");
+
+        // The compacted history replays to the same catalog.
+        let meta2 = MetaTable::open(&store).unwrap();
+        let mut catalog2 = Catalog::default();
+        let mut root_map2 = BTreeMap::new();
+        meta2.replay(&store, &mut catalog2, &mut root_map2).unwrap();
+        assert!(catalog2.has_index("t", "ix_a"));
+        assert!(root_map2.contains_key("t"));
+    }
+
+    #[test]
+    fn destructive_history_disables_dedup_and_compaction() {
+        // CREATE → DROP → CREATE with the identical text: the re-create is
+        // NOT redundant, so text-dedup must not skip it at replay and
+        // compaction must refuse to delete it.
+        let (_dir, store) = open_store();
+        let meta = MetaTable::open(&store).unwrap();
+        let mut catalog = Catalog::default();
+        let mut root_map = BTreeMap::new();
+        meta.create_table_scoped(
+            &store,
+            &mut catalog,
+            &mut root_map,
+            "CREATE TABLE t (a TEXT)",
+            TxnScope::Own,
+        )
+        .unwrap();
+        meta.record_ddl(&store, "DROP TABLE t", TxnScope::Own).unwrap();
+        meta.record_ddl(&store, "CREATE TABLE t (a TEXT)", TxnScope::Own)
+            .unwrap();
+
+        let before = ddl_row_count(&store);
+        assert_eq!(
+            meta.compact_ddl_history(&store).unwrap(),
+            0,
+            "a history holding destructive DDL must refuse compaction"
+        );
+        assert_eq!(ddl_row_count(&store), before);
+
+        // Replay must apply the trailing re-create: the table exists.
+        let meta2 = MetaTable::open(&store).unwrap();
+        let mut catalog2 = Catalog::default();
+        let mut root_map2 = BTreeMap::new();
+        meta2.replay(&store, &mut catalog2, &mut root_map2).unwrap();
+        assert!(
+            catalog2.get("t").is_ok(),
+            "text-dedup must not erase a table re-created after a DROP"
+        );
+    }
+
+    #[test]
+    fn post_compaction_seq_never_collides() {
+        let (_dir, store) = open_store();
+        let meta = MetaTable::open(&store).unwrap();
+        let mut catalog = Catalog::default();
+        let mut root_map = BTreeMap::new();
+        meta.create_table_scoped(
+            &store,
+            &mut catalog,
+            &mut root_map,
+            "CREATE TABLE t (a TEXT)",
+            TxnScope::Own,
+        )
+        .unwrap();
+        for _ in 0..4 {
+            meta.record_ddl(&store, "CREATE INDEX IF NOT EXISTS ix_a ON t (a)", TxnScope::Own)
+                .unwrap();
+        }
+        meta.record_ddl(&store, "CREATE INDEX IF NOT EXISTS ix_b ON t (a)", TxnScope::Own)
+            .unwrap();
+        meta.compact_ddl_history(&store).unwrap();
+        // A new DDL after compaction must sort AFTER every surviving row.
+        meta.record_ddl(&store, "CREATE INDEX IF NOT EXISTS ix_c ON t (a)", TxnScope::Own)
+            .unwrap();
+        let meta2 = MetaTable::open(&store).unwrap();
+        let mut catalog2 = Catalog::default();
+        let mut root_map2 = BTreeMap::new();
+        meta2.replay(&store, &mut catalog2, &mut root_map2).unwrap();
+        for ix in ["ix_a", "ix_b", "ix_c"] {
+            assert!(catalog2.has_index("t", ix), "{ix} must survive replay");
+        }
+    }
 }
 
 #[cfg(test)]

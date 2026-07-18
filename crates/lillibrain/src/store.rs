@@ -53,6 +53,23 @@ impl Store {
         Ok(Store::from_pager(Pager::open_read_only(path)?))
     }
 
+    /// Re-arm a read-only store's committed snapshot in place (see
+    /// [`Pager::refresh_ro_snapshot`]). Cell counts are dropped when the
+    /// snapshot moved — they were exact for the previous snapshot only and
+    /// repopulate lazily on the next count walk.
+    pub fn refresh_read_only(&mut self) -> Result<bool> {
+        let changed = self.pager.refresh_ro_snapshot()?;
+        if changed {
+            // A poisoned lock must still clear: skipping would serve counts
+            // from the previous snapshot as if they were exact.
+            self.cell_counts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
+        Ok(changed)
+    }
+
     /// Adjust the cached cell count for `root` by `delta`, when a cached
     /// entry exists (lazy population is owned by `count_cells`).
     fn adjust_cell_count(&self, root: u32, delta: i64) {

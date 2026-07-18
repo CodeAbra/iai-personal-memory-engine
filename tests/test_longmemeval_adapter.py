@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 from unittest import mock
@@ -11,14 +12,15 @@ import pytest
 _HF_CACHE = Path(
     os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface")
 )
-HAS_LONGMEMEVAL_CACHE = any(
-    _HF_CACHE.rglob("longmemeval_s")
-) if _HF_CACHE.exists() else False
+HAS_LONGMEMEVAL_CACHE = (
+    any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exists() else False
+) and importlib.util.find_spec("huggingface_hub") is not None
 
 
 @pytest.mark.skipif(
     not HAS_LONGMEMEVAL_CACHE,
-    reason="LongMemEval dataset not cached locally; skipping network-dependent load",
+    reason="LongMemEval dataset not cached locally or huggingface_hub not "
+    "installed; skipping network-dependent load",
 )
 def test_load_dataset_S_returns_non_empty_iterable():
     from bench.adapters.longmemeval import LongMemEvalAdapter, LMESession

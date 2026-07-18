@@ -318,6 +318,12 @@ from ._capture import (
     cmd_capture_hooks_status,
 )
 
+from ._cowork import (
+    cmd_cowork_install,
+    cmd_cowork_uninstall,
+    cmd_cowork_status,
+)
+
 from ._daemon import (
     cmd_daemon_install,
     cmd_daemon_uninstall,
@@ -685,6 +691,29 @@ def _build_parser() -> argparse.ArgumentParser:
     ch_sub.add_parser("status",
                       help="show whether the Stop hook is installed and active"
                       ).set_defaults(func=cmd_capture_hooks_status)
+
+    cw = sub.add_parser(
+        "cowork",
+        help=(
+            "install/uninstall/status the iai-mcp plugin for Claude Cowork "
+            "(desktop local-agent mode): recall + capture hooks in every "
+            "Cowork session"
+        ),
+    )
+    cw_sub = cw.add_subparsers(dest="cowork_cmd", required=True)
+    cw_sub.add_parser(
+        "install",
+        help="stage the plugin marketplace under ~/.iai-mcp/ and wire it into "
+             "each Cowork home's cowork_settings.json",
+    ).set_defaults(func=cmd_cowork_install)
+    cw_sub.add_parser(
+        "uninstall",
+        help="unwire the plugin from Cowork and remove the staged marketplace",
+    ).set_defaults(func=cmd_cowork_uninstall)
+    cw_sub.add_parser(
+        "status",
+        help="show plugin staging and per-home Cowork wiring",
+    ).set_defaults(func=cmd_cowork_status)
 
     a = sub.add_parser(
         "audit",

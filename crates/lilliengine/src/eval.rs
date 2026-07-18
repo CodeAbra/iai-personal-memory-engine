@@ -612,12 +612,48 @@ const CLASS_BLOB: u8 = 3;
 pub enum SortKey {
     /// The NULL placeholder; never participates in a within-class compare.
     Null,
-    /// A numeric value (int or real) ordered by magnitude.
-    Number(f64),
+    /// An integer, compared exactly as i64 — NEVER through f64, where
+    /// adjacent integers past 2^53 collapse to the same double and an
+    /// equality predicate silently matches the wrong row.
+    Int(i64),
+    /// A real; ordered against integers via the exact int-float comparison.
+    Float(f64),
     /// A text value ordered lexicographically by bytes.
     Text(String),
     /// A blob value ordered lexicographically by bytes.
     Blob(Vec<u8>),
+}
+
+/// Exact ordering of an i64 against an f64 without precision loss: the float
+/// is split into its truncated integer part and fraction, so magnitudes past
+/// 2^53 (where `i as f64` rounds) still order correctly. A NaN compares
+/// Equal, mirroring the previous total-order fallback (stored data never
+/// carries NaN; Ord must stay consistent for sorting).
+fn int_float_cmp(i: i64, f: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if f.is_nan() {
+        return Ordering::Equal;
+    }
+    if f < -9_223_372_036_854_775_808.0 {
+        return Ordering::Greater;
+    }
+    if f >= 9_223_372_036_854_775_808.0 {
+        return Ordering::Less;
+    }
+    let t = f.trunc();
+    let ft = t as i64;
+    match i.cmp(&ft) {
+        Ordering::Equal => {
+            if f > t {
+                Ordering::Less
+            } else if f < t {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        other => other,
+    }
 }
 
 impl Eq for SortKey {}
@@ -632,9 +668,12 @@ impl Ord for SortKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (SortKey::Null, SortKey::Null) => std::cmp::Ordering::Equal,
-            (SortKey::Number(a), SortKey::Number(b)) => {
+            (SortKey::Int(a), SortKey::Int(b)) => a.cmp(b),
+            (SortKey::Float(a), SortKey::Float(b)) => {
                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
             }
+            (SortKey::Int(a), SortKey::Float(b)) => int_float_cmp(*a, *b),
+            (SortKey::Float(a), SortKey::Int(b)) => int_float_cmp(*b, *a).reverse(),
             (SortKey::Text(a), SortKey::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
             (SortKey::Blob(a), SortKey::Blob(b)) => a.cmp(b),
             // Different variants never co-occur within a class compare (the rank
@@ -644,13 +683,64 @@ impl Ord for SortKey {
     }
 }
 
+#[cfg(test)]
+mod int_float_cmp_tests {
+    use super::{int_float_cmp, order_key, SortKey};
+    use lillibrain::Value;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn adjacent_giants_do_not_collapse() {
+        // Past 2^53 both round to the same f64; the exact path must still
+        // tell them apart (the differential fuzzer's shrunk counterexample).
+        let a = -4_611_686_018_427_387_649_i64;
+        let b = -4_611_686_018_427_387_648_i64;
+        let (_, ka) = order_key(&Value::Int(a));
+        let (_, kb) = order_key(&Value::Int(b));
+        assert_ne!(ka.cmp(&kb), Ordering::Equal);
+        assert_eq!(ka.cmp(&kb), Ordering::Less);
+    }
+
+    #[test]
+    fn int_float_equality_and_fractions() {
+        assert_eq!(int_float_cmp(1, 1.0), Ordering::Equal);
+        assert_eq!(int_float_cmp(2, 2.5), Ordering::Less);
+        assert_eq!(int_float_cmp(3, 2.5), Ordering::Greater);
+        assert_eq!(int_float_cmp(-2, -2.5), Ordering::Greater);
+        assert_eq!(int_float_cmp(-3, -2.5), Ordering::Less);
+    }
+
+    #[test]
+    fn floats_beyond_i64_range_order_by_sign() {
+        assert_eq!(int_float_cmp(i64::MAX, 1e19), Ordering::Less);
+        assert_eq!(int_float_cmp(i64::MIN, -1e19), Ordering::Greater);
+    }
+
+    #[test]
+    fn giant_int_vs_nearby_float() {
+        // 2^62 as f64 is exact; 2^62+1 is not representable — the exact
+        // comparison must still order them.
+        let giant = (1_i64 << 62) + 1;
+        let f = (1_i64 << 62) as f64;
+        assert_eq!(int_float_cmp(giant, f), Ordering::Greater);
+    }
+
+    #[test]
+    fn cross_variant_orderings_reverse_consistently() {
+        let i = SortKey::Int(10);
+        let f = SortKey::Float(9.5);
+        assert_eq!(i.cmp(&f), Ordering::Greater);
+        assert_eq!(f.cmp(&i), Ordering::Less);
+    }
+}
+
 /// Map a value to its ascending `(class_rank, within_class_key)` sort key,
 /// reproducing sqlite3's NULLs-first, numeric-before-text collation order.
 pub fn order_key(value: &Value) -> (u8, SortKey) {
     match value {
         Value::Null => (CLASS_NULL, SortKey::Null),
-        Value::Int(i) => (CLASS_NUMBER, SortKey::Number(*i as f64)),
-        Value::Float(f) => (CLASS_NUMBER, SortKey::Number(*f)),
+        Value::Int(i) => (CLASS_NUMBER, SortKey::Int(*i)),
+        Value::Float(f) => (CLASS_NUMBER, SortKey::Float(*f)),
         Value::Text(s) => (CLASS_TEXT, SortKey::Text(s.clone())),
         Value::Blob(b) => (CLASS_BLOB, SortKey::Blob(b.clone())),
     }

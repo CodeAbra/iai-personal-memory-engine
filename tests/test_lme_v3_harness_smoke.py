@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -24,12 +25,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 V2_JSONL = REPO_ROOT / "bench" / "lme500" / "output" / "lme500-v2.json.jsonl"
 
 _HF_CACHE = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
-HAS_LONGMEMEVAL_CACHE = any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exists() else False
+HAS_LONGMEMEVAL_CACHE = (
+    any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exists() else False
+) and importlib.util.find_spec("huggingface_hub") is not None
 
 
 @pytest.mark.skipif(
     not HAS_LONGMEMEVAL_CACHE,
-    reason="LongMemEval-S HF dataset not cached",
+    reason="LongMemEval-S HF dataset not cached or huggingface_hub not installed",
 )
 @pytest.mark.skipif(
     os.environ.get("IAI_MCP_SKIP_LME_V3_SMOKE") == "1",
@@ -192,7 +195,8 @@ class TestFourCombinationCoverage:
 
     @pytest.mark.skipif(
         not HAS_LONGMEMEVAL_CACHE,
-        reason="LongMemEval-S HF dataset not cached; the harness subprocess loads it",
+        reason="LongMemEval-S HF dataset not cached or huggingface_hub not "
+    "installed; the harness subprocess needs both",
     )
     def test_four_combinations_are_argparse_valid(self) -> None:
         combos = [

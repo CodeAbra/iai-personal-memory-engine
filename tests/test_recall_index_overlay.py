@@ -599,3 +599,82 @@ def test_recall_index_rebuild_step_stamps_fresh_generation(tmp_path, monkeypatch
     )
     snap = rgc.load_last_good_structural(store)
     assert snap is not None, "Snapshot must be readable after nightly rebuild"
+
+
+def test_recall_index_rebuild_prewarms_read_model(tmp_path, monkeypatch):
+    """The rebuild step pays the post-rewrite decode/build itself, so the
+    first recall after a cycle is a pure memo hit instead of a cold decode +
+    full-corpus graph stream + cold exact-authority lane."""
+    from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
+
+    store = _make_store(tmp_path)
+    store.insert(_make(text="User prewarm record one", vec=_norm_vec(21)))
+    store.insert(_make(text="User prewarm record two", vec=_norm_vec(22)))
+
+    # Force-cold everything the step must leave warm.
+    store._decoded_structural_memo = None
+    store._decoded_degrees_memo = None
+    store._warm_graph_bundle = None
+    store._exact_index.invalidate()
+
+    pipeline = SleepPipeline(store)
+    done, payload = pipeline._step_recall_index_rebuild(None)
+    assert done is True
+
+    for err_key in (
+        "structural_prewarm_error",
+        "bundle_prewarm_error",
+        "exact_prewarm_error",
+    ):
+        assert err_key not in payload, payload[err_key]
+    assert "structural_prewarm_elapsed_sec" in payload, payload
+    assert "bundle_prewarm_elapsed_sec" in payload, payload
+    assert "exact_prewarm_elapsed_sec" in payload, payload
+
+    assert any(
+        getattr(store, memo, None) is not None
+        for memo in (
+            "_decoded_structural_memo",
+            "_decoded_overlay_pair_memo",
+            "_decoded_degrees_memo",
+        )
+    ), "structural prewarm must leave a decoded memo behind"
+    assert getattr(store, "_warm_graph_bundle", None) is not None, (
+        "bundle prewarm must leave the warm graph bundle installed"
+    )
+    assert store._exact_index.is_warm, (
+        "exact prewarm must rebuild the invalidated authority matrix"
+    )
+
+
+def test_recall_index_rebuild_prewarm_yields_to_foreground(tmp_path, monkeypatch):
+    """Prewarm is pure acceleration: with a live read waiting, every phase
+    must skip rather than hold the interpreter."""
+    from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
+
+    store = _make_store(tmp_path)
+    store.insert(_make(text="User prewarm yield record", vec=_norm_vec(31)))
+
+    store._decoded_structural_memo = None
+    store._warm_graph_bundle = None
+    store._exact_index.invalidate()
+
+    pipeline = SleepPipeline(store)
+    # Interrupt fires only for chunk_idx > 0 style checks inside prewarm; the
+    # step-entry check (chunk 0) must still let the rebuild itself run.
+    calls = {"n": 0}
+
+    def _foreground_after_step_entry() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    done, payload = pipeline._step_recall_index_rebuild(_foreground_after_step_entry)
+    assert done is True
+    assert payload.get("rebuilt") is True, payload
+    for phase in ("structural", "bundle", "exact"):
+        assert payload.get(f"{phase}_prewarm_skipped") == "foreground", (
+            f"{phase} prewarm must yield to a waiting foreground read: {payload}"
+        )
+    assert store._warm_graph_bundle is None, (
+        "a skipped bundle prewarm must not have built the bundle"
+    )

@@ -482,6 +482,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
                     _trace_mark("authority")
                     _hop1_edges = _incident_edges_warm(store, list(_candidate_recs.keys()), top_k=5)
+                    _trace_mark("hop1_edges")
                     _hop1_new_ids = list({
                         _nbr
                         for _nbr_list in _hop1_edges.values()
@@ -490,8 +491,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     })
                     if _hop1_new_ids:
                         _candidate_recs.update(store.get_batch(_hop1_new_ids))
+                    _trace_mark("hop1_fetch")
 
                     _hop2_edges = _incident_edges_warm(store, _hop1_new_ids, top_k=5) if _hop1_new_ids else {}
+                    _trace_mark("hop2_edges")
                     _hop2_new_ids = list({
                         _nbr
                         for _nbr_list in _hop2_edges.values()
@@ -500,6 +503,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     })
                     if _hop2_new_ids:
                         _candidate_recs.update(store.get_batch(_hop2_new_ids))
+                    _trace_mark("hop2_fetch")
 
                     _RC_CAP = 50
                     _rc_cap = (rc or [])[:_RC_CAP]

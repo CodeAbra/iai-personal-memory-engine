@@ -408,11 +408,16 @@ pub fn write_interior_node(keys: &[i64], children: &[u32]) -> Result<Vec<u8>> {
     Ok(page)
 }
 
-/// Whether an interior node with these keys fits one usable page.
-pub fn interior_fits(keys: &[i64]) -> bool {
+/// Packed on-page byte footprint of an interior node with these keys.
+pub fn interior_used_bytes(keys: &[i64]) -> usize {
     let ptr_area = INTERIOR_HEADER_SIZE + keys.len() * 2;
     let cell_bytes: usize = keys.iter().map(|k| 4 + encode_varint(*k).len()).sum();
-    ptr_area + cell_bytes <= USABLE_END
+    ptr_area + cell_bytes
+}
+
+/// Whether an interior node with these keys fits one usable page.
+pub fn interior_fits(keys: &[i64]) -> bool {
+    interior_used_bytes(keys) <= USABLE_END
 }
 
 /// Build an empty leaf page with no sibling.

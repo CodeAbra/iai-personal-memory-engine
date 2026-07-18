@@ -488,4 +488,9 @@ class Catalog:
         advance()  # )
         is_partial = peek() == "WHERE"
         entry = (index_name, col_name, is_partial)
-        self._indexes.setdefault(table_name, []).append(entry)
+        entries = self._indexes.setdefault(table_name, [])
+        # A repeated registration must not multiply the registry (identifier
+        # compare is case-insensitive, matching sqlite and the native engine).
+        if any(name.lower() == index_name.lower() for name, _, _ in entries):
+            return
+        entries.append(entry)

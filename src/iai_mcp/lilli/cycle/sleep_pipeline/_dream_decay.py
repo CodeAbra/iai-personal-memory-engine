@@ -23,8 +23,21 @@ def step_dream_decay(
         _plasticity = getattr(_um, "plasticity_gain", 1.0) or 1.0
     except (OSError, ValueError, RuntimeError, StoreError, AttributeError) as exc:
         logger.debug("non-critical plasticity_gain load failed: %s", exc)
-    result = _decay_edges(self._store, plasticity_gain=_plasticity)
+
+    # Deferral between chunks reuses the standard bookkeeping; committed
+    # chunks stay applied (their edges carry a fresh updated_at, so the
+    # resumed run skips them via the grace window — restart-idempotent).
+    def _defer(chunk_no: int) -> bool:
+        return self._check_interrupt(
+            SleepStep.DREAM_DECAY, chunk_no, interrupt_check,
+        )
+
+    result = _decay_edges(
+        self._store, plasticity_gain=_plasticity, should_defer=_defer,
+    )
     if isinstance(result, dict):
+        if result.get("interrupted"):
+            return False, {}
         return True, {
             "decayed": int(result.get("decayed", 0) or 0),
             "pruned": int(result.get("pruned", 0) or 0),

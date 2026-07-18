@@ -34,8 +34,17 @@
     <key>ThrottleInterval</key>
     <integer>5</integer>
 
+    <!--
+      Interactive, NOT Background: this daemon IS the awake recall path —
+      every memory lookup a live session makes goes through it. Background
+      puts the whole process in the darwin-background QoS band (CPU
+      throttled, low-priority IO), which stretched every recall stage
+      ~3-4x whenever other apps were active. Consolidation stays polite
+      through its own night window, cooldown, and foreground-yield gates,
+      not through process-wide deprioritization.
+    -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
 
     <!--
       Belt-and-suspenders FD floor for a socket-serving daemon.

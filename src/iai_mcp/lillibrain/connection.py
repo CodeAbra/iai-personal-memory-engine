@@ -1536,6 +1536,23 @@ class _OwnedEngineRawConn:
     def execute(self, sql: str, params=()):
         return self._raw.execute(sql, params)
 
+    def refresh(self) -> bool:
+        """Re-arm a read-only adapter to the newest committed snapshot in place.
+
+        Returns True when the visible snapshot moved. Read-only adapters only —
+        the engine rejects a refresh on a writer connection.
+        """
+        return bool(self._raw.refresh())
+
+    def col_index_ready(self, table: str) -> bool:
+        return bool(self._raw.col_index_ready(table))
+
+    def id_index_ready(self, table: str) -> bool:
+        return bool(self._raw.id_index_ready(table))
+
+    def cells_visited_count(self) -> int:
+        return int(self._raw.cells_visited_count())
+
     def commit(self) -> None:
         # A read-only open has no write transaction to commit; commit is a no-op
         # so a reader's commit() (the stdlib usage pattern) never errors.

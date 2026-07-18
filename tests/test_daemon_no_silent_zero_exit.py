@@ -92,13 +92,14 @@ def test_e_cmd_daemon_stop_writes_sentinel_before_launchctl(
 
     call_log: list[str] = []
 
-    real_save_state = state_mod.save_state
+    real_update_state = state_mod.update_state
 
-    def tracking_save_state(state: dict) -> None:
-        call_log.append(f"save_state:{state.get('user_requested_shutdown')}")
-        real_save_state(state)
+    def tracking_update_state(mutator):
+        result = real_update_state(mutator)
+        call_log.append(f"save_state:{result.get('user_requested_shutdown')}")
+        return result
 
-    monkeypatch.setattr(state_mod, "save_state", tracking_save_state)
+    monkeypatch.setattr(state_mod, "update_state", tracking_update_state)
 
     def fake_run(argv, **_kwargs):
         call_log.append(f"subprocess.run:{argv[0]}:{argv[1]}")
@@ -142,13 +143,14 @@ def test_f_cmd_daemon_stop_writes_sentinel_before_systemctl(
 
     call_log: list[str] = []
 
-    real_save_state = state_mod.save_state
+    real_update_state = state_mod.update_state
 
-    def tracking_save_state(state: dict) -> None:
-        call_log.append(f"save_state:{state.get('user_requested_shutdown')}")
-        real_save_state(state)
+    def tracking_update_state(mutator):
+        result = real_update_state(mutator)
+        call_log.append(f"save_state:{result.get('user_requested_shutdown')}")
+        return result
 
-    monkeypatch.setattr(state_mod, "save_state", tracking_save_state)
+    monkeypatch.setattr(state_mod, "update_state", tracking_update_state)
 
     def fake_run(argv, **_kwargs):
         call_log.append(f"subprocess.run:{argv[0]}")

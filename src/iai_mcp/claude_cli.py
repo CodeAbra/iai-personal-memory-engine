@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from iai_mcp.daemon_state import load_state, save_state
+from iai_mcp.daemon_state import load_state, update_state
 
 _ANTHR = "ANTHR" + "OPIC_" + "API_" + "KEY"
 _CLAUDE_KEY = "CLAUDE_" + "API_" + "KEY"
@@ -198,7 +198,9 @@ class BudgetTracker:
             "claude_disabled": self._claude_disabled,
             "claude_disabled_reason": self._disabled_reason,
         }
-        save_state(self._state)
+        update_state(
+            lambda d: d.__setitem__(BUDGET_STATE_KEY, self._state[BUDGET_STATE_KEY]),
+        )
 
 
 def _scrubbed_env() -> dict[str, str]:

@@ -30,6 +30,12 @@ pub fn leaf_max_cells() -> usize {
 
 const SMALL_CAP_SENTINEL: usize = 9999;
 
+/// Whether a small injected cell ceiling is active. Count-floor rebalance
+/// rules apply only then; byte-driven rules govern otherwise.
+pub fn small_cap_active() -> bool {
+    leaf_max_cells() < SMALL_CAP_SENTINEL
+}
+
 /// A materialized `(key, value)` leaf cell with its full payload.
 pub type Cell = (i64, Vec<u8>);
 
@@ -395,21 +401,57 @@ impl<'p> Cursor<'p> {
             let page = self.pager.read_page_scan(page_no)?;
             pages_visited += 1;
             let hdr = read_leaf_header(&page);
-            for i in 0..hdr.num_cells {
-                if ki >= keys.len() {
+            // Per-page binary seek instead of a linear cell decode: cells are
+            // key-sorted, so each requested key resolves in O(log num_cells)
+            // key-only decodes. A hub adjacency fetch of ~1e3 scattered keys
+            // over a ~1e5-cell table otherwise decodes every cell it walks
+            // past — the dominant cost of the whole fetch.
+            if hdr.num_cells == 0 {
+                page_no = get_sibling(&page);
+                continue;
+            }
+            let last_key = read_leaf_cell_raw(
+                &page, hdr.num_cells - 1, OVERFLOW_THRESHOLD,
+            )?
+            .key;
+            let mut lo = 0usize;
+            while ki < keys.len() {
+                let target = keys[ki];
+                if target > last_key {
+                    // Every remaining target lies beyond this page.
                     break;
                 }
-                let raw = read_leaf_cell_raw(&page, i, OVERFLOW_THRESHOLD)?;
-                while ki < keys.len() && keys[ki] < raw.key {
-                    ki += 1; // requested key absent from the tree: skip it
+                // Binary search in [lo, num_cells) for the first cell whose
+                // key >= target; lo only moves forward (targets are sorted).
+                let mut left = lo;
+                let mut right = hdr.num_cells;
+                while left < right {
+                    let mid = left + (right - left) / 2;
+                    let mid_key =
+                        read_leaf_cell_raw(&page, mid, OVERFLOW_THRESHOLD)?.key;
+                    if mid_key < target {
+                        left = mid + 1;
+                    } else {
+                        right = mid;
+                    }
                 }
-                if ki < keys.len() && keys[ki] == raw.key {
-                    let payload = self.payload_of(&page, &raw)?;
-                    out.push((raw.key, payload));
-                    // Advance past this key and any duplicates of it.
-                    while ki < keys.len() && keys[ki] == raw.key {
+                lo = left;
+                if left < hdr.num_cells {
+                    let raw = read_leaf_cell_raw(&page, left, OVERFLOW_THRESHOLD)?;
+                    if raw.key == target {
+                        let payload = self.payload_of(&page, &raw)?;
+                        out.push((raw.key, payload));
+                    }
+                    // Equal: consumed. Greater: target absent from the tree
+                    // (this page holds the first key past it). Either way the
+                    // target (and its duplicates) is done.
+                    while ki < keys.len() && keys[ki] == target {
                         ki += 1;
                     }
+                } else {
+                    // Insertion point past the page end despite target <=
+                    // last_key cannot happen; defensively move on.
+                    break;
                 }
             }
             page_no = get_sibling(&page);

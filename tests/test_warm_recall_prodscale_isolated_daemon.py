@@ -127,6 +127,10 @@ def _assert_prod_daemon_alive_if_present(pid: "int | None") -> None:
         pass
 
 
+# Prod-scale by design: migrating and booting the full repro corpus takes
+# minutes on a loaded serial box; the override keeps a lane-wide short
+# --timeout from killing it.
+@pytest.mark.timeout(900)
 @pytest.mark.parametrize("driver", ["lilli", "stdlib"])
 def test_warm_recall_prodscale_isolated_daemon(tmp_path: Path, driver: str) -> None:
     _assert_frozen_cue_set()

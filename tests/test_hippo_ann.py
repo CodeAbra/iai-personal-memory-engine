@@ -359,3 +359,44 @@ def test_ann_to_pandas_returns_empty_on_runtime_error(tmp_path: Path) -> None:
     assert len(df) == 0, (
         f"expected empty DataFrame on RuntimeError; got {len(df)} rows"
     )
+
+
+def test_knn_query_degrades_k_instead_of_returning_empty(tmp_path: Path) -> None:
+    """A delete-churned index can be too fragmented to reach k neighbors
+    (hnswlib: "Cannot return the results in a contiguous 2D array") even with
+    ef >= k. The lane must degrade k and return what the graph CAN reach —
+    an empty return silently drops ANN from recall until the next rebuild."""
+    rng = np.random.default_rng(7)
+    db = HippoDB(str(tmp_path / "store"))
+    tbl = db.open_table("records")
+    for _ in range(32):
+        tbl.add([_record_row(embedding=_rng_unit_vec(rng))])
+
+    real_query = db._hnsw.knn_query
+
+    class _FragmentedIndex:
+        def __getattr__(self, name):
+            return getattr(db.__dict__["_hnsw_real"], name)
+
+        def knn_query(self, vec, k):
+            if k > 8:
+                raise RuntimeError(
+                    "Cannot return the results in a contiguous 2D array. "
+                    "Probably ef or M is too small"
+                )
+            return real_query(vec, k=k)
+
+    db.__dict__["_hnsw_real"] = db._hnsw
+    db._hnsw = _FragmentedIndex()
+    try:
+        cue = _rng_unit_vec(rng)
+        rows = (
+            tbl.search(cue).distance_type("cosine").limit(30).to_row_dicts()
+        )
+        assert 1 <= len(rows) <= 8, (
+            f"fragmented index must yield a DEGRADED result, not empty/full: "
+            f"{len(rows)} rows"
+        )
+    finally:
+        db._hnsw = db.__dict__.pop("_hnsw_real")
+        db.close()

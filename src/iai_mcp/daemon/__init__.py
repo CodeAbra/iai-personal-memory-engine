@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 from iai_mcp import s4
 from iai_mcp.concurrency import serve_control_socket  # noqa: F401 -- re-exported here for the test suite; the function lives in concurrency.py
-from iai_mcp.daemon_state import load_state, save_state
+from iai_mcp.daemon_state import load_state, save_state, update_state
 from iai_mcp.dream import run_rem_cycle
 from iai_mcp.events import (
     CRISIS_MODE_AUTO_EXPIRED,
@@ -157,6 +157,24 @@ def _should_drain_on_drowsy_edge(prev, current) -> bool:
     return prev is _L.WAKE and current is _L.DROWSY
 
 
+#: Post-read courtesy tail for the sleep pipeline: a foreground read that
+#: finished this recently still defers the next chunk (a turn usually issues
+#: several reads back to back). Kept short on purpose — pipeline steps now
+#: yield between ~1-2s chunks, so a read arriving mid-grind waits at most one
+#: chunk; a long tail here only starves consolidation on a busy machine.
+SLEEP_FOREGROUND_RECENT_WINDOW_SEC: float = 5.0
+
+
+def _sleep_interrupt_predicate() -> bool:
+    # Module-level so it is directly unit-testable without assembling the
+    # daemon. Sleep yields to the USER: a foreground read in flight, or one
+    # stamped within the courtesy tail. Ambient socket traffic (capture
+    # hooks, refresh polls, status probes) never defers a chunk.
+    from iai_mcp.concurrency import foreground_recent
+
+    return foreground_recent(SLEEP_FOREGROUND_RECENT_WINDOW_SEC)
+
+
 def _sleep_pipeline_gate(daemon_state: dict | None) -> bool:
     # Module-level so it is directly unit-testable without assembling the
     # daemon. Returns False (pipeline must NOT run) when scheduler_paused is
@@ -183,6 +201,55 @@ def _sleep_backoff_active(
     if bool(((daemon_state or {}).get("force_rem_request") or {}).get("pending")):
         return False
     return now < backoff_until
+
+
+def _sleep_cycle_cooldown_sec() -> float:
+    try:
+        return float(os.environ.get("IAI_MCP_SLEEP_CYCLE_COOLDOWN_SEC", "14400"))
+    except ValueError:
+        return 14400.0
+
+
+def _sleep_cooldown_active(
+    daemon_state: "dict | None",
+    last_clean_cycle_mono: float,
+    now: float,
+    last_clean_cycle_wall: float = 0.0,
+) -> bool:
+    # Module-level so it is directly unit-testable without assembling the
+    # daemon. A completed CLEAN cycle opens a refractory window: consolidation
+    # already ran to completion, and re-running it back-to-back only taxes the
+    # awake path — an active user blocks the hibernation exit, so without
+    # this gate the pipeline loops continuously for as long as the user works
+    # (observed: 117 cycles in one night, the awake socket starved to
+    # timeout). force-rem is explicit operator intent and always wins — and
+    # because the tick CONSUMES the pending flag (stamping honored_at) before
+    # this gate runs, an honored force must keep the gate open until ITS
+    # cycle completes (a clean completion newer than honored_at closes it, or
+    # the forced cycle would re-open the continuous loop for the whole
+    # honored-recency window).
+    for req_key in ("force_rem_request", "user_sleep_request"):
+        req = (daemon_state or {}).get(req_key) or {}
+        if bool(req.get("pending")):
+            return False
+        honored_raw = req.get("honored_at")
+        if not honored_raw:
+            continue
+        try:
+            from datetime import datetime, timedelta, timezone as _tz
+
+            honored = datetime.fromisoformat(str(honored_raw))
+            if honored.tzinfo is None:
+                honored = honored.replace(tzinfo=_tz.utc)
+            recent = (datetime.now(_tz.utc) - honored) <= timedelta(hours=2)
+            served = last_clean_cycle_wall > honored.timestamp()
+            if recent and not served:
+                return False
+        except (ValueError, TypeError):
+            pass
+    if last_clean_cycle_mono <= 0.0:
+        return False
+    return (now - last_clean_cycle_mono) < _sleep_cycle_cooldown_sec()
 
 
 def _in_consolidation_window(daemon_state: "dict | None") -> bool:
@@ -243,7 +310,7 @@ async def _consume_force_wake(ds: dict, state_machine: Any) -> dict:
 
     from datetime import datetime as _dt, timezone as _tz
 
-    from iai_mcp.daemon_state import save_state as _save
+    from iai_mcp.daemon_state import update_state as _update
     from iai_mcp.lifecycle import LifecycleEvent as _Ev
     from iai_mcp.s2_coordinator import (
         S2OscillationBlocked as _Blocked,
@@ -258,13 +325,13 @@ async def _consume_force_wake(ds: dict, state_machine: Any) -> dict:
         # pending so the next tick retries after the interval clears.
         return ds
 
-    updated = dict(ds)
-    req = dict(updated.get("force_wake_request") or {})
-    req["pending"] = False
-    req["honored_at"] = _dt.now(_tz.utc).isoformat()
-    updated["force_wake_request"] = req
-    await asyncio.to_thread(_save, updated)
-    return updated
+    def _honor(d: dict) -> None:
+        req = dict(d.get("force_wake_request") or {})
+        req["pending"] = False
+        req["honored_at"] = _dt.now(_tz.utc).isoformat()
+        d["force_wake_request"] = req
+
+    return await asyncio.to_thread(_update, _honor)
 
 
 def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
@@ -334,6 +401,20 @@ def _wake_hook_rebuild_if_cold(store) -> None:
         log.debug("wake-hook graph-cache rebuild failed", exc_info=True)
 
 
+def _persist_keys(state: dict, *keys: str) -> None:
+    # Copy only the named keys from the long-held in-memory dict to disk
+    # under the state write lock. A whole-dict save_state of that dict
+    # erases every key another writer persisted since it was loaded.
+    def _apply(d: dict) -> None:
+        for k in keys:
+            if k in state:
+                d[k] = state[k]
+            else:
+                d.pop(k, None)
+
+    update_state(_apply)
+
+
 def transition(state: dict, new_fsm: str) -> None:
     current = state.get("fsm_state", STATE_WAKE)
     allowed = VALID_TRANSITIONS.get(current, set())
@@ -343,7 +424,7 @@ def transition(state: dict, new_fsm: str) -> None:
         )
     state["fsm_state"] = new_fsm
     state["fsm_transition_at"] = datetime.now(timezone.utc).isoformat()
-    save_state(state)
+    _persist_keys(state, "fsm_state", "fsm_transition_at")
 
 
 def _store_is_empty(store: MemoryStore) -> bool:
@@ -459,7 +540,10 @@ async def _tick_body(
         )
         if dropped:
             try:
-                await asyncio.to_thread(save_state, state)
+                def _persist_prune(d: dict) -> None:
+                    prune_first_turn_pending(d, now=datetime.now(timezone.utc))
+
+                await asyncio.to_thread(update_state, _persist_prune)
             except (OSError, ValueError) as exc:  # noqa: BLE001 -- state save non-critical
                 log.debug("save_state after prune failed: %s", exc)
             try:
@@ -594,7 +678,9 @@ async def _tick_body(
         state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
         state["last_tick_skipped_reason"] = "paused"
         try:
-            await asyncio.to_thread(save_state, state)
+            await asyncio.to_thread(
+                _persist_keys, state, "last_tick_at", "last_tick_skipped_reason",
+            )
         except (OSError, ValueError) as exc:
             log.debug("save_state (paused) failed: %s", exc)
         return
@@ -602,7 +688,9 @@ async def _tick_body(
     if await asyncio.to_thread(_store_is_empty, store):
         state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
         state["last_tick_skipped_reason"] = "empty_store"
-        await asyncio.to_thread(save_state, state)
+        await asyncio.to_thread(
+            _persist_keys, state, "last_tick_at", "last_tick_skipped_reason",
+        )
         return
 
     now = datetime.now(timezone.utc)
@@ -628,12 +716,17 @@ async def _tick_body(
             window = None
         state["quiet_window"] = list(window) if window else None
         state["quiet_window_learned_at"] = now.isoformat()
-        await asyncio.to_thread(save_state, state)
+        await asyncio.to_thread(
+            _persist_keys, state, "quiet_window", "quiet_window_learned_at",
+        )
 
 
     state["last_tick_at"] = datetime.now(timezone.utc).isoformat()
+    state.pop("last_tick_skipped_reason", None)
     try:
-        await asyncio.to_thread(save_state, state)
+        await asyncio.to_thread(
+            _persist_keys, state, "last_tick_at", "last_tick_skipped_reason",
+        )
     except (OSError, ValueError) as exc:
         log.debug("save_state after tick failed: %s", exc)
 
@@ -746,10 +839,7 @@ _USER_SHUTDOWN_FLAG = "user_requested_shutdown"
 
 def _clear_user_shutdown_sentinel(state: dict) -> None:
     try:
-        on_disk = load_state()
-        if _USER_SHUTDOWN_FLAG in on_disk:
-            on_disk.pop(_USER_SHUTDOWN_FLAG, None)
-            save_state(on_disk)
+        update_state(lambda d: d.pop(_USER_SHUTDOWN_FLAG, None))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         log.debug("clear_user_shutdown_sentinel disk op failed: %s", exc)
     state.pop(_USER_SHUTDOWN_FLAG, None)
@@ -946,13 +1036,14 @@ async def main() -> int:
         except Exception:  # noqa: BLE001 -- fail-safe boundary
             log.debug("archive_stuck_backups failed", exc_info=True)
 
-        state = await asyncio.to_thread(load_state)
-        state.setdefault("fsm_state", STATE_WAKE)
-        state["daemon_started_at"] = datetime.now(timezone.utc).isoformat()
+        def _boot_stamp(d: dict) -> None:
+            d.setdefault("fsm_state", STATE_WAKE)
+            d["daemon_started_at"] = datetime.now(timezone.utc).isoformat()
+            d["daemon_pid"] = os.getpid()
+
+        state = await asyncio.to_thread(update_state, _boot_stamp)
         global _daemon_started_monotonic
         _daemon_started_monotonic = time.monotonic()
-        state["daemon_pid"] = os.getpid()
-        await asyncio.to_thread(save_state, state)
         write_event(store, "daemon_started", {"state": state["fsm_state"]})
 
         _wake_was_pending = False
@@ -1015,7 +1106,10 @@ async def main() -> int:
                 state, now=datetime.now(timezone.utc),
             )
             if dropped:
-                await asyncio.to_thread(save_state, state)
+                def _persist_boot_prune(d: dict) -> None:
+                    prune_first_turn_pending(d, now=datetime.now(timezone.utc))
+
+                await asyncio.to_thread(update_state, _persist_boot_prune)
                 try:
                     write_event(
                         store,
@@ -1331,6 +1425,8 @@ async def main() -> int:
         # starves every SHARED client (dashboard, CLI) for as long as the
         # failure persists. One failure buys a cooldown before the next try.
         _sleep_fail_backoff_until: list[float] = [0.0]
+        _last_clean_cycle_mono: list[float] = [0.0]
+        _last_clean_cycle_wall: list[float] = [0.0]
         _last_pending_embed_mono: list[float] = [0.0]
         _pending_embed_inflight: list[bool] = [False]
 
@@ -1357,7 +1453,13 @@ async def main() -> int:
                     log.debug("pending-embed pack refresh failed", exc_info=True)
             if isinstance(result, dict) and result.get("action") != "skip":
                 try:
-                    _rgc.invalidate(store)
+                    # Ambient churn, not an operator demand for freshness: drop
+                    # only the persisted cache and let the kicked rebuild
+                    # refresh behind the live bundle (stale-while-revalidate).
+                    # The hard invalidate also nulled the in-process warm
+                    # bundle, so every daytime heal degraded the recall hop
+                    # stages to whole-table edge SQL until the rebuild landed.
+                    _rgc.invalidate_at_root(store.root)
                 except Exception:  # noqa: BLE001
                     pass
                 try:
@@ -1454,22 +1556,25 @@ async def main() -> int:
                                 _now_iso = __import__("datetime").datetime.now(
                                     __import__("datetime").timezone.utc,
                                 ).isoformat()
-                                _ds_upd = dict(_ds)
-                                if _force_rem:
-                                    req = dict(_ds_upd.get("force_rem_request") or {})
-                                    req["pending"] = False
-                                    req["honored_at"] = _now_iso
-                                    _ds_upd["force_rem_request"] = req
-                                if _user_sleep:
-                                    req = dict(_ds_upd.get("user_sleep_request") or {})
-                                    req["pending"] = False
-                                    req["honored_at"] = _now_iso
-                                    _ds_upd["user_sleep_request"] = req
-                                from iai_mcp.daemon_state import save_state as _save_ds
-                                await asyncio.to_thread(_save_ds, _ds_upd)
+
+                                def _honor_sleep_reqs(d: dict) -> None:
+                                    if _force_rem:
+                                        req = dict(d.get("force_rem_request") or {})
+                                        req["pending"] = False
+                                        req["honored_at"] = _now_iso
+                                        d["force_rem_request"] = req
+                                    if _user_sleep:
+                                        req = dict(d.get("user_sleep_request") or {})
+                                        req["pending"] = False
+                                        req["honored_at"] = _now_iso
+                                        d["user_sleep_request"] = req
+
+                                from iai_mcp.daemon_state import update_state as _update_ds
                                 # Later consumers in this tick must see the
                                 # honored flags, not the stale pre-save dict.
-                                _ds = _ds_upd
+                                _ds = await asyncio.to_thread(
+                                    _update_ds, _honor_sleep_reqs,
+                                )
                     except Exception:  # noqa: BLE001 -- FORCE_SLEEP dispatch is best-effort
                         log.debug("lifecycle_tick FORCE_SLEEP dispatch failed", exc_info=True)
 
@@ -1624,6 +1729,9 @@ async def main() -> int:
                                 getattr(_hp_pool, "writer_fallback_count", 0) or 0
                             ),
                         }
+                        await asyncio.to_thread(
+                            _persist_keys, state, "ann_pool_health",
+                        )
                     except Exception:  # noqa: BLE001 -- health publish is best-effort
                         pass
 
@@ -1659,19 +1767,32 @@ async def main() -> int:
                             "(%.0fs left)",
                             _sleep_fail_backoff_until[0] - time.monotonic(),
                         )
+                    elif current is _LifecycleState.SLEEP and _sleep_cooldown_active(
+                        _ds,
+                        _last_clean_cycle_mono[0],
+                        time.monotonic(),
+                        _last_clean_cycle_wall[0],
+                    ):
+                        log.debug(
+                            "lifecycle_tick: SLEEP pipeline in post-cycle "
+                            "cooldown (%.0fs left)",
+                            _last_clean_cycle_mono[0]
+                            + _sleep_cycle_cooldown_sec()
+                            - time.monotonic(),
+                        )
                     elif current is _LifecycleState.SLEEP:
                         # Consolidation is NEVER on the awake critical path:
-                        # every step yields the moment a client is active, even
-                        # for a force-rem. 'Force' means run NOW (skip the
-                        # schedule wait), not 'block the user' — it completes at
-                        # the next lull.
+                        # every step yields the moment a USER read is being
+                        # served, even for a force-rem. The yield signal is the
+                        # foreground beacon (stamped by recall/search dispatch),
+                        # NOT raw socket traffic: ambient machinery — per-turn
+                        # capture hooks, session-refresh polls, status probes
+                        # from every open client session — keeps the socket
+                        # warm around the clock, and a predicate keyed to it
+                        # starves consolidation forever (a cycle that defers at
+                        # its first chunk and never resumes, any hour of day).
                         def _interrupt_check() -> bool:
-                            if mcp_socket.active_connections > 0:
-                                return True
-                            elapsed = (
-                                time.monotonic() - mcp_socket.last_activity_ts
-                            )
-                            return elapsed < INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC
+                            return _sleep_interrupt_predicate()
 
                         try:
                             await asyncio.to_thread(store.db.escalate_to_exclusive)
@@ -1765,6 +1886,8 @@ async def main() -> int:
                             and not result.get("quarantine_triggered", False)
                             and len(result.get("completed_steps", [])) >= 5
                         ):
+                            _last_clean_cycle_mono[0] = time.monotonic()
+                            _last_clean_cycle_wall[0] = time.time()
                             still_idle_now = await asyncio.to_thread(
                                 _heartbeat_scanner.heartbeat_idle_30min,
                             )
@@ -1865,7 +1988,12 @@ async def main() -> int:
             try:
                 state.pop("daemon_pid", None)
                 state["daemon_stopped_at"] = datetime.now(timezone.utc).isoformat()
-                await asyncio.to_thread(save_state, state)
+
+                def _stop_stamp(d: dict) -> None:
+                    d.pop("daemon_pid", None)
+                    d["daemon_stopped_at"] = state["daemon_stopped_at"]
+
+                await asyncio.to_thread(update_state, _stop_stamp)
             except (OSError, ValueError) as exc:
                 log.debug("final save_state failed: %s", exc)
             try:
