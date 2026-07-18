@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — 2026-07-17
+
+### Added
+
+- **Claude Cowork support.** `iai-mcp cowork install` wires the ambient memory
+  hooks into Claude Cowork through a local plugin marketplace, so capture and
+  recall work there the same way they do in the other supported clients.
+
+### Changed
+
+- **Recall stays fast while the store is being written.** The engine now keeps
+  its read indexes and row counts on the writer side and publishes them at
+  commit, and reads the corpus count off the write lock, so recall no longer
+  slows down under a write load or right after a burst of captures.
+- **Consolidation gets out of your way.** Sleep now yields to your reads rather
+  than to background socket chatter, so a deferred cycle actually resumes
+  instead of starving; it waits out a short cooldown after a clean cycle instead
+  of looping while you work; edge decay runs in chunks so it finishes on a live
+  daemon; and the orphan-edge sweep is about 54× faster on a real backlog.
+- **Lower first-recall latency after a restart.** Boot warm-up publishes the read
+  models once up front, so the first queries after a restart no longer each pay
+  for a full table scan.
+
+### Fixed
+
+- **The daemon no longer gets throttled by macOS.** It now runs as an
+  interactive service instead of a background one, so macOS stops starving it of
+  CPU and I/O while other apps are busy — the fix that brought live recall from
+  seconds back down to well under one.
+- **Big integers compare exactly.** Past 2^53 the engine promoted integers to
+  doubles, where adjacent values round together, so an UPDATE or DELETE whose
+  WHERE named one giant integer could silently touch a different row.
+  Comparisons and sort keys now keep integers exact.
+- **Deletes over large pages no longer fail.** Interior B-tree rebalancing now
+  measures page fullness in bytes, so a delete cascade across byte-full interior
+  pages completes instead of erroring with a page overflow.
+- **Recall degrades gracefully on a fragmented index.** A nearest-neighbor query
+  now returns fewer results on a fragmented index instead of coming back empty.
+- **Concurrent daemon-state writes are safe.** State is written atomically, so
+  one writer's keys are no longer erased by another writer's whole-dictionary
+  save.
+- **Reinforcement no longer disturbs recall.** Writing a reinforcement no longer
+  invalidates the recall read path.
+- **Async writes shut down cleanly.** Turning async writes off, or tearing the
+  store down, no longer leaks the writer thread.
+
 ## [2.3.1] — 2026-07-14
 
 ### Fixed
