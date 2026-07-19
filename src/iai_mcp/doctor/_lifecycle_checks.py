@@ -261,7 +261,15 @@ def check_e_state_file_valid() -> CheckResult:
             "no state file (daemon never booted — not a bug)",
         )
 
-    valid = {"WAKE", "DROWSY", "SLEEP", "SLEEPING", "DREAMING", "HIBERNATION"}
+    valid = {
+        "WAKE",
+        "DROWSY",
+        "TRANSITIONING",
+        "SLEEP",
+        "SLEEPING",
+        "DREAMING",
+        "HIBERNATION",
+    }
     if fsm_state in valid:
         return CheckResult(
             "(e) daemon state file valid",

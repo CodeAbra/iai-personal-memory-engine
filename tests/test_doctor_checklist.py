@@ -216,6 +216,17 @@ def test_check_e_passes_when_state_file_absent(short_socket_paths):
     assert "no state file" in result.detail
 
 
+def test_check_e_passes_for_transitioning_state(short_socket_paths):
+    _, _, state_path = short_socket_paths
+    state_path.write_text(json.dumps({"fsm_state": "TRANSITIONING"}))
+
+    from iai_mcp.doctor import check_e_state_file_valid
+
+    result = check_e_state_file_valid()
+    assert result.passed is True
+    assert result.detail == "fsm_state=TRANSITIONING"
+
+
 def test_check_b_passes_against_silent_listening_socket(short_socket_paths):
     import socket as _socket
     import threading
