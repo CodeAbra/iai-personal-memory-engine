@@ -9,8 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-import pyarrow as pa
-
 from iai_mcp.events import write_event
 from iai_mcp.store import (
     MemoryStore,
@@ -26,13 +24,34 @@ from iai_mcp.migrate import STAGING_TABLE, OLD_TABLE_PREFIX, PROGRESS_FILE
 log = logging.getLogger(__name__)
 
 
-def _records_schema_at_dim(db, dim: int) -> pa.Schema:
-    # Staging inherits the LIVE records schema (only the embedding dim
-    # changes) — a hand-copied column list silently drifts behind
-    # _reconcile_columns additions and breaks the staging insert.
-    base = db.open_table(RECORDS_TABLE).schema
-    idx = base.get_field_index("embedding")
-    return base.set(idx, pa.field("embedding", pa.list_(pa.float32(), dim)))
+def _create_canonical_staging(db):
+    """Create the staging table from the CANONICAL records DDL, not from a
+    pyarrow-derived column list. Arrow schemas carry names and types but no
+    SQL constraints, so an arrow-derived staging table loses
+    ``vec_label INTEGER PRIMARY KEY AUTOINCREMENT`` and ``id UNIQUE`` — after
+    the swap, inserts leave ``vec_label`` NULL (the rowid alias is gone) and
+    the next label-map load crashes the daemon into a restart loop. The SQL
+    DDL is embedding-dim independent (the column is a BLOB), so the canonical
+    text is correct for any target dim; live columns added after the DDL was
+    written are aligned by the same reconcile pass the boot path uses."""
+    from iai_mcp.hippo._table import _DDL_RECORDS, _pa_type_to_sqlite
+
+    ddl = _DDL_RECORDS.replace(
+        "CREATE TABLE IF NOT EXISTS records (",
+        f"CREATE TABLE IF NOT EXISTS {STAGING_TABLE} (",
+        1,
+    )
+    from iai_mcp.hippo._db import _txn
+
+    with db._conn_lock, _txn(db._conn):
+        db._conn.execute(ddl)
+
+    live_schema = db.open_table(RECORDS_TABLE).schema
+    drift = [
+        (f.name, _pa_type_to_sqlite(f.type)) for f in live_schema
+    ]
+    db._reconcile_columns(STAGING_TABLE, drift)
+    return db.open_table(STAGING_TABLE)
 
 
 def _progress_path(store: MemoryStore) -> Path:
@@ -369,9 +388,7 @@ def migrate_reembed_to_current_dim(
 
     if STAGING_TABLE in set(store.db.table_names()):
         store.db.drop_table(STAGING_TABLE)
-    target_tbl = store.db.create_table(
-        STAGING_TABLE, schema=_records_schema_at_dim(store.db, target_dim)
-    )
+    target_tbl = _create_canonical_staging(store.db)
 
     total = store.db.open_table(RECORDS_TABLE).count_rows()
     source_iter = store.iter_records()
@@ -554,9 +571,7 @@ def _resume(db, store: MemoryStore, target_embedder) -> int:
         return 2
 
     if STAGING_TABLE not in names:
-        target_tbl = db.create_table(
-            STAGING_TABLE, schema=_records_schema_at_dim(db, target_dim)
-        )
+        target_tbl = _create_canonical_staging(db)
         already_staged: set[str] = set()
     else:
         target_tbl = db.open_table(STAGING_TABLE)

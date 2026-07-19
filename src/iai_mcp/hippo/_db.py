@@ -1029,7 +1029,21 @@ class HippoDB:
                 " WHERE tombstoned_at IS NULL"
                 " AND COALESCE(embedding_pending, 0) = 0"
             ).fetchall()
-        return {row["id"]: int(row["vec_label"]) for row in rows}
+        from iai_mcp.hippo import HippoIntegrityError  # noqa: PLC0415
+
+        label_map: dict[str, int] = {}
+        for row in rows:
+            label = row["vec_label"]
+            if label is None:
+                # The boot heal backfills these; one appearing here means a
+                # writer is still inserting without the rowid alias.
+                raise HippoIntegrityError(
+                    f"records row {row['id']!r} has NULL vec_label; the "
+                    "records table lost its INTEGER PRIMARY KEY alias — "
+                    "reopen the store to heal, and report the writer"
+                )
+            label_map[row["id"]] = int(label)
+        return label_map
 
     def _repopulate_label_map_from_sqlite(self) -> None:
         fresh = self._load_label_map_from_sqlite()
@@ -2040,6 +2054,32 @@ class HippoDB:
             conn.execute(_DDL_RECORD_TAGS)
             for idx in _DDL_RECORD_TAGS_INDEXES:
                 conn.execute(idx)
+
+        self._heal_null_vec_labels()
+
+    def _heal_null_vec_labels(self) -> None:
+        """Backfill NULL ``vec_label`` from the rowid. A staging table built
+        without the ``INTEGER PRIMARY KEY`` alias (a past reembed migration
+        did exactly that) leaves every post-swap insert with a NULL
+        vec_label; the first label-map load after restart then dies on
+        ``int(None)`` and launchd respawns the daemon into a crash loop.
+        ``lastrowid == rowid`` for those inserts, so the rowid IS the label
+        the ANN index and the in-memory map were using."""
+        with self._conn_lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM records WHERE vec_label IS NULL"
+            ).fetchone()
+        n_null = int(row[0]) if row is not None else 0
+        if n_null == 0:
+            return
+        _log.warning(
+            "healing %d records rows with NULL vec_label (backfill from rowid)",
+            n_null,
+        )
+        with self._conn_lock, _txn(self._conn):
+            self._conn.execute(
+                "UPDATE records SET vec_label = rowid WHERE vec_label IS NULL"
+            )
 
     def _reconcile_columns(
         self, table_name: str, expected: list[tuple[str, str]]

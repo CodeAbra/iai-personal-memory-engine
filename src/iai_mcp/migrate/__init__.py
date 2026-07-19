@@ -127,7 +127,7 @@ from iai_mcp.migrate._reembed import (  # noqa: E402
     _resume,
     _stage_loop,
     _stage_record_to_table,
-    _records_schema_at_dim,
+    _create_canonical_staging,
     _validate_and_swap,
     _swap_tables_filesystem,
     _progress_path,
