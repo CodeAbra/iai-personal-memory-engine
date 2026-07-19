@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] — 2026-07-19
+
+### Fixed
+
+- **Re-embedding to a custom provider no longer breaks the store.**
+  `iai-mcp migrate --reembed-to-configured-provider` rebuilt the records table
+  from a schema that dropped the primary-key constraint, so records captured
+  afterward stored a null internal label and the daemon crash-looped on the next
+  restart with memory reported unreachable. The migration now preserves the
+  table's canonical constraints; a null label left by an affected earlier run is
+  repaired automatically on startup; and a genuinely null label now fails with a
+  clear, actionable error instead of an opaque one. If you hit this on 2.4.0 or
+  2.3.1, upgrading and restarting is enough — no manual repair needed.
+- **`doctor` no longer reports a false failure while the daemon is winding down.**
+  Check (e) rejected the `TRANSITIONING` state the daemon legitimately writes on
+  the way to drowsy, showing a spurious failed check on a healthy install. It now
+  accepts that state.
+
 ## [2.4.0] — 2026-07-17
 
 ### Added
