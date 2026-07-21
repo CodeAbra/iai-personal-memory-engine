@@ -184,6 +184,35 @@ fn integrity_flags_child_out_of_range() {
     }
 }
 
+#[test]
+fn integrity_flags_misrouting_separator() {
+    let (_d, _p, store, root) = populated_store();
+    let pager = store.pager();
+
+    let page = pager.read_page(root).unwrap();
+    if page[0] != lillibrain::consts::PAGE_INTERIOR_TABLE {
+        return; // shallow tree — no separator to corrupt
+    }
+    let node = read_interior_node(&page).unwrap();
+
+    // Drop the first separator below the leftmost child's key range: every key
+    // in child[0] is now at or above its (exclusive) upper bound, a misroute the
+    // global leaf-order check alone cannot see. Interior keys stay strictly
+    // ordered (-1 < the next separator) and the leaves are untouched, so only the
+    // subtree-bound check can catch this.
+    let mut bad_keys = node.keys.clone();
+    bad_keys[0] = -1;
+    let bad = write_interior_node(&bad_keys, &node.children).unwrap();
+    pager.write_page(root, &bad).unwrap();
+    pager.flush().unwrap();
+
+    let errs = store.check_integrity(root).unwrap();
+    assert!(
+        errs.iter().any(|e| e.contains("misrouting separator")),
+        "expected a misrouting-separator violation, got: {errs:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Codec hostile-input arithmetic: overflow yields a typed error, never a panic
 // ---------------------------------------------------------------------------

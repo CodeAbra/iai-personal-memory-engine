@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from iai_mcp import errors
+
 import pytest
 
 from iai_mcp.daemon import _sleep_backoff_active
@@ -45,7 +47,7 @@ class _FencingConn:
 
     def execute(self, sql, *args):
         if self._die_after == 0:
-            raise sqlite3.OperationalError(
+            raise errors.OperationalError(
                 "storage error: integrity violation: read-only snapshot "
                 "invalidated: main file size changed under a concurrent "
                 "checkpoint"
@@ -67,7 +69,7 @@ class _FencingCursor:
 
     def fetchmany(self, n):
         if self._left <= 0:
-            raise sqlite3.OperationalError(
+            raise errors.OperationalError(
                 "storage error: integrity violation: read-only snapshot "
                 "invalidated: main file size changed under a concurrent "
                 "checkpoint"
@@ -129,7 +131,7 @@ def test_fenced_scan_without_id_fails_loud_after_rows_served(
     from iai_mcp.store import RECORDS_TABLE
 
     q = store.db.open_table(RECORDS_TABLE).search().select(["tags_json"])
-    with pytest.raises(sqlite3.OperationalError, match="snapshot invalidated"):
+    with pytest.raises(errors.OperationalError, match="snapshot invalidated"):
         [r for batch in q.to_batches(batch_size=3) for r in batch.to_pylist()]
     store.close()
 
@@ -270,7 +272,7 @@ def test_iter_record_columns_keyset_resumes_on_fence(driver, tmp_path, monkeypat
         def execute(self, sql, *a):
             if fence_budget["n"] > 0 and "id > ?" in sql:
                 fence_budget["n"] -= 1
-                raise sqlite3.OperationalError(
+                raise errors.OperationalError(
                     "storage error: integrity violation: read-only snapshot "
                     "invalidated: main file size changed under a concurrent "
                     "checkpoint")

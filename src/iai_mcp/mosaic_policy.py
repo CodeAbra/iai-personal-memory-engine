@@ -57,16 +57,13 @@ def all_communities_connected(
     return True
 
 
-def should_fall_back_to_flat(
-    modularity: float,
-    singleton_ratio: float,
-    n_communities: int,
-    n: int,
-) -> bool:
-    if modularity < CPM_MODULARITY_FLOOR:
-        return True
-    if singleton_ratio > 0.30:
-        return True
-    if n > 0 and n_communities > (n // 5):
-        return True
-    return False
+def should_fall_back_to_flat(modularity: float) -> bool:
+    """Flat replaces a partition ONLY when it carries no structure (modularity
+    below the CPM floor). Secondary signals — singleton ratio, community
+    count — rank gamma candidates but must never veto a strong-modularity
+    partition down to flat: on a sparse memory graph (average degree ~3)
+    thousands of small tight communities ARE the true structure, and a k=1
+    flat assignment disables the recall community gate entirely. A former
+    count veto (k > n/5) did exactly that on the live corpus, collapsing a
+    0.78-modularity partition into one community."""
+    return modularity < CPM_MODULARITY_FLOOR

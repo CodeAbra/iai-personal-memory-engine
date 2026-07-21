@@ -8,7 +8,6 @@ from iai_mcp import _flock as fcntl
 import logging
 import os
 import re
-import sqlite3
 import threading
 import time
 import weakref
@@ -17,9 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import hnswlib
+from iai_mcp.hippo import _vecindex
 import numpy as np
-import pyarrow as pa
+from iai_mcp import _sqlite_stdlib
+from iai_mcp import errors
+from iai_mcp.hippo import _schema
 
 from iai_mcp.crypto import (
     decrypt_field,
@@ -203,7 +204,7 @@ _txn_owners_lock: threading.Lock = threading.Lock()
 
 
 @contextlib.contextmanager  # type: ignore[misc]
-def _txn(conn: "sqlite3.Connection"):
+def _txn(conn: Any):
     from iai_mcp.hippo import HippoIntegrityError
     # Owner keys use the UNWRAPPED connection: two HippoDBs sharing one raw
     # lilli connection wrap it in distinct signalling proxies, and keying on
@@ -233,11 +234,12 @@ def _txn(conn: "sqlite3.Connection"):
         except BaseException:
             try:
                 conn.execute("ROLLBACK")
-            except (sqlite3.Error, RuntimeError):
-                # sqlite3.Error covers stdlib driver rollback failures.
-                # RuntimeError covers the lilli engine's pager.rollback()
-                # when the transaction state is already cleared — suppress
-                # both so the original exception propagates unmasked.
+            except (errors.Error, RuntimeError):
+                # errors.Error covers driver rollback failures (both the
+                # engine and the translated stdlib driver). RuntimeError
+                # covers the lilli engine's pager.rollback() when the
+                # transaction state is already cleared — suppress both so
+                # the original exception propagates unmasked.
                 pass
             raise
         conn.execute("COMMIT")
@@ -332,7 +334,7 @@ def _open_storage_connection(
     fresh store) via :func:`_resolve_effective_driver`:
 
     - ``"stdlib"`` / any non-``"lilli"`` value → the stdlib ``sqlite3`` driver
-      (the default; the connection kwargs are byte-identical to a
+      (the default; the connection kwargs are byte-identical to the historical
       direct ``sqlite3.connect`` call).
     - ``"lilli"`` → the in-tree pager/B+tree/WAL engine. The engine connection
       is registered under ``db_path`` so raw-access helpers can reach it without
@@ -379,7 +381,7 @@ def _open_storage_connection(
             try:
                 conn = engine.Connection.open(db_path, embed_dim)
                 break
-            except sqlite3.OperationalError as exc:
+            except errors.OperationalError as exc:
                 if (
                     "store is locked" not in str(exc)
                     or time.monotonic() >= _deadline
@@ -388,7 +390,7 @@ def _open_storage_connection(
                 time.sleep(0.05)
         register_lilli_conn(db_path, conn)
         return conn, True
-    conn = sqlite3.connect(
+    conn = _sqlite_stdlib.connect(
         db_path,
         check_same_thread=False,
         isolation_level=None,
@@ -469,7 +471,11 @@ class HippoDB:
                 self._conn,
                 lambda _p=self._db_path: _mark_path_pools_stale(_p),
             )
-        self._conn.row_factory = sqlite3.Row
+        else:
+            # Engine rows are name-keyed natively; only the stdlib driver
+            # needs the Row factory (assigning it on the lilli branch would
+            # lazily import sqlite3 into an engine-only process).
+            self._conn.row_factory = _sqlite_stdlib.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -503,7 +509,7 @@ class HippoDB:
         # Single-writer invariant for ANN rebuilds: every rebuild entry point
         # (wake sequence, mid-run reconcile, sleep-pipeline reconcile,
         # migrations, child-worker swap in maintenance.py) MUST hold this lock
-        # across build->swap. Two unserialized builders mutating one hnswlib
+        # across build->swap. Two unserialized builders mutating one vector-index
         # buffer is a C++ data race (GIL released inside add_items); two
         # unserialized swaps can publish a stale buffer as active. Lock order:
         # _rebuild_lock OUTER, then _hnsw_lock, then _conn_lock.
@@ -580,8 +586,8 @@ class HippoDB:
             _register_ro_pool(self._db_path, self._ro_pool)
 
         if read_only:
-            self._hnsw: hnswlib.Index | None = None  # type: ignore[assignment]
-            self._hnsw_standby: hnswlib.Index | None = None
+            self._hnsw: _vecindex.Index | None = None  # type: ignore[assignment]
+            self._hnsw_standby: _vecindex.Index | None = None
             try:
                 self._repopulate_label_map_from_sqlite()
             except Exception:  # noqa: BLE001
@@ -890,11 +896,12 @@ class HippoDB:
             RECALL_INDEX_EF,
             HippoIntegrityError,
         )
-        _sqlite_count_row = self._conn.execute(
-            "SELECT COUNT(*) FROM records"
-            " WHERE tombstoned_at IS NULL"
-            " AND COALESCE(embedding_pending, 0) = 0"
-        ).fetchone()
+        with self._conn_lock:
+            _sqlite_count_row = self._conn.execute(
+                "SELECT COUNT(*) FROM records"
+                " WHERE tombstoned_at IS NULL"
+                " AND COALESCE(embedding_pending, 0) = 0"
+            ).fetchone()
         if _sqlite_count_row is None:
             raise HippoIntegrityError(
                 "_initialize_hnsw_index: SELECT COUNT(*) returned no row — "
@@ -908,18 +915,18 @@ class HippoDB:
         for candidate in (self._hnsw_tmp_path, self._hnsw_path):
             if candidate.exists():
                 try:
-                    idx = hnswlib.Index(space="cosine", dim=self._embed_dim)
+                    idx = _vecindex.Index(space="cosine", dim=self._embed_dim)
                     idx.load_index(str(candidate), max_elements=cap, allow_replace_deleted=True)
                     idx.set_ef(max(HNSW_EF, RECALL_INDEX_EF))
                     idx.set_num_threads(1)
-                    self._hnsw: hnswlib.Index = idx
+                    self._hnsw: _vecindex.Index = idx
                     loaded = True
                     break
                 except Exception as exc:  # noqa: BLE001
-                    _log.warning("Failed to load hnswlib index from %s: %s", candidate, exc)
+                    _log.warning("Failed to load vector index from %s: %s", candidate, exc)
 
         if not loaded:
-            self._hnsw = hnswlib.Index(space="cosine", dim=self._embed_dim)
+            self._hnsw = _vecindex.Index(space="cosine", dim=self._embed_dim)
             self._hnsw.init_index(
                 max_elements=cap,
                 ef_construction=HNSW_EF_CONSTRUCTION,
@@ -930,7 +937,7 @@ class HippoDB:
             self._hnsw.set_num_threads(1)
             if sqlite_count > 0:
                 _log.info(
-                    "No valid hnswlib file found; rebuilding from %d SQLite records",
+                    "No valid vector-index file found; rebuilding from %d SQLite records",
                     sqlite_count,
                 )
                 self._rebuild_index_from_sqlite()
@@ -962,19 +969,22 @@ class HippoDB:
         self._allocate_standby_index(cap)
 
     def _loaded_hnsw_matches_sqlite_sample(self) -> bool:
-        """Reject a stale on-disk ANN after a model or dimension migration."""
-        rows = self._conn.execute(
-            "SELECT vec_label, embedding FROM records"
-            " WHERE tombstoned_at IS NULL"
-            " AND COALESCE(embedding_pending, 0) = 0"
-            " ORDER BY vec_label LIMIT 3"
-        ).fetchall()
-        rows += self._conn.execute(
-            "SELECT vec_label, embedding FROM records"
-            " WHERE tombstoned_at IS NULL"
-            " AND COALESCE(embedding_pending, 0) = 0"
-            " ORDER BY vec_label DESC LIMIT 3"
-        ).fetchall()
+        """Reject a stale on-disk vector index after a model or dimension
+        migration: sample rows from both ends of the label range and require
+        the indexed vector to equal the stored embedding (normalized)."""
+        with self._conn_lock:
+            rows = self._conn.execute(
+                "SELECT vec_label, embedding FROM records"
+                " WHERE tombstoned_at IS NULL"
+                " AND COALESCE(embedding_pending, 0) = 0"
+                " ORDER BY vec_label LIMIT 3"
+            ).fetchall()
+            rows += self._conn.execute(
+                "SELECT vec_label, embedding FROM records"
+                " WHERE tombstoned_at IS NULL"
+                " AND COALESCE(embedding_pending, 0) = 0"
+                " ORDER BY vec_label DESC LIMIT 3"
+            ).fetchall()
         try:
             for row in rows:
                 stored = np.frombuffer(row["embedding"], dtype=np.float32)
@@ -999,7 +1009,7 @@ class HippoDB:
             HNSW_EF,
             RECALL_INDEX_EF,
         )
-        standby = hnswlib.Index(space="cosine", dim=self._embed_dim)
+        standby = _vecindex.Index(space="cosine", dim=self._embed_dim)
         standby.init_index(
             max_elements=cap,
             ef_construction=HNSW_EF_CONSTRUCTION,
@@ -1008,7 +1018,7 @@ class HippoDB:
         )
         standby.set_ef(max(HNSW_EF, RECALL_INDEX_EF))
         standby.set_num_threads(1)
-        self._hnsw_standby: hnswlib.Index | None = standby
+        self._hnsw_standby: _vecindex.Index | None = standby
 
     def _load_label_map_from_sqlite(self) -> "dict[str, int]":
         """Fresh id->vec_label map for the live corpus. O(corpus) — callers
@@ -1098,7 +1108,7 @@ class HippoDB:
             # Boot path: the standby is not allocated yet (it is created at the
             # end of _initialize_hnsw_index, after any boot-integrity rebuild).
             # Build a fresh active index directly.
-            self._hnsw = hnswlib.Index(space="cosine", dim=self._embed_dim)
+            self._hnsw = _vecindex.Index(space="cosine", dim=self._embed_dim)
             self._hnsw.init_index(
                 max_elements=cap,
                 ef_construction=HNSW_EF_CONSTRUCTION,
@@ -1149,7 +1159,7 @@ class HippoDB:
         # recall lock so a concurrent knn_query reader always sees a consistent
         # (buffer, label_map) pair — never a half-deleted or half-refilled index.
         # The critical section is O(journal) + two reference swaps — a recall
-        # landing mid-swap does not stall behind a corpus scan or a disk
+        # landing mid-swap no longer stalls behind a corpus scan or a disk
         # write. Swap atomicity relies on the CPython GIL; a free-threaded
         # build needs explicit synchronization at this site.
         with self._hnsw_lock:
@@ -1171,19 +1181,14 @@ class HippoDB:
 
     @staticmethod
     def _refill_index_in_place(
-        index: "hnswlib.Index", vecs: "np.ndarray | None", labels: "np.ndarray | None"
+        index: "_vecindex.Index", vecs: "np.ndarray | None", labels: "np.ndarray | None"
     ) -> None:
-        """Bring a retired buffer to the snapshot state WITHOUT the
-        mark-all-deleted + replace_deleted dance. Re-adding an existing label
-        set through replace_deleted DROPS labels: hnswlib erases the replaced
-        slot's current external label from its lookup even when that label was
-        already re-homed to another slot earlier in the same refill — measured
-        ~48% of labels lost per cycle on a shuffled 200-label set, and the
-        cause of the fresh-allocation fallback firing on most production
-        rebuilds. Instead: survivors update IN PLACE (their slots never move),
-        stale labels are only marked deleted, and replace_deleted runs solely
-        for labels NEW to the buffer — the slot-label it erases is then always
-        a stale one, never a live re-homed one.
+        """Bring a retired buffer to the snapshot state by updating in place:
+        survivors are re-added under their existing labels (an existing label
+        MUST update its slot, never allocate or re-home one — the invariant
+        this refill relies on), stale labels are only marked deleted, and
+        labels new to the buffer append. No slot a live label points at is
+        ever reassigned mid-refill.
         """
         incoming: "dict[int, int]" = (
             {int(l): i for i, l in enumerate(labels)} if labels is not None else {}
@@ -1220,7 +1225,7 @@ class HippoDB:
 
     def _apply_ann_journal(
         self,
-        buffer: "hnswlib.Index",
+        buffer: "_vecindex.Index",
         entries: "list[tuple[str, Any, int, str]]",
         label_map: "dict[str, int] | None" = None,
     ) -> None:
@@ -1260,7 +1265,7 @@ class HippoDB:
                     label_map.pop(rid, None)
 
     @staticmethod
-    def _standby_has_all_labels(index: "hnswlib.Index", labels: np.ndarray) -> bool:
+    def _standby_has_all_labels(index: "_vecindex.Index", labels: np.ndarray) -> bool:
         """True iff every expected label is resolvable in the rebuilt index.
 
         get_items raises when any label is missing (the slot-reuse drop), so a
@@ -1280,7 +1285,7 @@ class HippoDB:
 
     def _build_fresh_index(
         self, cap: int, vecs: np.ndarray, labels: np.ndarray
-    ) -> "hnswlib.Index":
+    ) -> "_vecindex.Index":
         """Allocate and fill a fresh ANN index — the boot-path build, reused as
         the reuse-path correctness fallback. No slot reuse, so no overlap drop."""
         from iai_mcp.hippo import (
@@ -1289,7 +1294,7 @@ class HippoDB:
             HNSW_EF,
             RECALL_INDEX_EF,
         )
-        fresh = hnswlib.Index(space="cosine", dim=self._embed_dim)
+        fresh = _vecindex.Index(space="cosine", dim=self._embed_dim)
         fresh.init_index(
             max_elements=cap,
             ef_construction=HNSW_EF_CONSTRUCTION,
@@ -1301,7 +1306,7 @@ class HippoDB:
         fresh.add_items(vecs, labels)
         return fresh
 
-    def _save_index_atomic(self, index: "hnswlib.Index | None" = None) -> None:
+    def _save_index_atomic(self, index: "_vecindex.Index | None" = None) -> None:
         # Saving the ACTIVE index requires _hnsw_lock (concurrent add_items
         # during save_index is a C++ race); the rebuild path instead passes
         # its still-private commit buffer and saves lock-free. The temp file
@@ -1326,7 +1331,7 @@ class HippoDB:
             os.replace(tmp_name, self._hnsw_path)
             tmp_name = None
         except OSError as exc:
-            _log.warning("hnswlib index save failed: %s", exc)
+            _log.warning("vector index save failed: %s", exc)
         finally:
             if tmp_name is not None:
                 try:
@@ -1498,7 +1503,12 @@ class HippoDB:
             pass
 
         from iai_mcp.hippo._table import _upsert_record_tags
-        with self._conn_lock:
+        # The record row and its tag rows must land atomically: a crash or
+        # exception between them would leave a committed pending record with no
+        # record_tags, silently invisible to tag-gated recall until a rebuild
+        # re-derives them. _txn makes both one transaction (autocommit mode
+        # would otherwise commit the INSERT alone), matching _table.add().
+        with self._conn_lock, _txn(self._conn):
             self._conn.execute(
                 "INSERT INTO records"
                 " (id, tier, literal_surface, aaak_index, embedding, embedding_pending,"
@@ -1522,7 +1532,6 @@ class HippoDB:
                 ),
             )
             _upsert_record_tags(self._conn, record_id, tags_json)
-            self._conn.commit()
 
         # Fire the recency buffer pending-feed callback (if registered) so the
         # buffer is current for any reader that checks immediately after this
@@ -1595,7 +1604,7 @@ class HippoDB:
         """Embed pending rows, optionally bounded by batch size and resident set.
 
         The deferred-embed pass of the two-phase capture drain. With the defaults
-        (both bounds 0) it embeds every pending row in one pass — the
+        (both bounds 0) it embeds every pending row in one pass — the historical
         behaviour direct-write recovery and the wake sequence rely on.
 
         When ``batch_size`` is positive the rows are embedded in windows of that
@@ -1726,6 +1735,16 @@ class HippoDB:
                         _log.debug(
                             "recency_reconcile callback failed id=%s: %s", rid, _exc
                         )
+                # Feed the flip into the LIVE ANN buffer incrementally — the
+                # wake sequence then needs no full index rebuild for a clean
+                # pass. A failed add self-heals: the next wake's index/count
+                # mismatch probe routes that pass through the full rebuild.
+                try:
+                    self._ann_add_flipped_row(str(rid), vecs[rid])
+                except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                    _log.debug(
+                        "ann incremental add failed id=%s: %s", rid, _exc
+                    )
                 # Feed the newly-embedded row into the resident exact-cosine
                 # matrix so the flipped row is answerable without a rebuild.
                 _xf = self._exact_index_feed
@@ -1848,17 +1867,52 @@ class HippoDB:
             ingested += 1
         return ingested
 
+    def _ann_add_flipped_row(self, rid: str, vec) -> None:
+        """Add one pending→active flip to the live ANN buffer in place.
+
+        Same discipline as the insert path: the label is the row's rowid, the
+        add is journaled when a rebuild is between snapshot and swap, and the
+        label map is updated under ``_hnsw_lock`` (``_conn_lock`` nested
+        inside, matching the reuse-path lock order). Re-adding an existing
+        label is hnsw's update-in-place, so a re-flip is safe.
+        """
+        import numpy as _np
+
+        with self._hnsw_lock:
+            with self._conn_lock:
+                row = self._conn.execute(
+                    "SELECT rowid FROM records WHERE id = ?", (rid,)
+                ).fetchone()
+            if row is None:
+                return
+            vec_label = int(row[0])
+            emb_vec = _np.array(vec, dtype=_np.float32).reshape(1, -1)
+            self._hnsw.add_items(emb_vec, _np.array([vec_label], dtype=_np.int64))
+            if self._ann_journal is not None:
+                self._ann_journal.append(("add", emb_vec, vec_label, rid))
+            self._label_map[rid] = vec_label
+            self._write_counter += 1
+            self._maybe_resize()
+
     def pending_embeddings_wake_sequence(self, embedder: Any | None = None) -> dict:
         has_pending = self.has_pending_rows()
         sidecar_dir = self._store_root / ".pending-embeddings"
         has_sidecars = sidecar_dir.exists() and any(sidecar_dir.glob("*.npy"))
+        from iai_mcp.hippo import HippoIntegrityError
         with self._conn_lock:
             non_pending_row = self._conn.execute(
                 "SELECT COUNT(*) FROM records"
                 " WHERE tombstoned_at IS NULL"
                 " AND COALESCE(embedding_pending, 0) = 0"
             ).fetchone()
-        non_pending_count = non_pending_row[0] if non_pending_row else 0
+        if non_pending_row is None:
+            # A COUNT(*) must return a row; None means the shared cursor was
+            # reset mid-fetch. Coercing to 0 would fake a mismatch and drive a
+            # needless rebuild (or mask a real one) — fail loud instead.
+            raise HippoIntegrityError(
+                "pending_embeddings_wake_sequence: COUNT(*) returned no row"
+            )
+        non_pending_count = non_pending_row[0]
         index_count = len(self._label_map)
         has_mismatch = (index_count != non_pending_count)
 
@@ -1882,7 +1936,16 @@ class HippoDB:
         if has_sidecars:
             ingest_count = self.ingest_pending_embeddings()
 
-        rebuild_result = self._rebuild_index_from_sqlite()
+        # Flips land in the ANN incrementally (per-row add above), so a clean
+        # pass needs NO full rebuild — an unconditional rebuild here re-added
+        # the whole corpus for a handful of flipped rows on every ambient
+        # drain. The full rebuild remains the self-heal for a pre-existing
+        # index/corpus mismatch and for the sidecar-ingest path (which does
+        # not add incrementally).
+        if has_mismatch or ingest_count > 0:
+            rebuild_result = self._rebuild_index_from_sqlite()
+        else:
+            rebuild_result = {"action": "skip", "reason": "incremental_adds"}
 
         # A pending->ready transition (a row flipping embedding_pending 1->0, or a
         # sidecar embedding landing) adds an active, index-findable row whose +1
@@ -1972,22 +2035,28 @@ class HippoDB:
             "column": column,
             "error": error,
         })
+        # This runs from the off-lock decrypt loop, so the write MUST take
+        # _conn_lock + _txn like every other mutator — a bare execute on the
+        # shared source-of-truth connection would interleave with a concurrent
+        # writer's open transaction and corrupt its cursor/commit. Telemetry
+        # stays best-effort (swallowed), but never at the cost of the writer.
         try:
-            self._conn.execute(
-                "INSERT INTO events (id, kind, severity, domain, ts, "
-                "data_json, session_id, source_ids_json) VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event_id,
-                    "record_decrypt_failed",
-                    "error",
-                    "storage",
-                    ts,
-                    payload,
-                    None,
-                    None,
-                ),
-            )
+            with self._conn_lock, _txn(self._conn):
+                self._conn.execute(
+                    "INSERT INTO events (id, kind, severity, domain, ts, "
+                    "data_json, session_id, source_ids_json) VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        event_id,
+                        "record_decrypt_failed",
+                        "error",
+                        "storage",
+                        ts,
+                        payload,
+                        None,
+                        None,
+                    ),
+                )
         except Exception:
             pass
 
@@ -2085,10 +2154,10 @@ class HippoDB:
         self, table_name: str, expected: list[tuple[str, str]]
     ) -> None:
         plain_to_pa = {
-            "TEXT": pa.string(),
-            "INTEGER": pa.int64(),
-            "REAL": pa.float64(),
-            "BLOB": pa.binary(),
+            "TEXT": _schema.string(),
+            "INTEGER": _schema.int64(),
+            "REAL": _schema.float64(),
+            "BLOB": _schema.binary(),
         }
         allowed_with_default = {
             "REAL DEFAULT 0.0",
@@ -2109,13 +2178,13 @@ class HippoDB:
         existing = {row["name"] for row in _pragma_rows}
 
         tbl = self.open_table(safe_table)
-        missing_plain: list[pa.Field] = []
+        missing_plain: list[_schema.Field] = []
         missing_with_default: list[tuple[str, str]] = []
         for col_name, sqlite_type in expected:
             if col_name in existing:
                 continue
             if sqlite_type in plain_to_pa:
-                missing_plain.append(pa.field(col_name, plain_to_pa[sqlite_type]))
+                missing_plain.append(_schema.field(col_name, plain_to_pa[sqlite_type]))
             elif sqlite_type in allowed_with_default:
                 missing_with_default.append((col_name, sqlite_type))
             else:
@@ -2172,7 +2241,7 @@ class HippoDB:
     def create_table(
         self,
         name: str,
-        schema: pa.Schema | None = None,
+        schema: _schema.Schema | None = None,
         data: Any = None,
     ) -> "HippoTable":
         from iai_mcp.hippo import HippoTable, _pa_type_to_sqlite
@@ -2185,18 +2254,18 @@ class HippoDB:
                     col_name = _validate_table_name(f.name)
                     cols.append(f"{col_name} {sqlite_type}")
                 ddl = f"CREATE TABLE IF NOT EXISTS {name} ({', '.join(cols)})"
-                self._conn.execute("BEGIN")
-                try:
+                # Serialize DDL under _conn_lock + _txn: a bare BEGIN on the
+                # shared connection while another thread holds an open txn would
+                # error ("transaction within a transaction") or commit that
+                # thread's work, and bypasses the double-writer tripwire.
+                with self._conn_lock, _txn(self._conn):
                     self._conn.execute(ddl)
-                except Exception:
-                    self._conn.execute("ROLLBACK")
-                    raise
-                self._conn.execute("COMMIT")
         return HippoTable(self._conn, name, embed_dim=self._embed_dim, db=self)
 
     def drop_table(self, name: str) -> None:
         _validate_table_name(name)
-        self._conn.execute(f"DROP TABLE IF EXISTS {name}")
+        with self._conn_lock, _txn(self._conn):
+            self._conn.execute(f"DROP TABLE IF EXISTS {name}")
 
 
     def close(self) -> None:

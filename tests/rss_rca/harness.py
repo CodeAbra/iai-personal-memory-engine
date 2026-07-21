@@ -19,7 +19,7 @@ Invocation::
     source .venv/bin/activate
     python tests/rss_rca/harness.py \\
         --n 22000 --cycles 3 \\
-        --out ./rca-artifacts/
+        --out build/rss-rca/
 
 The output directory contains ``RCA-FINDINGS.md`` (planner-consumed), plus
 ``rca-log.jsonl`` (sampler + per-cycle state) and ``vmmap-cycle-N.txt`` and
@@ -230,7 +230,7 @@ class _Sampler:
         pa_pool_bytes = 0
         pa_pool_max = 0
         try:
-            import pyarrow as _pa
+            from iai_mcp.hippo import _schema as _pa
             _mp = _pa.default_memory_pool()
             pa_pool_bytes = int(_mp.bytes_allocated())
             pa_pool_max = int(_mp.max_memory())
@@ -268,7 +268,7 @@ class _Sampler:
                 pa_pool_bytes = 0
                 pa_pool_max = 0
                 try:
-                    import pyarrow as _pa
+                    from iai_mcp.hippo import _schema as _pa
                     _mp = _pa.default_memory_pool()
                     pa_pool_bytes = int(_mp.bytes_allocated())
                     pa_pool_max = int(_mp.max_memory())

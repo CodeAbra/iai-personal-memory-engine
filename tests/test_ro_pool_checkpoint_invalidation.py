@@ -1,5 +1,5 @@
 """Regression: RoConnPool.borrow() self-heals against the read-only-snapshot
-fence.
+fence, closing the phase-177 defect (deferred-items.md item 3).
 
 The engine's read-only-snapshot fence (crates/lillibrain/src/pager.rs:322-338)
 correctly RAISES when a WAL auto-checkpoint invalidates an already-open RO
@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
+from iai_mcp import errors
 import struct
 import uuid
 from datetime import datetime, timezone
@@ -135,8 +137,9 @@ def test_borrow_self_heals_after_checkpoint_invalidation(tmp_path: Path) -> None
     rid = _insert_record_direct(store, 0)
     _force_wal_checkpoint(store)
 
-    # Open + release a slot (idle in the queue): a slot opened BEFORE the
-    # invalidating checkpoint, still snapshotted at its open-time state.
+    # Open + release a slot (idle in the queue), matching the deferred-items.md
+    # repro shape: a slot opened BEFORE the invalidating checkpoint, still
+    # snapshotted at its open-time state.
     with pool.borrow() as conn:
         conn.execute("SELECT COUNT(*) FROM records").fetchone()
 
@@ -148,8 +151,9 @@ def test_borrow_self_heals_after_checkpoint_invalidation(tmp_path: Path) -> None
 
     gen_before = pool._current_generation()
 
-    # dispatch #2: must NOT raise out of borrow()/the context even though the
-    # pool's generation was never bumped by the checkpoint.
+    # dispatch #2 (deferred-items.md): must NOT raise out of borrow()/the
+    # context even though the pool's generation was never bumped by the
+    # checkpoint.
     with pool.borrow() as conn:
         row = conn.execute(
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
@@ -160,10 +164,11 @@ def test_borrow_self_heals_after_checkpoint_invalidation(tmp_path: Path) -> None
         "stale pre-checkpoint snapshot"
     )
 
-    # dispatch #3: the original bug reproduced on TWO consecutive dispatches
-    # (the single-retry fallback in core/__init__.py hit the same stale slot
-    # on its own retry) -- prove the pool itself stays healthy across a second
-    # borrow too, independent of any caller-side retry.
+    # dispatch #3 (deferred-items.md): the original bug reproduced on TWO
+    # consecutive dispatches (the single-retry fallback in core/__init__.py
+    # hit the same stale slot on its own retry) -- prove the pool itself
+    # stays healthy across a second borrow too, independent of any
+    # caller-side retry.
     with pool.borrow() as conn:
         row2 = conn.execute(
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
@@ -198,7 +203,7 @@ def test_bounded_retry_exhaustion_raises(
 
     class _AlwaysFenced:
         def execute(self, sql, params=()):
-            raise sqlite3.OperationalError(
+            raise errors.OperationalError(
                 f"{_RO_SNAPSHOT_FENCE_MARKER}: simulated permanent invalidation"
             )
 
@@ -220,7 +225,7 @@ def test_bounded_retry_exhaustion_raises(
 
     monkeypatch.setattr(pool, "_open_slot", _spy_open_slot)
 
-    with pytest.raises(sqlite3.OperationalError) as excinfo:
+    with pytest.raises(errors.OperationalError) as excinfo:
         pool.borrow()
 
     assert _RO_SNAPSHOT_FENCE_MARKER in str(excinfo.value)
@@ -255,7 +260,7 @@ def test_non_fence_operational_error_propagates(
 
     class _GenuinelyBroken:
         def execute(self, sql, params=()):
-            raise sqlite3.OperationalError("disk I/O error: simulated genuine failure")
+            raise errors.OperationalError("disk I/O error: simulated genuine failure")
 
         def close(self):
             pass
@@ -271,7 +276,7 @@ def test_non_fence_operational_error_propagates(
     slot.conn = _GenuinelyBroken()
     pool._queue.put_nowait(slot)
 
-    with pytest.raises(sqlite3.OperationalError) as excinfo:
+    with pytest.raises(errors.OperationalError) as excinfo:
         pool.borrow()
 
     assert _RO_SNAPSHOT_FENCE_MARKER not in str(excinfo.value)
@@ -285,7 +290,7 @@ def test_non_fence_operational_error_propagates(
 
 # ---------------------------------------------------------------------------
 # ro_conn() end-to-end: the checkpoint-invalidation repro through the actual
-# caller-facing contextmanager, proving the defect no longer reproduces
+# caller-facing contextmanager, proving the 177 defect no longer reproduces
 # at the layer core.dispatch actually uses.
 # ---------------------------------------------------------------------------
 

@@ -7,7 +7,7 @@ import os
 import platform
 import re
 import signal
-import sqlite3
+from iai_mcp import errors
 import logging
 import subprocess
 import sys
@@ -83,8 +83,6 @@ async def _socket_status_probe(socket_path: Path, timeout: float) -> dict | None
 
 
 def check_f_hippo_readable() -> CheckResult:
-    import sqlite3
-
     from iai_mcp.hippo import HippoLockHeldError
 
     _s = None
@@ -104,7 +102,7 @@ def check_f_hippo_readable() -> CheckResult:
             True,
             "store held by the live daemon — normal",
         )
-    except sqlite3.OperationalError as e:
+    except errors.OperationalError as e:
         if "database is locked" in str(e).lower():
             logger.debug("check_f: store held by running daemon (sqlite): %s", e)
             return CheckResult(

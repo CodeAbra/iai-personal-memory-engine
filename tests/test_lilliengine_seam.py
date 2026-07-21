@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
+from iai_mcp import errors
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -72,7 +74,7 @@ def test_raw_conn_read_only_blocks_write(lilli_driver):
     conn.execute("CREATE TABLE t (id TEXT PRIMARY KEY)")
 
     raw = get_lilli_raw_conn(path, read_only=True)
-    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+    with pytest.raises(errors.OperationalError, match="readonly"):
         raw.execute("INSERT INTO t (id) VALUES ('x')")
     raw.close()
 
@@ -81,7 +83,8 @@ def test_default_stdlib_branch_unchanged(monkeypatch):
     monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
     path = os.path.join(tempfile.mkdtemp(), "b.sqlite3")
     conn, _owns = _open_storage_connection(path, embed_dim=384, cached_statements=128)
-    assert isinstance(conn, sqlite3.Connection)
+    from iai_mcp import _sqlite_stdlib
+    assert _sqlite_stdlib.is_stdlib_connection(conn)
 
 
 def test_lillibrain_connection_stays_intact():

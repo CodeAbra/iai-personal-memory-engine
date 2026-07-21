@@ -79,7 +79,7 @@ def test_contradict_rejects_cyrillic_new_fact_without_raw_tag(tmp_path):
             "memory_contradict",
             {
                 "id": str(r.id),
-                "new_fact": "Не правда, было не так",
+                "new_fact": "それは違う、そうではなかった",
                 "cue_embedding": r.embedding,
             },
         )

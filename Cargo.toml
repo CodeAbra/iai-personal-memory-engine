@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "rust/iai_mcp_embed_core",
     "rust/iai_mcp_graph_core",
+    "rust/iai_mcp_vec_core",
     "rust/iai_mcp_native",
     "crates/lilli-hd",
     "crates/lillibrain",
@@ -20,7 +21,10 @@ candle-core    = "0.10.2"
 candle-nn      = "0.10.2"
 safetensors    = "0.7.0"
 tokenizers     = "0.23.1"
-hf-hub         = { version = "0.4.1", features = ["ureq"] }
+# default-features off: only the sync ureq API is used (rustls under ureq's
+# defaults) — keeps native-tls/openssl-sys/reqwest/tokio out of the tree, so
+# manylinux wheel builds need no OpenSSL headers.
+hf-hub         = { version = "0.4.1", default-features = false, features = ["ureq"] }
 pyo3           = "0.22"
 numpy          = "0.22"
 accelerate-src = "0.3.2"

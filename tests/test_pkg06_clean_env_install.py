@@ -211,8 +211,10 @@ def test_fresh_editable_install_resolver(tmp_path_factory, clean_install_whl):
     clean_env = {k: v for k, v in os.environ.items() if k not in _MASKING_VARS}
     clean_env["HOME"] = str(editable_tmp)
     clean_env["IAI_MCP_STORE"] = str(editable_tmp / ".iai-mcp")
-    import pwd as _pwd
-    _real_home = _pwd.getpwuid(os.getuid()).pw_dir
+    # HOME is masked in clean_env above, so recover the real home portably
+    # (pwd/getuid do not exist on Windows). Path.home() reads the unmasked
+    # process environment, which still holds the real value here.
+    _real_home = str(Path.home())
     clean_env.setdefault("RUSTUP_HOME", os.path.join(_real_home, ".rustup"))
     clean_env.setdefault("CARGO_HOME", os.path.join(_real_home, ".cargo"))
 

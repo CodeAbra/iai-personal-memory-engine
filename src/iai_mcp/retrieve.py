@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-import sqlite3
+from iai_mcp import errors
 import threading
 import time
 from contextlib import contextmanager
@@ -396,7 +396,7 @@ def build_temporal_validity_maps(
             outgoing.setdefault(src_s, []).append(dst_s)
             involved.add(src_s)
             involved.add(dst_s)
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+    except (OSError, ValueError, RuntimeError, errors.Error) as exc:
         log.warning("build_temporal_validity_maps edges read failed: %s", exc)
         return None
 
@@ -416,7 +416,7 @@ def build_temporal_validity_maps(
                         ts_by_id[str(row[0])] = _parse_created_ts(row[1])
                     except (TypeError, ValueError):
                         continue
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+    except (OSError, ValueError, RuntimeError, errors.Error) as exc:
         log.warning("build_temporal_validity_maps records read failed: %s", exc)
         return None
     _result_full: tuple[dict[str, list[str]], dict[str, datetime]] = (outgoing, ts_by_id)

@@ -78,9 +78,20 @@ pub fn read_overflow_chain(pager: &Pager, first_page: u32, total_len: usize) -> 
                 .try_into()
                 .unwrap(),
         );
-        let remaining = total_len - out.len();
+        let remaining = total_len.saturating_sub(out.len());
         let avail = &page[OVERFLOW_DATA_OFFSET..USABLE_END];
         let take = if next == 0 { remaining.min(avail.len()) } else { avail.len() };
+        // A non-last page that would carry the running total past total_len means
+        // the chain is longer than the cell's declared payload length — a
+        // structural mismatch. Fail loud instead of underflowing the subtraction
+        // above or returning a silently truncated prefix.
+        if next != 0 && out.len() + take > total_len {
+            return Err(StoreError::Integrity {
+                detail: format!(
+                    "overflow chain from page {first_page}: exceeds declared {total_len} bytes"
+                ),
+            });
+        }
         out.extend_from_slice(&avail[..take]);
         current = next;
     }

@@ -264,7 +264,7 @@ def _insert_stale_edge(
 ) -> None:
     old_ts = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
     tbl = store.db.open_table(EDGES_TABLE)
-    import pyarrow as pa
+    from iai_mcp.hippo import _schema as pa
     rows = pa.Table.from_pylist(
         [{"src": str(src), "dst": str(dst), "edge_type": edge_type,
           "weight": weight, "updated_at": old_ts}],

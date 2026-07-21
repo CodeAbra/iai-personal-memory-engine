@@ -176,3 +176,46 @@ pub fn permute(hv: &Bound<'_, PyList>, shift: i64) -> PyResult<Vec<u16>> {
 pub fn similarity(a: &Bound<'_, PyList>, b: &Bound<'_, PyList>) -> PyResult<f64> {
     Ok(similarity_impl(&extract_indices(a)?, &extract_indices(b)?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pad_to_k_is_deterministic_and_complete() {
+        // A union below K forces the backfill path (never hit by the ops golden,
+        // whose role vectors always union to >= K).
+        let indices = vec![1u16, 5, 17];
+        let a = vec![1u16, 5];
+        let b = vec![17u16];
+        let out1 = pad_to_k(&indices, &a, &b);
+        let out2 = pad_to_k(&indices, &a, &b);
+        assert_eq!(out1, out2, "pad must be deterministic across calls");
+        assert_eq!(out1.len(), SPARSE_K, "pad must reach exactly K indices");
+        assert!(
+            out1.windows(2).all(|w| w[0] < w[1]),
+            "pad output must be sorted and distinct"
+        );
+        for i in &indices {
+            assert!(out1.contains(i), "pad must retain the original indices");
+        }
+    }
+
+    #[test]
+    fn pad_backfill_bind_underflow_reaches_k() {
+        // bind of two short lists whose union is < K must backfill to K.
+        let out = bind_impl(&[1u16, 2, 3], &[3u16, 4]);
+        assert_eq!(out.len(), SPARSE_K);
+    }
+
+    #[test]
+    fn debug_repr_matches_python_str_list() {
+        // The pad seed derives from the Debug repr of the sorted operand lists;
+        // it must stay byte-identical to Python's str(sorted(list)) — brackets
+        // and ", " separators — or the two backends reseed differently and the
+        // procedural tier diverges silently.
+        assert_eq!(format!("{:?}", Vec::<u16>::new()), "[]");
+        assert_eq!(format!("{:?}", vec![5u16]), "[5]");
+        assert_eq!(format!("{:?}", vec![1u16, 5, 17]), "[1, 5, 17]");
+    }
+}

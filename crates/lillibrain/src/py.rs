@@ -10,14 +10,33 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use pyo3::import_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyModule};
 
 use crate::store::Store;
 
-/// Map a storage-engine error onto a Python exception.
+import_exception!(iai_mcp.errors, DatabaseError);
+import_exception!(iai_mcp.errors, OperationalError);
+
+/// Map a storage-engine error onto a Python exception by fault class.
+///
+/// A transient I/O fault maps to `OSError` and a transient snapshot fence to
+/// `iai_mcp.errors.OperationalError` (both recoverable); every corruption class
+/// (checksum mismatch, freelist corruption, integrity violation, page out of
+/// bounds) maps to the bare `iai_mcp.errors.DatabaseError` so a caller can
+/// branch on disk damage instead of seeing an indistinguishable `RuntimeError`.
 fn to_pyerr(e: crate::error::StoreError) -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+    use crate::error::StoreError as S;
+    let msg = e.to_string();
+    match e {
+        S::Io(_) => pyo3::exceptions::PyOSError::new_err(msg),
+        S::SnapshotFence { .. } => OperationalError::new_err(msg),
+        S::CrcMismatch { .. }
+        | S::FreelistCorruption { .. }
+        | S::Integrity { .. }
+        | S::PageOutOfBounds { .. } => DatabaseError::new_err(msg),
+    }
 }
 
 /// Lock a mutex, failing closed if a prior operation panicked while holding it.

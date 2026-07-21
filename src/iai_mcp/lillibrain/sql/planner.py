@@ -7,7 +7,7 @@ emits scan_type='constant' — the executor answers it without a cursor.
 """
 from __future__ import annotations
 
-import sqlite3
+from iai_mcp import errors
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -257,10 +257,10 @@ def _plan_insert(
         elif isinstance(val_expr, Literal):
             if val_expr.value == "?":
                 # Placeholder — consume next positional param.
-                # Fail loud on underflow: mirrors sqlite3.ProgrammingError raised
+                # Fail loud on underflow: mirrors the ProgrammingError raised
                 # for too-few bindings ("Incorrect number of bindings supplied").
                 if not params_queue:
-                    raise sqlite3.ProgrammingError(
+                    raise errors.ProgrammingError(
                         "Incorrect number of bindings supplied: too few parameters "
                         "for '?' placeholders in INSERT VALUES"
                     )
@@ -275,10 +275,10 @@ def _plan_insert(
                 f"unsupported VALUES expression type {type(val_expr).__name__!r} in INSERT"
             )
 
-    # Fail loud on surplus params — mirrors sqlite3.ProgrammingError raised for
+    # Fail loud on surplus params — mirrors the ProgrammingError raised for
     # too-many bindings ("Incorrect number of bindings supplied").
     if params_queue:
-        raise sqlite3.ProgrammingError(
+        raise errors.ProgrammingError(
             "Incorrect number of bindings supplied: "
             f"{len(params_queue)} surplus parameter(s) for INSERT VALUES"
         )

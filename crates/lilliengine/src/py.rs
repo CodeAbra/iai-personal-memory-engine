@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration};
-use pyo3::import_exception;
+use pyo3::{create_exception, import_exception};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule, PyTuple};
 
@@ -24,29 +24,46 @@ use lillibrain::Value;
 use crate::conn::{self, ColumnDesc, CursorState, RawAction};
 use crate::error::EngineError;
 
-import_exception!(sqlite3, ProgrammingError);
+import_exception!(iai_mcp.errors, ProgrammingError);
+import_exception!(iai_mcp.errors, OperationalError);
+
+create_exception!(
+    iai_mcp_native.engine,
+    SnapshotFenceError,
+    OperationalError,
+    "A read-only snapshot fence tripped under a concurrent checkpoint; retry the read. \
+     Subclasses iai_mcp.errors.OperationalError so a broad `except OperationalError` \
+     still catches it, while new code matches this exact class structurally."
+);
 
 /// The shared, thread-held backing connection.
 type SharedConn = Arc<Mutex<conn::Connection>>;
 
-/// Map an engine error onto the closest sqlite3-shaped Python exception.
+/// Map an engine error onto the matching `iai_mcp.errors` exception.
 ///
-/// `ProgrammingError` (bind-count fault) maps to `sqlite3.ProgrammingError`; the
-/// read-only write rejection maps to `sqlite3.OperationalError` ("attempt to
-/// write a readonly database"); a parse/unsupported error maps to
-/// `sqlite3.OperationalError` so the host sees a SQL-shaped error, not a bare
-/// RuntimeError.
+/// A bind-count fault maps to `ProgrammingError`; storage corruption maps to the
+/// bare `DatabaseError` (the parent, not a subclass) so a caller's
+/// `except OperationalError` does not swallow disk damage; a transient storage
+/// I/O fault, read-only write rejection, and parse/unsupported errors map to
+/// `OperationalError` so the host sees a SQL-shaped error.
 fn to_pyerr(py: Python<'_>, e: EngineError) -> PyErr {
-    let sqlite3 = match py.import_bound("sqlite3") {
-        Ok(m) => m,
-        Err(_) => return PyRuntimeError::new_err(e.to_string()),
-    };
     let msg = e.to_string();
+    // A snapshot fence is transient: raise the dedicated OperationalError
+    // subclass so the reader's fence-retry loop matches it structurally (not by
+    // message text), while a legacy `except OperationalError` still catches it.
+    if matches!(e, EngineError::SnapshotFence(_)) {
+        return SnapshotFenceError::new_err(msg);
+    }
+    let errors_mod = match py.import_bound("iai_mcp.errors") {
+        Ok(m) => m,
+        Err(_) => return PyRuntimeError::new_err(msg),
+    };
     let exc_name = match &e {
         EngineError::ProgrammingError(_) => "ProgrammingError",
+        EngineError::Corruption { .. } => "DatabaseError",
         _ => "OperationalError",
     };
-    match sqlite3.getattr(exc_name) {
+    match errors_mod.getattr(exc_name) {
         Ok(exc) => match exc.call1((msg.clone(),)) {
             Ok(inst) => PyErr::from_value_bound(inst),
             Err(_) => PyRuntimeError::new_err(msg),
@@ -981,5 +998,6 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Row>()?;
     m.add_class::<RawConn>()?;
     m.add_class::<IndexSnapshot>()?;
+    m.add("SnapshotFenceError", m.py().get_type_bound::<SnapshotFenceError>())?;
     Ok(())
 }

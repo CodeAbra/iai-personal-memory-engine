@@ -2152,9 +2152,10 @@ fn drop_table_name(ddl: &str) -> Option<String> {
         .map(|s| s.trim_matches(|c| c == '[' || c == ']' || c == '"' || c == ';').to_string())
 }
 
-/// Adapt a storage-layer error into the engine error taxonomy.
+/// Adapt a storage-layer error into the engine error taxonomy, preserving the
+/// corruption class so the boundary can surface it as a dedicated exception.
 fn open_err(e: lillibrain::StoreError) -> EngineError {
-    EngineError::parse(format!("engine connection: storage error: {e}"))
+    EngineError::from(e)
 }
 
 /// The columns to hash-index for `table`, derived from `catalog`'s recorded

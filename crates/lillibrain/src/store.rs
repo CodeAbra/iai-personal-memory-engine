@@ -53,6 +53,31 @@ impl Store {
         Ok(Store::from_pager(Pager::open_read_only(path)?))
     }
 
+    /// Lock the count cache, recovering from a poisoned mutex.
+    ///
+    /// A poisoned lock means a prior holder panicked mid-update, so the cached
+    /// counts are suspect: clear them and let the next `count_cells` walk
+    /// repopulate exactly, rather than serve a possibly-torn count. Every count
+    /// accessor goes through here so the poison policy is uniform — no path
+    /// silently skips an update and leaves the cache diverged from the tree.
+    fn counts(&self) -> std::sync::MutexGuard<'_, HashMap<u32, u64>> {
+        match self.cell_counts.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                let mut g = poisoned.into_inner();
+                g.clear();
+                g
+            }
+        }
+    }
+
+    /// Lock the transaction snapshot, recovering from a poisoned mutex.
+    fn counts_snapshot(&self) -> std::sync::MutexGuard<'_, Option<HashMap<u32, u64>>> {
+        self.cell_counts_txn_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Re-arm a read-only store's committed snapshot in place (see
     /// [`Pager::refresh_ro_snapshot`]). Cell counts are dropped when the
     /// snapshot moved — they were exact for the previous snapshot only and
@@ -60,12 +85,7 @@ impl Store {
     pub fn refresh_read_only(&mut self) -> Result<bool> {
         let changed = self.pager.refresh_ro_snapshot()?;
         if changed {
-            // A poisoned lock must still clear: skipping would serve counts
-            // from the previous snapshot as if they were exact.
-            self.cell_counts
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clear();
+            self.counts().clear();
         }
         Ok(changed)
     }
@@ -73,10 +93,9 @@ impl Store {
     /// Adjust the cached cell count for `root` by `delta`, when a cached
     /// entry exists (lazy population is owned by `count_cells`).
     fn adjust_cell_count(&self, root: u32, delta: i64) {
-        if let Ok(mut counts) = self.cell_counts.lock() {
-            if let Some(c) = counts.get_mut(&root) {
-                *c = c.saturating_add_signed(delta);
-            }
+        let mut counts = self.counts();
+        if let Some(c) = counts.get_mut(&root) {
+            *c = c.saturating_add_signed(delta);
         }
     }
 
@@ -136,16 +155,15 @@ impl Store {
     /// Begin a write transaction. Tree mutations issued before [`Store::commit`]
     /// land atomically: a crash before commit leaves the prior consistent state.
     pub fn begin_write(&self) -> Result<()> {
-        // Snapshot the count cache so a rollback can restore it alongside the
-        // pager state (the incremental adjustments inside the transaction
-        // must not survive an abort).
-        if let (Ok(counts), Ok(mut snap)) = (
-            self.cell_counts.lock(),
-            self.cell_counts_txn_snapshot.lock(),
-        ) {
-            *snap = Some(counts.clone());
-        }
-        self.pager.begin_write()
+        // Open the pager transaction FIRST: it rejects a nested begin, and the
+        // snapshot must reflect the pre-transaction counts. Snapshotting before
+        // the nesting check would overwrite a live transaction's baseline with
+        // post-mutation counts, so a later rollback would restore the wrong
+        // counts. Take the snapshot only once the pager has accepted the begin.
+        self.pager.begin_write()?;
+        let snapshot = self.counts().clone();
+        *self.counts_snapshot() = Some(snapshot);
+        Ok(())
     }
 
     /// Commit the open transaction (WAL append + one fsync, or the journal
@@ -153,9 +171,7 @@ impl Store {
     pub fn commit(&self) -> Result<()> {
         let result = self.pager.commit();
         if result.is_ok() {
-            if let Ok(mut snap) = self.cell_counts_txn_snapshot.lock() {
-                *snap = None;
-            }
+            *self.counts_snapshot() = None;
         }
         result
     }
@@ -165,15 +181,13 @@ impl Store {
         // Restore the count cache to its pre-transaction snapshot; when no
         // snapshot exists (a rollback without a begin), drop the cache
         // entirely — a stale count must never survive an ambiguous abort.
-        if let (Ok(mut counts), Ok(mut snap)) = (
-            self.cell_counts.lock(),
-            self.cell_counts_txn_snapshot.lock(),
-        ) {
-            match snap.take() {
-                Some(restored) => *counts = restored,
-                None => counts.clear(),
-            }
+        let restored = self.counts_snapshot().take();
+        let mut counts = self.counts();
+        match restored {
+            Some(restored) => *counts = restored,
+            None => counts.clear(),
         }
+        drop(counts);
         self.pager.rollback()
     }
 
@@ -324,15 +338,11 @@ impl Tree<'_> {
     /// overflow cells (the header `num_cells` counts the cell on the leaf page,
     /// not the overflow continuation pages).
     pub fn count_cells(&self) -> Result<u64> {
-        if let Ok(counts) = self.store.cell_counts.lock() {
-            if let Some(&c) = counts.get(&self.root_page_no) {
-                return Ok(c);
-            }
+        if let Some(&c) = self.store.counts().get(&self.root_page_no) {
+            return Ok(c);
         }
         let walked = self.cursor().count_cells()?;
-        if let Ok(mut counts) = self.store.cell_counts.lock() {
-            counts.insert(self.root_page_no, walked);
-        }
+        self.store.counts().insert(self.root_page_no, walked);
         Ok(walked)
     }
 

@@ -1007,7 +1007,7 @@ fn scan_rows(store: &Store, root: u32, col_names: &[String]) -> Result<Vec<Row>>
     let raw = store
         .tree(root)
         .full_scan()
-        .map_err(|e| EngineError::parse(format!("scan: {e}")))?;
+        .map_err(store_err)?;
     let mut rows = Vec::with_capacity(raw.len());
     for (key, payload) in raw {
         let mut vals = decode_row(&payload)?;
@@ -1035,7 +1035,7 @@ fn count_rows_no_decode(store: &Store, root: u32) -> Result<i64> {
     let n = store
         .tree(root)
         .count_cells()
-        .map_err(|e| EngineError::parse(format!("count: {e}")))?;
+        .map_err(store_err)?;
     Ok(n as i64)
 }
 
@@ -2641,9 +2641,10 @@ impl Drop for TxnGuard<'_> {
     }
 }
 
-/// Adapt a storage-layer error into the engine error taxonomy.
+/// Adapt a storage-layer error into the engine error taxonomy, preserving the
+/// corruption class so the boundary can surface it as a dedicated exception.
 fn store_err(e: lillibrain::StoreError) -> EngineError {
-    EngineError::parse(format!("write: storage error: {e}"))
+    EngineError::from(e)
 }
 
 /// Decode a stored record into a row map, padding a short record (written before

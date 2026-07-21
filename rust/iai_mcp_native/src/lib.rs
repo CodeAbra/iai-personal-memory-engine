@@ -45,6 +45,12 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     iai_mcp_graph_core::register(py, &graph)?;
     m.add("graph", &graph)?;
 
+    // Vector-index sub-module — exact cosine search over the record
+    // embeddings, the recall index under Hippo.
+    let vec = PyModule::new_bound(py, "iai_mcp_native.vec")?;
+    iai_mcp_vec_core::register(py, &vec)?;
+    m.add("vec", &vec)?;
+
     // Hypervector sub-module — BSC / FHRR / sparse VSA bit-kernels plus the
     // frozen SimHash projection-apply.
     let hd = PyModule::new_bound(py, "iai_mcp_native.hd")?;
@@ -72,6 +78,7 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         .downcast_into()?;
     sys_modules.set_item("iai_mcp_native.embed", &embed)?;
     sys_modules.set_item("iai_mcp_native.graph", &graph)?;
+    sys_modules.set_item("iai_mcp_native.vec", &vec)?;
     sys_modules.set_item("iai_mcp_native.hd", &hd)?;
     sys_modules.set_item("iai_mcp_native.store", &store)?;
     sys_modules.set_item("iai_mcp_native.engine", &engine)?;

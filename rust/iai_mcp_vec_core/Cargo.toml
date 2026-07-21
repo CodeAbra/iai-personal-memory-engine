@@ -1,0 +1,14 @@
+[package]
+name    = "iai_mcp_vec_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "iai_mcp_vec_core"
+crate-type = ["rlib"]    # only the native wrapper crate (iai_mcp_native) ships the cdylib
+
+[dependencies]
+pyo3           = { workspace = true }
+numpy          = { workspace = true }
+rayon          = "1.10"
+crc32fast      = "1.4"

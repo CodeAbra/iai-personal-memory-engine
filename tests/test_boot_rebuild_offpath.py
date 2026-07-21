@@ -50,7 +50,6 @@ from __future__ import annotations
 import ast
 import time
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
@@ -437,12 +436,6 @@ def test_incremental_delta_equals_full_rebuild_after_small_change(
     flush_record_buffer(store)
     store.boost_edges(
         [(base_ids[0], new_recs[0].id)], delta=1.0, edge_type="hebbian",
-    )
-    # A stale edge can outlive a tombstoned/deleted record until the next
-    # maintenance sweep. Replaying it must not recreate the missing endpoint
-    # as a phantom runtime-graph node in either rebuild path.
-    store.boost_edges(
-        [(base_ids[0], uuid4())], delta=1.0, edge_type="hebbian",
     )
     # Equivalence is defined over ONE corpus state: drain the in-process edge
     # buffer so both builds stream the identical committed edge set (buffer

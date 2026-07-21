@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-import hnswlib
+from iai_mcp.hippo import _vecindex as hnswlib
 import numpy as np
 import pytest
 

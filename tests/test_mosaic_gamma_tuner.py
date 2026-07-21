@@ -215,42 +215,22 @@ def test_should_fall_back_to_flat_q_too_low():
     )
 
     too_low_q = CPM_MODULARITY_FLOOR - 0.05
-    assert (
-        should_fall_back_to_flat(
-            modularity=too_low_q, singleton_ratio=0.10, n_communities=5, n=100
-        )
-        is True
-    )
+    assert should_fall_back_to_flat(modularity=too_low_q) is True
 
 
-def test_should_fall_back_to_flat_singleton_explosion():
+def test_should_fall_back_to_flat_only_modularity_decides():
+    """Secondary signals (singleton ratio, community count) must NOT veto a
+    strong-modularity partition into flat: a k=1 flat assignment disables the
+    recall community gate, which is strictly worse than any structured
+    partition at or above the floor. The old count veto (k > n/5) collapsed
+    the live sparse corpus's 0.78-modularity partition into one community."""
     from iai_mcp.mosaic_policy import (
         CPM_MODULARITY_FLOOR,
         should_fall_back_to_flat,
     )
 
     good_q = CPM_MODULARITY_FLOOR + 0.10
-    assert (
-        should_fall_back_to_flat(
-            modularity=good_q, singleton_ratio=0.40, n_communities=5, n=100
-        )
-        is True
-    )
-
-
-def test_should_fall_back_to_flat_community_count_explosion():
-    from iai_mcp.mosaic_policy import (
-        CPM_MODULARITY_FLOOR,
-        should_fall_back_to_flat,
-    )
-
-    good_q = CPM_MODULARITY_FLOOR + 0.10
-    assert (
-        should_fall_back_to_flat(
-            modularity=good_q, singleton_ratio=0.10, n_communities=50, n=100
-        )
-        is True
-    )
+    assert should_fall_back_to_flat(modularity=good_q) is False
 
 
 def test_should_fall_back_to_flat_healthy_partition():
@@ -260,12 +240,7 @@ def test_should_fall_back_to_flat_healthy_partition():
     )
 
     good_q = CPM_MODULARITY_FLOOR + 0.10
-    assert (
-        should_fall_back_to_flat(
-            modularity=good_q, singleton_ratio=0.10, n_communities=10, n=100
-        )
-        is False
-    )
+    assert should_fall_back_to_flat(modularity=good_q) is False
 
 
 def test_tuner_candidate_set_size():
@@ -527,4 +502,54 @@ def test_gamma_tuner_closes_karate_gap():
         f"Karate NMI regression: NMI vs leidenalg@gamma=0.5 = {nmi_v_05:.4f} "
         f"< 0.74. 21-03 baseline was 0.7753; tuner-chosen partition should "
         f"match it (gamma=0.5 by composite score)."
+    )
+
+
+def test_sparse_fragmented_corpus_keeps_structure_over_flat():
+    """A sparse memory-shaped graph (many small tight communities, community
+    count above n/5) must yield its structured partition, not flat. The live
+    corpus regressed to a single flat community exactly this way: strong
+    modularity, thousands of small communities, and a count veto plus a
+    timeout-to-flat path threw the structure away."""
+    import uuid as _uuid
+
+    from iai_mcp.community import detect_communities
+
+    rng = random.Random(20260719)
+    g = MemoryGraph()
+    n_cliques = 320
+    clique_size = 4
+    all_nodes: list[_uuid.UUID] = []
+    clique_members: list[list[_uuid.UUID]] = []
+    for _ in range(n_cliques):
+        members = [_uuid.uuid4() for _ in range(clique_size)]
+        for m in members:
+            g.add_node(m, None, [0.0])
+        for i in range(clique_size):
+            for j in range(i + 1, clique_size):
+                g.add_edge(members[i], members[j], weight=1.0)
+        all_nodes.extend(members)
+        clique_members.append(members)
+    # Sparse inter-clique links (average degree stays ~3, like live hebbian).
+    for _ in range(n_cliques // 2):
+        a = rng.choice(clique_members)
+        b = rng.choice(clique_members)
+        if a is b:
+            continue
+        g.add_edge(rng.choice(a), rng.choice(b), weight=0.5)
+
+    n = g.node_count()
+    assignment = detect_communities(g, prior=None, prior_mode="cold")
+    k = len(set(assignment.node_to_community.values()))
+
+    assert assignment.backend != "flat", (
+        "sparse structured corpus collapsed to flat — the community gate "
+        "would be disabled"
+    )
+    # The exact count depends on how many linked cliques merge; the invariant
+    # is fine-grained structure (hundreds of communities), never a handful.
+    assert k >= 100, f"expected fine-grained structure, got k={k} at n={n}"
+    assert assignment.modularity > 0.5, (
+        f"expected strong modularity on a clique forest, got "
+        f"{assignment.modularity}"
     )

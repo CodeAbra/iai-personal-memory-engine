@@ -191,14 +191,20 @@ class MemoryGraph:
 
         for _ in range(2):
             next_frontier: set[str] = set()
-            for node in frontier:
+            # Deterministic frontier order: which neighbours win the top_k cut and
+            # the visited race depends on processing order, so a hash-randomized
+            # set sweep makes the candidate set differ across processes. Recall
+            # reproducibility requires a stable order.
+            for node in sorted(frontier):
                 if node not in self._adj:
                     continue
                 neighbours = [
                     (n, float(attrs.get("weight", 1.0)))
                     for n, attrs in self._adj[node].items()
                 ]
-                neighbours.sort(key=lambda x: x[1], reverse=True)
+                # Weight descending, then node id ascending, so weight ties break
+                # reproducibly rather than by dict insertion order.
+                neighbours.sort(key=lambda x: (-x[1], x[0]))
                 for n, _ in neighbours[:top_k]:
                     if n not in visited:
                         next_frontier.add(n)
@@ -208,7 +214,7 @@ class MemoryGraph:
             if not frontier:
                 break
 
-        return [UUID(n) for n in collected]
+        return [UUID(n) for n in sorted(collected)]
 
     def rich_club_coefficient(self, k_threshold: int | None = None) -> float:
         edges_no_selfloop: list[tuple[UUID, UUID]] = [

@@ -411,10 +411,10 @@ def test_buffered_edge_flush_bumps_generation_with_zero_funnel_calls(
 
 @_lilli_only
 def test_write_through_ro_conn_raises(tmp_path: Path) -> None:
-    import sqlite3
+    from iai_mcp import errors
 
     store = _make_store(tmp_path)
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(errors.Error):
         with store.db.ro_conn() as conn:
             conn.execute(
                 "INSERT INTO records (id, tier) VALUES (?, ?)",

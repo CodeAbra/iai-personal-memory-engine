@@ -47,6 +47,7 @@ jobs:
             (yum install -y openssl-devel pkgconfig ||
              apt-get update && apt-get install -y libssl-dev pkg-config || true)
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=10.12
           # A freshly built native wheel must import before it ships.
           CIBW_TEST_COMMAND: 'python -c "import iai_mcp, iai_mcp_native"'
 

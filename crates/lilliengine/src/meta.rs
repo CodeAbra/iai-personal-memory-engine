@@ -157,30 +157,56 @@ impl MetaTable {
         let rows = self.read_rows(store)?;
         let seq = next_ddl_seq(&rows);
 
-        // Allocate the data-tree root via the storage layer.
-        let root_page = store.create_tree().map_err(store_err)?;
+        // Allocate the data-tree root and persist both catalog rows in ONE
+        // transaction so a crash mid-DDL can never leave a table without its
+        // root, or an orphan root page without a catalog entry. Under an outer
+        // BEGIN (Suppressed) the caller already owns the transaction; the Own
+        // path opens and commits exactly one here. create_tree's own flush and
+        // each append insert no-op inside the open transaction, so all three
+        // writes land together at the single commit.
+        let own = scope == TxnScope::Own;
+        if own {
+            store.begin_write().map_err(store_err)?;
+        }
+        let persisted = (|| -> Result<u32> {
+            let root_page = store.create_tree().map_err(store_err)?;
+            self.append_row(
+                store,
+                &[
+                    Value::Text("ddl".to_string()),
+                    Value::Int(seq),
+                    Value::Text(ddl.to_string()),
+                ],
+                TxnScope::Suppressed,
+            )?;
+            self.append_row(
+                store,
+                &[
+                    Value::Text("root".to_string()),
+                    Value::Text(table_name.clone()),
+                    Value::Int(i64::from(root_page)),
+                ],
+                TxnScope::Suppressed,
+            )?;
+            Ok(root_page)
+        })();
+        let root_page = match persisted {
+            Ok(rp) => rp,
+            Err(e) => {
+                if own {
+                    // Abort the partial DDL so the root page and any written row
+                    // roll back together — nothing half-applied survives.
+                    let _ = store.rollback();
+                }
+                return Err(e);
+            }
+        };
+        if own {
+            store.commit().map_err(store_err)?;
+        }
 
-        // Persist the DDL text and the table → root mapping.
-        self.append_row(
-            store,
-            &[
-                Value::Text("ddl".to_string()),
-                Value::Int(seq),
-                Value::Text(ddl.to_string()),
-            ],
-            scope,
-        )?;
-        self.append_row(
-            store,
-            &[
-                Value::Text("root".to_string()),
-                Value::Text(table_name.clone()),
-                Value::Int(i64::from(root_page)),
-            ],
-            scope,
-        )?;
-
-        // Apply to the live catalog and record the root mapping.
+        // Apply to the live catalog only after the durable commit succeeds, so a
+        // commit failure leaves the in-memory catalog consistent with disk.
         let stmt = crate::parser::parse(ddl)?;
         catalog.apply_ddl(&stmt)?;
         catalog.set_rootpage(&table_name, i64::from(root_page));

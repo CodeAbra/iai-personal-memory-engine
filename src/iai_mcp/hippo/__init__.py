@@ -7,7 +7,6 @@ from iai_mcp import _flock as fcntl
 import logging
 import os
 import re
-import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -15,10 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import hnswlib
 import numpy as np
 import pandas as pd
-import pyarrow as pa
+from iai_mcp.hippo import _schema
 
 from iai_mcp.crypto import (
     decrypt_field,

@@ -218,14 +218,18 @@ def test_super_merge_lineage_events_recorded() -> None:
     )
     init = np.arange(n, dtype=np.int64)
     init_sigma = compute_sigma_tot(indptr, indices, data_arr, init, n)
+    # gamma=1.0 (the canonical CPM resolution) fragments Karate into a
+    # multi-community pre-merge partition so the coarser super-merge below has
+    # something to collapse. At gamma=0.5 the local move already recovers the
+    # true 2-faction split, leaving super-merge nothing to do.
     pre_merge_partition, _q, _stats = _run_one_leiden_pass(
-        csr_re, init, init_sigma, gamma=0.5, seed=42,
+        csr_re, init, init_sigma, gamma=1.0, seed=42,
     )
     partition = pre_merge_partition.copy()
     k = int(len(np.unique(partition)))
     assert k >= 3, (
         f"Pre-condition: expected pre-super-merge to find >=3 "
-        f"communities on Karate(gamma=0.5); got {k}."
+        f"communities on Karate(gamma=1.0); got {k}."
     )
 
     sigma_tot = compute_sigma_tot(indptr, indices, data_arr, partition, k)

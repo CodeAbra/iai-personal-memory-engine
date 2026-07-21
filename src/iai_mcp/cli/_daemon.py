@@ -62,6 +62,34 @@ def _render_systemd_unit() -> str:
     return text
 
 
+def _render_windows_task_xml() -> str:
+    from iai_mcp import cli as _cli
+    tmpl = _res.files("iai_mcp") / "_deploy" / "windows" / "iai-mcp-daemon.xml"
+    text = tmpl.read_text()
+    text = text.replace("{START_CMD}", str(_cli.WINDOWS_START_CMD))
+    text = text.replace("{WORK_DIR}", str(Path.home() / ".iai-mcp"))
+    return text
+
+
+def _render_windows_start_cmd() -> str:
+    """Start wrapper the scheduled task runs: the Task Scheduler XML cannot
+    set environment variables or redirect streams, so this .cmd is the
+    Windows counterpart of the plist's EnvironmentVariables +
+    StandardErrorPath blocks."""
+    from iai_mcp import cli as _cli
+    home = Path.home()
+    log_dir = home / ".iai-mcp" / "logs"
+    return (
+        "@echo off\r\n"
+        f'set "IAI_MCP_STORE={home / ".iai-mcp"}"\r\n'
+        'set "IAI_MCP_LAUNCHD_MANAGED=1"\r\n'
+        f'if not exist "{log_dir}" mkdir "{log_dir}"\r\n'
+        f'"{_cli.sys.executable}" -m iai_mcp.daemon '
+        f'>> "{log_dir / "task-stdout.log"}" '
+        f'2>> "{log_dir / "task-stderr.log"}"\r\n'
+    )
+
+
 def _prompt_consent(stream_out=None) -> bool:
     from iai_mcp import cli as _cli
     if stream_out is None:
@@ -124,6 +152,8 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
     elif _cli._is_linux():
         content = _render_systemd_unit()
         target = _cli.SYSTEMD_TARGET
+    elif os.name == "nt":
+        return _install_windows_task(dry_run=dry_run)
     else:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)
         return 1
@@ -142,8 +172,9 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
 
     _cli._ensure_crypto_key_present()
 
-    uid = os.getuid()
+    # os.getuid() is POSIX-only; resolve it inside the branch that uses it.
     if _cli._is_macos():
+        uid = os.getuid()
         _cli.subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}", str(target)],
             check=False, capture_output=True,
@@ -196,6 +227,100 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_windows_task(*, dry_run: bool) -> int:
+    """Register the daemon as a per-user Task Scheduler task (logon trigger,
+    restart-on-failure) — the Windows counterpart of launchd/systemd install."""
+    from iai_mcp import cli as _cli
+
+    cmd_content = _render_windows_start_cmd()
+    xml_content = _render_windows_task_xml()
+
+    if dry_run:
+        print(f"# Would install start wrapper to: {_cli.WINDOWS_START_CMD}")
+        print(cmd_content)
+        print(f"# Would register task '{_cli.WINDOWS_TASK_NAME}' from: {_cli.WINDOWS_TASK_XML}")
+        print(xml_content)
+        return 0
+
+    _cli.WINDOWS_START_CMD.parent.mkdir(parents=True, exist_ok=True)
+    _cli.WINDOWS_START_CMD.write_text(cmd_content, encoding="utf-8")
+    # Task Scheduler expects its XML in UTF-16, matching its own export format.
+    _cli.WINDOWS_TASK_XML.write_text(xml_content, encoding="utf-16")
+
+    _cli._ensure_crypto_key_present()
+
+    result = _cli.subprocess.run(
+        [
+            "schtasks", "/Create",
+            "/TN", _cli.WINDOWS_TASK_NAME,
+            "/XML", str(_cli.WINDOWS_TASK_XML),
+            "/F",
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"schtasks /Create failed ({result.returncode}): "
+            f"{(result.stderr or result.stdout).strip()}",
+            file=sys.stderr,
+        )
+        return 1
+    _cli.subprocess.run(
+        ["schtasks", "/Run", "/TN", _cli.WINDOWS_TASK_NAME],
+        check=False, capture_output=True,
+    )
+
+    print(f"Installed scheduled task '{_cli.WINDOWS_TASK_NAME}' (start wrapper: {_cli.WINDOWS_START_CMD})")
+    return 0
+
+
+def _install_windows_task(*, dry_run: bool) -> int:
+    """Register the daemon as a per-user Task Scheduler task (logon trigger,
+    restart-on-failure) — the Windows counterpart of launchd/systemd install."""
+    from iai_mcp import cli as _cli
+
+    cmd_content = _render_windows_start_cmd()
+    xml_content = _render_windows_task_xml()
+
+    if dry_run:
+        print(f"# Would install start wrapper to: {_cli.WINDOWS_START_CMD}")
+        print(cmd_content)
+        print(f"# Would register task '{_cli.WINDOWS_TASK_NAME}' from: {_cli.WINDOWS_TASK_XML}")
+        print(xml_content)
+        return 0
+
+    _cli.WINDOWS_START_CMD.parent.mkdir(parents=True, exist_ok=True)
+    _cli.WINDOWS_START_CMD.write_text(cmd_content, encoding="utf-8")
+    # Task Scheduler expects its XML in UTF-16, matching its own export format.
+    _cli.WINDOWS_TASK_XML.write_text(xml_content, encoding="utf-16")
+
+    _cli._ensure_crypto_key_present()
+
+    result = _cli.subprocess.run(
+        [
+            "schtasks", "/Create",
+            "/TN", _cli.WINDOWS_TASK_NAME,
+            "/XML", str(_cli.WINDOWS_TASK_XML),
+            "/F",
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"schtasks /Create failed ({result.returncode}): "
+            f"{(result.stderr or result.stdout).strip()}",
+            file=sys.stderr,
+        )
+        return 1
+    _cli.subprocess.run(
+        ["schtasks", "/Run", "/TN", _cli.WINDOWS_TASK_NAME],
+        check=False, capture_output=True,
+    )
+
+    print(f"Installed scheduled task '{_cli.WINDOWS_TASK_NAME}' (start wrapper: {_cli.WINDOWS_START_CMD})")
+    return 0
+
+
 def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     yes = bool(getattr(args, "yes", False))
@@ -211,8 +336,27 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
             print("Uninstall cancelled.", file=sys.stderr)
             return 1
 
-    uid = os.getuid()
+    if os.name == "nt":
+        _cli.subprocess.run(
+            ["schtasks", "/End", "/TN", _cli.WINDOWS_TASK_NAME],
+            check=False, capture_output=True,
+        )
+        _cli.subprocess.run(
+            ["schtasks", "/Delete", "/TN", _cli.WINDOWS_TASK_NAME, "/F"],
+            check=False, capture_output=True,
+        )
+        for artifact in (_cli.WINDOWS_TASK_XML, _cli.WINDOWS_START_CMD):
+            try:
+                artifact.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"warning: could not remove {artifact.name}: {exc}", file=sys.stderr)
+        _remove_state_files()
+        print("Daemon uninstalled. State files removed.")
+        return 0
+
+    # os.getuid() is POSIX-only; resolve it inside the branch that uses it.
     if _cli._is_macos():
+        uid = os.getuid()
         if _cli.LAUNCHD_TARGET.exists():
             _cli.subprocess.run(
                 ["launchctl", "bootout", f"gui/{uid}", str(_cli.LAUNCHD_TARGET)],
@@ -244,8 +388,24 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_daemon_start(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
-    uid = os.getuid()
+    if os.name == "nt":
+        result = _cli.subprocess.run(
+            ["schtasks", "/Run", "/TN", _cli.WINDOWS_TASK_NAME],
+            check=False, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(
+                f"schtasks /Run failed ({result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()} — "
+                "run `iai-mcp daemon install` first",
+                file=sys.stderr,
+            )
+            return 1
+        print("Daemon start requested via Task Scheduler.")
+        return 0
+    # os.getuid() is POSIX-only; resolve it inside the branch that uses it.
     if _cli._is_macos():
+        uid = os.getuid()
         target = _cli.LAUNCHD_TARGET
         _cli.subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}", str(target)],
@@ -455,8 +615,6 @@ def cmd_daemon_rss_stats(args: argparse.Namespace) -> int:
         rss_kib = snap.get("rss_kib", "?")
         regions = snap.get("vmmap_region_count", "?")
         va_kib = snap.get("vm_allocate_kib", "?")
-        pa_bytes = snap.get("pa_pool_bytes", "?")
-        pa_max = snap.get("pa_pool_max", "?")
         nrt_alloc = snap.get("numba_nrt_alloc_count", -1)
         nrt_free = snap.get("numba_nrt_free_count", -1)
         nrt_outstanding = (
@@ -470,7 +628,6 @@ def cmd_daemon_rss_stats(args: argparse.Namespace) -> int:
         print(f"  rss_kib:             {rss_kib}")
         print(f"  vmmap_region_count:  {regions}")
         print(f"  vm_allocate_kib:     {va_kib}")
-        print(f"  pyarrow_pool_bytes:  {pa_bytes} (high-water {pa_max})")
         print(f"  numba_nrt_outstanding: {nrt_outstanding}")
     else:
         print("(daemon socket unreachable; live stats omitted)")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
+from iai_mcp import errors
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -422,8 +422,8 @@ def migrate_encryption_v2_to_v3(
 
     if not dry_run and records_updates:
         now = datetime.now(timezone.utc)
-        import pyarrow as pa
-        update_tbl = pa.table(
+        from iai_mcp.hippo import _schema
+        update_tbl = _schema.table(
             {
                 "id": [u["id"] for u in records_updates],
                 "literal_surface": [u["literal_surface"] for u in records_updates],
@@ -436,7 +436,7 @@ def migrate_encryption_v2_to_v3(
         )
         try:
             records_tbl.merge_insert("id").when_matched_update_all().execute(update_tbl)
-        except (OSError, ValueError, AttributeError, RuntimeError, sqlite3.IntegrityError) as exc:
+        except (OSError, ValueError, AttributeError, RuntimeError, errors.IntegrityError) as exc:
             log.error("merge_insert fallback triggered: %s", exc)
             for u in records_updates:
                 try:

@@ -26,7 +26,7 @@ use crate::consts::{
     PAGE_CRC_COVERED, PAGE_CRC_OFFSET, PAGE_SIZE, WRITE_VERSION_JOURNAL, WRITE_VERSION_WAL,
 };
 use crate::error::{Result, StoreError};
-use crate::io::{durable_fsync, fsync_directory};
+use crate::io::{durable_fsync, fsync_parent_directory};
 use crate::journal::{journal_path_for, recover_journal_on_open, Journal};
 use crate::wal::{
     read_checkpoint_generation, read_committed_wal_frames, recover_wal_on_open, wal_path_for,
@@ -342,7 +342,7 @@ impl Pager {
         };
         let current_len = self.with_file(|f| Ok(f.metadata()?.len()))?;
         if current_len != fence.main_len {
-            return Err(StoreError::Integrity {
+            return Err(StoreError::SnapshotFence {
                 detail: format!(
                     "{RO_SNAPSHOT_FENCE_PREFIX}: main file size changed under a concurrent checkpoint"
                 ),
@@ -350,7 +350,7 @@ impl Pager {
         }
         let current_generation = read_checkpoint_generation(&fence.wal_path);
         if current_generation != fence.generation {
-            return Err(StoreError::Integrity {
+            return Err(StoreError::SnapshotFence {
                 detail: format!(
                     "{RO_SNAPSHOT_FENCE_PREFIX}: checkpoint generation advanced under a concurrent checkpoint"
                 ),
@@ -626,6 +626,14 @@ impl Pager {
     /// Total page count from the header.
     pub fn db_size(&self) -> Result<u32> {
         self.read_header_u32(HDR_DB_SIZE_OFFSET)
+    }
+
+    /// Physical page count implied by the on-disk file length (full pages only),
+    /// independent of the header's recorded `db_size`. A checker compares the two
+    /// to surface trailing pages past the recorded extent.
+    pub fn physical_page_count(&self) -> Result<u32> {
+        let len = self.with_file(|f| Ok(f.metadata()?.len()))?;
+        Ok((len / PAGE_SIZE as u64) as u32)
     }
 
     /// First freelist trunk page (0 = empty).
@@ -1072,7 +1080,15 @@ impl Pager {
                 let wal = tx.wal.as_mut().ok_or_else(|| StoreError::Integrity {
                     detail: "commit: WAL mode without a writer".to_string(),
                 })?;
-                wal.commit_transaction(&dirty, db_size)?;
+                if let Err(e) = wal.commit_transaction(&dirty, db_size) {
+                    // A failed commit must not leave the running frame index
+                    // advanced past the last durable frame: rewind to the
+                    // committed baseline so a subsequent retry or rollback starts
+                    // consistent and can never append duplicate frames past a
+                    // torn gap.
+                    wal.rollback();
+                    return Err(e);
+                }
                 if wal.committed_frame_count() >= crate::consts::WAL_AUTOCHECKPOINT_FRAMES as u64 {
                     self.with_file(|f| wal.checkpoint(f))?;
                 }
@@ -1099,13 +1115,17 @@ impl Pager {
         }
         self.with_file(|f| durable_fsync(f))?;
 
-        // Discard the journal — the commit point — and make it durable.
+        // Discard the journal — the commit point. The unlink and its directory
+        // entry must be durable before commit reports success: a surviving
+        // committed journal would roll this transaction back on the next open.
         let journal_path = journal_path_for(&self.path);
         tx.journal = None;
-        let _ = std::fs::remove_file(&journal_path);
-        if let Some(parent) = self.path.parent() {
-            let _ = fsync_directory(parent);
+        match std::fs::remove_file(&journal_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
+        fsync_parent_directory(&journal_path)?;
         tx.open = false;
         drop(tx);
         self.inner.lock().dirty.clear();

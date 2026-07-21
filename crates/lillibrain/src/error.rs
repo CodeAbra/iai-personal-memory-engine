@@ -48,6 +48,16 @@ pub enum StoreError {
         /// The current total page count.
         db_size: u32,
     },
+
+    /// A read-only snapshot fence tripped: a concurrent checkpoint advanced the
+    /// store under this read-only pager. Transient and retryable (reopen or
+    /// refresh the snapshot) — NOT corruption, and must never be classified as
+    /// such, or the reader's fence-retry loop stops catching it.
+    #[error("{detail}")]
+    SnapshotFence {
+        /// The fence message (carries `RO_SNAPSHOT_FENCE_PREFIX`).
+        detail: String,
+    },
 }
 
 /// Result alias for storage-engine operations.

@@ -26,7 +26,7 @@ use crate::consts::{
     WAL_MAGIC_BE,
 };
 use crate::error::Result;
-use crate::io::{durable_fsync, fsync_directory};
+use crate::io::{durable_fsync, fsync_parent_directory};
 
 /// The two-sum checksum over `data`, chained from a prior `(s0, s1)` pair.
 ///
@@ -43,20 +43,42 @@ pub fn wal_checksum(data: &[u8], mut s0: u32, mut s1: u32) -> (u32, u32) {
     (s0, s1)
 }
 
-/// A simple deterministic-enough salt source: mixes process-time entropy so two
-/// log cycles draw distinct salt pairs without pulling a crate dependency.
+/// A salt source that mixes full-resolution time, a process-global monotonic
+/// counter, the process id, and a stack address (ASLR) so two salt draws never
+/// collide — even within one coarse clock tick — without a crate dependency.
+///
+/// The salt is a secondary guard behind frame truncation and the checksum chain,
+/// but a repeated salt weakens stale-frame rejection, so it must not lean on the
+/// low bits of a single sub-second read.
 fn fresh_salt() -> u32 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    // SplitMix-style scramble so successive nanosecond reads spread across the
-    // u32 range rather than clustering in the low bits.
-    let mut x = (nanos as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0xD1B5_4A32);
+    let pid = u64::from(std::process::id());
+    let stack_entropy = {
+        let local = 0u8;
+        (&local as *const u8) as u64
+    };
+
+    // SplitMix64 finalizer over the combined entropy so every input bit spreads
+    // across the full width rather than clustering in the low bits.
+    let mut x = nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(seq.wrapping_mul(0xD1B5_4A32_9E37_79B9))
+        .wrapping_add(pid.rotate_left(17))
+        .wrapping_add(stack_entropy);
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
     (x as u32) ^ ((x >> 32) as u32)
 }
 
@@ -123,6 +145,9 @@ impl WalWriter {
             committed_next_frame_offset: WAL_HEADER_SIZE as u64,
         };
         w.write_header()?;
+        // The sidecar's directory entry must be durable before any committed
+        // frame relies on the file being findable after power loss.
+        fsync_parent_directory(&w.path)?;
         Ok(w)
     }
 
@@ -538,11 +563,14 @@ pub fn recover_wal_on_open(db_path: &Path, wal_path: &Path, page_size: usize) ->
         durable_fsync(&db_file)?;
     }
 
-    // Step 5: remove the sidecar so the next open starts clean.
-    let _ = std::fs::remove_file(wal_path);
-    if let Some(parent) = wal_path.parent() {
-        let _ = fsync_directory(parent);
+    // Step 5: remove the sidecar — the commit point of recovery. A surviving
+    // sidecar would replay again, so the unlink must succeed and be durable.
+    match std::fs::remove_file(wal_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
+    fsync_parent_directory(wal_path)?;
     Ok(())
 }
 

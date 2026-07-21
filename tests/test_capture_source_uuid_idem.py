@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(
 
 SESSION_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 TRANSCRIPT_TS = "2026-05-31T17:41:01.968Z"
-TURN_TEXT = "маркер один — unique marker for re-emission idem test"
+TURN_TEXT = "マーカー壱 — unique marker for re-emission idem test"
 
 
 @pytest.fixture

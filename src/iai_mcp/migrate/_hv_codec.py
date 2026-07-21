@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
+from iai_mcp import errors
 import time
 from typing import Callable, Optional
 
@@ -93,7 +93,7 @@ def migrate_hd_vector_to_structure_hv_v3_to_v4(
     return result
 
 
-def _migrate_add_hv_tier_columns(conn: sqlite3.Connection) -> dict:
+def _migrate_add_hv_tier_columns(conn) -> dict:
     result = {"hv_tier_added": False, "structure_hv_payload_added": False}
 
     try:
@@ -101,7 +101,7 @@ def _migrate_add_hv_tier_columns(conn: sqlite3.Connection) -> dict:
             "ALTER TABLE records ADD COLUMN hv_tier TEXT NOT NULL DEFAULT 'bsc'"
         )
         result["hv_tier_added"] = True
-    except sqlite3.OperationalError as exc:
+    except errors.OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
             raise
 
@@ -110,7 +110,7 @@ def _migrate_add_hv_tier_columns(conn: sqlite3.Connection) -> dict:
             "ALTER TABLE records ADD COLUMN structure_hv_payload BLOB NOT NULL DEFAULT x''"
         )
         result["structure_hv_payload_added"] = True
-    except sqlite3.OperationalError as exc:
+    except errors.OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
             raise
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re as _re
-import sqlite3
+from iai_mcp import errors
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -647,17 +647,17 @@ def _bind_params(
 
     if isinstance(expr, NamedParam):
         if named is None:
-            raise sqlite3.ProgrammingError(
+            raise errors.ProgrammingError(
                 "bind_params: a :name placeholder requires a dict param "
                 f"(none supplied for {expr.name!r})"
             )
         if expr.name not in named:
-            raise sqlite3.ProgrammingError(
+            raise errors.ProgrammingError(
                 f"bind_params: no value supplied for named parameter {expr.name!r}"
             )
         seen["named"] = True
         if seen["positional"]:
-            raise sqlite3.ProgrammingError(
+            raise errors.ProgrammingError(
                 "bind_params: cannot mix named (:name) and positional (?) "
                 "parameters in one statement"
             )
@@ -668,13 +668,13 @@ def _bind_params(
         if expr.value == "?":
             seen["positional"] = True
             if seen["named"]:
-                raise sqlite3.ProgrammingError(
+                raise errors.ProgrammingError(
                     "bind_params: cannot mix named (:name) and positional (?) "
                     "parameters in one statement"
                 )
             # This is a '?' placeholder — pop the next bound param
             if not params_queue:
-                raise sqlite3.ProgrammingError(
+                raise errors.ProgrammingError(
                     "bind_params: too few bound parameters for '?' placeholders"
                 )
             val = params_queue.pop(0)

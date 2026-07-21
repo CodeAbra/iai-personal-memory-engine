@@ -35,11 +35,11 @@ from __future__ import annotations
 import math
 import os
 import shutil
-import sqlite3
+from iai_mcp import _sqlite_stdlib
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -107,22 +107,22 @@ def _dst_db_path(dst_root: str | Path) -> Path:
     return Path(dst_root) / "hippo" / "brain.sqlite3"
 
 
-def _open_ro(db_path: str | Path) -> sqlite3.Connection:
+def _open_ro(db_path: str | Path) -> Any:
     """Open a genuine SQLite-format file read-only with the stdlib driver.
 
     Used only for the SOURCE store, which is genuine SQLite.  The destination is
     lilli-format and must be read via the lilli engine instead (see _open_dst).
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
+    conn = _sqlite_stdlib.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = _sqlite_stdlib.Row
     return conn
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+def _table_columns(conn: Any, table: str) -> list[str]:
     return [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
-def _count(conn: sqlite3.Connection, table: str) -> int:
+def _count(conn: Any, table: str) -> int:
     row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
     return int(row["n"]) if row is not None else 0
 
@@ -131,7 +131,7 @@ def _count(conn: sqlite3.Connection, table: str) -> int:
 _SCAN_BATCH = 1000
 
 
-def _fetch_row(conn: sqlite3.Connection, table: str, rid: str) -> Optional[sqlite3.Row]:
+def _fetch_row(conn: Any, table: str, rid: str) -> Optional[Any]:
     """Single-row lookup by id -- used ONLY on the source (genuine SQLite, which
     has a rowid/PK index), and never inside a per-sample loop on the engine.
     """
@@ -191,7 +191,7 @@ def _as_bytes(value) -> bytes:
 
 
 def _verify_counts(
-    src: sqlite3.Connection, dst: sqlite3.Connection
+    src: Any, dst: Any
 ) -> DimensionResult:
     """Dimension A -- per-table row count parity for every store table."""
     counts: dict[str, int] = {}
@@ -275,7 +275,7 @@ def _co_scan_bytes(
 
 
 def _verify_bytes(
-    src: sqlite3.Connection,
+    src: Any,
     dst,
 ) -> tuple[DimensionResult, list[str]]:
     """Dimension B -- ciphertext + embedding byte-equality over EVERY row.
@@ -307,7 +307,7 @@ def _verify_bytes(
 
 
 def _verify_decrypt(
-    src: sqlite3.Connection,
+    src: Any,
     dst,
     crypto_key: bytes,
 ) -> DimensionResult:
@@ -656,7 +656,7 @@ def _verify_temporal(
 
 
 def _verify_codec(
-    src: sqlite3.Connection,
+    src: Any,
     dst,
 ) -> DimensionResult:
     """Dimension F -- V5 codec metadata round-trip (hv_tier + structure_hv_payload).

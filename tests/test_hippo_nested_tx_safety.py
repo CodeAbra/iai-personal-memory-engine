@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-import pyarrow as pa
+from iai_mcp.hippo import _schema as pa
 import pytest
 
 from iai_mcp.hippo import HippoDB
@@ -30,7 +30,7 @@ def _sample_edge_row(src_id: str, dst_id: str) -> dict:
 
 
 def _edge_arrow(rows: list[dict]) -> pa.Table:
-    import pyarrow as pa
+    from iai_mcp.hippo import _schema as pa
     return pa.Table.from_pylist(
         rows,
         schema=pa.schema(

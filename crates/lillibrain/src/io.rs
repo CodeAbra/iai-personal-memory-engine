@@ -66,6 +66,17 @@ pub fn fsync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Flush the directory entry for `path`'s containing directory to stable
+/// storage. An empty parent (bare relative path) resolves to the current
+/// directory. The error is always propagated.
+pub fn fsync_parent_directory(path: &Path) -> Result<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fsync_directory(parent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

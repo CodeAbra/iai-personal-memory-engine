@@ -18,6 +18,48 @@ pub mod shortest;
 use pyo3::prelude::*;
 use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 
+use crate::error::GraphError;
+
+/// Validate a CSR (compressed sparse row) adjacency pair before a kernel walks
+/// it. One shared contract for every algorithm entry point: `indptr` has length
+/// `n_nodes + 1`, is monotonic non-decreasing, its tail equals `indices.len()`,
+/// and every neighbor id sits in `[0, n_nodes)`. A malformed CSR would otherwise
+/// index out of bounds (a `PanicException` crossing into Python) or, worse, add a
+/// phantom node that silently corrupts a metric. Errors map to `ValueError`.
+pub fn validate_csr(indptr: &[i64], indices: &[i64], n_nodes: usize) -> Result<(), GraphError> {
+    if indptr.len() != n_nodes + 1 {
+        return Err(GraphError::InvalidNodeId(format!(
+            "indptr length {} != n_nodes + 1 = {}",
+            indptr.len(),
+            n_nodes + 1
+        )));
+    }
+    let mut prev: i64 = 0;
+    for (i, &p) in indptr.iter().enumerate() {
+        if p < prev {
+            return Err(GraphError::InvalidNodeId(format!(
+                "indptr not monotonic at {i}: {p} < {prev}"
+            )));
+        }
+        prev = p;
+    }
+    if indptr[n_nodes] as usize != indices.len() {
+        return Err(GraphError::InvalidNodeId(format!(
+            "indptr tail {} != indices length {}",
+            indptr[n_nodes],
+            indices.len()
+        )));
+    }
+    for (k, &v) in indices.iter().enumerate() {
+        if v < 0 || v as usize >= n_nodes {
+            return Err(GraphError::InvalidNodeId(format!(
+                "indices[{k}] = {v} out of range [0, {n_nodes})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Wave-1 wiring probe. Returning the literal `42` lets a downstream Python
 /// smoke test prove that:
 ///   1. the wrapper crate exposes the `graph` sub-module successfully, and
@@ -47,6 +89,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connectivity::selfloop_edges, m)?)?;
     m.add_function(wrap_pyfunction!(generators::gnm_random_graph, m)?)?;
     m.add_function(wrap_pyfunction!(shortest::average_shortest_path_length, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        shortest::average_shortest_path_length_sampled,
+        m
+    )?)?;
     Ok(())
 }
 

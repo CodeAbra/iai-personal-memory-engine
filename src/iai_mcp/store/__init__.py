@@ -23,7 +23,6 @@ from iai_mcp.hippo import _REAL_IAI_ROOT, AccessMode, HippoDB, HippoIntegrityErr
 
 CPU_HAS_AVX2: bool = True
 
-import pyarrow as pa
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

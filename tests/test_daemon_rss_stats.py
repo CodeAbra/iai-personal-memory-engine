@@ -47,8 +47,6 @@ _SNAPSHOT_KEYS = (
     "rss_kib",
     "vmmap_region_count",
     "vm_allocate_kib",
-    "pa_pool_bytes",
-    "pa_pool_max",
     "numba_nrt_alloc_count",
     "numba_nrt_free_count",
 )
@@ -129,8 +127,6 @@ def test_cli_rss_stats_live_snapshot(tmp_path, monkeypatch, capsys) -> None:
             "rss_kib": 204800,
             "vmmap_region_count": 289,
             "vm_allocate_kib": 16,
-            "pa_pool_bytes": 0,
-            "pa_pool_max": 1024,
             "numba_nrt_alloc_count": 10,
             "numba_nrt_free_count": 4,
             "t": 1.0,

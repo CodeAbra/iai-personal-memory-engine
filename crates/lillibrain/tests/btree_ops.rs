@@ -644,3 +644,34 @@ fn get_many_binary_seek_matches_per_key_gets() {
     assert_eq!(got.len(), expected.len());
     assert_eq!(got, expected);
 }
+
+#[test]
+fn get_many_sparse_over_fat_rows_falls_back_and_stays_correct() {
+    // Fat inline rows pack ~2 per leaf, so a few hundred rows span hundreds of
+    // pages. A handful of sparse requests then exhaust the page budget
+    // (~4 + 3*keys) long before the walk reaches them, forcing the per-key
+    // descent fallback — which must still return every key, including one whose
+    // value spills to an overflow chain.
+    let (_d, store, root) = open_tree();
+    let t = store.tree(root);
+    for k in 0..400i64 {
+        let payload = vec![b'y'; 4000 + (k % 5) as usize];
+        t.insert(k, &payload).unwrap();
+    }
+    let big = vec![b'z'; OVERFLOW_THRESHOLD + 500];
+    t.insert(1000, &big).unwrap();
+
+    let requests = vec![0i64, 200, 399, 1000];
+    let got = t.get_many(&requests).unwrap();
+
+    let expected: Vec<(i64, Vec<u8>)> = requests
+        .iter()
+        .map(|&k| (k, t.get(k).unwrap().unwrap()))
+        .collect();
+    assert_eq!(got, expected, "fallback must return every key, overflow included");
+    assert_eq!(
+        got.last().unwrap().1.len(),
+        OVERFLOW_THRESHOLD + 500,
+        "the overflow payload must round-trip through get_many"
+    );
+}

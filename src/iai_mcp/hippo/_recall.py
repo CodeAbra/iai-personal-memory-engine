@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-import hnswlib
+from iai_mcp import _sqlite_stdlib
+
+from iai_mcp.hippo import _vecindex
 import numpy as np
 
 from iai_mcp.types import EMBED_DIM
@@ -35,8 +36,8 @@ def _decrypt_degraded_surface(
 
     Returns the plaintext on success, or None when decryption fails — in which
     case the caller MUST skip the row. A decrypt failure NEVER surfaces raw
-    ciphertext as user-facing content (constitutional: decrypt failure is
-    fail-loud, never silent ciphertext-as-content).
+    ciphertext as user-facing content: a decrypt failure is fail-loud, never
+    silent ciphertext-as-content.
     """
     try:
         return decrypt_field(surface, crypto_key, _aad_for_id(row_id))
@@ -103,20 +104,20 @@ def _no_flock_recency_rows_from_store(
     limit: "int | None" = None,
 ) -> list[dict]:
     from iai_mcp.hippo._raw_open import open_store_conn
-    conn: "sqlite3.Connection | None" = None
+    conn = None
     try:
         _eng = open_store_conn(db_path, read_only=True)
         if _eng is not None:
             conn = _eng
         else:
-            conn = sqlite3.connect(
+            conn = _sqlite_stdlib.connect(
                 str(db_path),
                 check_same_thread=False,
                 isolation_level=None,
             )
+            conn.row_factory = _sqlite_stdlib.Row
         conn.execute("PRAGMA busy_timeout=2000")
         conn.execute("PRAGMA query_only=ON")
-        conn.row_factory = sqlite3.Row
         if limit is not None:
             cursor = conn.execute(_DIRECT_RECENCY_SQL_LIMITED, (limit,))
         else:
@@ -174,12 +175,12 @@ def direct_recency_rows_from_store(
     return _no_flock_recency_rows_from_store(db_path, limit=limit)
 
 
-def load_hnsw_readonly(store_root: "str | Path", embed_dim: int) -> "hnswlib.Index | None":
+def load_hnsw_readonly(store_root: "str | Path", embed_dim: int) -> "_vecindex.Index | None":
     hnsw_path = Path(store_root) / "hippo" / "records.hnsw"
     if not hnsw_path.exists():
         return None
     try:
-        idx = hnswlib.Index(space="cosine", dim=embed_dim)
+        idx = _vecindex.Index(space="cosine", dim=embed_dim)
         idx.load_index(str(hnsw_path), max_elements=0)
         idx.set_ef(200)
         idx.set_num_threads(1)

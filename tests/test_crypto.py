@@ -25,7 +25,7 @@ def test_crypto_roundtrip_basic() -> None:
 def test_crypto_roundtrip_cyrillic() -> None:
     from iai_mcp.crypto import encrypt_field, decrypt_field
     key = b"\x01" * 32
-    plaintext = "Привет, мир! Это тест шифрования."
+    plaintext = "こんにちは世界！これは暗号化のテストです。"
     ciphertext = encrypt_field(plaintext, key)
     recovered = decrypt_field(ciphertext, key)
     assert recovered == plaintext
@@ -289,7 +289,7 @@ def test_envelope_byte_identity_roundtrip() -> None:
         "ok",
         "the quick brown fox jumps over the lazy dog " * 50,
         '[{"a":1,"b":2,"c":[1,2,3,4,5]}]',
-        "Привет, мир! — Cyrillic mix",
+        "こんにちは世界 — CJK mix",
         "",
         # Adversarial: new-write round-trip must survive leading control bytes
         # that collide with envelope version tags (these are the exact bytes

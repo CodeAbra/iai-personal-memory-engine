@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
+from iai_mcp import errors
 import threading
 import time
 from pathlib import Path
@@ -106,7 +108,7 @@ def test_open_ro_connection_rejects_writes(tmp_path: Path):
 
     ro = roexp.open_ro_connection(db_path)
     try:
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(errors.OperationalError):
             ro.execute(
                 "INSERT INTO records (id, embedding) VALUES (?, ?)",
                 (str(uuid4()), b"\x00" * (_DIM * 4)),
@@ -264,7 +266,8 @@ def test_read_transaction_and_edges_branch_on_connection_not_env_reverse(
 
     ro = roexp.open_ro_connection(db_path)
     try:
-        assert isinstance(ro, sqlite3.Connection), (
+        from iai_mcp import _sqlite_stdlib
+        assert _sqlite_stdlib.is_stdlib_connection(ro), (
             "on-disk magic is genuine stdlib SQLite; open_ro_connection must "
             "resolve the stdlib connection regardless of env=lilli"
         )

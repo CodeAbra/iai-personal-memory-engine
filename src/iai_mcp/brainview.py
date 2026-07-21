@@ -380,17 +380,16 @@ class BrainView:
         """Short-lived lock-free RO snapshot on the store file. Never touches
         the writer lock; a concurrent checkpoint invalidates it (the caller
         retries once on the fence error)."""
-        import sqlite3 as _sqlite3
-
+        from iai_mcp import _sqlite_stdlib
         from iai_mcp.hippo._raw_open import open_store_conn
 
         db_path = str(self.root / "hippo" / "brain.sqlite3")
         conn = open_store_conn(db_path, read_only=True)
         if conn is None:
-            conn = _sqlite3.connect(
+            conn = _sqlite_stdlib.connect(
                 f"file:{db_path}?mode=ro", uri=True, check_same_thread=False,
             )
-        conn.row_factory = _sqlite3.Row
+            conn.row_factory = _sqlite_stdlib.Row
         return conn
 
     _EMPTY_SHELLS = {

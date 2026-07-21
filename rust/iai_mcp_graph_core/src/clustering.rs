@@ -40,8 +40,6 @@
 use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 
-use crate::error::GraphError;
-
 /// Slice into `indices` covering the neighbors of node `u`.
 ///
 /// CSR layout: `neighbors(u) = indices[indptr[u]..indptr[u + 1]]`.
@@ -172,17 +170,12 @@ pub fn average_clustering(
     indices: PyReadonlyArray1<'_, i64>,
     n_nodes: usize,
 ) -> PyResult<f64> {
-    // Validate while we still hold the GIL -- error construction needs it.
+    // Validate while we still hold the GIL -- error construction needs it. The
+    // full CSR check (not just indptr length) keeps count_triangles_for_node
+    // from indexing indptr with an out-of-range neighbor id and panicking.
     let indptr_slice = indptr.as_slice()?;
     let indices_slice = indices.as_slice()?;
-    if indptr_slice.len() != n_nodes + 1 {
-        return Err(GraphError::InvalidNodeId(format!(
-            "indptr length {} != n_nodes + 1 = {}",
-            indptr_slice.len(),
-            n_nodes + 1
-        ))
-        .into());
-    }
+    crate::validate_csr(indptr_slice, indices_slice, n_nodes)?;
 
     // Copy to owned buffers BEFORE allow_threads -- the closure must
     // not hold Python-bound borrows because the GIL is released for

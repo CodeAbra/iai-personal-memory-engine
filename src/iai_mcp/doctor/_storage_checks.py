@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 from pathlib import Path
+
+from iai_mcp import _sqlite_stdlib
+from iai_mcp import errors
 
 from iai_mcp.doctor import CheckResult
 from iai_mcp.hippo import open_store_conn
@@ -220,13 +222,13 @@ def check_x_no_collapsed_timestamps() -> CheckResult:
         if _eng is not None:
             conn = _eng
         else:
-            conn = sqlite3.connect(str(db_path), timeout=2.0)
+            conn = _sqlite_stdlib.connect(str(db_path), timeout=2.0)
         rows = conn.execute(
             "SELECT created_at, COUNT(*) AS n FROM records"
             " WHERE tier = 'episodic' AND tombstoned_at IS NULL"
             " GROUP BY created_at HAVING COUNT(*) >= 5 ORDER BY n DESC LIMIT 20"
         ).fetchall()
-    except (sqlite3.Error, _LilliParseError) as exc:  # type: ignore[misc]
+    except (errors.Error, _LilliParseError) as exc:  # type: ignore[misc]
         return CheckResult(
             name="(x) no collapsed-timestamp groups",
             passed=True,
@@ -327,10 +329,10 @@ def check_r_hippo_hnsw_loadable() -> CheckResult:
             status="FAIL",
         )
     try:
-        import hnswlib as _hnswlib
+        from iai_mcp.hippo import _vecindex as _vi
         from iai_mcp.types import EMBED_DIM
 
-        idx = _hnswlib.Index(space="cosine", dim=EMBED_DIM)
+        idx = _vi.Index(space="cosine", dim=EMBED_DIM)
         idx.load_index(str(hnsw_path), max_elements=0)
     except Exception as exc:  # noqa: BLE001 — surface any load failure
         logger.debug("check_r: hnswlib.load_index failed: %s", exc)
@@ -366,11 +368,11 @@ def check_s_hippo_schema_version() -> CheckResult:
         if _eng is not None:
             conn = _eng
         else:
-            conn = sqlite3.connect(str(db_path), timeout=2.0)
+            conn = _sqlite_stdlib.connect(str(db_path), timeout=2.0)
         row = conn.execute(
             "SELECT value FROM _hippo_meta WHERE key = 'schema_version'"
         ).fetchone()
-    except (sqlite3.Error, _LilliParseError) as exc:  # type: ignore[misc]
+    except (errors.Error, _LilliParseError) as exc:  # type: ignore[misc]
         return CheckResult(
             name="(s) hippo schema version",
             passed=True,
@@ -408,7 +410,6 @@ def check_s_hippo_schema_version() -> CheckResult:
 
 
 def check_t_hippo_compacted_freshness() -> CheckResult:
-    import sqlite3
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
@@ -430,7 +431,7 @@ def check_t_hippo_compacted_freshness() -> CheckResult:
             detail="deferred — daemon holds the store (normal)",
             status="PASS",
         )
-    except sqlite3.OperationalError as exc:
+    except errors.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             logger.debug("check_t: store held by running daemon (sqlite): %s", exc)
             return CheckResult(
@@ -504,7 +505,6 @@ def check_t_hippo_compacted_freshness() -> CheckResult:
 
 
 def check_u_recall_centrality_regression() -> CheckResult:
-    import sqlite3
     import statistics
     from datetime import datetime as _dt
     from datetime import timedelta as _td
@@ -586,7 +586,7 @@ def check_u_recall_centrality_regression() -> CheckResult:
             detail="deferred — daemon holds the store (normal)",
             status="PASS",
         )
-    except sqlite3.OperationalError as exc:
+    except errors.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             logger.debug("check_u: store held by running daemon (sqlite): %s", exc)
             return CheckResult(

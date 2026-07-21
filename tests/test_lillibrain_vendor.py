@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
+from iai_mcp import errors
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -140,7 +142,8 @@ def test_default_driver_is_stdlib(
     monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
     db = HippoDB(tmp_path)
     try:
-        assert isinstance(db._conn, sqlite3.Connection)
+        from iai_mcp import _sqlite_stdlib
+        assert _sqlite_stdlib.is_stdlib_connection(db._conn)
         assert not isinstance(db._conn, LilliBrainConnection)
     finally:
         db.close()
@@ -158,7 +161,8 @@ def test_driver_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
     db_stdlib = HippoDB(tmp_path / "stdlib")
     try:
-        assert isinstance(db_stdlib._conn, sqlite3.Connection)
+        from iai_mcp import _sqlite_stdlib
+        assert _sqlite_stdlib.is_stdlib_connection(db_stdlib._conn)
         assert not isinstance(db_stdlib._conn, LilliBrainConnection)
     finally:
         db_stdlib.close()
@@ -338,7 +342,7 @@ def test_lilli_read_only_raises_on_write(
     """HippoDB(read_only=True) on the lilli driver blocks INSERT/UPDATE/DELETE.
 
     The engine must honor PRAGMA query_only=ON by raising
-    sqlite3.OperationalError('attempt to write a readonly database') when a
+    OperationalError('attempt to write a readonly database') when a
     mutating statement is executed — matching the sqlite3 contract so callers
     can rely on read_only=True for safety regardless of driver.
     """
@@ -356,7 +360,7 @@ def test_lilli_read_only_raises_on_write(
     # Re-open read-only: INSERT must raise.
     db_ro = HippoDB(tmp_path, read_only=True)
     try:
-        with pytest.raises(sqlite3.OperationalError, match="attempt to write a readonly database"):
+        with pytest.raises(errors.OperationalError, match="attempt to write a readonly database"):
             db_ro._conn.execute(
                 "INSERT INTO records (id, tier) VALUES (?, ?)",
                 (str(uuid4()), "episodic"),

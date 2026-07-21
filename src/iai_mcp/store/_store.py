@@ -18,7 +18,7 @@ import logging
 
 from iai_mcp.hippo import _REAL_IAI_ROOT, AccessMode, HippoDB, HippoIntegrityError
 
-import pyarrow as pa
+from iai_mcp.hippo import _schema
 
 from iai_mcp.crypto import (
     CryptoKey,
@@ -1902,9 +1902,9 @@ class MemoryStore:
         # invalidated") — but because the cursor advances by id, a reopen
         # resumes exactly where it left off instead of re-scanning from the
         # start. Forward progress is therefore guaranteed at any corpus size:
-        import sqlite3 as _sqlite3
-
-        from iai_mcp.hippo._ro_pool import _RO_SNAPSHOT_FENCE_MARKER
+        # the pipeline can no longer fence its own full-corpus scans to death.
+        from iai_mcp import errors as _errors
+        from iai_mcp.hippo._ro_pool import _is_snapshot_fence
 
         want = list(columns)
         select_cols = want if "id" in want else ["id", *want]
@@ -1918,19 +1918,33 @@ class MemoryStore:
         strip_id = "id" not in want
         conn = self._open_keyset_snapshot(db_path)
         last_id = ""
+        # Bound CONSECUTIVE fence reopens: a page that fences before returning
+        # its first row, over and over (a checkpoint flapping faster than the
+        # page drains), would otherwise spin forever with last_id never
+        # advancing. A successful page read clears the streak, so genuine
+        # progress is never capped.
+        _MAX_CONSECUTIVE_FENCE = 8
+        consecutive_fence = 0
         try:
             while True:
                 try:
                     rows = conn.execute(page_sql, (last_id,)).fetchall()
-                except _sqlite3.OperationalError as exc:
-                    if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
+                except _errors.OperationalError as exc:
+                    if not _is_snapshot_fence(exc):
+                        raise
+                    consecutive_fence += 1
+                    if consecutive_fence > _MAX_CONSECUTIVE_FENCE:
+                        # No forward progress across the bound — surface it so a
+                        # higher layer can fall back rather than livelock here.
                         raise
                     try:
                         conn.close()
                     except Exception:  # noqa: BLE001
                         pass
+                    time.sleep(0.005 * consecutive_fence)  # brief backoff to let the checkpoint settle
                     conn = self._open_keyset_snapshot(db_path)  # resume from last_id — no re-scan
                     continue
+                consecutive_fence = 0  # a page read succeeded — reset the streak
                 if not rows:
                     break
                 for row in rows:
@@ -1952,20 +1966,20 @@ class MemoryStore:
         """Short-lived read-only snapshot for a keyset scan page (driver-aware,
         lock-free). A single seam so a fence retry always reopens the same way."""
         import contextlib as _cl
-        import sqlite3 as _sqlite3
 
+        from iai_mcp import _sqlite_stdlib
         from iai_mcp.hippo._raw_open import open_store_conn
 
         conn = open_store_conn(db_path, read_only=True)
         if conn is None:
-            conn = _sqlite3.connect(
+            conn = _sqlite_stdlib.connect(
                 db_path, check_same_thread=False, isolation_level=None,
             )
+            conn.row_factory = _sqlite_stdlib.Row
         with _cl.suppress(Exception):
             conn.execute("PRAGMA busy_timeout=2000")
         with _cl.suppress(Exception):
             conn.execute("PRAGMA query_only=ON")
-        conn.row_factory = _sqlite3.Row
         return conn
 
     _EXACT_INDEX_BUILD_BACKOFF_SEC = 30.0
@@ -2019,8 +2033,9 @@ class MemoryStore:
                     _snap = None
                 if _snap is not None:
                     try:
-                        import sqlite3 as _sqlite3
-                        _snap.row_factory = _sqlite3.Row
+                        # Engine raw rows are name-keyed natively; no row
+                        # factory needed (open_store_conn never returns a
+                        # stdlib connection — it yields engine-or-None).
                         rows = _snap.execute(_sql).fetchall()
                     finally:
                         try:
@@ -2683,8 +2698,8 @@ class MemoryStore:
         if not update_ids:
             return
 
-        import pyarrow as pa
-        update_tbl = pa.table({
+        from iai_mcp.hippo import _schema
+        update_tbl = _schema.table({
             "id": update_ids,
             "provenance_json": update_prov,
             "updated_at": [now] * len(update_ids),
@@ -3114,15 +3129,15 @@ class MemoryStore:
 
         if update_rows:
             try:
-                upd_arrow = pa.Table.from_pylist(
+                upd_arrow = _schema.Table.from_pylist(
                     update_rows,
-                    schema=pa.schema(
+                    schema=_schema.schema(
                         [
-                            ("src", pa.string()),
-                            ("dst", pa.string()),
-                            ("edge_type", pa.string()),
-                            ("weight", pa.float32()),
-                            ("updated_at", pa.timestamp("us", tz="UTC")),
+                            ("src", _schema.string()),
+                            ("dst", _schema.string()),
+                            ("edge_type", _schema.string()),
+                            ("weight", _schema.float32()),
+                            ("updated_at", _schema.timestamp("us", tz="UTC")),
                         ]
                     ),
                 )

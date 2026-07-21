@@ -1,7 +1,7 @@
 """Best-effort resident-set snapshot for per-step memory attribution.
 
 Samples the process's own RSS, a ``vmmap -summary`` region count + VM_ALLOCATE
-size, and the pyarrow + numba allocator counters. Every path is best-effort:
+size, and the numba allocator counters. Every path is best-effort:
 ``capture_step_snapshot`` wraps its whole body so it can never raise into the
 caller, and each individual probe degrades to a sentinel (``None`` for the
 darwin-only / parse-dependent vmmap fields, ``-1`` for the numeric allocator
@@ -10,11 +10,10 @@ hooks attach the snapshot to their event dicts without any risk of aborting a
 sleep step.
 
 The vmmap region count + VM_ALLOCATE size stand in as a page-reclaim proxy:
-this build's allocator (mimalloc, statically linked into pyarrow) exports no
-process-callable stats symbol, so its decommit behaviour is observed indirectly
-through the mapped-region count and the VM_ALLOCATE virtual size, which both
-drop together when the allocator returns pages to the OS. VM_ALLOCATE is read
-from the VIRTUAL size column to match the diagnostic-harness baseline.
+allocator decommit behaviour is observed indirectly through the mapped-region
+count and the VM_ALLOCATE virtual size, which both drop together when the
+allocator returns pages to the OS. VM_ALLOCATE is read from the VIRTUAL size
+column to match the diagnostic-harness baseline.
 
 The vmmap subprocess is the only expensive sample (~tens of milliseconds), so
 it is opt-in per call: the per-step hooks omit it (RSS + pool + NRT are
@@ -107,21 +106,11 @@ def _vmmap_summary_counts() -> tuple[int | None, int | None]:
 
 
 def _allocator_stats() -> dict[str, int]:
-    """Best-effort pyarrow pool + numba NRT counters. Missing values are ``-1``."""
+    """Best-effort numba NRT counters. Missing values are ``-1``."""
     out = {
-        "pa_pool_bytes": -1,
-        "pa_pool_max": -1,
         "numba_nrt_alloc_count": -1,
         "numba_nrt_free_count": -1,
     }
-    try:
-        import pyarrow as pa
-
-        mp = pa.default_memory_pool()
-        out["pa_pool_bytes"] = int(mp.bytes_allocated())
-        out["pa_pool_max"] = int(mp.max_memory())
-    except Exception:  # noqa: BLE001 -- pool stats are best-effort
-        pass
     try:
         from numba.core.runtime import nrt
 
@@ -160,8 +149,6 @@ def capture_step_snapshot(*, include_vmmap: bool = True) -> dict[str, Any]:
             "rss_kib": None,
             "vmmap_region_count": None,
             "vm_allocate_kib": None,
-            "pa_pool_bytes": -1,
-            "pa_pool_max": -1,
             "numba_nrt_alloc_count": -1,
             "numba_nrt_free_count": -1,
             "t": time.monotonic(),

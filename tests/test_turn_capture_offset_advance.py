@@ -205,7 +205,7 @@ def test_stale_path_scan_fallback_captures_turns():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
+        project_dir = home / ".claude" / "projects" / "-Users-dev-Desktop-Project"
         project_dir.mkdir(parents=True, exist_ok=True)
         real_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript(real_transcript, 12)
@@ -257,7 +257,7 @@ def test_present_but_empty_stdin_uses_canonical_and_writes_nonce():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
+        project_dir = home / ".claude" / "projects" / "-Users-dev-Desktop-Project"
         project_dir.mkdir(parents=True, exist_ok=True)
         canonical_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript_with_nonce(canonical_transcript, 35, nonce)
@@ -292,7 +292,7 @@ def test_present_but_wrong_session_stdin_uses_canonical_not_stdin():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
+        project_dir = home / ".claude" / "projects" / "-Users-dev-Desktop-Project"
         project_dir.mkdir(parents=True, exist_ok=True)
         canonical_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript_with_nonce(canonical_transcript, 35, nonce)

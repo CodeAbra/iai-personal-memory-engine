@@ -278,7 +278,6 @@ class SleepPipeline:
                 "rss_kib": snap_before.get("rss_kib"),
                 "vmmap_region_count": snap_before.get("vmmap_region_count"),
                 "vm_allocate_kib": snap_before.get("vm_allocate_kib"),
-                "pa_pool_bytes": snap_before.get("pa_pool_bytes"),
                 "numba_nrt_alloc_count": snap_before.get("numba_nrt_alloc_count"),
             })
         except (OSError, ValueError) as exc:
@@ -314,8 +313,6 @@ class SleepPipeline:
                 "vmmap_region_count_after": snap_after.get("vmmap_region_count"),
                 "vm_allocate_kib_before": snap_before.get("vm_allocate_kib"),
                 "vm_allocate_kib_after": snap_after.get("vm_allocate_kib"),
-                "pa_pool_bytes_before": snap_before.get("pa_pool_bytes"),
-                "pa_pool_bytes_after": snap_after.get("pa_pool_bytes"),
                 "numba_nrt_alloc_count_before": snap_before.get("numba_nrt_alloc_count"),
                 "numba_nrt_alloc_count_after": snap_after.get("numba_nrt_alloc_count"),
                 **payload,

@@ -5,6 +5,7 @@ is exercised by every existing daemon/relay suite."""
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -80,6 +81,7 @@ def test_auth_handler_gates_the_connection(monkeypatch, tmp_path):
     assert rejected == b"", "a wrong token must get nothing back"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX passthrough contract")
 def test_flock_shim_is_posix_passthrough():
     import fcntl as _real
 

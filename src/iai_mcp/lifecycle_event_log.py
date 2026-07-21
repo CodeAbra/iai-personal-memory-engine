@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import errno
-import fcntl
+from iai_mcp import _flock
 import gzip
 import json
 import os
@@ -73,12 +73,12 @@ class LifecycleEventLog:
             0o600,
         )
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            _flock.flock(fd, _flock.LOCK_EX)
             try:
                 os.write(fd, line.encode("utf-8"))
                 os.fsync(fd)
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                _flock.flock(fd, _flock.LOCK_UN)
         finally:
             os.close(fd)
 

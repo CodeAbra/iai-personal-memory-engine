@@ -5,16 +5,32 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
-import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
+from iai_mcp import _sqlite_stdlib
+from iai_mcp import errors
+from iai_mcp.hippo import _schema
 
 _log = logging.getLogger(__name__)
+
+#: Column identifiers are interpolated into generated SQL (add / update /
+#: merge_insert). Values are always parameterized and table names validated, but
+#: column names come from caller-supplied row dicts, so they are validated to the
+#: same identifier grammar as a defense-in-depth guard against injection.
+_COLUMN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_columns(cols: "list[str]") -> "list[str]":
+    for c in cols:
+        if not _COLUMN_NAME_RE.match(c):
+            raise ValueError(
+                f"Invalid column name {c!r}: must match [A-Za-z_][A-Za-z0-9_]*"
+            )
+    return cols
 
 #: Bound on snapshot reopen attempts when a concurrent WAL checkpoint fences a
 #: streaming scan mid-drain. Mirrors the RO-pool's borrow()-level bound; a real
@@ -54,19 +70,19 @@ _PA_TO_SQLITE: dict[str, str] = {
 }
 
 
-def _pa_type_to_sqlite(t: pa.DataType) -> str:
+def _pa_type_to_sqlite(t: _schema.DataType) -> str:
     type_str = str(t)
     if type_str in _PA_TO_SQLITE:
         return _PA_TO_SQLITE[type_str]
-    if pa.types.is_integer(t):
+    if _schema.types.is_integer(t):
         return "INTEGER"
-    if pa.types.is_floating(t):
+    if _schema.types.is_floating(t):
         return "REAL"
-    if pa.types.is_boolean(t):
+    if _schema.types.is_boolean(t):
         return "INTEGER"
-    if pa.types.is_list(t) or pa.types.is_large_list(t):
+    if _schema.types.is_list(t) or _schema.types.is_large_list(t):
         return "BLOB"
-    if pa.types.is_timestamp(t):
+    if _schema.types.is_timestamp(t):
         return "TEXT"
     return "TEXT"
 
@@ -81,21 +97,21 @@ _STRICT_BOOL_COLUMNS: frozenset[str] = frozenset({
 })
 
 
-def _sqlite_type_to_pa(col_name: str, type_str: str, embed_dim: int) -> pa.DataType:
+def _sqlite_type_to_pa(col_name: str, type_str: str, embed_dim: int) -> _schema.DataType:
     t_upper = type_str.upper()
     if col_name == "embedding":
-        return pa.list_(pa.float32(), embed_dim)
+        return _schema.list_(_schema.float32(), embed_dim)
     if col_name in _STRICT_BOOL_COLUMNS:
-        return pa.bool_()
+        return _schema.bool_()
     if t_upper in ("TEXT",):
-        return pa.string()
+        return _schema.string()
     if t_upper in ("REAL",):
-        return pa.float32()
+        return _schema.float32()
     if t_upper in ("INTEGER",):
-        return pa.int64()
+        return _schema.int64()
     if t_upper in ("BLOB",):
-        return pa.binary()
-    return pa.string()
+        return _schema.binary()
+    return _schema.string()
 
 
 _DDL_RECORDS = """\
@@ -348,7 +364,7 @@ def _tags_from_json(tags_json: "str | None") -> list[str]:
 
 
 def _upsert_record_tags(
-    conn: "sqlite3.Connection",
+    conn: Any,
     record_id: str,
     tags_json: "str | None",
 ) -> None:
@@ -381,7 +397,7 @@ def _upsert_record_tags(
         _log.debug("record_tags upsert failed for record_id=%s", record_id, exc_info=True)
 
 
-def _delete_record_tags(conn: "sqlite3.Connection", record_id: str) -> None:
+def _delete_record_tags(conn: Any, record_id: str) -> None:
     """Delete every ``record_tags`` row for ``record_id``.
 
     Called only from a HARD delete of the record itself (``HippoTable.delete``
@@ -425,7 +441,7 @@ def _decode_raw_row_embedding(row: dict) -> dict:
 
 
 def _rows_to_df(
-    cursor: "sqlite3.Cursor",
+    cursor: Any,
     rows: "list",
 ) -> pd.DataFrame:
     """Build a DataFrame from a raw cursor fetch without pandas' SQL introspection.
@@ -481,8 +497,11 @@ def _normalize_to_row_list(data: Any) -> list[dict]:
         return data
     if isinstance(data, pd.DataFrame):
         return data.to_dict(orient="records")
-    if isinstance(data, pa.Table):
-        return data.to_pylist()
+    # Duck-typed row carrier: our own Table/RecordBatch and any external
+    # columnar table alike expose to_pylist() -> list[dict].
+    to_pylist = getattr(data, "to_pylist", None)
+    if callable(to_pylist):
+        return to_pylist()
     return list(data)
 
 
@@ -490,7 +509,7 @@ class HippoTable:
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        conn: Any,
         name: str,
         *,
         embed_dim: int,
@@ -624,7 +643,7 @@ class HippoTable:
             return
         row_list = self._encrypt_rows(row_list)
         encoded = [_encode_row_for_insert(r) for r in row_list]
-        cols = list(encoded[0].keys())
+        cols = _validate_columns(list(encoded[0].keys()))
         placeholders = ", ".join("?" for _ in cols)
         col_names = ", ".join(cols)
         if self._sql is not None:
@@ -713,6 +732,7 @@ class HippoTable:
             else:
                 encoded_values[col] = val
 
+        _validate_columns(list(encoded_values))
         set_clause = ", ".join(col + "=?" for col in encoded_values)
         if self._sql is not None:
             stmt = self._sql["update_prefix"] + set_clause + " WHERE " + where
@@ -766,7 +786,7 @@ class HippoTable:
 
 
     @property
-    def schema(self) -> pa.Schema:
+    def schema(self) -> _schema.Schema:
         if self._sql is not None:
             pragma_stmt = self._sql["pragma"]
         else:
@@ -777,16 +797,16 @@ class HippoTable:
                 pragma_rows = self._conn.execute(pragma_stmt).fetchall()
         else:
             pragma_rows = self._conn.execute(pragma_stmt).fetchall()
-        fields: list[pa.Field] = []
+        fields: list[_schema.Field] = []
         for row in pragma_rows:
             col_name = row["name"]
             type_str = row["type"] if row["type"] else "TEXT"
             pa_type = _sqlite_type_to_pa(col_name, type_str, self._embed_dim)
             nullable = not bool(row["notnull"])
-            fields.append(pa.field(col_name, pa_type, nullable=nullable))
-        return pa.schema(fields)
+            fields.append(_schema.field(col_name, pa_type, nullable=nullable))
+        return _schema.schema(fields)
 
-    def add_columns(self, fields: list[pa.Field]) -> None:
+    def add_columns(self, fields: list[_schema.Field]) -> None:
         from iai_mcp.hippo import _validate_table_name
         if self._sql is not None:
             pragma_stmt = self._sql["pragma"]
@@ -811,13 +831,14 @@ class HippoTable:
 
     def drop_columns(self, column_names: list[str]) -> None:
         from iai_mcp.hippo import _validate_table_name
-        import sqlite3 as _sqlite3
-        major, minor, _ = (int(x) for x in _sqlite3.sqlite_version.split("."))
-        if (major, minor) < (3, 35):
-            raise RuntimeError(
-                f"ALTER TABLE DROP COLUMN requires SQLite >= 3.35; "
-                f"installed: {_sqlite3.sqlite_version}"
-            )
+        if _sqlite_stdlib.is_stdlib_connection(self._conn):
+            version = _sqlite_stdlib.sqlite_version()
+            major, minor, _ = (int(x) for x in version.split("."))
+            if (major, minor) < (3, 35):
+                raise RuntimeError(
+                    f"ALTER TABLE DROP COLUMN requires SQLite >= 3.35; "
+                    f"installed: {version}"
+                )
         if self._sql is not None:
             pragma_stmt = self._sql["pragma"]
         else:
@@ -842,7 +863,7 @@ class HippoQuery:
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        conn: Any,
         table_name: str,
         *,
         embed_dim: int,
@@ -905,7 +926,7 @@ class HippoQuery:
 
     def _ann_knn_fetch_core(
         self,
-    ) -> "tuple[sqlite3.Cursor, list, dict[int, float]] | None":
+    ) -> "tuple[Any, list, dict[int, float]] | None":
         """Run the knn_query + vec_label row fetch shared by every ANN output
         shape (DataFrame or row-dict). Returns ``None`` on every "no
         neighbours" outcome (empty index, RuntimeError, empty label result),
@@ -919,30 +940,27 @@ class HippoQuery:
             active_count = len(db._label_map)
             if active_count == 0:
                 return None
-            # Clamp k to the live hnswlib index count, not just the label_map
-            # count. The two can diverge briefly during boot/rebuild, and
-            # hnswlib raises "Probably ef or M is too small" when asked for
-            # more neighbors than the index actually contains.
+            # Clamp k to the live index count, not just the label_map count —
+            # the two can diverge briefly during boot/rebuild, and asking an
+            # index for more neighbors than it holds is an error condition on
+            # some backends.
             hnsw_count = db._hnsw.get_current_count()
             k_clamped = min(k, active_count, hnsw_count)
             if k_clamped == 0:
                 return None
-            # hnswlib requires ef >= k: an exact-escalation query asking for
-            # the whole index otherwise dies with "ef or M is too small" and
-            # the lane silently returns empty. ef is a property of the SHARED
-            # index: a raised ef MUST be restored after the query (same
-            # _hnsw_lock block, so the pair is atomic) — one big-k caller
-            # (e.g. a large teach weave) would otherwise leave every later
-            # awake recall running at ef≈that-k until the next rebuild.
+            # ef handling survives from the ANN era: the exact index accepts
+            # and ignores set_ef, so this block is a no-op there, but the
+            # restore-after-query pairing stays (same lock block = atomic) in
+            # case a graph-ANN backend ever returns at larger corpus scale.
             try:
                 _cur_ef = int(getattr(db._hnsw, "ef", 0))
             except (AttributeError, TypeError, ValueError):
                 _cur_ef = 0
-            _ef_raised = False
+            _ef_was_set = False
             if k_clamped > _cur_ef:
                 try:
                     db._hnsw.set_ef(k_clamped)
-                    _ef_raised = _cur_ef > 0
+                    _ef_was_set = True
                 except (AttributeError, RuntimeError):
                     pass
             try:
@@ -967,27 +985,30 @@ class HippoQuery:
                         _last_exc = exc
                         _k_try //= 2
                 if labels is None:
-                    # Defensive: hnswlib still raises this on rare
-                    # label-map/index skew. Treat as "no neighbors found" so
-                    # the insert path's pattern-separation gate can proceed
-                    # instead of failing the whole capture.
+                    # Defensive: treat a query raise as "no neighbors found"
+                    # so the insert path's pattern-separation gate can
+                    # proceed instead of failing the whole capture.
                     _log.warning(
-                        "hnswlib knn_query failed at every k down from %d "
-                        "(hnsw_count=%d, active_count=%d); returning empty "
-                        "result: %s",
+                        "vector-index knn_query failed at every k down from "
+                        "%d (index_count=%d, active_count=%d); returning "
+                        "empty result: %s",
                         k_clamped, hnsw_count, active_count, _last_exc,
                     )
                     return None
                 if _k_try < k_clamped:
                     _log.warning(
-                        "hnswlib knn_query degraded k=%d -> %d (fragmented "
-                        "index; a full rebuild restores connectivity): %s",
+                        "vector-index knn_query degraded k=%d -> %d: %s",
                         k_clamped, _k_try, _last_exc,
                     )
             finally:
-                if _ef_raised:
+                if _ef_was_set:
                     try:
-                        db._hnsw.set_ef(_cur_ef)
+                        from iai_mcp.hippo import RECALL_INDEX_EF
+                        # Always restore once we raised ef. When the prior value
+                        # was unreadable, fall back to a known-safe default rather
+                        # than leaving the shared index at the elevated big-k ef,
+                        # which would slow every later recall until the next rebuild.
+                        db._hnsw.set_ef(_cur_ef if _cur_ef > 0 else RECALL_INDEX_EF)
                     except (AttributeError, RuntimeError):
                         pass
 
@@ -1118,7 +1139,7 @@ class HippoQuery:
             )
         return df
 
-    def to_batches(self, batch_size: int = 1000) -> Iterator[pa.RecordBatch]:
+    def to_batches(self, batch_size: int = 1000) -> Iterator[_schema.RecordBatch]:
         sql = self._build_sql()
         db = self._db
         db_path = getattr(db, "_db_path", None) if db is not None else None
@@ -1143,7 +1164,7 @@ class HippoQuery:
 
     def _drain_snapshot_with_fence_recovery(
         self, sql: str, batch_size: int, db_path: str
-    ) -> Iterator[pa.RecordBatch]:
+    ) -> Iterator[_schema.RecordBatch]:
         """Stream a snapshot scan, surviving checkpoint fences mid-drain.
 
         A concurrent WAL checkpoint invalidates an open read-only snapshot on
@@ -1155,7 +1176,7 @@ class HippoQuery:
         without ``id`` that fenced mid-drain re-raises — silently re-yielding
         rows would be worse than failing loud.
         """
-        from iai_mcp.hippo._ro_pool import _RO_SNAPSHOT_FENCE_MARKER
+        from iai_mcp.hippo._ro_pool import _is_snapshot_fence
 
         yielded_ids: set = set()
         rows_yielded = False
@@ -1174,7 +1195,7 @@ class HippoQuery:
                         if not keep:
                             continue
                         if len(keep) < batch.num_rows:
-                            batch = batch.take(pa.array(keep, type=pa.int32()))
+                            batch = batch.take(_schema.array(keep, type=_schema.int32()))
                     if has_id:
                         yielded_ids.update(batch.column("id").to_pylist())
                     else:
@@ -1182,8 +1203,8 @@ class HippoQuery:
                     rows_yielded = True
                     yield batch
                 return
-            except sqlite3.OperationalError as exc:
-                if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
+            except errors.OperationalError as exc:
+                if not _is_snapshot_fence(exc):
                     raise
                 attempts += 1
                 if attempts > _MAX_DRAIN_FENCE_ATTEMPTS:
@@ -1199,32 +1220,32 @@ class HippoQuery:
                 with contextlib.suppress(Exception):
                     conn.close()
 
-    def _open_snapshot_conn(self, db_path: str) -> sqlite3.Connection:
+    def _open_snapshot_conn(self, db_path: str) -> Any:
         """Open a short-lived read-only connection for a lock-free scan.
 
         Mirrors the audited daemon-down direct-access pattern: driver-aware
-        open (engine raw connection on the lilli driver, else stdlib
-        ``sqlite3.connect``), read-only, ``sqlite3.Row`` factory so name-keyed
-        row access works. Holds no shared ``_conn_lock``.
+        open (engine raw connection on the lilli driver, else the stdlib
+        driver), read-only, name-keyed row access. Holds no shared
+        ``_conn_lock``.
         """
         from iai_mcp.hippo._raw_open import open_store_conn
         conn = open_store_conn(db_path, read_only=True)
         if conn is None:
-            conn = sqlite3.connect(
+            conn = _sqlite_stdlib.connect(
                 db_path,
                 check_same_thread=False,
                 isolation_level=None,
             )
+            conn.row_factory = _sqlite_stdlib.Row
         with contextlib.suppress(Exception):
             conn.execute("PRAGMA busy_timeout=2000")
         with contextlib.suppress(Exception):
             conn.execute("PRAGMA query_only=ON")
-        conn.row_factory = sqlite3.Row
         return conn
 
     def _drain_to_batches(
-        self, sql: str, batch_size: int, conn: "sqlite3.Connection | None" = None
-    ) -> Iterator[pa.RecordBatch]:
+        self, sql: str, batch_size: int, conn: Any = None
+    ) -> Iterator[_schema.RecordBatch]:
         cursor = (conn if conn is not None else self._conn).execute(sql)
         try:
             column_names = [desc[0] for desc in cursor.description]
@@ -1243,7 +1264,7 @@ class HippoQuery:
                         else b
                         for b in data["embedding"]
                     ]
-                yield pa.record_batch(data)
+                yield _schema.record_batch(data)
         finally:
             # A fenced snapshot can refuse even close(); never let that mask
             # the in-flight error the recovery wrapper needs to see.
@@ -1270,7 +1291,8 @@ class HippoMergeInsert:
 
         rows = self._table._encrypt_rows(rows)
         encoded = [_encode_row_for_insert(r) for r in rows]
-        all_cols = list(encoded[0].keys())
+        all_cols = _validate_columns(list(encoded[0].keys()))
+        _validate_columns(self._key_cols)
         non_key = [c for c in all_cols if c not in self._key_cols]
         key_conflict = ", ".join(self._key_cols)
         conn = self._table._conn

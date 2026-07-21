@@ -193,6 +193,28 @@ def test_native_projection_kernel_byte_equal_numpy() -> None:
         assert len(native) == 1250
 
 
+def test_projection_near_zero_sign_boundary_kernel_equals_numpy() -> None:
+    # Adversarially probe the sign boundary: random embeddings drive projection
+    # components arbitrarily close to zero, exactly where a divergent float
+    # reduction order between numpy's BLAS and the scalar kernel could flip the
+    # packed sign bit (the SHA lock covers the matrix bytes, not the matmul
+    # order). numpy and the kernel must still agree byte-for-byte on this machine.
+    from iai_mcp.lilli.core.projection import P
+
+    rng = np.random.default_rng(0xC0FFEE)
+    min_abs = np.inf
+    for _ in range(64):
+        emb = rng.standard_normal(384).astype(np.float32)
+        projected = emb @ P
+        min_abs = min(min_abs, float(np.min(np.abs(projected))))
+        reference = embed_to_hv.from_embedding(emb.tolist())
+        native = bytes(hd.project(np.ascontiguousarray(emb, dtype=np.float32)))
+        assert native == reference, "near-zero projection sign diverged numpy vs kernel"
+    # Confirm the probe actually reached the boundary (a component within a
+    # hair of zero), so the byte-equality above is a real test of sign stability.
+    assert min_abs < 1e-2, f"probe never neared the sign boundary (min |comp|={min_abs})"
+
+
 # --- emit-then-raise under the rust backend --------------------------------
 
 

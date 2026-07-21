@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import fcntl
+from iai_mcp import _flock as fcntl
 
 import pytest
 

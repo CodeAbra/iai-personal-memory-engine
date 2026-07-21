@@ -45,6 +45,20 @@ def test_phys_footprint_reads_positive_int_on_macos() -> None:
     assert phys > 0
 
 
+@pytest.mark.skipif(not DARWIN, reason="phys_footprint is a macOS metric")
+def test_phys_footprint_not_above_rss_on_clean_process() -> None:
+    # phys_footprint excludes reusable (MADV_FREE) pages that still count toward
+    # resident_size, so it can only be <= RSS (a small slack absorbs the race
+    # between the two reads on a live, churning heap).
+    rss = wd._own_rss_bytes()
+    phys = wd._phys_footprint_bytes()
+    assert rss is not None and phys is not None
+    assert phys <= rss * 1.05, (
+        f"phys_footprint ({phys}) should not exceed resident_size ({rss}); "
+        "phys excludes reusable pages RSS still counts"
+    )
+
+
 def test_phys_footprint_returns_none_off_darwin(monkeypatch) -> None:
     # On any non-Darwin host there is no proc_pid_rusage syscall, so the reader
     # must return None and let the caller fall back to resident_size.

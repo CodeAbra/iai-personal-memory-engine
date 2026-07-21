@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -132,7 +133,18 @@ async def _socket_connect_probe(socket_path: Path, timeout: float) -> str | None
 
 def check_b_socket_fresh() -> CheckResult:
     socket_path = _resolve_socket_path()
-    if not socket_path.exists():
+    if sys.platform == "win32":
+        # Windows serves the daemon over loopback TCP; the bound port lives
+        # in PORT_FILE and there is no unix-socket path to stat.
+        from iai_mcp._ipc import PORT_FILE
+
+        if not PORT_FILE.exists():
+            return CheckResult(
+                "(b) socket file fresh",
+                False,
+                f"{PORT_FILE} does not exist",
+            )
+    elif not socket_path.exists():
         return CheckResult(
             "(b) socket file fresh",
             False,

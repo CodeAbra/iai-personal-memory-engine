@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
+from iai_mcp import _sqlite_stdlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -441,8 +441,8 @@ def migrate_sqlite_to_lilli(
     report = MigrateReport()
     peak_rss = _rss_mb()
 
-    src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
-    src.row_factory = sqlite3.Row
+    src = _sqlite_stdlib.connect(f"file:{src_db}?mode=ro", uri=True)
+    src.row_factory = _sqlite_stdlib.Row
 
     # Pitfall 2: IAI_MCP_STORE overrides the explicit path arg in _resolve_root,
     # so force it to the dest root around the open and restore it in finally.

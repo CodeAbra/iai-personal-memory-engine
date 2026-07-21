@@ -12,7 +12,7 @@ from iai_mcp.store import MemoryStore
 
 TRICKY_STRINGS = [
     "simple ascii text",
-    "unicode: привет мир 你好世界",
+    "unicode: こんにちは 你好世界",
     'quotes: "double" and \'single\'',
     "newlines:\nline2\n\tindented",
     "long: " + "x" * 8000,

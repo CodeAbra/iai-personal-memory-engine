@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import errno
-import fcntl
+from iai_mcp import _flock as fcntl
 import json
 import os
 import threading
@@ -220,7 +220,7 @@ def test_overflow_prune_oldest(tmp_path):
 
 def test_verbatim_round_trip_unicode(tmp_path):
     q = CaptureQueue(queue_dir=tmp_path)
-    payload = "Привет, world! 🧠 Δ ∑ — combining é vs é"
+    payload = "こんにちは, world! 🧠 Δ ∑ — combining é vs é"
 
     q.append(_sample_record(0, surface=payload))
     seen: list[str] = []

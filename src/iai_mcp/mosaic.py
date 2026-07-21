@@ -168,9 +168,6 @@ def run_mosaic(
     )
 
     for level in range(max_levels):
-        if time.monotonic() - t_start > WALL_TIME_HARD_CAP_S:
-            return _flat_fallback(graph, prior)
-
         n_curr = curr_partition.shape[0]
 
         rng_lm = np.random.Generator(np.random.PCG64(seed + 2 * level))
@@ -239,8 +236,14 @@ def run_mosaic(
         if super_n <= 1:
             break
 
-    if time.monotonic() - t_start > WALL_TIME_HARD_CAP_S:
-        return _flat_fallback(graph, prior)
+        # Budget check at the BOTTOM of the level: the base level always
+        # completes (its local move carries the primary structure), and a
+        # timeout means "stop refining", never "discard the structure" — the
+        # partition built so far finalizes below. The old top-of-loop check
+        # returned flat on timeout, which threw away a strong partition on
+        # every large-corpus run.
+        if time.monotonic() - t_start > WALL_TIME_HARD_CAP_S:
+            break
 
     final_partition_orig = curr_partition[node_to_super_idx].astype(np.int64)
     unique_final = np.unique(final_partition_orig)
@@ -314,6 +317,12 @@ def run_mosaic(
             indptr, indices, data, final_partition_compact, final_sigma, gamma_value,
         )
     )
+
+    # An all-singleton final partition means the local move accepted nothing:
+    # no realized structure, and materializing one centroid per node would be
+    # pure waste. Flat is the honest answer for exactly this case.
+    if k_final >= n:
+        return _flat_fallback(graph, prior)
 
     partition = final_partition_compact
     sigma_tot = final_sigma
@@ -425,6 +434,14 @@ def compute_delta_q_cpm(
     end = indptr[node_idx + 1]
     for off in range(start, end):
         j = indices[off]
+        if j == node_idx:
+            # A self-loop is node i's own internal mass, not a link to "current
+            # community without i" — it belongs in k_i / sigma_tot (degree), not
+            # the links-to-community sums. At aggregated levels every merged
+            # internal edge becomes such a self-loop, so counting it here would
+            # over-state the cost of leaving and make super-nodes artificially
+            # sticky to their current community.
+            continue
         w = data[off]
         comm_j = partition[j]
         if comm_j == target_comm:
@@ -849,76 +866,89 @@ def _super_level_merge(
 
     accepted_total = 0
     _ = seed
+    _ = max_iter
 
-    for _outer in range(max_iter):
-        comms_sorted = sorted({int(v) for v in partition.tolist()})
-        if len(comms_sorted) < 2:
-            break
+    # Aggregate the inter-community weights ONCE (O(E)); every merge decision
+    # then reads the super-graph instead of rescanning all nodes per candidate
+    # pair. The previous shape — an O(n·d) scan per (ci, cj) pair with a full
+    # restart after every accepted merge — was quadratic-and-worse in the
+    # community count and unusable at corpus scale (thousands of communities).
+    adj: dict[int, dict[int, float]] = {}
+    sizes: dict[int, int] = {}
+    for u in range(n):
+        cu = int(partition[u])
+        sizes[cu] = sizes.get(cu, 0) + 1
+        row = adj.setdefault(cu, {})
+        for off in range(int(indptr[u]), int(indptr[u + 1])):
+            cv = int(partition[int(indices[off])])
+            if cv != cu:
+                row[cv] = row.get(cv, 0.0) + float(data[off])
 
-        accepted_this_outer = False
-        for ii in range(len(comms_sorted)):
-            ci = comms_sorted[ii]
-            for jj in range(ii + 1, len(comms_sorted)):
-                cj = comms_sorted[jj]
+    alive = set(adj.keys()) | set(sizes.keys())
+    if len(alive) < 2:
+        return 0
 
-                w_ij_count_once = 0.0
-                for u in range(n):
-                    if int(partition[u]) != ci:
-                        continue
-                    s = int(indptr[u])
-                    e = int(indptr[u + 1])
-                    for off in range(s, e):
-                        v = int(indices[off])
-                        if int(partition[v]) == cj:
-                            w_ij_count_once += float(data[off])
-                w_ij_count_twice = 2.0 * w_ij_count_once
-
-                k_i = float(sigma_tot[ci])
-                k_j = float(sigma_tot[cj])
-                delta_q = (
-                    w_ij_count_twice / two_m
-                    - 2.0 * gamma * k_i * k_j * inv_two_m_sq
-                )
-                if delta_q <= EPSILON:
+    changed = True
+    while changed and len(alive) > 1:
+        changed = False
+        for ci in sorted(alive):
+            if ci not in alive:
+                continue
+            # Only adjacent communities can gain edge mass from a merge; the
+            # best positive-ΔQ neighbor (ties break on the lower label) wins.
+            best_dq = EPSILON
+            best_cj = -1
+            for cj, w_ij in sorted(adj.get(ci, {}).items()):
+                if cj == ci or cj not in alive:
                     continue
+                delta_q = (
+                    2.0 * w_ij / two_m
+                    - 2.0 * gamma * float(sigma_tot[ci]) * float(sigma_tot[cj])
+                    * inv_two_m_sq
+                )
+                if delta_q > best_dq:
+                    best_dq = delta_q
+                    best_cj = cj
+            if best_cj < 0:
+                continue
 
-                partition[partition == cj] = ci
-                sigma_tot[ci] = k_i + k_j
-                sigma_tot[cj] = 0.0
+            cj = best_cj
+            sigma_tot[ci] = float(sigma_tot[ci]) + float(sigma_tot[cj])
+            sigma_tot[cj] = 0.0
+            sizes[ci] = sizes.get(ci, 0) + sizes.pop(cj, 0)
+            row_i = adj.setdefault(ci, {})
+            for ck, w in adj.pop(cj, {}).items():
+                if ck == ci:
+                    continue
+                row_i[ck] = row_i.get(ck, 0.0) + w
+                nbr = adj.setdefault(ck, {})
+                nbr[ci] = nbr.get(ci, 0.0) + nbr.pop(cj, 0.0)
+            row_i.pop(cj, None)
+            alive.discard(cj)
+            partition[partition == cj] = ci
 
-                if (
-                    lineage_tracker is not None
-                    and label_to_uuid is not None
-                    and ci in label_to_uuid
-                    and cj in label_to_uuid
-                ):
-                    u_ci = label_to_uuid[ci]
-                    u_cj = label_to_uuid[cj]
-                    parents = [u_ci, u_cj]
-                    surviving = lineage_tracker.pick_merge_survivor(parents)
-                    member_count = int((partition == ci).sum())
-                    lineage_tracker.record_merge(
-                        parents, surviving, member_count,
-                    )
-                    label_to_uuid[ci] = surviving
-                    del label_to_uuid[cj]
-                elif lineage_tracker is not None:
-                    placeholder_ci = uuid4()
-                    placeholder_cj = uuid4()
-                    lineage_tracker.record_merge(
-                        [placeholder_ci, placeholder_cj],
-                        surviving=placeholder_ci,
-                        member_count=int((partition == ci).sum()),
-                    )
+            if (
+                lineage_tracker is not None
+                and label_to_uuid is not None
+                and ci in label_to_uuid
+                and cj in label_to_uuid
+            ):
+                parents = [label_to_uuid[ci], label_to_uuid[cj]]
+                surviving = lineage_tracker.pick_merge_survivor(parents)
+                lineage_tracker.record_merge(parents, surviving, sizes[ci])
+                label_to_uuid[ci] = surviving
+                del label_to_uuid[cj]
+            elif lineage_tracker is not None:
+                placeholder_ci = uuid4()
+                placeholder_cj = uuid4()
+                lineage_tracker.record_merge(
+                    [placeholder_ci, placeholder_cj],
+                    surviving=placeholder_ci,
+                    member_count=sizes[ci],
+                )
 
-                accepted_this_outer = True
-                accepted_total += 1
-                break
-            if accepted_this_outer:
-                break
-
-        if not accepted_this_outer:
-            break
+            accepted_total += 1
+            changed = True
 
     return accepted_total
 
@@ -1157,7 +1187,6 @@ def multi_objective_gamma_tuner(
         CPM_MODULARITY_FLOOR,
         all_communities_connected,
         compute_singleton_ratio,
-        should_fall_back_to_flat,
     )
 
     if targets is None:
@@ -1171,6 +1200,7 @@ def multi_objective_gamma_tuner(
     best_gamma: float = 1.0
     best_score: float = float("-inf")
     any_satisfied: bool = False
+    structure_found: bool = False
     budget_exhausted: bool = False
     tuner_budget_s = WALL_TIME_HARD_CAP_S / 2.0
     t_start = time.monotonic()
@@ -1186,13 +1216,14 @@ def multi_objective_gamma_tuner(
         s_ratio = float(compute_singleton_ratio(p_test))
         n_communities = int(len(np.unique(p_test)))
         connected_ok = bool(all_communities_connected(csr, p_test))
+        # Secondary criteria RANK candidates; only the modularity floor gates
+        # structure-vs-flat. A candidate clearing every secondary bar is
+        # preferred, but a strong-Q candidate that misses one must still beat
+        # flat — flat disables the community gate outright.
         hard_satisfied = (
             q >= targets["q_min"]
             and s_ratio < targets["singleton_ratio_max"]
             and connected_ok
-            and not should_fall_back_to_flat(
-                q, s_ratio, n_communities, n,
-            )
         )
         composite = q - 0.5 * s_ratio
         candidate_scores[gamma_f] = float(composite)
@@ -1203,16 +1234,25 @@ def multi_objective_gamma_tuner(
             "connected": connected_ok,
             "hard_satisfied": bool(hard_satisfied),
         }
+        if q >= targets["q_min"]:
+            structure_found = True
         if hard_satisfied:
             any_satisfied = True
             if composite > best_score:
                 best_score = composite
                 best_gamma = gamma_f
 
-    if not any_satisfied and candidate_scores:
-        best_gamma = float(
-            max(candidate_scores.items(), key=lambda kv: kv[1])[0]
-        )
+    if not any_satisfied and candidate_stats:
+        # No candidate cleared every secondary bar: prefer the best composite
+        # among those with real structure (Q at/above the floor); fall back to
+        # the global best composite only when nothing reached the floor.
+        structured = {
+            g: candidate_scores[g]
+            for g, st in candidate_stats.items()
+            if st["q"] >= targets["q_min"]
+        }
+        pool = structured if structured else candidate_scores
+        best_gamma = float(max(pool.items(), key=lambda kv: kv[1])[0])
 
     if candidate_stats and best_gamma in candidate_stats:
         best_gamma_q = float(candidate_stats[best_gamma]["q"])
@@ -1229,7 +1269,7 @@ def multi_objective_gamma_tuner(
         "all_constraints_satisfied": any_satisfied,
         "candidate_scores": candidate_scores,
         "candidate_stats": candidate_stats,
-        "should_fall_back_to_flat": (not any_satisfied),
+        "should_fall_back_to_flat": (not structure_found),
         "tuner_budget_exhausted": budget_exhausted,
         "best_gamma_q": best_gamma_q,
         "best_gamma_singleton_ratio": best_gamma_s_ratio,

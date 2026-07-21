@@ -102,6 +102,7 @@ def test_recall_cue_encode_failure_emits_store_event_and_raises(
     def _broken_embed(self, text: str) -> list[float]:
         raise RuntimeError("boom native encode")
 
+    monkeypatch.setattr(Embedder, "_encode_batch", lambda self, texts, **kw: (_ for _ in ()).throw(RuntimeError("boom native encode")))
     monkeypatch.setattr(Embedder, "embed", _broken_embed)
 
     monkeypatch.setattr(

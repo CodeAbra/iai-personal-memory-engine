@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+from iai_mcp import errors
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -162,7 +162,7 @@ def test_reembed_table_swap_and_dimension_metadata_are_atomic(tmp_path, monkeypa
 
     from iai_mcp.migrate import migrate_reembed_to_current_dim
 
-    with pytest.raises(sqlite3.IntegrityError, match="simulated metadata failure"):
+    with pytest.raises(errors.IntegrityError, match="simulated metadata failure"):
         migrate_reembed_to_current_dim(store, _DimEmbedder(1024))
 
     assert store.db.open_table("records").count_rows() == 2

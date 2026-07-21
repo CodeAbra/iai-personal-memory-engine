@@ -96,8 +96,6 @@ def test_capture_snapshot_keys_present() -> None:
         "rss_kib",
         "vmmap_region_count",
         "vm_allocate_kib",
-        "pa_pool_bytes",
-        "pa_pool_max",
         "numba_nrt_alloc_count",
         "numba_nrt_free_count",
     ):

@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import pyarrow as pa
+from iai_mcp.hippo import _schema as pa
 import pytest
 
 from iai_mcp.hippo import (

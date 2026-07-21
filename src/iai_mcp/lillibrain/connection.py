@@ -26,7 +26,7 @@ directly (the meta table is not exposed to the SQL executor or catalog).
 from __future__ import annotations
 
 import logging
-import sqlite3
+from iai_mcp import errors
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -860,7 +860,7 @@ class LilliBrainConnection:
             if self._query_only and sql_upper.startswith(
                 ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "ALTER ", "DROP ")
             ):
-                raise sqlite3.OperationalError("attempt to write a readonly database")
+                raise errors.OperationalError("attempt to write a readonly database")
 
             # --- Transaction control ---
             if sql_upper in (
@@ -870,7 +870,7 @@ class LilliBrainConnection:
                 "BEGIN EXCLUSIVE",
             ):
                 if self._in_transaction:
-                    raise sqlite3.OperationalError(
+                    raise errors.OperationalError(
                         "cannot start a transaction within a transaction"
                     )
                 self._pager.begin_write()
@@ -1469,7 +1469,7 @@ class LilliBrainRawConn:
         if self._ro and sql_upper.startswith(
             ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "ALTER ", "DROP ")
         ):
-            raise sqlite3.OperationalError("attempt to write a readonly database")
+            raise errors.OperationalError("attempt to write a readonly database")
         return self._conn.execute(sql, params)
 
     def commit(self) -> None:
@@ -1704,7 +1704,6 @@ def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawC
         # Read-only path on a registry hit: open a dedicated lock-free handle
         # so a long read scan does not share the writer connection's mutex.
         # Mirror the same open/wrap pattern as the registry-miss branch below.
-        import sqlite3 as _sqlite3  # noqa: PLC0415
         try:
             from iai_mcp_native import engine as _engine  # noqa: PLC0415
 
@@ -1732,10 +1731,10 @@ def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawC
                 # the lazy build stays the always-correct fallback.
                 pass
             return _OwnedEngineRawConn(engine_conn, read_only=True, path=str(path))
-        except _sqlite3.DatabaseError:
+        except errors.DatabaseError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise _sqlite3.DatabaseError(
+            raise errors.DatabaseError(
                 f"file is not a database (corrupt lilli file): {path}"
             ) from exc
 
@@ -1761,10 +1760,8 @@ def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawC
     # path must reopen through the native engine; opening the file through the
     # reference pager and writing to it would produce pages the engine rejects on
     # its next open. A corrupt or unreadable file raises here; re-raise as
-    # sqlite3.DatabaseError so callers see the same exception type as stdlib's
-    # "file is not a database" and the diagnostic is "corrupt database", not
-    # "no engine connection".
-    import sqlite3 as _sqlite3  # noqa: PLC0415
+    # the bare DatabaseError so callers see the corruption class and the
+    # diagnostic is "corrupt database", not "no engine connection".
     try:
         from iai_mcp_native import engine as _engine  # noqa: PLC0415
 
@@ -1777,9 +1774,9 @@ def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawC
         else:
             engine_conn = _engine.Connection.open(str(path), 0)
         return _OwnedEngineRawConn(engine_conn, read_only=read_only, path=str(path))
-    except _sqlite3.DatabaseError:
+    except errors.DatabaseError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise _sqlite3.DatabaseError(
+        raise errors.DatabaseError(
             f"file is not a database (corrupt lilli file): {path}"
         ) from exc

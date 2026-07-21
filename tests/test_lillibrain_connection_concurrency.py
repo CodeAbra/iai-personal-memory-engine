@@ -16,6 +16,8 @@ directly (no HippoDB, no encryption, no ANN) and assert:
 from __future__ import annotations
 
 import sqlite3
+
+from iai_mcp import errors as iai_errors
 import threading
 from pathlib import Path
 
@@ -63,7 +65,7 @@ def test_concurrent_writers_readers_no_deadlock(tmp_path: Path) -> None:
                 conn.execute("COMMIT")
                 write_count.release()
                 i += 1
-            except sqlite3.OperationalError:
+            except iai_errors.OperationalError:
                 # Overlapping writer hit a nested BEGIN — retry on the next loop.
                 continue
             except Exception as exc:  # noqa: BLE001
@@ -114,16 +116,18 @@ def test_nested_begin_raises(tmp_path: Path) -> None:
     """
     conn = _open_engine(tmp_path)
     conn.execute("BEGIN")
-    with pytest.raises(sqlite3.OperationalError) as engine_exc:
+    with pytest.raises(iai_errors.OperationalError) as engine_exc:
         conn.execute("BEGIN")
     assert "cannot start a transaction within a transaction" in str(engine_exc.value)
     conn.execute("ROLLBACK")
     conn.close()
 
-    # Differential arm: stdlib sqlite3 raises the same family + message.
-    std = sqlite3.connect(":memory:", isolation_level=None)
+    # Differential arm: the stdlib driver (through the translating wrapper)
+    # raises the same family + message.
+    from iai_mcp import _sqlite_stdlib
+    std = _sqlite_stdlib.connect(":memory:", isolation_level=None)
     std.execute("BEGIN")
-    with pytest.raises(sqlite3.OperationalError) as std_exc:
+    with pytest.raises(iai_errors.OperationalError) as std_exc:
         std.execute("BEGIN")
     assert "cannot start a transaction within a transaction" in str(std_exc.value)
     assert type(engine_exc.value) is type(std_exc.value)

@@ -20,9 +20,12 @@ STATE_PATH: Path = Path.home() / ".iai-mcp" / ".daemon-state.json"
 
 LAUNCHD_TARGET: Path = Path.home() / "Library" / "LaunchAgents" / "com.iai-mcp.daemon.plist"
 SYSTEMD_TARGET: Path = Path.home() / ".config" / "systemd" / "user" / "iai-mcp-daemon.service"
+WINDOWS_TASK_XML: Path = Path.home() / ".iai-mcp" / "iai-mcp-daemon.task.xml"
+WINDOWS_START_CMD: Path = Path.home() / ".iai-mcp" / "daemon-start.cmd"
 
 DAEMON_LABEL: str = "com.iai-mcp.daemon"
 SERVICE_NAME: str = "iai-mcp-daemon.service"
+WINDOWS_TASK_NAME: str = "iai-mcp-daemon"
 
 CONSENT_BANNER: str = """\
 ==============================================================================
@@ -340,6 +343,9 @@ from ._daemon import (
     _launchd_template,
     _render_launchd_plist,
     _render_systemd_unit,
+    _render_windows_task_xml,
+    _render_windows_start_cmd,
+    _install_windows_task,
     _prompt_consent,
     _record_consent_receipt,
     _remove_state_files,

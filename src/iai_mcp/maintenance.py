@@ -228,8 +228,8 @@ def _rebuild_hnsw_in_child(db: Any) -> int:
         # Load the child-built index and prepare the fresh label map OFF the
         # recall lock — the lock below holds only for O(journal) replay plus
         # two reference swaps, never a corpus scan or file I/O.
-        import hnswlib
-        new_index = hnswlib.Index(space="cosine", dim=db._embed_dim)
+        from iai_mcp.hippo import _vecindex
+        new_index = _vecindex.Index(space="cosine", dim=db._embed_dim)
         new_index.load_index(tmp_path, max_elements=cap, allow_replace_deleted=True)
         new_index.set_ef(max(HNSW_EF, RECALL_INDEX_EF))
         new_index.set_num_threads(1)

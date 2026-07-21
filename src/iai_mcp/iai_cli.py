@@ -488,7 +488,10 @@ def cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001 -- argparse con
     daemon_state = "DOWN"
     record_count = "?"
     regime = "?"
-    resp = _send_jsonrpc_request("topology", {})
+    # status_light answers from the corpus-count cache and the cached
+    # topology snapshot only — a status probe must never trigger the deep
+    # graph compute (a poller once stacked those into an hours-long burn).
+    resp = _send_jsonrpc_request("status_light", {})
     if isinstance(resp, dict):
         result = resp.get("result")
         if isinstance(result, dict):

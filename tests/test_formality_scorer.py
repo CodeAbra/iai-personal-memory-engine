@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "formality_ru_en_50pairs.json"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "formality_en_pairs.json"
 
 
 def _load_fixture():
@@ -16,9 +16,9 @@ def _load_fixture():
 
 def test_fixture_loads_and_has_enough_pairs():
     pairs = _load_fixture()
-    assert len(pairs) >= 45, f"expected ~50 pairs, got {len(pairs)}"
+    assert len(pairs) >= 25, f"expected at least 25 pairs, got {len(pairs)}"
     langs = {p["lang"] for p in pairs}
-    assert "en" in langs and "ru" in langs
+    assert langs == {"en"}, f"scorer ships English markers only, fixture langs: {langs}"
 
 
 def test_fixture_shape():

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
+from iai_mcp import errors
 from pathlib import Path
 
 import pytest
@@ -299,7 +301,7 @@ def test_ro_adapter_rejects_writes_through_itself(
         assert ro_conn is not None
         try:
             from uuid import uuid4
-            with pytest.raises(sqlite3.OperationalError, match="attempt to write a readonly database"):
+            with pytest.raises(errors.OperationalError, match="attempt to write a readonly database"):
                 ro_conn.execute(
                     "INSERT INTO records (id, tier) VALUES (?, ?)",
                     (str(uuid4()), "episodic"),

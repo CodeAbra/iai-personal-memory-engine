@@ -174,7 +174,7 @@ def test_rebuild_recall_parity_one_cycle(tmp_path):
             HNSW_M,
             RECALL_INDEX_EF,
         )
-        import hnswlib
+        from iai_mcp.hippo import _vecindex as hnswlib
 
         cap = max(HNSW_INITIAL_CAPACITY, len(labels) * 2)
         ref = hnswlib.Index(space="cosine", dim=_DIM)

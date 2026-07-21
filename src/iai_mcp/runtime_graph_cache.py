@@ -863,7 +863,18 @@ def _emit_freshness_fuse_tripped(store: Any, *, age_ms: int) -> None:
 
 
 _current_generation: int = 0
+#: When non-zero, save() stamps THIS epoch into the snapshot instead of the
+#: module generation. save_with_generation sets it to the next epoch before
+#: writing and commits the module generation to the same value only after the
+#: snapshot is durable — the on-disk epoch and the module epoch must never
+#: diverge, or every overlay read bypasses on epoch_mismatch.
+_generation_override: int = 0
 _GEN_LOCK = threading.Lock()
+
+
+def _snapshot_generation() -> int:
+    with _GEN_LOCK:
+        return _generation_override if _generation_override else _current_generation
 
 
 def get_current_generation() -> int:
@@ -1548,7 +1559,7 @@ def save(
         # traversal fan-out without clamping the ranking degree numerator.
         "node_degrees": serialized_node_degrees,
         "saved_at": datetime.now(timezone.utc).isoformat(),
-        "generation": int(get_current_generation()),
+        "generation": int(_snapshot_generation()),
         "rebuild_timestamp": _rebuild_timestamp_override or "",
     }
 
@@ -1610,19 +1621,32 @@ def save_with_generation(
     max_degree: int = 0,
     node_degrees: "dict | None" = None,
 ) -> bool:
-    new_gen = advance_generation()
-    reset_dirty_counter()
     ts_iso = datetime.now(timezone.utc).isoformat()
-    global _rebuild_timestamp_override  # noqa: PLW0603
+    global _rebuild_timestamp_override, _generation_override  # noqa: PLW0603
+    global _current_generation  # noqa: PLW0603
     with _GEN_LOCK:
         _rebuild_timestamp_override = ts_iso
-    result = save(
-        store, assignment, rich_club,
-        node_payload=node_payload, max_degree=max_degree,
-        node_degrees=node_degrees,
-    )
-    with _GEN_LOCK:
-        _rebuild_timestamp_override = ""
+        next_gen = _current_generation + 1
+        _generation_override = next_gen
+    result = False
+    try:
+        result = save(
+            store, assignment, rich_club,
+            node_payload=node_payload, max_degree=max_degree,
+            node_degrees=node_degrees,
+        )
+    finally:
+        # The snapshot on disk carries next_gen; the module epoch must commit
+        # to the SAME value, and only once the bytes are durable. A failed or
+        # raising save leaves the module epoch untouched (no epoch running
+        # ahead of disk) and must not zero the dirty counter.
+        with _GEN_LOCK:
+            _rebuild_timestamp_override = ""
+            _generation_override = 0
+            if result and next_gen > _current_generation:
+                _current_generation = next_gen
+    if result:
+        reset_dirty_counter()
     return result
 
 

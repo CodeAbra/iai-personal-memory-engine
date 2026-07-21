@@ -121,6 +121,17 @@ pub fn leaf_underflows(page: &[u8], num_cells: usize) -> Result<bool> {
     Ok(leaf_used_bytes(page, num_cells)? < USABLE_END / 2)
 }
 
+/// Whether a leaf built from `cells` would sit below the half-page fill
+/// threshold — the byteful mirror of [`leaf_underflows`] for an in-memory cell
+/// list, so a borrow donor can be tested without re-reading its page.
+fn leaf_cells_underflow(cells: &[Cell]) -> bool {
+    if cells.is_empty() {
+        return true;
+    }
+    let footprint: Vec<(i64, usize)> = cells.iter().map(|(k, v)| (*k, v.len())).collect();
+    leaf_footprint(&footprint) < USABLE_END / 2
+}
+
 /// Reassemble every `(key, value)` cell on a leaf page with full payloads.
 fn read_all_full(pager: &Pager, page_no: u32) -> Result<(Vec<Cell>, u32)> {
     let page = pager.read_page(page_no)?;
@@ -393,10 +404,20 @@ pub fn rebalance_leaf(pager: &Pager, path_stack: Vec<(u32, usize)>, leaf_page_no
 
     let (recv_cells, _recv_sibling) = read_all_full(pager, leaf_page_no)?;
 
-    // Borrow from right.
+    // Borrow from right. A donor qualifies when it stays at or above the
+    // half-page fill threshold after giving up its first cell (byte-driven by
+    // default, mirroring the interior rule); the count floor applies only under
+    // an injected small ceiling. The `> 1` / `.max(1)` floors also keep the
+    // donor at two-plus cells so the borrow's first-cell access never indexes an
+    // emptied list.
     if let Some(right_no) = right_sibling {
         let (right_cells, _) = read_all_full(pager, right_no)?;
-        if right_cells.len() > leaf_min_cells() && borrow_fits_receiver(&recv_cells, &right_cells[0]) {
+        let donor_ok = if small_cap_active() {
+            right_cells.len() > leaf_min_cells().max(1)
+        } else {
+            right_cells.len() > 1 && !leaf_cells_underflow(&right_cells[1..])
+        };
+        if donor_ok && borrow_fits_receiver(&recv_cells, &right_cells[0]) {
             return borrow_from_right_leaf(
                 pager, parent_stack, leaf_page_no, right_no, parent_page_no, child_idx,
             );
@@ -405,7 +426,12 @@ pub fn rebalance_leaf(pager: &Pager, path_stack: Vec<(u32, usize)>, leaf_page_no
     // Borrow from left.
     if let Some(left_no) = left_sibling {
         let (left_cells, _) = read_all_full(pager, left_no)?;
-        if left_cells.len() > leaf_min_cells() {
+        let donor_ok = if small_cap_active() {
+            left_cells.len() > leaf_min_cells().max(1)
+        } else {
+            left_cells.len() > 1 && !leaf_cells_underflow(&left_cells[..left_cells.len() - 1])
+        };
+        if donor_ok {
             let borrowed = left_cells[left_cells.len() - 1].clone();
             if borrow_fits_receiver(&recv_cells, &borrowed) {
                 return borrow_from_left_leaf(
@@ -420,7 +446,13 @@ pub fn rebalance_leaf(pager: &Pager, path_stack: Vec<(u32, usize)>, leaf_page_no
     } else if let Some(left_no) = left_sibling {
         merge_leaves(pager, parent_stack, left_no, leaf_page_no, parent_page_no, child_idx - 1)
     } else {
-        Ok(())
+        // A non-root leaf reached via a parent always has a sibling: a well-formed
+        // non-root interior holds two-plus children. No sibling here means the
+        // tree is structurally corrupt — fail loud rather than silently leaving an
+        // underfull leaf linked.
+        Err(StoreError::Integrity {
+            detail: "rebalance_leaf: underflowing non-root leaf has no sibling".to_string(),
+        })
     }
 }
 

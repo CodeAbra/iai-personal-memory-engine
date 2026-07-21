@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import fcntl
+from iai_mcp import _flock
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -96,7 +96,7 @@ def _lifecycle_lock(lock_path: Path) -> Iterator[int]:
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _flock.flock(fd, _flock.LOCK_EX | _flock.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 raise LifecycleStateLocked(
@@ -107,7 +107,7 @@ def _lifecycle_lock(lock_path: Path) -> Iterator[int]:
             yield fd
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                _flock.flock(fd, _flock.LOCK_UN)
             except OSError:
                 pass
     finally:

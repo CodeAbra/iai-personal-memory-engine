@@ -27,7 +27,7 @@ def _random_vec(seed: int) -> list[float]:
 
 
 def _seed_lancedb_store(store_root: Path, n: int = 3) -> list[dict]:
-    import pyarrow as pa
+    from iai_mcp.hippo import _schema as pa
 
     lance_root = store_root / "lancedb"
     lance_root.mkdir(parents=True, exist_ok=True)
@@ -104,7 +104,7 @@ def _seed_lancedb_store(store_root: Path, n: int = 3) -> list[dict]:
         pa.field("valence", pa.float64()),
     ])
 
-    import pyarrow as pa
+    from iai_mcp.hippo import _schema as pa
     table = pa.Table.from_pylist(records, schema=schema)
     db.create_table("records", data=table, mode="overwrite")
 
@@ -188,7 +188,7 @@ def test_migration_record_vector_byte_strict(tmp_path: Path, monkeypatch, _no_da
 
 
 def test_migration_hnsw_rebuilt_and_loadable(tmp_path: Path, monkeypatch, _no_daemon_guard) -> None:
-    import hnswlib
+    from iai_mcp.hippo import _vecindex as hnswlib
 
     n = 4
     _seed_lancedb_store(tmp_path, n=n)

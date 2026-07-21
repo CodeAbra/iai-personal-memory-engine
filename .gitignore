@@ -66,3 +66,6 @@ runtime_*.json
 
 # Rust build output
 target/
+
+# Internal planning artifacts — never ship
+.planning/

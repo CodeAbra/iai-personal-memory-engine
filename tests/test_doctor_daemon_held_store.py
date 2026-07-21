@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from iai_mcp import errors
+
 
 from iai_mcp import doctor as _doctor
 from iai_mcp.hippo import HippoLockHeldError
@@ -29,7 +31,7 @@ def test_f_reports_healthy_on_sqlite_database_locked(monkeypatch) -> None:
     import iai_mcp.store as _store_mod
 
     def _raise_locked(*_a, **_kw):
-        raise sqlite3.OperationalError("database is locked")
+        raise errors.OperationalError("database is locked")
 
     monkeypatch.setattr(_store_mod, "MemoryStore", _raise_locked)
 
@@ -44,7 +46,7 @@ def test_f_still_fails_on_real_open_error_daemon_down(monkeypatch) -> None:
     import iai_mcp.store as _store_mod
 
     def _raise_corruption(*_a, **_kw):
-        raise sqlite3.DatabaseError("file is not a database")
+        raise errors.DatabaseError("file is not a database")
 
     monkeypatch.setattr(_store_mod, "MemoryStore", _raise_corruption)
 
@@ -59,7 +61,7 @@ def test_f_still_fails_on_other_operational_error(monkeypatch) -> None:
     import iai_mcp.store as _store_mod
 
     def _raise_other(*_a, **_kw):
-        raise sqlite3.OperationalError("disk I/O error")
+        raise errors.OperationalError("disk I/O error")
 
     monkeypatch.setattr(_store_mod, "MemoryStore", _raise_other)
 

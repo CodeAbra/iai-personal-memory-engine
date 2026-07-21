@@ -235,7 +235,7 @@ def _save_empty_hnsw(dst_root: Path) -> int:
     the recovery test proves the planted index genuinely held zero elements before
     open -- making the post-open recall-parity assertion non-trivial.
     """
-    import hnswlib
+    from iai_mcp.hippo import _vecindex as hnswlib
 
     idx = hnswlib.Index(space="cosine", dim=384)
     idx.init_index(max_elements=16, ef_construction=200, M=16, allow_replace_deleted=True)

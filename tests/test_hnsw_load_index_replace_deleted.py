@@ -1,132 +1,101 @@
-"""Pin the hnswlib 0.8.0 ``load_index`` contract for ``allow_replace_deleted``.
+"""Pin the vector-index load/add contract around deleted labels.
 
-hnswlib 0.8.0 silently resets ``allow_replace_deleted`` to ``False`` on every
-``load_index`` call when the kwarg is omitted, even if the saved index was
-built with ``allow_replace_deleted=True``. Any subsequent
-``mark_deleted(label)`` followed by ``add_items(..., replace_deleted=True)``
-raises ``RuntimeError: Replacement of deleted elements is disabled in constructor``.
+The previous ANN library gated slot reuse behind a fragile flag pairing:
+``load_index`` silently reset ``allow_replace_deleted`` unless the kwarg was
+re-passed, and a later ``add_items(..., replace_deleted=True)`` then raised —
+a whole class of load-site hazards this project had to pin test-by-test.
 
-Every ``load_index`` call site in this project that hands the loaded index to a
-write path that may issue ``mark_deleted`` + ``add_items(replace_deleted=True)``
-MUST pass ``allow_replace_deleted=True``. This file pins both arms of the
-contract — the bare-load failure mode AND the with-flag success mode — so any
-regression that re-introduces a bare-load on a write path fails here.
+The exact index eliminates the class: adds never depend on load flags, an
+existing label (deleted or not) updates its slot in place and revives it, and
+a NEW label appends regardless of any flag. These tests pin THAT contract so
+a future backend swap cannot silently reintroduce flag-gated adds.
 
-Hermetic: uses ``tmp_path`` only, never touches the project store or the live
-daemon. Depends only on the ``hnswlib>=0.8.0`` runtime dep already declared in
-``pyproject.toml``.
+Hermetic: uses ``tmp_path`` only, never touches the project store or the
+live daemon.
 """
 
 from __future__ import annotations
 
-import hnswlib
 import numpy as np
-import pytest
 
+from iai_mcp.hippo import _vecindex
 
 _DIM = 8
 _N_INITIAL = 5
-_EF = 50
-_M = 8
-_EF_CONSTRUCTION = 100
 
 
 def _build_and_save(tmp_path) -> str:
-    """Build a small hnswlib index with the flag set and save it to disk."""
-    vecs = np.random.rand(_N_INITIAL, _DIM).astype(np.float32)
-    labels = np.arange(_N_INITIAL, dtype=np.int64)
-
-    h = hnswlib.Index(space="cosine", dim=_DIM)
-    h.init_index(
-        max_elements=_N_INITIAL * 2,
-        ef_construction=_EF_CONSTRUCTION,
-        M=_M,
-        allow_replace_deleted=True,
-    )
-    h.set_ef(_EF)
-    h.add_items(vecs, labels)
-
-    path = str(tmp_path / "regression.hnsw")
-    h.save_index(path)
+    idx = _vecindex.Index(space="cosine", dim=_DIM)
+    idx.init_index(max_elements=32)
+    vecs = np.eye(_DIM, dtype=np.float32)[:_N_INITIAL]
+    idx.add_items(vecs, np.arange(_N_INITIAL, dtype=np.int64))
+    idx.mark_deleted(2)
+    path = str(tmp_path / "exact.idx")
+    idx.save_index(path)
     return path
 
 
-class TestPreFixBehaviour:
-    """Without the kwarg, the load_index call demotes the flag to False and
-    the next mark_deleted + add_items(replace_deleted=True) raises."""
+def test_bare_load_never_gates_adds(tmp_path):
+    """A load WITHOUT any flag must leave the index fully writable — the
+    old library's silent flag reset on bare loads is the hazard this pins
+    out of existence."""
+    path = _build_and_save(tmp_path)
+    loaded = _vecindex.Index(space="cosine", dim=_DIM)
+    loaded.load_index(path)
 
-    def test_load_without_flag_then_replace_raises(self, tmp_path):
-        path = _build_and_save(tmp_path)
-
-        loaded = hnswlib.Index(space="cosine", dim=_DIM)
-        loaded.load_index(path, max_elements=_N_INITIAL * 2)  # flag absent
-        loaded.set_ef(_EF)
-
-        loaded.mark_deleted(0)
-        with pytest.raises(
-            RuntimeError,
-            match="Replacement of deleted elements is disabled",
-        ):
-            loaded.add_items(
-                np.random.rand(1, _DIM).astype(np.float32),
-                np.array([10], dtype=np.int64),
-                replace_deleted=True,
-            )
-
-    def test_load_without_flag_standby_pattern_also_raises(self, tmp_path):
-        """The standby-buffer pattern (build into a fresh Index instance,
-        load from a sibling file) has the same failure mode."""
-        path = _build_and_save(tmp_path)
-
-        standby = hnswlib.Index(space="cosine", dim=_DIM)
-        standby.load_index(path, max_elements=_N_INITIAL * 2)  # flag absent
-
-        standby.mark_deleted(1)
-        with pytest.raises(
-            RuntimeError,
-            match="Replacement of deleted elements is disabled",
-        ):
-            standby.add_items(
-                np.random.rand(1, _DIM).astype(np.float32),
-                np.array([20], dtype=np.int64),
-                replace_deleted=True,
-            )
+    fresh = np.ones((1, _DIM), dtype=np.float32)
+    loaded.add_items(fresh, np.array([100], dtype=np.int64))
+    assert 100 in loaded.get_ids_list()
 
 
-class TestPostFixBehaviour:
-    """With the kwarg, the load_index call preserves the flag and the
-    mark_deleted + add_items(replace_deleted=True) sequence succeeds."""
+def test_readd_of_deleted_label_revives_in_place(tmp_path):
+    path = _build_and_save(tmp_path)
+    loaded = _vecindex.Index(space="cosine", dim=_DIM)
+    loaded.load_index(path, max_elements=32)
 
-    def test_load_with_flag_then_replace_succeeds(self, tmp_path):
-        path = _build_and_save(tmp_path)
+    replacement = np.zeros((1, _DIM), dtype=np.float32)
+    replacement[0, 7] = 1.0
+    loaded.add_items(replacement, np.array([2], dtype=np.int64))
 
-        loaded = hnswlib.Index(space="cosine", dim=_DIM)
-        loaded.load_index(
-            path, max_elements=_N_INITIAL * 2, allow_replace_deleted=True,
-        )
-        loaded.set_ef(_EF)
+    assert loaded.get_current_count() == _N_INITIAL, (
+        "re-adding an existing label must update its slot, not append"
+    )
+    q = np.zeros(_DIM, dtype=np.float32)
+    q[7] = 1.0
+    labels, _ = loaded.knn_query(q, k=1)
+    assert labels[0][0] == 2, "revived label must be queryable at its new vector"
 
-        loaded.mark_deleted(0)
-        loaded.add_items(
-            np.random.rand(1, _DIM).astype(np.float32),
-            np.array([10], dtype=np.int64),
-            replace_deleted=True,
-        )
-        assert loaded.get_current_count() == _N_INITIAL
 
-    def test_load_with_flag_standby_pattern_succeeds(self, tmp_path):
-        path = _build_and_save(tmp_path)
+def test_new_label_appends_regardless_of_replace_flag(tmp_path):
+    path = _build_and_save(tmp_path)
+    loaded = _vecindex.Index(space="cosine", dim=_DIM)
+    loaded.load_index(path, max_elements=32)
 
-        standby = hnswlib.Index(space="cosine", dim=_DIM)
-        standby.load_index(
-            path, max_elements=_N_INITIAL * 2, allow_replace_deleted=True,
-        )
-        standby.set_ef(_EF)
+    fresh = np.ones((1, _DIM), dtype=np.float32)
+    loaded.add_items(fresh, np.array([200], dtype=np.int64), replace_deleted=True)
+    assert loaded.get_current_count() == _N_INITIAL + 1
+    assert 200 in loaded.get_ids_list()
+    # The deleted label stays deleted — a new label must never cannibalize
+    # a tombstoned slot's identity.
+    q = np.eye(_DIM, dtype=np.float32)[2]
+    labels, _ = loaded.knn_query(q, k=_N_INITIAL + 1)
+    assert 2 not in labels[0].tolist()
 
-        standby.mark_deleted(1)
-        standby.add_items(
-            np.random.rand(1, _DIM).astype(np.float32),
-            np.array([20], dtype=np.int64),
-            replace_deleted=True,
-        )
-        assert standby.get_current_count() == _N_INITIAL
+
+def test_standby_pattern_load_then_refill(tmp_path):
+    """The double-buffer standby loads a snapshot and is refilled by the
+    rebuild: survivors update in place, stale labels mark deleted, new
+    labels append — all without any load-time capability flag."""
+    path = _build_and_save(tmp_path)
+    standby = _vecindex.Index(space="cosine", dim=_DIM)
+    standby.load_index(path, max_elements=64)
+
+    survivors = np.eye(_DIM, dtype=np.float32)[:2]
+    standby.add_items(survivors, np.arange(2, dtype=np.int64))
+    standby.mark_deleted(4)
+    fresh = np.full((1, _DIM), 0.5, dtype=np.float32)
+    standby.add_items(fresh, np.array([300], dtype=np.int64), replace_deleted=True)
+
+    assert standby.get_current_count() == _N_INITIAL + 1
+    ids = set(standby.get_ids_list())
+    assert {0, 1, 2, 3, 4, 300} == ids

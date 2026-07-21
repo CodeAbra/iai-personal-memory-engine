@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import errno
-import fcntl
+from iai_mcp import _flock
 import json
 import os
 import secrets
@@ -164,12 +164,34 @@ class CaptureQueue:
         return ulid
 
 
-    def ingest_pending(self, handler: Callable[[dict], None]) -> int:
+    def ingest_pending(
+        self,
+        handler: Callable[[dict], None],
+        *,
+        max_records: int | None = None,
+        budget_sec: float | None = None,
+    ) -> int:
+        """Consume pending envelopes through ``handler``, oldest first.
+
+        With ``max_records`` and/or ``budget_sec`` the pass stops at the bound
+        and leaves the remainder pending — the queue itself is the resume
+        cursor (ingested files are unlinked), so repeated bounded calls drain
+        an arbitrary backlog without any caller-side state.
+        """
         if not callable(handler):
             raise TypeError("handler must be callable")
+        if max_records is not None and max_records <= 0:
+            return 0
+        deadline = (
+            time.monotonic() + budget_sec if budget_sec is not None else None
+        )
 
         ingested = 0
         for pending_path in self.list_pending():
+            if max_records is not None and ingested >= max_records:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             ulid = self._ulid_from_path(pending_path)
             lock_path = self._queue_dir / f"pending-{ulid}.lock"
 
@@ -184,7 +206,7 @@ class CaptureQueue:
 
             try:
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _flock.flock(lock_fd, _flock.LOCK_EX | _flock.LOCK_NB)
                 except OSError as exc:
                     if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                         continue
@@ -211,7 +233,7 @@ class CaptureQueue:
                 ingested += 1
             finally:
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    _flock.flock(lock_fd, _flock.LOCK_UN)
                 except OSError:
                     pass
                 os.close(lock_fd)
@@ -300,12 +322,12 @@ class CaptureQueue:
             return
         try:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                _flock.flock(fd, _flock.LOCK_EX)
                 os.write(fd, line.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    _flock.flock(fd, _flock.LOCK_UN)
                 except OSError:
                     pass
         finally:

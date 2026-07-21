@@ -118,6 +118,24 @@ pub fn free_page(pager: &Pager, page_no: u32) -> Result<()> {
     let trunk_data = pager.read_page(first_trunk)?;
     let mut trunk = TrunkPage::decode(&trunk_data)?;
 
+    // Double-free tripwire: freeing a page already recorded on the freelist
+    // would let alloc_page hand the same page out twice, aliasing two records
+    // onto one page. The head-trunk check is O(1) and catches the common
+    // immediate double-free; debug builds additionally scan the whole chain.
+    if page_no == first_trunk || trunk.leaf_pages.contains(&page_no) {
+        return Err(StoreError::FreelistCorruption {
+            detail: format!("double free: page {page_no} is already on the head trunk"),
+        });
+    }
+    #[cfg(debug_assertions)]
+    {
+        if freelist_pages(pager)?.contains(&page_no) {
+            return Err(StoreError::FreelistCorruption {
+                detail: format!("double free: page {page_no} is already on the freelist chain"),
+            });
+        }
+    }
+
     if trunk.leaf_pages.len() < cap {
         trunk.leaf_pages.push(page_no);
         pager.write_page(first_trunk, &trunk.encode(page_size))?;
@@ -240,6 +258,55 @@ mod tests {
         want.insert(c);
         assert_eq!(got, want);
         assert_eq!(p.db_size().unwrap(), stable);
+        assert_eq!(p.freelist_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn freelist_double_free_is_rejected() {
+        let (_d, path) = temp_db();
+        let p = Pager::open(&path).unwrap();
+        let a = alloc_page(&p).unwrap();
+        let b = alloc_page(&p).unwrap();
+        // Free two distinct pages onto the head trunk, then free `a` again: the
+        // duplicate must be rejected rather than handed out twice by alloc.
+        free_page(&p, a).unwrap();
+        free_page(&p, b).unwrap();
+        let count_before = p.freelist_count().unwrap();
+        let err = free_page(&p, a).unwrap_err();
+        assert!(matches!(err, StoreError::FreelistCorruption { .. }));
+        assert_eq!(
+            p.freelist_count().unwrap(),
+            count_before,
+            "a rejected double free must not change the freelist count"
+        );
+    }
+
+    #[test]
+    fn freelist_trunk_chain_grows_past_one_trunk_without_leak() {
+        let (_d, path) = temp_db();
+        let p = Pager::open(&path).unwrap();
+        // Free enough pages to overflow a single trunk's leaf capacity, forcing
+        // the new-trunk branch and a multi-trunk chain. Reallocation must return
+        // every freed page, none leaked or handed out twice.
+        let cap = max_leaves(p.page_size());
+        let n = cap + cap / 2; // one and a half trunks' worth
+        let mut allocated: Vec<u32> = (0..n).map(|_| alloc_page(&p).unwrap()).collect();
+        let stable = p.db_size().unwrap();
+
+        for &pno in &allocated {
+            free_page(&p, pno).unwrap();
+        }
+        assert_eq!(p.freelist_count().unwrap() as usize, n);
+
+        let mut reused = std::collections::HashSet::new();
+        for _ in 0..n {
+            assert!(reused.insert(alloc_page(&p).unwrap()), "a page was handed out twice");
+        }
+        allocated.sort_unstable();
+        let mut got: Vec<u32> = reused.into_iter().collect();
+        got.sort_unstable();
+        assert_eq!(got, allocated, "every freed page must come back exactly once");
+        assert_eq!(p.db_size().unwrap(), stable, "reuse must not grow the file");
         assert_eq!(p.freelist_count().unwrap(), 0);
     }
 

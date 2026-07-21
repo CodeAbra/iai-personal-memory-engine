@@ -16,9 +16,11 @@ no write transaction.
 from __future__ import annotations
 
 import contextlib
-import sqlite3
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
+
+from iai_mcp import _sqlite_stdlib
+from iai_mcp import errors
 
 from iai_mcp.hippo import open_store_conn
 
@@ -27,7 +29,7 @@ DEFAULT_RECORDS_CHUNK_SIZE: int = 2000
 DEFAULT_EDGES_CHUNK_SIZE: int = 5000
 
 
-def open_ro_connection(db_path: Path) -> sqlite3.Connection:
+def open_ro_connection(db_path: Path) -> Any:
     """Open a read-only connection to the store, driver-aware.
 
     On the lilli driver: returns the engine raw connection for the file
@@ -42,20 +44,20 @@ def open_ro_connection(db_path: Path) -> sqlite3.Connection:
     if _eng is not None:
         conn = _eng
     else:
-        conn = sqlite3.connect(
+        conn = _sqlite_stdlib.connect(
             f"file:{db_path}?mode=ro",
             uri=True,
             check_same_thread=False,
             isolation_level=None,
         )
-    conn.row_factory = sqlite3.Row
+        conn.row_factory = _sqlite_stdlib.Row
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=2000")
     return conn
 
 
 @contextlib.contextmanager
-def read_transaction(conn: sqlite3.Connection):
+def read_transaction(conn: Any):
     """Wrap the export in a read-only transaction context.
 
     On stdlib: issues BEGIN DEFERRED / COMMIT so every paginated SELECT
@@ -72,7 +74,7 @@ def read_transaction(conn: sqlite3.Connection):
     and vice versa for a genuine stdlib connection opened with the env set
     to "lilli".
     """
-    if not isinstance(conn, sqlite3.Connection):
+    if not _sqlite_stdlib.is_stdlib_connection(conn):
         yield
         return
     conn.execute("BEGIN DEFERRED")
@@ -81,18 +83,18 @@ def read_transaction(conn: sqlite3.Connection):
     except BaseException:
         try:
             conn.execute("ROLLBACK")
-        except sqlite3.Error:
+        except errors.Error:
             pass
         raise
     else:
         try:
             conn.execute("COMMIT")
-        except sqlite3.Error:
+        except errors.Error:
             pass
 
 
 def iter_records_chunks(
-    conn: sqlite3.Connection,
+    conn: Any,
     chunk_size: int = DEFAULT_RECORDS_CHUNK_SIZE,
 ) -> Iterator[list[tuple[str, bytes]]]:
     """Yield lists of `(id_str, embedding_blob_bytes)` of length <= chunk_size.
@@ -125,7 +127,7 @@ def iter_records_chunks(
             return
 
 
-def _fetch_active_ids(conn: sqlite3.Connection) -> set[str]:
+def _fetch_active_ids(conn: Any) -> set[str]:
     """Return the set of record ids that are active (not tombstoned, not pending).
 
     Fetches once using a narrow projection — no JOIN, no dotted columns —
@@ -143,7 +145,7 @@ def _fetch_active_ids(conn: sqlite3.Connection) -> set[str]:
 
 
 def iter_edges_chunks(
-    conn: sqlite3.Connection,
+    conn: Any,
     chunk_size: int = DEFAULT_EDGES_CHUNK_SIZE,
 ) -> Iterator[list[tuple[str, str, float]]]:
     """Yield lists of `(src_str, dst_str, weight_float)` of length <= chunk_size.
@@ -157,7 +159,7 @@ def iter_edges_chunks(
     Pagination strategy is driver-aware, branching on the concrete
     connection object (already driver-resolved from the on-disk file format
     by `open_ro_connection`), not on the ambient env var:
-    - stdlib (`isinstance(conn, sqlite3.Connection)`): keyset pagination
+    - stdlib connection: keyset pagination
       using compound tuple comparison `(src, dst, edge_type) > (?, ?, ?)`
       for snapshot-consistent streaming.
     - lilli engine (anything else): single full scan followed by
@@ -171,7 +173,7 @@ def iter_edges_chunks(
     """
     active_ids = _fetch_active_ids(conn)
 
-    if not isinstance(conn, sqlite3.Connection):
+    if not _sqlite_stdlib.is_stdlib_connection(conn):
         # Lilli path: single full scan, chunk in Python.
         # The engine does not support multi-column ORDER BY or compound-tuple
         # WHERE comparisons, so no sort is applied — order is unspecified but

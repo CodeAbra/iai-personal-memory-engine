@@ -30,11 +30,11 @@ def _worker_entry(conn) -> None:  # noqa: ANN001
       Worker sends:  ("done", {"rebuilt_count": int}) on success
                      ("error", str) on failure
     """
-    import sqlite3
+    from iai_mcp import _sqlite_stdlib
     import struct
     import sys
 
-    import hnswlib
+    from iai_mcp.hippo import _vecindex
     import numpy as np
 
     try:
@@ -65,12 +65,12 @@ def _worker_entry(conn) -> None:  # noqa: ANN001
                 conn.send(("error", f"lilli driver active but no engine connection for {db_path!r}"))
                 return
         else:
-            ro_conn = sqlite3.connect(
+            ro_conn = _sqlite_stdlib.connect(
                 f"file:{db_path}?mode=ro",
                 uri=True,
                 check_same_thread=False,
             )
-        ro_conn.row_factory = sqlite3.Row
+            ro_conn.row_factory = _sqlite_stdlib.Row
         try:
             rows = ro_conn.execute(
                 "SELECT vec_label, embedding FROM records"
@@ -84,7 +84,7 @@ def _worker_entry(conn) -> None:  # noqa: ANN001
         n = len(rows)
         cap = max(capacity, n * 2)
 
-        idx = hnswlib.Index(space="cosine", dim=embed_dim)
+        idx = _vecindex.Index(space="cosine", dim=embed_dim)
         idx.init_index(
             max_elements=cap,
             ef_construction=ef_construction,

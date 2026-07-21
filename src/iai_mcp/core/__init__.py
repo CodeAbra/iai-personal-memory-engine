@@ -71,6 +71,18 @@ _last_injection_ids: list[str] = []
 
 _profile_lock: threading.RLock = threading.RLock()
 
+#: Snapshot cache for the deep topology surface. The deep compute walks the
+#: full graph (clustering + APSL + sigma baselines + community detection);
+#: serving it per-call let a status poller stack unbounded multi-minute
+#: dispatches and starve the daemon for hours. At most ONE deep compute runs
+#: at a time (non-blocking acquire = single-flight); concurrent and TTL-fresh
+#: callers are served from the cache.
+_TOPOLOGY_SNAPSHOT_TTL_S: float = 900.0
+_topology_cache: dict[str, Any] | None = None
+_topology_cache_at: float = 0.0
+_topology_state_lock: threading.Lock = threading.Lock()
+_topology_inflight: threading.Lock = threading.Lock()
+
 LIVE_KNOBS: dict[str, Any] = _profile_state
 DEFERRED_KNOBS: frozenset[str] = frozenset(
     profile.PHASE_2_DEFERRED | profile.PHASE_3_DEFERRED
@@ -263,6 +275,7 @@ def _incident_edges_warm(
 
 def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
     global _last_injection_embedding, _last_injection_ids, _arousal_state
+    global _topology_cache, _topology_cache_at
     if method == "memory_recall":
         _recall_t0 = _time.perf_counter()
         # Stamp the foreground-activity beacon so polite background loops
@@ -1408,6 +1421,20 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             "language": verdict.language,
         }
 
+    if method == "status_light":
+        # Liveness + headline numbers with ZERO graph work: the awake path
+        # must answer instantly, so this surface reads only the O(1) corpus
+        # count and whatever topology snapshot the cache already holds.
+        records_count = store.active_records_count()
+        with _topology_state_lock:
+            cached_snapshot = _topology_cache
+        return {
+            "N": records_count,
+            "regime": (cached_snapshot or {}).get("regime", "unknown"),
+            "sigma": (cached_snapshot or {}).get("sigma"),
+            "topology_cached": cached_snapshot is not None,
+        }
+
     if method == "topology":
         from iai_mcp import sigma as sigma_mod
         from iai_mcp.events import write_event
@@ -1422,10 +1449,48 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 "community_count": 0, "rich_club_ratio": 0.0,
                 "regime": "insufficient_data",
             }
+        now = _time.monotonic()
+        with _topology_state_lock:
+            cached_snapshot = _topology_cache
+            cache_fresh = (
+                cached_snapshot is not None
+                and (now - _topology_cache_at) < _TOPOLOGY_SNAPSHOT_TTL_S
+            )
+        if cache_fresh:
+            return dict(cached_snapshot)
+        if not _topology_inflight.acquire(blocking=False):
+            # A deep compute is already running; never stack another one.
+            # Serve the stale snapshot when there is one; otherwise answer
+            # with an honest shape-stable placeholder.
+            if cached_snapshot is not None:
+                return dict(cached_snapshot)
+            return {
+                "N": records_count, "C": 0.0, "L": 0.0, "sigma": None,
+                "community_count": 0, "rich_club_ratio": 0.0,
+                "regime": "computing",
+            }
         try:
             graph_bundle = retrieve.build_runtime_graph(store)
-            graph = graph_bundle[0] if isinstance(graph_bundle, tuple) else graph_bundle
-            return sigma_mod.compute_topology_snapshot(graph)
+            if isinstance(graph_bundle, tuple):
+                graph = graph_bundle[0]
+                # The bundle already carries the community assignment; passing
+                # it through skips a full in-process re-detection per snapshot.
+                # A degraded bundle assignment (no centroids) would report a
+                # zero community count — fall back to detection instead.
+                bundle_assignment = (
+                    graph_bundle[1] if len(graph_bundle) > 1 else None
+                )
+                if not getattr(bundle_assignment, "community_centroids", None):
+                    bundle_assignment = None
+            else:
+                graph, bundle_assignment = graph_bundle, None
+            snapshot = sigma_mod.compute_topology_snapshot(
+                graph, assignment=bundle_assignment
+            )
+            with _topology_state_lock:
+                _topology_cache = dict(snapshot)
+                _topology_cache_at = _time.monotonic()
+            return snapshot
         except Exception as exc:
             write_event(
                 store,
@@ -1433,6 +1498,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 {"error_type": type(exc).__name__, "error": str(exc)},
             )
             raise
+        finally:
+            _topology_inflight.release()
 
     if method == "camouflaging_status":
         from iai_mcp import camouflaging
@@ -1643,8 +1710,6 @@ def _rss_stats_snapshot() -> dict:
             "rss_kib": None,
             "vmmap_region_count": None,
             "vm_allocate_kib": None,
-            "pa_pool_bytes": -1,
-            "pa_pool_max": -1,
             "numba_nrt_alloc_count": -1,
             "numba_nrt_free_count": -1,
         }

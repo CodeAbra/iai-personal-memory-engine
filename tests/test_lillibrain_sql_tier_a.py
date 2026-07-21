@@ -12,6 +12,8 @@ SQL on each, and asserts the normalised result rows are equal.
 from __future__ import annotations
 
 import sqlite3
+
+from iai_mcp import errors
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -2450,7 +2452,7 @@ def test_named_param_tuple_raises_programming_error(tmp_path) -> None:
     conn = LilliBrainConnection(pager, catalog, root_map)
     try:
         conn.execute("CREATE TABLE t (id TEXT, v INTEGER)")
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(errors.ProgrammingError):
             conn.execute("SELECT id FROM t WHERE id = :x", ("a",)).fetchall()
     finally:
         conn.close()
@@ -2462,7 +2464,7 @@ def test_missing_named_param_raises_programming_error(tmp_path) -> None:
     conn = LilliBrainConnection(pager, catalog, root_map)
     try:
         conn.execute("CREATE TABLE t (id TEXT, v INTEGER)")
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(errors.ProgrammingError):
             conn.execute("SELECT id FROM t WHERE id = :x", {}).fetchall()
     finally:
         conn.close()
@@ -2474,7 +2476,7 @@ def test_mixed_named_positional_raises_programming_error(tmp_path) -> None:
     conn = LilliBrainConnection(pager, catalog, root_map)
     try:
         conn.execute("CREATE TABLE t (id TEXT, v INTEGER)")
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(errors.ProgrammingError):
             conn.execute(
                 "SELECT id FROM t WHERE id = :x AND v = ?", {"x": "a"}
             ).fetchall()
@@ -2501,7 +2503,7 @@ def test_insert_too_few_params_raises_programming_error(tmp_path) -> None:
         with pytest.raises(sqlite3.ProgrammingError):
             sq.execute("INSERT INTO t (id, n) VALUES (?, ?)", ("bad",))
         # lilli must raise the same exception type
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(errors.ProgrammingError):
             lilli.execute("INSERT INTO t (id, n) VALUES (?, ?)", ("bad",))
     finally:
         lilli.close()
@@ -2521,7 +2523,7 @@ def test_insert_too_many_params_raises_programming_error(tmp_path) -> None:
         with pytest.raises(sqlite3.ProgrammingError):
             sq.execute("INSERT INTO t (id, n) VALUES (?, ?)", ("a", 1, 999))
         # lilli must raise the same exception type
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(errors.ProgrammingError):
             lilli.execute("INSERT INTO t (id, n) VALUES (?, ?)", ("a", 1, 999))
     finally:
         lilli.close()
@@ -2565,7 +2567,7 @@ def test_insert_executemany_too_few_raises_programming_error(tmp_path) -> None:
             sq.executemany(
                 "INSERT INTO t (id, n) VALUES (?, ?)", [("a", 1), ("bad",)]
             )
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(errors.ProgrammingError):
             lilli.executemany(
                 "INSERT INTO t (id, n) VALUES (?, ?)", [("a", 1), ("bad",)]
             )

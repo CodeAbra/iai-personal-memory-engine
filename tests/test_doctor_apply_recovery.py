@@ -197,7 +197,7 @@ def test_apply_yes_recovers_from_kill(isolated_daemon_paths):
         # Poll until the hippo flock is released (kernel releases on
         # process death, but reaping may take a moment).
         import errno as _errno
-        import fcntl as _fcntl
+        from iai_mcp import _flock as _fcntl
         _hippo_lock = store_dir / "hippo" / ".lock"
         _flock_deadline = time.monotonic() + 8.0
         while time.monotonic() < _flock_deadline:

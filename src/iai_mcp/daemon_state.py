@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import fcntl
+from iai_mcp import _flock
 import json
 import os
 import tempfile
@@ -77,14 +77,14 @@ def _state_write_lock() -> Iterator[None]:
             0o600,
         )
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _flock.flock(lock_fd, _flock.LOCK_EX)
             _state_lock_depth.value = 1
             try:
                 yield
             finally:
                 _state_lock_depth.value = 0
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    _flock.flock(lock_fd, _flock.LOCK_UN)
                 except OSError:
                     pass
         finally:

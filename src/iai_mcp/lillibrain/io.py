@@ -5,10 +5,16 @@ F_FULLFSYNC on macOS forces the drive controller's DRAM cache to NAND.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import sys
 from pathlib import Path
+
+# fcntl exists only on POSIX; it is used solely for the Darwin-only
+# F_FULLFSYNC path, so its absence (Windows) must not break the import.
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Platform sentinel

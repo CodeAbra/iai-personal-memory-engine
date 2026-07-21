@@ -14,7 +14,7 @@ from pathlib import Path
 from tests._store_raw import open_store_raw
 
 
-_SECRET = "top-secret direct-write phrase: alice's passphrase Привет 42"
+_SECRET = "top-secret direct-write phrase: alice's passphrase こんにちは 42"
 
 
 def _raw_row_for(db_path: Path, fragment: str):

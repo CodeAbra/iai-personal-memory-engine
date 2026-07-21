@@ -215,7 +215,10 @@ fn balanced_nway_interior_split(
         let next_child = all_children[i + 1];
         let mut probe = cur_keys.clone();
         probe.push(*key);
-        if !cur_keys.is_empty() && !interior_fits(&probe) {
+        // Break a group when the next key would overflow the page (bytes) or
+        // reach the count ceiling — the ceiling is honored symmetrically with
+        // the leaf packer, so an injected small ceiling bounds interior nodes too.
+        if !cur_keys.is_empty() && (!interior_fits(&probe) || cur_keys.len() >= leaf_max_cells()) {
             nodes.push((std::mem::take(&mut cur_keys), std::mem::take(&mut cur_children)));
             push_up_keys.push(*key);
             cur_children = vec![next_child];

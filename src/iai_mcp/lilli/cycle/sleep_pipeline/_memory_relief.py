@@ -11,26 +11,11 @@ can never show a reclaim. The step is wrapped fail-soft: the helper must never
 raise on any platform, because it runs after a successful step whose progress
 is already persisted.
 
-**Why the pyarrow/mimalloc arena is not targeted here:**
-The dominant allocator for the heavy sleep steps is mimalloc, statically linked
-into pyarrow.  Two primitives that were previously attempted both measure ~0
-reclaim against those arenas:
-
-- ``pa.default_memory_pool().release_unused()`` — the tracked arrow pool
-  counter is decoupled from RSS in this build; measured +0.2 MB (noise).
-- ``malloc_zone_pressure_relief(NULL, 0)`` (macOS only) — iterates the system
-  libmalloc zones; mimalloc-in-pyarrow does NOT register itself as a libmalloc
-  zone, so no mimalloc pages are reached.
-
-``mi_collect(true)`` would be the correct primitive, but it is not exported as
-a public symbol by pyarrow's bundled mimalloc build (verified: nm over all
-pyarrow .so files finds no ``mi_collect``).
-
-The actual RSS return after a heavy step comes from mimalloc decommitting pages
-on free, governed by the ``MIMALLOC_ALLOW_DECOMMIT=1`` /
-``MIMALLOC_DECOMMIT_DELAY=0`` / ``MIMALLOC_SEGMENT_DECOMMIT_DELAY=0``
-environment variables set in the launchd plist.  Those env vars take effect at
-process spawn and require no in-process call.
+Allocator-arena reclaim primitives are deliberately NOT called here:
+``malloc_zone_pressure_relief`` measured ~0 against the arenas the heavy
+steps actually allocate from, and page return to the OS is governed by the
+allocator's own decommit-on-free behaviour (tuned via environment variables
+in the launchd plist, effective at process spawn — no in-process call).
 
 ``zone_reclaimed_mb`` is kept at 0.0 in the telemetry dict for schema
 stability (existing event readers expect the key).

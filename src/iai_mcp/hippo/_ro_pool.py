@@ -18,10 +18,11 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import sqlite3
 import threading
 import time as _time
 from typing import Any
+
+from iai_mcp import errors
 
 _log = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def _slow_ro_execute_log_ms() -> float:
 RO_POOL_SIZE_DEFAULT = 8
 
 #: The read-only-snapshot fence (crates/lillibrain/src/pager.rs:322-338
-#: validate_ro_snapshot_fence) surfaces as a GENERIC sqlite3.OperationalError
+#: validate_ro_snapshot_fence) surfaces as a GENERIC errors.OperationalError
 #: (crates/lilliengine/src/py.rs:39-55 to_pyerr maps StoreError::Integrity to
 #: it) -- there is NO distinct catchable Python fence class. The message
 #: substring below (pager.rs:329 "main file size changed" variant / pager.rs:335
@@ -47,6 +48,27 @@ RO_POOL_SIZE_DEFAULT = 8
 #: constant must be updated in lockstep or every fence occurrence silently
 #: stops being retried (falls through to the non-fence re-raise branch).
 _RO_SNAPSHOT_FENCE_MARKER = "read-only snapshot invalidated"
+
+try:
+    # The native engine raises this dedicated OperationalError subclass for a
+    # snapshot fence, so callers match the fault STRUCTURALLY instead of on the
+    # message text. It is unavailable on the stdlib driver / a Python-only build.
+    from iai_mcp_native.engine import SnapshotFenceError as _SnapshotFenceError
+except Exception:  # noqa: BLE001 -- native engine absent; substring is the fallback
+    _SnapshotFenceError = ()
+
+
+def _is_snapshot_fence(exc: BaseException) -> bool:
+    """True when ``exc`` is a retryable read-only snapshot fence.
+
+    Prefers a structural ``isinstance`` against the engine's dedicated
+    ``SnapshotFenceError`` (immune to message-text drift); falls back to the
+    message marker for the stdlib driver and any path where the class is
+    unavailable.
+    """
+    if _SnapshotFenceError and isinstance(exc, _SnapshotFenceError):
+        return True
+    return _RO_SNAPSHOT_FENCE_MARKER in str(exc)
 
 #: Bound on how many times borrow() will close+reopen a slot in response to
 #: the fence before giving up and raising (so ro_conn() falls back to the
@@ -245,8 +267,8 @@ class RoConnPool:
                             _ms, _idx, sql[:120],
                         )
                     return result
-                except sqlite3.OperationalError as exc:
-                    if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
+                except errors.OperationalError as exc:
+                    if not _is_snapshot_fence(exc):
                         raise
                     attempts += 1
                     if attempts > _MAX_FENCE_REOPEN_ATTEMPTS:
@@ -295,7 +317,7 @@ class RoConnPool:
         BEFORE handout, so a caller never receives a slot that raises on its
         first real query. Only the narrowed fence error (message contains
         ``_RO_SNAPSHOT_FENCE_MARKER``) is retried (close + reopen + re-probe);
-        every other ``sqlite3.OperationalError`` re-raises immediately. The
+        every other ``OperationalError`` re-raises immediately. The
         reopen is bounded (``_MAX_FENCE_REOPEN_ATTEMPTS``) so a genuinely
         broken store cannot spin -- exhaustion raises here too.
 
@@ -356,7 +378,7 @@ class RoConnPool:
                 # FROM-bearing probe that actually exercises the fence.
                 slot.conn.execute("SELECT 1 FROM records LIMIT 1")
                 break
-            except sqlite3.OperationalError as exc:
+            except errors.OperationalError as exc:
                 if _RO_SNAPSHOT_FENCE_MARKER not in str(exc):
                     raise
                 attempts += 1
@@ -413,6 +435,12 @@ class RoConnPool:
         slot.generation = target_gen
 
     def _release(self, slot: _Slot) -> None:
+        if self._closed:
+            # The pool closed while this slot was checked out: close its
+            # connection instead of returning it to a drained queue, where it
+            # would never be closed (a leaked connection at shutdown).
+            self._close_slot_conn(slot.conn)
+            return
         try:
             self._queue.put_nowait(slot)
         except queue.Full:  # pragma: no cover -- defensive; sized to filled count

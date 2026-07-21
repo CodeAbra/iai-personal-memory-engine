@@ -794,11 +794,16 @@ class TestReinforceDeferredDuringGate:
 
         try:
             from iai_mcp import core
-            core.dispatch(
-                store,
-                "memory_recall",
-                {"cue": "alice", "session_id": "defer_gate"},
-            )
+            # The store is _DIM-dimensional; the cue must embed at the same
+            # dim. The exact index rejects a dim-mismatched query outright
+            # (the old ANN silently read the first _DIM floats of a full-size
+            # cue — garbage similarity that happened to return neighbors).
+            with _EmbedderCtx(_FixedEmbedder(dim=_DIM)):
+                core.dispatch(
+                    store,
+                    "memory_recall",
+                    {"cue": "alice", "session_id": "defer_gate"},
+                )
         finally:
             store.close()
 
@@ -840,11 +845,12 @@ class TestReinforceDeferredDuringGate:
 
         try:
             from iai_mcp import core
-            core.dispatch(
-                store,
-                "memory_recall",
-                {"cue": "alice", "session_id": "no_shim_control"},
-            )
+            with _EmbedderCtx(_FixedEmbedder(dim=_DIM)):
+                core.dispatch(
+                    store,
+                    "memory_recall",
+                    {"cue": "alice", "session_id": "no_shim_control"},
+                )
         finally:
             store.close()
 

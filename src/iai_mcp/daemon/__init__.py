@@ -6,7 +6,13 @@ import faulthandler
 import json
 import logging
 import os
-import resource
+
+# resource exists only on POSIX; used solely for the fd-limit raise, which is
+# a no-op on Windows.
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None  # type: ignore[assignment]
 import signal
 import sys
 import threading
@@ -127,6 +133,8 @@ _DAEMON_NOFILE_FLOOR_DEFAULT: int = 8192
 
 
 def _raise_fd_limit() -> None:
+    if resource is None:
+        return
     try:
         floor = int(
             os.environ.get("IAI_MCP_DAEMON_NOFILE_FLOOR", _DAEMON_NOFILE_FLOOR_DEFAULT)
@@ -332,6 +340,73 @@ async def _consume_force_wake(ds: dict, state_machine: Any) -> dict:
         d["force_wake_request"] = req
 
     return await asyncio.to_thread(_update, _honor)
+
+
+_CAPTURE_DRAIN_MAX_RECORDS_DEFAULT: int = 500
+_CAPTURE_DRAIN_BUDGET_SEC_DEFAULT: float = 10.0
+
+
+def _capture_drain_max_records() -> int | None:
+    raw = os.environ.get("IAI_MCP_CAPTURE_DRAIN_MAX_RECORDS")
+    if raw is None:
+        return _CAPTURE_DRAIN_MAX_RECORDS_DEFAULT
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return _CAPTURE_DRAIN_MAX_RECORDS_DEFAULT
+    return val if val > 0 else None
+
+
+def _capture_drain_budget_sec() -> float | None:
+    raw = os.environ.get("IAI_MCP_CAPTURE_DRAIN_BUDGET_SEC")
+    if raw is None:
+        return _CAPTURE_DRAIN_BUDGET_SEC_DEFAULT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _CAPTURE_DRAIN_BUDGET_SEC_DEFAULT
+    return val if val > 0 else None
+
+
+def _run_bounded_capture_queue_drain(store, *, write_event_fn) -> None:
+    """One bounded pass over the persistent capture queue. Same bounds as the
+    boot pass, so a backlog the boot pass left behind converges edge by edge."""
+    try:
+        from iai_mcp.capture import capture_turn as _capture_turn
+        from iai_mcp.capture_queue import CaptureQueue
+
+        queue = CaptureQueue()
+        if queue.pending_count() == 0:
+            return
+
+        def _handler(record: dict) -> None:
+            _capture_turn(
+                store,
+                cue=record.get("cue", ""),
+                text=record.get("text", record.get("surface", "")),
+                tier=record.get("tier", "episodic"),
+                session_id=record.get("session_id", "-"),
+                role=record.get("role", "user"),
+            )
+
+        ingested = queue.ingest_pending(
+            _handler,
+            max_records=_capture_drain_max_records(),
+            budget_sec=_capture_drain_budget_sec(),
+        )
+        if ingested > 0:
+            write_event_fn(
+                store,
+                "capture_queue_drained",
+                {
+                    "phase": "drowsy",
+                    "ingested": ingested,
+                    "remaining": queue.pending_count(),
+                },
+                severity="info",
+            )
+    except Exception as e:  # noqa: BLE001 -- lifecycle_tick MUST NOT crash
+        log.warning("bounded capture-queue drain failed: %s", e, exc_info=True)
 
 
 def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
@@ -1074,14 +1149,26 @@ async def main() -> int:
                 }
                 _capture_turn(store, **kwargs)
 
+            # Boot drain is bounded: an arbitrary backlog must never own the
+            # startup path. The remainder stays pending and converges through
+            # the same bounded pass on every drowsy edge.
             ingested = await asyncio.to_thread(
-                _capture_queue.ingest_pending, _capture_handler,
+                lambda: _capture_queue.ingest_pending(
+                    _capture_handler,
+                    max_records=_capture_drain_max_records(),
+                    budget_sec=_capture_drain_budget_sec(),
+                )
             )
             if ingested > 0:
+                remaining = await asyncio.to_thread(_capture_queue.pending_count)
                 write_event(
                     store,
                     "capture_queue_drained",
-                    {"phase": "startup", "ingested": ingested},
+                    {
+                        "phase": "startup",
+                        "ingested": ingested,
+                        "remaining": remaining,
+                    },
                     severity="info",
                 )
         except Exception as exc:  # noqa: BLE001 -- never block boot on queue drain
@@ -1148,7 +1235,13 @@ async def main() -> int:
 
         shutdown = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        # SIGHUP resolved lazily: absent on Windows, where the loop-signal
+        # registration is a no-op anyway.
+        _shutdown_signals = [signal.SIGTERM, signal.SIGINT]
+        _sighup = getattr(signal, "SIGHUP", None)
+        if _sighup is not None:
+            _shutdown_signals.append(_sighup)
+        for sig in _shutdown_signals:
             try:
                 loop.add_signal_handler(sig, shutdown.set)
             except (NotImplementedError, RuntimeError):
@@ -1641,6 +1734,11 @@ async def main() -> int:
                                 _run_drowsy_drain,
                                 store,
                                 drain_fn=drain_capture_backlog,
+                                write_event_fn=write_event,
+                            )
+                            await asyncio.to_thread(
+                                _run_bounded_capture_queue_drain,
+                                store,
                                 write_event_fn=write_event,
                             )
                         except Exception:  # noqa: BLE001 -- drowsy drain non-fatal

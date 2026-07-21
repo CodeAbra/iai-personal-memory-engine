@@ -78,6 +78,13 @@ fn walk_overflow_chain(
         ));
         return;
     }
+    // An overlong chain carries at least one whole page more than the declared
+    // payload needs: the surplus pages are reachable but never read back — leaked.
+    if collected >= total_len + crate::btree::overflow::OVERFLOW_USABLE {
+        errors.push(format!(
+            "overflow chain starting at page {first_page}: {collected} bytes exceeds declared {total_len} by a full page (leaked overflow pages)"
+        ));
+    }
 
     match read_overflow_chain(pager, first_page, total_len) {
         Ok(reassembled) => {
@@ -97,10 +104,17 @@ fn walk_overflow_chain(
 /// Recursively walk the subtree at `page_no`, returning its leaf depth (or
 /// `None` when a fault prevented reaching leaves).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn walk_tree(
     pager: &Pager,
     page_no: u32,
     depth: usize,
+    // Inclusive lower / exclusive upper key bound this subtree must fall within,
+    // derived from the ancestor separators (routing uses bisect_right, so a child
+    // holds keys in [keys[i-1], keys[i])). A key outside these bounds is a
+    // separator that misroutes lookups even when leaves stay globally sorted.
+    lower: Option<i64>,
+    upper: Option<i64>,
     visited: &mut HashSet<u32>,
     leaf_order: &mut Vec<u32>,
     errors: &mut Vec<String>,
@@ -160,6 +174,21 @@ fn walk_tree(
                 }
                 prev = Some(raw.key);
 
+                if lower.is_some_and(|lo| raw.key < lo) {
+                    errors.push(format!(
+                        "page {page_no}: leaf key {} below subtree lower bound {} (misrouting separator)",
+                        raw.key,
+                        lower.unwrap()
+                    ));
+                }
+                if upper.is_some_and(|hi| raw.key >= hi) {
+                    errors.push(format!(
+                        "page {page_no}: leaf key {} at/above subtree upper bound {} (misrouting separator)",
+                        raw.key,
+                        upper.unwrap()
+                    ));
+                }
+
                 if raw.spilled {
                     match crate::btree::page::read_spilled_pointer(&page, raw.payload_start) {
                         Ok(first_ovf) => walk_overflow_chain(
@@ -213,11 +242,17 @@ fn walk_tree(
             }
 
             let mut leaf_depths: Vec<usize> = Vec::new();
-            for &child in &node.children {
+            for (i, &child) in node.children.iter().enumerate() {
+                // child[i] holds keys in [keys[i-1], keys[i]); the outermost
+                // children inherit the parent's own bounds.
+                let child_lower = if i == 0 { lower } else { Some(node.keys[i - 1]) };
+                let child_upper = if i == node.keys.len() { upper } else { Some(node.keys[i]) };
                 if let Some(d) = walk_tree(
                     pager,
                     child,
                     depth + 1,
+                    child_lower,
+                    child_upper,
                     visited,
                     leaf_order,
                     errors,
@@ -267,6 +302,8 @@ pub fn page_census(pager: &Pager, root_page_no: u32) -> Result<PageCensus> {
         pager,
         root_page_no,
         0,
+        None,
+        None,
         &mut visited,
         &mut leaf_order,
         &mut errors,
@@ -303,6 +340,17 @@ pub fn check_integrity_with_reserved(
     let mut errors: Vec<String> = Vec::new();
     let db_size = pager.db_size()?;
 
+    // Trailing pages past the recorded db_size are invisible to the orphan scan
+    // (which stops at db_size), so surface them explicitly as a leak signal.
+    if let Ok(physical) = pager.physical_page_count() {
+        if physical > db_size {
+            errors.push(format!(
+                "file has {physical} pages but header db_size={db_size}: {} trailing pages past the recorded extent",
+                physical - db_size
+            ));
+        }
+    }
+
     if db_size < 1 {
         errors.push(format!("db_size={db_size}: invalid (must be >= 1)"));
         return Ok(errors);
@@ -322,6 +370,8 @@ pub fn check_integrity_with_reserved(
         pager,
         root_page_no,
         0,
+        None,
+        None,
         &mut visited,
         &mut leaf_order,
         &mut errors,

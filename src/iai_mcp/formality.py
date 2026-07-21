@@ -14,22 +14,12 @@ LEX_MARKERS: dict[str, list[str]] = {
         "whereas", "hereby", "herein", "thereof", "pursuant", "aforementioned",
         "shall", "aforesaid",
     ],
-    "ru": [
-        "тем не менее", "следовательно", "однако", "впрочем", "таким образом",
-        "вследствие", "настоящим", "согласно", "вышеизложенного", "вышеизложенному",
-        "в соответствии", "по-видимому", "в силу", "исходя из", "данное",
-        "настоящее", "прилагаемым", "представленное", "уведомляем",
-    ],
 }
 
 HEDGE_MARKERS: dict[str, list[str]] = {
     "en": [
         "possibly", "perhaps", "might", "may", "could", "seemingly",
         "appears to", "seems", "somewhat", "apparently", "presumably",
-    ],
-    "ru": [
-        "возможно", "вероятно", "видимо", "по-видимому", "наверное",
-        "кажется", "пожалуй", "скорее всего", "вроде", "будто",
     ],
 }
 
@@ -153,7 +143,7 @@ def formality_score(
 
     if lang not in LEX_MARKERS:
         warnings.warn(
-            f"formality_score: lang={lang!r} outside RU+EN baseline; "
+            f"formality_score: lang={lang!r} outside the English baseline; "
             "returning neutral 0.5 (graceful degradation for unsupported languages)",
             stacklevel=2,
         )
