@@ -5,6 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-07-21
+
+### Changed
+
+- **The storage stack is now ours end to end.** Nearest-neighbour search and the
+  record schema moved onto in-tree engines, and the `hnswlib` and `pyarrow`
+  dependencies are gone. Recall is exact rather than approximate, the index
+  grows on demand instead of hitting a fixed capacity wall, and a stale index is
+  rebuilt from the store on first boot. Nothing is required of you — an existing
+  store upgrades in place.
+- **The runtime no longer needs `sqlite3`.** The daemon runs entirely on the
+  in-tree engine; the standard-library driver remains only as an explicit
+  fallback. Installs are smaller and the native extension links no system
+  libraries.
+
+### Added
+
+- **`iai-mcp idem-dedup`** removes exact-duplicate records left by earlier
+  builds. It reports by default and only rewrites with `--apply`, which takes a
+  store snapshot first.
+- **`CLAUDE_BIN`** points the daemon at your `claude` executable when the
+  service manager's environment cannot find it.
+- **Kill-switches for the consolidation work below:**
+  `IAI_MCP_WAKE_COACTIVATION=0` stops recall from recording co-activations,
+  `IAI_MCP_REM_DISABLED=1` skips the nightly insight, and
+  `IAI_MCP_REM_MIN_INTERVAL_SEC` sets how often it may run.
+
+### Fixed
+
+- **Memory learns again.** Consolidation built its clusters from links that were
+  never created while awake, so every night found nothing to summarise and no
+  knowledge was ever written — silently, since the run reported success.
+  Clustering now reads the links the system actually forms, recall records which
+  memories come up together, oversized groups are split rather than merged into
+  one useless summary, and a group already covered by an existing summary is left
+  alone until it grows. On a mature store this is the difference between a
+  permanently empty knowledge layer and one that fills every night.
+- **A summary is no longer swallowed by the memories it quotes.** Because a
+  summary repeats its own sources, the near-duplicate check treated it as a copy
+  of them and merged it away. The check now compares only within the same kind of
+  memory, and links left pointing at the merged-away copies clean themselves up.
+- **The nightly insight runs again.** The pass that writes the overnight digest
+  had lost its only caller and had been silent since early June. It is wired back
+  in, spaced to once a night, and can be forced or disabled.
+- **The daemon can find `claude` under a service manager.** Started by launchd or
+  systemd, the daemon inherits a minimal environment and could not locate the
+  executable, so every nightly insight failed with a file-not-found error while
+  the same command worked from a terminal. It now looks at `CLAUDE_BIN`, then the
+  path, then the usual install locations. If your overnight digests were never
+  arriving, this is why.
+- **Duplicate records stop accumulating.** A record's tag index could be left
+  unbuilt, hiding it from the check that prevents re-inserting the same content.
+  The index now repairs itself each night, and the new `idem-dedup` command
+  clears what earlier builds already stored.
+- **The brain view shows connections again.** As a store matured, three separate
+  limits combined to leave the graph a field of unconnected dots: self-links
+  filled the scan window, the window ended before recent memories, and the sample
+  rarely held both ends of any link. Self-links are excluded, the window is far
+  wider, and each sampled memory brings its strongest partners along.
+- **Direct captures reach the fallback bank.** Only transcript-driven captures
+  were mirrored into the recent window, so recall with the daemon stopped saw
+  nothing newer than the last batch. Every successful capture is mirrored now.
+- **Time-scoped recall returns a valid response.** `memory_temporal_recall`
+  emitted an empty scope field on calls without a time bound, which failed
+  schema validation. The field is omitted when it does not apply.
+- **Pattern detection stops inventing patterns.** Per-record fingerprints, unique
+  by construction, were mined as if they were recurring patterns; most stored
+  patterns were this noise. They are excluded, and `schema-cleanup` prunes what
+  was already stored.
+- **A correction can no longer collapse into what it corrects.** If a correction
+  was near-identical to the record it contradicts, the duplicate check merged the
+  two and wired the record to contradict itself. This is now refused with a
+  message asking for a clearer rephrase.
+- **`doctor` distinguishes repaired history from damage** and reports honest
+  counts for what consolidation created versus merged.
+- **A rare storage error now records its own evidence.** Deleting links can
+  intermittently fail on one uncommon page layout — loudly, without data loss,
+  and the operation retries on the next cycle. When it happens the store image is
+  copied to a bounded quarantine folder so the cause can be found. If you see an
+  integrity error mentioning interior page overflow, that folder is what to send.
+- **`iai status` no longer pins a core.** The status probe was dispatching the
+  full topology computation on every call, so a monitoring loop could keep the
+  daemon busy indefinitely. Status now answers from a light path, topology is
+  cached with a single-flight guard, and the graph pass is sampled above a size
+  threshold.
+- **Startup no longer replays the whole capture backlog at once.** A large queue
+  of deferred captures was drained in one uninterrupted pass at boot, which
+  burned CPU for as long as it took. The pass is now bounded (500 records or 10
+  seconds by default, tunable via `IAI_MCP_CAPTURE_DRAIN_MAX_RECORDS` and
+  `IAI_MCP_CAPTURE_DRAIN_BUDGET_SEC`), reports what remains, and resumes on each
+  idle window until the backlog clears.
+- **Memory keeps its community structure at scale.** Above a few thousand
+  records the clustering pass could collapse into a single flat group, losing the
+  structure recall depends on. Partitioning now holds up at full corpus size.
+- **Storage corruption is reported as corruption.** A damaged store surfaced as
+  an opaque runtime error; disk damage, transient I/O faults, and read-only
+  rejections are now distinguishable, so a caller cannot mistake one for another.
+- **Deletes over large pages no longer fail.** Interior tree rebalancing measures
+  page fullness in bytes, so a delete cascade across byte-full pages completes.
+- **Windows can start the daemon again.** `iai-mcp daemon install` registers a
+  per-user Task Scheduler task, with install, start, and uninstall parity with
+  launchd and systemd.
+- **Release wheels build on Linux and macOS.** The native extension no longer
+  pulls OpenSSL into the dependency tree, and the macOS deployment target is
+  pinned so the built wheel passes its own repair step.
+
 ## [2.4.1] — 2026-07-19
 
 ### Fixed
