@@ -266,6 +266,7 @@ from ._analytics import (
 )
 
 from ._maintenance import (
+    cmd_edge_backfill,
     cmd_idem_dedup,
     cmd_schema_cleanup,
     cmd_maintenance_compact_hippo,
@@ -923,6 +924,39 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     idm.set_defaults(func=cmd_idem_dedup)
+
+    ebf = sub.add_parser(
+        "edge-backfill",
+        help=(
+            "re-link live knowledge summaries to their source moments: a "
+            "summary anchored by at least one surviving consolidation edge "
+            "claims the rest of its community's live members. Default mode "
+            "is --dry-run; --apply snapshots the store dir first. Idempotent."
+        ),
+    )
+    ebf_mode = ebf.add_mutually_exclusive_group()
+    ebf_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) report proposed links without mutating the store",
+    )
+    ebf_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="snapshot the store dir + write the proposed consolidation edges",
+    )
+    ebf.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    ebf.set_defaults(func=cmd_edge_backfill)
 
     mtn = sub.add_parser(
         "maintenance",

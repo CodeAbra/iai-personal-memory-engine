@@ -99,6 +99,50 @@ def _load_page() -> bytes:
     return ref.read_bytes()
 
 
+_COVERAGE_TTL_SEC = 60.0
+
+
+def _knowledge_coverage(conn) -> "float | None":
+    """Share of live episodic records consolidated into a live semantic
+    summary (consolidated_from edges). None = not computable (no episodic)."""
+    sem = {r[0] for r in conn.execute(
+        "SELECT id FROM records WHERE tier = 'semantic' AND tombstoned_at IS NULL"
+    ).fetchall()}
+    epi = {r[0] for r in conn.execute(
+        "SELECT id FROM records WHERE tier = 'episodic' AND tombstoned_at IS NULL"
+    ).fetchall()}
+    if not epi:
+        return None
+    if not sem:
+        return 0.0
+    covered = set()
+    # boost_edges canonicalizes pairs by sorting, so a consolidated_from row
+    # carries no direction — match the semantic end on either column.
+    for src, dst in conn.execute(
+        "SELECT src, dst FROM edges WHERE edge_type = 'consolidated_from'"
+    ).fetchall():
+        if src in sem and dst in epi:
+            covered.add(dst)
+        elif dst in sem and src in epi:
+            covered.add(src)
+    return len(covered) / len(epi)
+
+
+def _coverage_cached(holder, conn) -> "float | None":
+    # The id sweep is too heavy for the few-second overview poll — TTL-cache
+    # per server instance; coverage only moves during sleep cycles anyway.
+    cached = getattr(holder, "_coverage_cache", None)
+    now = time.monotonic()
+    if cached is not None and (now - cached[0]) < _COVERAGE_TTL_SEC:
+        return cached[1]
+    try:
+        value = _knowledge_coverage(conn)
+    except Exception:  # noqa: BLE001 -- a coverage hiccup must not blank the overview
+        value = None
+    holder._coverage_cache = (now, value)
+    return value
+
+
 def _iso(v: Any) -> str | None:
     if v is None:
         return None
@@ -481,6 +525,9 @@ class BrainView:
         counts["tombstoned"] = int(row[0]) if row else 0
         row = conn.execute("SELECT COUNT(*) FROM edges").fetchone()
         counts["edges"] = int(row[0]) if row else 0
+        cov = _coverage_cached(self, conn)
+        if cov is not None:
+            counts["coverage"] = round(cov, 4)
         return {
             "counts": counts,
             "lifecycle": self._lifecycle_label(),
@@ -776,6 +823,9 @@ class BrainView:
             counts["tombstoned"] = int(row[0]) if row else 0
             row = conn.execute("SELECT COUNT(*) FROM edges").fetchone()
             counts["edges"] = int(row[0]) if row else 0
+            cov = _coverage_cached(self, conn)
+            if cov is not None:
+                counts["coverage"] = round(cov, 4)
 
         lifecycle = "awake"
         try:

@@ -201,7 +201,7 @@
   .lg-tier.focused { color: var(--text); }
   .lg-tier.focused b { color: var(--epi); }
 
-  #btn-home { position: fixed; right: 34px; bottom: 108px; z-index: 20;
+  #btn-home { position: fixed; right: 34px; bottom: 170px; z-index: 20;
     background: rgba(9,7,18,.78); color: var(--dim); cursor: pointer;
     border: 1px solid rgba(186,220,240,.28); border-radius: 999px;
     padding: 8px 18px; font: 300 10.5px "Avenir Next", Futura, system-ui, sans-serif;
@@ -906,9 +906,9 @@ function draw(now) {
     }
   }
 
-  // captions: the map stays readable — hubs are always named, everything
-  // else earns a name as you zoom in (semantic zoom)
-  const labelBudget = VIEW.k < 1.25 ? 10 : VIEW.k < 2 ? 26 : VIEW.k < 3.2 ? 70 : 999;
+  // captions: the resting brain is wordless — names appear only once you
+  // zoom in, and more of them the deeper you go (semantic zoom)
+  const labelBudget = VIEW.k < 1.25 ? 0 : VIEW.k < 2 ? 26 : VIEW.k < 3.2 ? 70 : 999;
   const byImportance = nodes.filter(n => !n.ghost && (n._s || 1) > 0.97
                                       && n._x >= 0 && n._x <= W && n._y >= 0 && n._y <= H)
                             .sort((a, b) => (b._r || 0) - (a._r || 0));
@@ -1594,7 +1594,10 @@ function setReachBanner(show) {
 function renderHomeostat(c) {
   const live = (c.episodic || 0) + (c.semantic || 0) + (c.procedural || 0);
   const total = live + (c.tombstoned || 0);
-  const consolidation = live ? (c.semantic || 0) / live : 0;   // experience -> knowledge
+  // experience -> knowledge: share of moments already condensed into a
+  // summary (server-side coverage; summary-count ratio only as fallback)
+  const consolidation = (c.coverage != null) ? c.coverage
+                      : (live ? (c.semantic || 0) / live : 0);
   const connectivity = live ? (c.edges || 0) / live : 0;        // synapses per neuron
   const pruning = total ? (c.tombstoned || 0) / total : 0;      // forgetting fraction
   const rows = [

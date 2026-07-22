@@ -148,7 +148,11 @@ from iai_mcp.migrate._hv_codec import (  # noqa: E402
     migrate_codec_metadata_v4_to_v5,
     _migrate_add_hv_tier_columns,
 )
-from iai_mcp.migrate._cleanup import cleanup_idem_duplicates, cleanup_schema_duplicates  # noqa: E402
+from iai_mcp.migrate._cleanup import (  # noqa: E402
+    backfill_consolidated_edges,
+    cleanup_idem_duplicates,
+    cleanup_schema_duplicates,
+)
 from iai_mcp.migrate._timestamps import (  # noqa: E402
     migrate_rederive_collapsed_timestamps,
     _find_transcript_ts,

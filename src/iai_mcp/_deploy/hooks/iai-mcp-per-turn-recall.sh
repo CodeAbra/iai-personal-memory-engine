@@ -17,7 +17,6 @@
 set -u
 
 IAI_ROOT="${IAI_MCP_ROOT:-$HOME/.iai-mcp}"
-CACHE="${IAI_MCP_WORKING_TIER_CACHE:-$IAI_ROOT/.working-tier.cached.md}"
 FRESH_SEC="${IAI_MCP_WORKING_TIER_FRESH_SEC:-7200}"
 PACK="${IAI_MCP_FORESIGHT_PACK:-$IAI_ROOT/.next-turn-pack.cached.md}"
 PACK_STATE="${PACK%.cached.md}.state.json"
@@ -72,10 +71,23 @@ emit_foresight() {
 }
 
 emit_working_tier() {
-    [ -f "$CACHE" ] || return 0
-    [ "$(file_age "$CACHE")" -le "$FRESH_SEC" ] || return 0
+    # Session scope: the snapshot layout is per-session; this session reads
+    # ONLY its own file, so another conversation's task can never be injected
+    # here. The env override is an explicit single-file setup and bypasses
+    # the per-session layout (tests / single-consumer roots).
+    if [ -n "${IAI_MCP_WORKING_TIER_CACHE:-}" ]; then
+        cache="$IAI_MCP_WORKING_TIER_CACHE"
+    else
+        sess_in=$(json_field session_id "$STDIN_JSON")
+        [ -n "$sess_in" ] || return 0
+        sid=$(printf '%s' "$sess_in" | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
+        [ -n "$sid" ] || return 0
+        cache="$IAI_ROOT/.working-tier.$sid.cached.md"
+    fi
+    [ -f "$cache" ] || return 0
+    [ "$(file_age "$cache")" -le "$FRESH_SEC" ] || return 0
     echo "<iai-mcp-working-tier>"
-    head -c 4096 "$CACHE"
+    head -c 4096 "$cache"
     echo "</iai-mcp-working-tier>"
 }
 

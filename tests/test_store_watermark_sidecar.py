@@ -105,7 +105,7 @@ def test_drain_stamps_sidecar_and_feeds_working_tier(tmp_path):
         assert entry is not None, "ambient drained turn must open/update the active task"
         assert "feed the working tier" in entry.goal
 
-        snapshot = working_tier._cache_path(store)
+        snapshot = working_tier._cache_path(store, entry.session_id)
         assert snapshot.is_file(), "working-tier snapshot must persist for the per-turn hook"
     finally:
         store.close()

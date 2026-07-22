@@ -196,17 +196,20 @@ def _snippet(text: str) -> str:
     return clean[:_SNIPPET_CHARS] + ("…" if len(clean) > _SNIPPET_CHARS else "")
 
 
-def _blended_cue(store: Any, cue_embedding: "list[float]") -> "list[float]":
+def _blended_cue(
+    store: Any, cue_embedding: "list[float]", session_id: "str | None" = None
+) -> "list[float]":
     """Lean the turn's vector toward the active task's goal, sharpening a vague
     turn's cue. Capture-side only — the awake recall path never imports the
-    working tier."""
+    working tier. The task is selected for the session the pack is built for —
+    another session's goal must never steer this session's anticipation."""
     weight = _f(FORESIGHT_GOAL_WEIGHT_ENV, FORESIGHT_GOAL_WEIGHT_DEFAULT)
     if weight <= 0:
         return list(cue_embedding)
     try:
         from iai_mcp import working_tier  # noqa: PLC0415 -- capture-side import
 
-        entry = working_tier.read_task()
+        entry = working_tier.read_task(session_id=session_id)
         goal = (entry.goal or "").strip() if entry is not None else ""
         if len(goal) < 12:
             return list(cue_embedding)
@@ -305,7 +308,7 @@ def refresh_pack(
             if (now_ts - float(ts)) < repeat_after
         }
 
-        cue_vec = _blended_cue(store, cue_embedding)
+        cue_vec = _blended_cue(store, cue_embedding, session_id)
         window = max_items * _CANDIDATE_OVERFETCH
         candidates = store.query_similar(cue_vec, k=window)
 

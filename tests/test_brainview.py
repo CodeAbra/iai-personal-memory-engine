@@ -87,6 +87,44 @@ def test_page_and_overview(driver, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_overview_reports_knowledge_coverage(driver, tmp_path, monkeypatch):
+    """counts.coverage = share of live episodic records consolidated into a
+    live semantic summary via consolidated_from edges — NOT the summary/
+    moment count ratio."""
+    from uuid import UUID
+
+    _select_driver(driver, monkeypatch)
+    store = MemoryStore(path=tmp_path)
+    covered = _seed(store, "The hippocampus binds episodes together during sleep.")
+    _seed(store, "A stray uncondensed moment about coral reefs.")
+
+    summary = capture_turn(
+        store, cue="", text="Knowledge: sleep binds episodes into durable schemas.",
+        tier="semantic", session_id="system", role="assistant",
+    )
+    assert summary["status"] == "inserted", summary
+    flush_record_buffer(store)
+    store.boost_edges(
+        [(UUID(summary["record_id"]), UUID(covered))],
+        edge_type="consolidated_from",
+        delta=1.0,
+    )
+
+    server = make_server(store, port=0)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        _status, body = _get(port, "/api/overview")
+        counts = json.loads(body)["counts"]
+        assert counts["episodic"] == 2 and counts["semantic"] == 1, counts
+        assert abs(counts["coverage"] - 0.5) < 1e-6, (
+            f"one of two episodic records is consolidated: {counts}"
+        )
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_graph_serves_verbatim_decrypted_surfaces(driver, tmp_path, monkeypatch):
     _select_driver(driver, monkeypatch)
     store = MemoryStore(path=tmp_path)

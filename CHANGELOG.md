@@ -19,12 +19,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-tree engine; the standard-library driver remains only as an explicit
   fallback. Installs are smaller and the native extension links no system
   libraries.
+- **Working memory survives parallel sessions.** Two conversations open at once
+  shared one working task, and the per-turn injection could hand one
+  conversation the other's context. Attention still holds a single focal task,
+  but suspended tasks are now parked one per session: a turn from another
+  session parks the current task — writing its finished results through to
+  storage first — and restores that session's own. Each session reads only its
+  own snapshot, so one conversation's work can no longer surface in another.
+  **On upgrade, refresh the hooks together with the daemon** — run
+  `iai-mcp capture-hooks install`. A hook left from an older version reads a
+  file the new daemon no longer writes, and working memory silently stops being
+  injected until it is refreshed.
+- **Look-ahead context follows the session it belongs to** rather than whichever
+  conversation last held attention.
+- **"Turned into knowledge" now measures real coverage** — the share of moments
+  actually condensed into a summary, traced through the links between them. It
+  used to divide summaries by moments, a ratio pinned at a few percent no matter
+  how well consolidation worked. A newer page against an older daemon falls back
+  to the old number rather than breaking.
+- **The brain view rests wordless.** Captions appear as you zoom in; hovering or
+  selecting still names a memory at any zoom. The "center the brain" button
+  moved clear of the bottom edge.
+- **The brain view's economy card speaks plainly:** memory packs served, free
+  tokens injected, fallback searches, tokens saved.
 
 ### Added
 
 - **`iai-mcp idem-dedup`** removes exact-duplicate records left by earlier
   builds. It reports by default and only rewrites with `--apply`, which takes a
   store snapshot first.
+- **`iai-mcp edge-backfill`** re-links knowledge summaries to the moments they
+  came from, on stores where those links were lost. A summary that still holds
+  at least one link claims the rest of its group; summaries with none are
+  reported and left alone rather than guessed at — they recover on their own as
+  their group is summarised again. Reports by default, snapshots the store on
+  `--apply`, safe to re-run. Optional maintenance for long-lived stores; a fresh
+  install never needs it. Stop the daemon first.
 - **`CLAUDE_BIN`** points the daemon at your `claude` executable when the
   service manager's environment cannot find it.
 - **Kill-switches for the consolidation work below:**

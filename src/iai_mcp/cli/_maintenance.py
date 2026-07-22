@@ -727,3 +727,41 @@ def cmd_idem_dedup(args: argparse.Namespace) -> int:
         print()
         print("  Run with --apply to execute.")
     return 0
+
+
+def cmd_edge_backfill(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate import backfill_consolidated_edges
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    store = MemoryStore(path=store_path)
+    summary = backfill_consolidated_edges(store, apply=apply, store_path=store_path)
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp edge-backfill [{mode_str}]")
+    print(f"  live summaries:                    {summary.get('summaries_live', 0)}")
+    print(f"  anchored (>=1 surviving edge):     {summary.get('summaries_anchored', 0)}")
+    print(f"  edgeless (left to natural re-mint):{summary.get('summaries_edgeless', 0)}")
+    print(f"  existing links:                    {summary.get('links_existing', 0)}")
+    print(f"  proposed links:                    {summary.get('links_proposed', 0)}")
+    print(f"  written links:                     {summary.get('links_written', 0)}")
+    print(f"  oversize communities skipped:      {summary.get('communities_oversize_skipped', 0)}")
+    if summary.get("snapshot_dir"):
+        print(f"  snapshot directory:                {summary['snapshot_dir']}")
+    if mode_str == "dry-run" and summary.get("links_proposed", 0) > 0:
+        print()
+        print("  Run with --apply to execute.")
+    return 0

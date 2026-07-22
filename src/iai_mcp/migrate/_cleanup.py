@@ -309,3 +309,119 @@ def cleanup_idem_duplicates(
     except (OSError, ValueError, RuntimeError):
         pass
     return summary
+
+
+CONSOLIDATION_BACKFILL_OVERSIZE = 200
+"""Communities past this size are never claimed wholesale — mirrors the
+minting-side oversize skip (mega-clusters are stamped, not compressed)."""
+
+_BACKFILL_BATCH = 500
+
+
+def backfill_consolidated_edges(
+    store: MemoryStore,
+    *,
+    apply: bool = False,
+    store_path: "Path | None" = None,
+) -> dict:
+    """Re-link live semantic summaries to their source moments.
+
+    A summary's consolidated_from edges are its coverage ledger; historical
+    edge loss left old summaries anchored to a fraction of their cluster.
+    Expansion is structural only: a summary anchored by at least one
+    surviving edge into a community claims that community's remaining live
+    episodic members. Summaries with zero surviving anchors are counted but
+    never guessed at — they re-cover naturally when their cluster re-mints
+    and dedup-folds into them.
+    """
+    import shutil
+    from datetime import datetime, timezone
+
+    from iai_mcp.store._buffers import flush_record_buffer
+
+    flush_record_buffer(store)
+
+    sem: set[str] = set()
+    epi_community: dict[str, "str | None"] = {}
+    with store.db._conn_lock:
+        rows = store.db._conn.execute(
+            "SELECT id, tier, community_id FROM records WHERE tombstoned_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            rid = str(row["id"])
+            if row["tier"] == "semantic":
+                sem.add(rid)
+            elif row["tier"] == "episodic":
+                comm = row["community_id"]
+                epi_community[rid] = str(comm) if comm else None
+        edge_rows = store.db._conn.execute(
+            "SELECT src, dst FROM edges WHERE edge_type = 'consolidated_from'"
+        ).fetchall()
+
+    # Edge rows carry no direction (pair order is canonicalized on write) —
+    # the summary side is identified by tier, never by column.
+    anchors_of: dict[str, set[str]] = {}
+    for row in edge_rows:
+        a, b = str(row["src"]), str(row["dst"])
+        if a in sem and b in epi_community:
+            anchors_of.setdefault(a, set()).add(b)
+        elif b in sem and a in epi_community:
+            anchors_of.setdefault(b, set()).add(a)
+
+    community_members: dict[str, set[str]] = {}
+    for rid, comm in epi_community.items():
+        if comm:
+            community_members.setdefault(comm, set()).add(rid)
+
+    proposed: list[tuple[UUID, UUID]] = []
+    oversize_skipped: set[str] = set()
+    for sid, anchors in anchors_of.items():
+        communities = {epi_community[m] for m in anchors if epi_community.get(m)}
+        for comm in communities:
+            candidates = community_members.get(comm) or set()
+            if len(candidates) > CONSOLIDATION_BACKFILL_OVERSIZE:
+                oversize_skipped.add(comm)
+                continue
+            for rid in sorted(candidates - anchors):
+                proposed.append((UUID(sid), UUID(rid)))
+
+    snapshot_dir: "str | None" = None
+    written = 0
+    if apply and proposed:
+        iai_root = Path(store_path) if store_path is not None else Path(store.root)
+        src_hippo = iai_root / "hippo"
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snap = iai_root / f"hippo-pre-edge-backfill-{ts}"
+        shutil.copytree(src_hippo if src_hippo.exists() else iai_root, snap)
+        snapshot_dir = str(snap)
+
+        for start in range(0, len(proposed), _BACKFILL_BATCH):
+            batch = proposed[start:start + _BACKFILL_BATCH]
+            try:
+                store.boost_edges(batch, edge_type="consolidated_from", delta=1.0)
+                written += len(batch)
+            except (OSError, ValueError, RuntimeError) as exc:
+                log.warning("edge backfill batch failed at %d: %s", start, exc)
+
+    summary = {
+        "mode": "apply" if apply else "dry-run",
+        "summaries_live": len(sem),
+        "summaries_anchored": len(anchors_of),
+        "summaries_edgeless": len(sem) - len(anchors_of),
+        "links_existing": sum(len(v) for v in anchors_of.values()),
+        "links_proposed": len(proposed),
+        "links_written": written,
+        "communities_oversize_skipped": len(oversize_skipped),
+        "snapshot_dir": snapshot_dir,
+    }
+    try:
+        write_event(
+            store,
+            kind="edge_backfill_run",
+            data=summary,
+            severity="info",
+            session_id="system",
+        )
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return summary
