@@ -1,6 +1,6 @@
 """Concurrent-burst hardening for the at-rest field codec.
 
-The Phase 97 zstd envelope ships short-lived `ZstdCompressor` / `ZstdDecompressor`
+The zstd envelope ships short-lived `ZstdCompressor` / `ZstdDecompressor`
 instances inside `encrypt_field` / `decrypt_field` precisely because the
 python-zstandard library documents that those instances are not thread-safe.
 These tests pin that contract: 16 threads hit the codec under a synchronized

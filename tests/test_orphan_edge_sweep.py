@@ -288,3 +288,119 @@ class TestOrphanEdgeSweep:
         )
         assert done is False
         assert payload == {}
+
+
+class TestRecordTagsRepair:
+    def test_unindexed_record_reindexed_and_findable(self, tmp_path: Path) -> None:
+        """A record whose tags never reached record_tags (pre-table history,
+        stamped-over backfill) must be re-indexed by the cleanup repair so the
+        exact-key dedup lookup sees it again."""
+        from iai_mcp.lilli.cycle.sleep_pipeline._compact import (
+            _repair_record_tags_index,
+        )
+
+        store = _make_store(tmp_path)
+        idem = "idem:" + "f" * 64
+        rec = _make_record(embed_dim=store.embed_dim)
+        rec.tags = ["capture", idem]
+        store.insert(rec)
+        from iai_mcp.store._buffers import flush_record_buffer
+
+        flush_record_buffer(store)
+
+        with store.db._conn_lock:
+            store.db._conn.execute(
+                "DELETE FROM record_tags WHERE record_id = ?", (str(rec.id),)
+            )
+            store.db._conn.commit()
+        assert store.find_record_by_tag(idem) is None, "hole precondition"
+
+        repaired = _repair_record_tags_index(store)
+        assert repaired == 1
+
+        assert store.find_record_by_tag(idem) == rec.id
+
+        assert _repair_record_tags_index(store) == 0, "repair must be idempotent"
+
+
+class TestOverflowQuarantine:
+    def test_overflow_error_captures_forensics(self, tmp_path: Path) -> None:
+        from iai_mcp.lilli.cycle.sleep_pipeline._compact import (
+            _quarantine_on_page_overflow,
+        )
+
+        store = _make_store(tmp_path)
+        exc = RuntimeError(
+            "write: storage error: integrity violation: "
+            "interior page overflow while packing cells"
+        )
+        _quarantine_on_page_overflow(store, exc)
+
+        qdir = Path(store.root) / "quarantine-btree-overflow"
+        captures = [p for p in qdir.iterdir() if p.is_dir()]
+        assert len(captures) == 1
+        assert (captures[0] / "brain.sqlite3").exists()
+        assert "interior page overflow" in (
+            captures[0] / "error.txt"
+        ).read_text(encoding="utf-8")
+
+    def test_unrelated_error_captures_nothing(self, tmp_path: Path) -> None:
+        from iai_mcp.lilli.cycle.sleep_pipeline._compact import (
+            _quarantine_on_page_overflow,
+        )
+
+        store = _make_store(tmp_path)
+        _quarantine_on_page_overflow(store, RuntimeError("disk full"))
+        qdir = Path(store.root) / "quarantine-btree-overflow"
+        assert not qdir.exists() or not any(qdir.iterdir())
+
+    def test_quarantine_is_bounded_to_newest(self, tmp_path: Path) -> None:
+        from iai_mcp.lilli.cycle.sleep_pipeline._compact import (
+            _quarantine_on_page_overflow,
+        )
+
+        store = _make_store(tmp_path)
+        exc = RuntimeError("interior page overflow while packing cells")
+        import time
+
+        _quarantine_on_page_overflow(store, exc)
+        time.sleep(1.1)
+        _quarantine_on_page_overflow(store, exc)
+        qdir = Path(store.root) / "quarantine-btree-overflow"
+        captures = [p for p in qdir.iterdir() if p.is_dir()]
+        assert len(captures) == 1, "only the newest forensic image is kept"
+
+
+class TestMistierCoveragePrune:
+    def test_coverage_without_semantic_endpoint_is_pruned(
+        self, tmp_path: Path,
+    ) -> None:
+        from iai_mcp.lilli.cycle.sleep_pipeline._compact import (
+            _prune_mistier_consolidated_edges,
+        )
+        from iai_mcp.store import EDGES_TABLE
+        from iai_mcp.store._buffers import flush_edge_buffer, flush_record_buffer
+
+        store = _make_store(tmp_path)
+        a = _make_record(embed_dim=store.embed_dim)
+        b = _make_record(embed_dim=store.embed_dim)
+        summary = _make_record(embed_dim=store.embed_dim)
+        summary.tier = "semantic"
+        for r in (a, b, summary):
+            store.insert(r)
+        flush_record_buffer(store)
+
+        store.boost_edges([(a.id, b.id)], delta=1.0, edge_type="consolidated_from")
+        store.boost_edges(
+            [(summary.id, a.id)], delta=1.0, edge_type="consolidated_from",
+        )
+        flush_edge_buffer(store)
+
+        pruned = _prune_mistier_consolidated_edges(store)
+        assert pruned == 1
+
+        df = store.db.open_table(EDGES_TABLE).to_pandas()
+        cov = df[df["edge_type"] == "consolidated_from"]
+        assert len(cov) == 1, "the semantic-anchored coverage edge must survive"
+        endpoints = {str(cov.iloc[0]["src"]), str(cov.iloc[0]["dst"])}
+        assert str(summary.id) in endpoints

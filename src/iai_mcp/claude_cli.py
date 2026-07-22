@@ -227,8 +227,36 @@ def _bare_mode_enabled() -> bool:
     return val not in ("0", "false", "no", "off")
 
 
+def _resolve_claude_bin() -> str:
+    """Find the claude binary in environments that lack the user's PATH.
+
+    The daemon runs under the service manager (launchd/systemd) with a
+    minimal PATH, so a bare "claude" raises FileNotFoundError there while
+    the same call works from any shell. Resolution order: explicit
+    CLAUDE_BIN, the current PATH, then the standard install locations.
+    """
+    import shutil
+    from pathlib import Path
+
+    explicit = os.environ.get("CLAUDE_BIN")
+    if explicit and Path(explicit).is_file():
+        return explicit
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in (
+        Path.home() / ".local" / "bin" / "claude",
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+        Path.home() / ".claude" / "local" / "claude",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return "claude"
+
+
 def _build_cmd(prompt: str, model: str) -> list[str]:
-    cmd = ["claude"]
+    cmd = [_resolve_claude_bin()]
     if _bare_mode_enabled():
         cmd.append("--bare")
     cmd += [

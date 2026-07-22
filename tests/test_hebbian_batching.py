@@ -117,7 +117,7 @@ def test_sleep_consolidated_from_batches_into_two_versions(tmp_path):
         store.insert(r)
 
     versions_before = _versions(store)
-    summary_id = _create_semantic_summary(
+    summary_id, _folded = _create_semantic_summary(
         store,
         cluster,
         summary_text="cls summary of 5 source memories",

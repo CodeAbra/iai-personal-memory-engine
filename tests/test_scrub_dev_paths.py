@@ -28,9 +28,9 @@ from scripts.scrub_dev_paths import (
     "line",
     [
         'CACHE = "/Users/alice/.iai-mcp"',
-        "log_dir = Path('/home/bob/logs')",
-        'DEFAULT = "/Users/ci-runner/build/out"',
-        "path = '/home/deploy.user/state'",
+        "log_dir = Path('/home/somedev/logs')",
+        'DEFAULT = "/Users/test/build/out"',
+        "path = '/home/u/state'",
     ],
 )
 def test_home_paths_flagged(line):
@@ -58,7 +58,7 @@ def test_account_segment_required():
 
 
 def test_all_matches_returned():
-    line = '"/Users/alice/a" and "/home/bob/b"'
+    line = '"/Users/alice/a" and "/home/somedev/b"'
     assert len(find_home_paths(line)) == 2
 
 
@@ -120,12 +120,12 @@ def test_main_exits_nonzero_on_violation(tmp_path: Path, monkeypatch):
 
 
 def test_main_reports_violation_to_stderr(tmp_path: Path, monkeypatch, capsys):
-    _shipped(tmp_path, "bad.py", 'p = "/home/bob/state"\n')
+    _shipped(tmp_path, "bad.py", 'p = "/home/somedev/state"\n')
     monkeypatch.chdir(tmp_path)
     main([])
     err = capsys.readouterr().err
     assert "bad.py" in err
-    assert "/home/bob/" in err
+    assert "/home/somedev/" in err
 
 
 def test_main_ignores_paths_outside_shipped_roots(tmp_path: Path, monkeypatch):

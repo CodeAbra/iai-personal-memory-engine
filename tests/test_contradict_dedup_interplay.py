@@ -88,3 +88,25 @@ def test_contradict_with_fresh_corrective_still_inserts(driver, tmp_path, monkey
     rec = store.get(receipt.new_record_id)
     assert rec is not None
     assert rec.literal_surface == new_fact
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_corrective_folding_into_original_is_rejected(driver, tmp_path, monkeypatch):
+    """A corrector near-identical to the CONTRADICTED record itself would wire
+    a self-contradiction loop after the dedup fold — it must be rejected with
+    a clear error instead."""
+    _select_driver(driver, monkeypatch)
+    store = MemoryStore(path=tmp_path)
+    text = "The projection matrix rotates on every consolidation cycle."
+    original_id = _seed(store, text, "s1")
+    original = store.get(original_id)
+    assert original is not None
+
+    with pytest.raises(ValueError, match="contradicted record itself"):
+        retrieve.contradict(store, original_id, text, list(original.embedding))
+
+    with store.db._conn_lock:
+        rows = store.db._conn.execute(
+            "SELECT src, dst FROM edges WHERE edge_type = 'contradicts'"
+        ).fetchall()
+    assert all(str(r[0]) != str(r[1]) for r in rows), "self-contradiction edge"

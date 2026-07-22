@@ -109,6 +109,23 @@ class ReinforceWriteQueue:
             return
         self._flush_event.wait(timeout=timeout)
 
+    def enqueue_pairs(self, pairs: list, delta: float) -> None:
+        """Enqueue co-activation edge pairs for deferred potentiation.
+
+        Same contract as enqueue(): non-blocking, best-effort, dropped with a
+        marker on overflow. Keeps edge writes (which scan the hebbian edge
+        set) off the synchronous recall path.
+        """
+        if not pairs:
+            return
+        try:
+            self._q.put_nowait(("pairs", list(pairs), float(delta)))
+        except queue.Full:
+            logger.debug(
+                "reinforce_queue_pairs_overflow",
+                extra={"n_pairs": len(pairs)},
+            )
+
     def enqueue(self, record_ids: "list[UUID]") -> None:
         """Enqueue record ids for deferred reinforcement.
 
@@ -176,27 +193,41 @@ class ReinforceWriteQueue:
                 if saw_stop:
                     return
                 continue
-            ids: list = list(item)
-            while len(ids) < self._max_batch:
+            ids: list = []
+            pairs: list = []
+            self._accumulate(item, ids, pairs)
+            while len(ids) + len(pairs) < self._max_batch:
                 try:
                     nxt = self._q.get(timeout=self._coalesce_s)
                 except queue.Empty:
                     break
                 if nxt is _STOP:
                     self._flush_ids(ids)
+                    self._flush_pairs(pairs)
                     self._drain_remaining()
                     return
                 if nxt is _FLUSH:
                     self._flush_ids(ids)
+                    self._flush_pairs(pairs)
                     saw_stop = self._drain_remaining()
                     self._flush_event.set()
                     if saw_stop:
                         return
                     ids = []
+                    pairs = []
                     break
-                ids.extend(nxt)
+                self._accumulate(nxt, ids, pairs)
             if ids:
                 self._flush_ids(ids)
+            if pairs:
+                self._flush_pairs(pairs)
+
+    @staticmethod
+    def _accumulate(item, ids: list, pairs: list) -> None:
+        if isinstance(item, tuple) and len(item) == 3 and item[0] == "pairs":
+            pairs.extend((a, b, item[2]) for a, b in item[1])
+        else:
+            ids.extend(item)
 
     def _drain_remaining(self) -> bool:
         """Drain pending items, running any queued batches.  Returns True if a
@@ -204,6 +235,7 @@ class ReinforceWriteQueue:
         rather than discard the stop signal and idle forever.
         """
         ids: list = []
+        pairs: list = []
         saw_flush = False
         saw_stop = False
         while True:
@@ -217,12 +249,33 @@ class ReinforceWriteQueue:
             if item is _FLUSH:
                 saw_flush = True
                 continue
-            ids.extend(item)
+            self._accumulate(item, ids, pairs)
         if ids:
             self._flush_ids(ids)
+        if pairs:
+            self._flush_pairs(pairs)
         if saw_flush:
             self._flush_event.set()
         return saw_stop
+
+    def _flush_pairs(self, pairs: list) -> None:
+        """Potentiate deferred co-activation pairs, grouped by delta, one
+        bounded write per group. Best-effort: a failed group is logged and
+        dropped, never retried into the foreground."""
+        if not pairs:
+            return
+        by_delta: dict = {}
+        for a, b, delta in pairs:
+            by_delta.setdefault(float(delta), []).append((a, b))
+        for delta, group in by_delta.items():
+            try:
+                self._store.boost_edges(group, delta=delta, edge_type="hebbian")
+            except Exception:  # noqa: BLE001 -- worker must never die
+                logger.debug(
+                    "reinforce_queue_pairs_failed",
+                    extra={"n_pairs": len(group)},
+                    exc_info=True,
+                )
 
     # Per-transaction chunk size for a reinforcement batch. Each chunk runs
     # under ONE connection-lock hold and ONE commit, so a backlog of hundreds

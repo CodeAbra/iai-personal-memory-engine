@@ -16,6 +16,13 @@ from iai_mcp.types import (
 log = logging.getLogger(__name__)
 
 
+def _pattern_of(rec: "MemoryRecord") -> str:
+    tag = next(
+        (t for t in (rec.tags or []) if t.startswith("pattern:")), None,
+    )
+    return tag.split(":", 1)[1] if tag and ":" in tag else ""
+
+
 def cleanup_schema_duplicates(
     store: MemoryStore,
     *,
@@ -63,6 +70,22 @@ def cleanup_schema_duplicates(
         recs_sorted = sorted(recs, key=lambda r: r.created_at)
         keepers.append(recs_sorted[0])
         duplicates.extend(recs_sorted[1:])
+
+    # Noise schemas: a pattern referencing an idem hash can never generalize
+    # past its one record — prune them regardless of duplication.
+    noise: list[MemoryRecord] = []
+    pruned_ids = {d.id for d in duplicates}
+    keeper_ids = {k.id for k in keepers}
+    for pattern, recs in groups.items():
+        if "idem:" not in pattern:
+            continue
+        for rec in recs:
+            if rec.id in pruned_ids:
+                continue
+            noise.append(rec)
+            pruned_ids.add(rec.id)
+    keepers = [k for k in keepers if "idem:" not in _pattern_of(k)]
+    duplicates.extend(noise)
 
     edges_to_reinforce = 0
     try:
@@ -180,6 +203,7 @@ def cleanup_schema_duplicates(
         "groups": len(dup_groups),
         "keepers": len(keepers),
         "pruned": len(duplicates),
+        "noise_pruned": len(noise),
         "edges_reinforced": int(edges_to_reinforce),
         "snapshot_dir": snapshot_dir,
     }
@@ -193,4 +217,95 @@ def cleanup_schema_duplicates(
         )
     except (OSError, ValueError, RuntimeError) as exc:
         log.error("schema_cleanup_run event write failed: %s", exc)
+    return summary
+
+
+def cleanup_idem_duplicates(
+    store: MemoryStore,
+    *,
+    apply: bool = False,
+    store_path: "Path | None" = None,
+) -> dict:
+    """Collapse live records sharing one idempotency key down to the earliest.
+
+    The idem tag is the exact-key identity of a captured turn; two live
+    records with the same key are the same event stored twice (historical
+    check-then-insert races and tag-index holes). The keeper is the earliest
+    copy; the rest are tombstoned — content is preserved byte-identical in
+    the keeper, so the verbatim invariant holds.
+    """
+    import json as _json
+    import shutil
+    from datetime import datetime, timezone
+
+    from iai_mcp.store._buffers import flush_record_buffer
+
+    flush_record_buffer(store)
+    groups: dict[str, list[tuple[str, str]]] = {}
+    with store.db._conn_lock:
+        rows = store.db._conn.execute(
+            "SELECT id, tags_json, created_at FROM records "
+            "WHERE tombstoned_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            try:
+                tags = _json.loads(row["tags_json"] or "[]")
+            except (TypeError, ValueError):
+                continue
+            for tag in tags:
+                if isinstance(tag, str) and tag.startswith("idem:"):
+                    groups.setdefault(tag, []).append(
+                        (str(row["id"]), str(row["created_at"] or ""))
+                    )
+                    break
+
+    dup_groups = {t: rs for t, rs in groups.items() if len(rs) > 1}
+    to_tombstone: list[str] = []
+    for _tag, members in dup_groups.items():
+        members_sorted = sorted(members, key=lambda m: m[1])
+        to_tombstone.extend(mid for mid, _ in members_sorted[1:])
+
+    snapshot_dir: str | None = None
+    tombstoned = 0
+    if apply and to_tombstone:
+        iai_root = Path(store_path) if store_path is not None else Path(store.root)
+        src_hippo = iai_root / "hippo"
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snap = iai_root / f"hippo-pre-idem-dedup-{ts}"
+        shutil.copytree(src_hippo if src_hippo.exists() else iai_root, snap)
+        snapshot_dir = str(snap)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        tbl = store.db.open_table("records")
+        for rid in to_tombstone:
+            try:
+                tbl.update(
+                    where=f"id = '{rid}'",
+                    values={"tombstoned_at": now_iso},
+                )
+                tombstoned += 1
+            except (OSError, ValueError, RuntimeError) as exc:
+                log.warning("idem dedup tombstone failed for %s: %s", rid, exc)
+        try:
+            store._invalidate_corpus_count("active")
+        except Exception:  # noqa: BLE001 -- count cache refresh is best-effort
+            pass
+
+    summary = {
+        "mode": "apply" if apply else "dry-run",
+        "groups": len(dup_groups),
+        "extra_copies": len(to_tombstone),
+        "tombstoned": tombstoned,
+        "snapshot_dir": snapshot_dir,
+    }
+    try:
+        write_event(
+            store,
+            kind="idem_dedup_run",
+            data=summary,
+            severity="info",
+            session_id="system",
+        )
+    except (OSError, ValueError, RuntimeError):
+        pass
     return summary

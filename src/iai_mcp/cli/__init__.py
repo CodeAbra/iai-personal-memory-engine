@@ -266,6 +266,7 @@ from ._analytics import (
 )
 
 from ._maintenance import (
+    cmd_idem_dedup,
     cmd_schema_cleanup,
     cmd_maintenance_compact_hippo,
     cmd_maintenance_compact_records,
@@ -890,6 +891,38 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     sc.set_defaults(func=cmd_schema_cleanup)
+
+    idm = sub.add_parser(
+        "idem-dedup",
+        help=(
+            "collapse live records sharing one idempotency key down to the "
+            "earliest copy (tombstones the rest). Default mode is --dry-run; "
+            "--apply snapshots the store dir first. Idempotent."
+        ),
+    )
+    idm_mode = idm.add_mutually_exclusive_group()
+    idm_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) print the duplicate groups without mutating the store",
+    )
+    idm_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="snapshot the store dir + tombstone the extra copies",
+    )
+    idm.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    idm.set_defaults(func=cmd_idem_dedup)
 
     mtn = sub.add_parser(
         "maintenance",

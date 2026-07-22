@@ -70,7 +70,7 @@ def test_notice_exists_and_lists_runtime_deps() -> None:
 
 @pytest.mark.skipif(
     _planning_is_tracked(_REPO_ROOT),
-    reason="private repo tracks .planning/ by design; the gitignore convention is a public-release check",
+    reason="a checkout that tracks .planning/ opts out of the ignore convention",
 )
 def test_planning_dir_is_gitignored() -> None:
     result = subprocess.run(

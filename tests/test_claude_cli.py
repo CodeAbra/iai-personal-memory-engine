@@ -105,7 +105,8 @@ def test_invoke_uses_argv_and_required_flags(monkeypatch, fake_creds, isolated_s
 
     assert result["ok"] is True
     args = cap["args"]
-    assert args[0] == "claude"
+    import os as _os
+    assert _os.path.basename(args[0]) == "claude"
     assert "--bare" in args
     assert "-p" in args
     assert "hello" in args
@@ -491,3 +492,22 @@ def test_force_wake_does_not_crash_daemon(monkeypatch, fake_creds, isolated_stat
     assert result["reason"] == "force_wake_killed"
     assert proc.terminate_called is True
     assert proc.kill_called is True
+
+
+def test_claude_binary_resolves_without_user_path(monkeypatch, tmp_path):
+    """Service managers start the daemon with a minimal PATH; the claude
+    binary must still resolve (explicit env first, then PATH, then the
+    standard install locations) instead of raising FileNotFoundError."""
+    from iai_mcp.claude_cli import _build_cmd, _resolve_claude_bin
+
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    monkeypatch.setenv("CLAUDE_BIN", str(fake))
+    assert _resolve_claude_bin() == str(fake)
+    assert _build_cmd("hi", "haiku")[0] == str(fake)
+
+    monkeypatch.delenv("CLAUDE_BIN")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert _resolve_claude_bin() == str(fake)

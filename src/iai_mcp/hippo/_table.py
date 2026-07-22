@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS edges (
 _DDL_EDGES_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src)",
     "CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst)",
+    "CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type)",
 ]
 
 _DDL_EVENTS = """\

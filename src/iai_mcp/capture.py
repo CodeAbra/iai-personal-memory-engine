@@ -531,6 +531,17 @@ def capture_turn(
             },
         )
 
+    # Mirror every capture into the recent bank, not just transcript drains —
+    # the daemon-down degraded-recall path (bank-recall) must surface direct
+    # CLI/MCP captures too, or the transit layer goes blind to them.
+    try:
+        from iai_mcp.memory_bank import append_recent_record
+        append_recent_record(store, rec)
+    except Exception:  # noqa: BLE001 -- best-effort fail-safe boundary
+        log.warning(
+            "bank-recent append failed for record %s", rec.id, exc_info=True,
+        )
+
     # Anticipate the next turn while the cue embedding is already in hand:
     # only a genuinely-live conversational user turn refreshes the next-turn
     # memory pack. Failures never fail the capture.

@@ -474,6 +474,15 @@ def _wake_hook_rebuild_if_cold(store) -> None:
             _rgc._rebuild_and_save_rgc(store, force=True)
     except Exception:  # noqa: BLE001 -- best-effort, never crash the wake hook
         log.debug("wake-hook graph-cache rebuild failed", exc_info=True)
+    try:
+        # Warm the topology snapshot off the awake path: the process-local
+        # cache is empty after every restart, and status_light never computes
+        # (by design), so without this `iai status` reports regime=unknown
+        # until someone happens to call the deep topology verb.
+        from iai_mcp import core as _core
+        _core.dispatch(store, "topology", {})
+    except Exception:  # noqa: BLE001 -- best-effort, never crash the wake hook
+        log.debug("wake-hook topology warm failed", exc_info=True)
 
 
 def _persist_keys(state: dict, *keys: str) -> None:
@@ -553,6 +562,68 @@ def _update_pending_digest(state: dict, cycle_result: dict) -> None:
     if cycle_result.get("timed_out"):
         digest["timed_out_cycles"] = int(digest.get("timed_out_cycles", 0)) + 1
     state["pending_digest"] = digest
+
+
+REM_MIN_INTERVAL_SEC: float = float(
+    os.environ.get("IAI_MCP_REM_MIN_INTERVAL_SEC", str(20 * 3600))
+)
+
+
+def _recent_force_rem_honored(ds: dict, *, window_sec: float = 3600.0) -> bool:
+    honored = (ds.get("force_rem_request") or {}).get("honored_at")
+    if not honored:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(honored))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() < window_sec
+    except (TypeError, ValueError):
+        return False
+
+
+def _last_rem_completed_age_sec(store) -> "float | None":
+    try:
+        from iai_mcp.events import query_events
+        evs = query_events(store, kind="rem_cycle_completed", limit=1)
+        if not evs:
+            return None
+        ts = evs[0].get("ts")
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if not isinstance(ts, datetime):
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:  # noqa: BLE001 -- age probe must never block the pass
+        return None
+
+
+async def _maybe_run_rem(store, ds: dict) -> "dict | None":
+    """One REM pass after a clean pipeline cycle. The claude insight call is
+    subscription- and daily-budget-gated inside generate_overnight_insight;
+    this gate only spaces routine cycles so REM keeps a nightly rhythm while
+    a fresh force-rem always runs it. IAI_MCP_REM_DISABLED=1 disables."""
+    if os.environ.get("IAI_MCP_REM_DISABLED") == "1":
+        return None
+    if not _recent_force_rem_honored(ds):
+        age = await asyncio.to_thread(_last_rem_completed_age_sec, store)
+        if age is not None and age < REM_MIN_INTERVAL_SEC:
+            return None
+    result = await run_rem_cycle(
+        store, 1, 1, "rem", is_last=True, claude_enabled=True,
+    )
+    try:
+        from iai_mcp.daemon_state import update_state as _update_ds
+
+        def _fold_digest(d: dict) -> None:
+            _update_pending_digest(d, result)
+
+        await asyncio.to_thread(_update_ds, _fold_digest)
+    except Exception:  # noqa: BLE001 -- digest fold is best-effort
+        log.debug("pending_digest update after REM failed", exc_info=True)
+    return result
 
 
 def _write_session_start_cache(store, *, cache_path: Path = SESSION_START_CACHE_PATH) -> None:
@@ -1919,6 +1990,21 @@ async def main() -> int:
                                 "interrupted": False,
                                 "completed_steps": [],
                             }
+
+                        # REM after a clean cycle: nightly insight synthesis
+                        # (subscription/budget-gated inside the call) plus the
+                        # rem-event/digest contract. Interval-gated so routine
+                        # daytime cycles don't re-run it; a fresh force-rem
+                        # always does. Runs BEFORE the session-start precache
+                        # so the payload carries the new digest.
+                        if (
+                            result.get("failed_step") is None
+                            and not result.get("interrupted")
+                        ):
+                            try:
+                                await _maybe_run_rem(store, _ds)
+                            except Exception:  # noqa: BLE001 -- REM MUST NOT block wake
+                                log.debug("post-cycle REM failed", exc_info=True)
 
                         # --- WAKE hook (UNDER LOCK_EX, BEFORE downgrade) ---
                         try:

@@ -44,6 +44,10 @@ def cmd_schema_cleanup(args: argparse.Namespace) -> int:
         f"{summary.get('pruned', 0)}"
     )
     print(
+        f"  of which noise (idem-hash patterns):   "
+        f"{summary.get('noise_pruned', 0)}"
+    )
+    print(
         f"  edges to reinforce onto keepers:       "
         f"{summary.get('edges_reinforced', 0)}"
     )
@@ -689,3 +693,37 @@ def _print_drain_result(result: dict) -> None:
         print(f"  {name}")
     if q_dir:
         print(f"quarantine copies at: {q_dir}")
+
+
+def cmd_idem_dedup(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate import cleanup_idem_duplicates
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    store = MemoryStore(path=store_path)
+    summary = cleanup_idem_duplicates(store, apply=apply, store_path=store_path)
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp idem-dedup [{mode_str}]")
+    print(f"  duplicate groups (same idem key):  {summary.get('groups', 0)}")
+    print(f"  extra live copies:                 {summary.get('extra_copies', 0)}")
+    print(f"  tombstoned:                        {summary.get('tombstoned', 0)}")
+    if summary.get("snapshot_dir"):
+        print(f"  snapshot directory:                {summary['snapshot_dir']}")
+    if mode_str == "dry-run" and summary.get("groups", 0) > 0:
+        print()
+        print("  Run with --apply to execute.")
+    return 0

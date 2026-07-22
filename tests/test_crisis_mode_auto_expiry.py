@@ -185,7 +185,7 @@ class TestR1RecallGuardActivation:
     def test_recall_guard_reads_lifecycle_state_not_daemon_state(
         self, monkeypatch: pytest.MonkeyPatch,
     ):
-        # The Phase 105 honest-degrade guard reads from
+        # The honest-degrade guard reads from
         # iai_mcp.lifecycle_state.load_state (the file that actually carries
         # the crisis_mode flag). If a future refactor re-introduces the
         # wrong-file-read regression, this test fails — the monkeypatch of

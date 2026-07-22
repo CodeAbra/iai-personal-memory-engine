@@ -245,7 +245,7 @@ def test_symmetry_dry_run_reports_without_writing(
     )
 
 
-def test_phase11_1_dedup_test_smoke_post_fix(
+def test_dedup_smoke_with_self_loop_guard(
     fresh_store: MemoryStore,
 ) -> None:
     rec_a = _make_record(embedding=REFERENCE_EMBEDDING)
@@ -270,7 +270,7 @@ def test_phase11_1_dedup_test_smoke_post_fix(
     weight = float(self_loops["weight"].iloc[0])
     assert weight >= 0.9, (
         f"dedup-target self-loop weight floor violated. "
-        f"expected >= 0.9 (post-fix ~1.1); got {weight}"
+        f"expected >= 0.9 (typical ~1.1); got {weight}"
     )
 
 

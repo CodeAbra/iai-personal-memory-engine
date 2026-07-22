@@ -281,3 +281,46 @@ def test_persist_schema_does_not_collapse_distinct_patterns(tmp_path):
         if t.startswith("pattern:")
     )
     assert patterns == ["A", "B"]
+
+def test_cleanup_prunes_idem_noise_schemas(tmp_path):
+    """A persisted schema whose pattern embeds an idem hash is noise: cleanup
+    must soft-prune it while leaving legitimate patterns untouched."""
+    from iai_mcp.migrate import cleanup_schema_duplicates
+    from iai_mcp.schema import SchemaCandidate, persist_schema
+
+    store = MemoryStore(path=tmp_path)
+    ev = _seed_evidence(store, 2)
+    legit = "tags:capture+role:user"
+    noise = "tags:capture+idem:" + "b" * 64
+    for pattern, evid in ((legit, ev[0].id), (noise, ev[1].id)):
+        persist_schema(
+            store,
+            SchemaCandidate(
+                pattern=pattern,
+                confidence=0.9,
+                evidence_count=1,
+                evidence_ids=[evid],
+                status="auto",
+            ),
+        )
+
+    dry = cleanup_schema_duplicates(store, apply=False)
+    assert dry["noise_pruned"] == 1
+    assert dry["pruned"] == 1
+
+    applied = cleanup_schema_duplicates(store, apply=True, store_path=tmp_path)
+    assert applied["noise_pruned"] == 1
+
+    remaining = [
+        r for r in store.all_records()
+        if r.tier == "semantic"
+        and any(t.startswith("pattern:") for t in (r.tags or []))
+    ]
+    patterns = [
+        t.split(":", 1)[1]
+        for r in remaining
+        for t in (r.tags or [])
+        if t.startswith("pattern:")
+    ]
+    assert legit in patterns
+    assert all("idem:" not in p for p in patterns), patterns

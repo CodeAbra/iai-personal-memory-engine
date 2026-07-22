@@ -242,3 +242,22 @@ def test_user_approval_tier_is_reachable(tmp_path):
         assert by_pattern.get("tags:epsi+zeta") == "auto"
     finally:
         store.close()
+
+def test_idem_tags_never_form_patterns(tmp_path):
+    """idem: hashes are per-record-unique; a pattern containing one is noise
+    and must never surface as a candidate, even when the same idem tag
+    somehow repeats past the auto threshold."""
+    from iai_mcp.schema import induce_schemas_tier0
+
+    store = MemoryStore(path=tmp_path)
+    shared_idem = "idem:" + "a" * 64
+    for i in range(10):
+        store.insert(
+            _rec(text=f"r{i}", tags=["capture", "role:user", shared_idem])
+        )
+    candidates = induce_schemas_tier0(store)
+    assert candidates, "the legit capture+role pattern must still surface"
+    for cand in candidates:
+        assert "idem:" not in cand.pattern, (
+            f"idem hash leaked into a schema pattern: {cand.pattern}"
+        )

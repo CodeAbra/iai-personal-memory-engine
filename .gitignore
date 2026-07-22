@@ -69,3 +69,6 @@ target/
 
 # Internal planning artifacts — never ship
 .planning/
+
+# personal-data deny-list (local only, never committed)
+**/personal*

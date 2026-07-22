@@ -1107,6 +1107,12 @@ class MemoryStore:
             done_event.wait()
             if "exc" in result_box:
                 raise result_box["exc"]
+            # Flush-time gate fold: mirror the sync path's identity rewrite so
+            # callers (summary/contradict edge writers) bind to the surviving
+            # record — otherwise their edges dangle on an id that never landed.
+            _merged = result_box.get("val")
+            if isinstance(_merged, UUID) and _merged != record.id:
+                record.id = _merged
             if _psep_action == GateAction.INSERT and not _psep_cfg.dry_run:
                 self.boost_edges(
                     [(record.id, record.id)],
@@ -1369,6 +1375,24 @@ class MemoryStore:
             logger.debug("reinforce queue stop during teardown: %s", exc)
         self._reinforce_queue = None
 
+    def queue_coactivation(
+        self, pairs: "list[tuple[UUID, UUID]]", delta: float,
+    ) -> None:
+        """Deferred pairwise hebbian potentiation for co-recalled records.
+        Rides the reinforce queue so the edge write (which scans the hebbian
+        edge set) never runs on the synchronous recall path; without the
+        queue (tests, non-daemon) it degrades to a direct bounded write."""
+        if not pairs:
+            return
+        q = self._reinforce_queue
+        if q is not None and hasattr(q, "enqueue_pairs"):
+            q.enqueue_pairs(list(pairs), delta)
+            return
+        try:
+            self.boost_edges(list(pairs), delta=delta, edge_type="hebbian")
+        except Exception as exc:  # noqa: BLE001 -- best-effort, never raise into caller
+            logger.debug("queue_coactivation_sync_fallback_failed: %s", exc)
+
     def queue_reinforce(self, record_ids: "list[UUID]") -> None:
         """Enqueue record ids for deferred reinforcement, or reinforce synchronously.
 
@@ -1624,7 +1648,10 @@ class MemoryStore:
         row surviving a swallowed ``_delete_record_tags`` failure.
         """
         if not getattr(self, "_record_tags_backfill_ok", True):
-            return self._find_record_by_tag_like_scan(tag)
+            found = self._find_record_by_tag_like_scan(tag)
+            if found is not None:
+                return found
+            return self._find_buffered_record_by_tag(tag)
 
         with self.db._conn_lock:
             candidates = self.db._conn.execute(
@@ -1645,6 +1672,20 @@ class MemoryStore:
                     return UUID(str(raw_id))
                 except (ValueError, AttributeError):
                     continue
+        return self._find_buffered_record_by_tag(tag)
+
+    def _find_buffered_record_by_tag(self, tag: str) -> UUID | None:
+        """Tag lookup over rows still sitting in the in-memory insert buffer.
+        Without this, an exact-key dedup check between an insert and its
+        flush misses the just-inserted row and mints a duplicate."""
+        from iai_mcp.store._buffers import _record_buffer
+
+        for row in list(_record_buffer.get(id(self), [])):
+            try:
+                if tag in json.loads(row.get("tags_json") or "[]"):
+                    return UUID(str(row.get("id")))
+            except (TypeError, ValueError):
+                continue
         return None
 
     def add_tags(self, record_id: UUID, tags: "list[str]") -> bool:
@@ -2503,6 +2544,13 @@ class MemoryStore:
         record._psep_exact_confirm_cos = None
 
         hits = self.query_similar(list(record.embedding), k=cfg.top_k)
+        # Dedup is a WITHIN-tier operation: a semantic summary quoting its
+        # episodic members sits at cos ~0.96 to them, and a cross-tier fold
+        # would collapse knowledge into an episode (or vice versa) —
+        # different tiers are different kinds of memory, never duplicates.
+        hits = [
+            (rec, cos) for rec, cos in hits if rec.tier == record.tier
+        ]
 
         _ortho_enabled = os.environ.get(
             "IAI_MCP_ORTHO_ENABLED", "",

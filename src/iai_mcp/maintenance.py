@@ -90,12 +90,16 @@ def _measure_table_size_bytes(store: Any, table_name: str) -> int:
         return 0
 
 
+#: The timeout is a hang-stop, not a pace-setter: a healthy child finishes in
+#: seconds, so generous headroom only changes how long a genuine hang takes
+#: to die — while a tight budget kills healthy rebuilds whenever the machine
+#: (not the corpus) is busy, which is exactly when consolidation runs.
 _HNSW_WORKER_TIMEOUT_S: float = float(
-    os.environ.get("IAI_MCP_HNSW_WORKER_TIMEOUT_S", "120.0")
+    os.environ.get("IAI_MCP_HNSW_WORKER_TIMEOUT_S", "300.0")
 )
 
 _HNSW_WORKER_TIMEOUT_PER_1K_S: float = float(
-    os.environ.get("IAI_MCP_HNSW_WORKER_TIMEOUT_PER_1K_S", "5.0")
+    os.environ.get("IAI_MCP_HNSW_WORKER_TIMEOUT_PER_1K_S", "10.0")
 )
 
 

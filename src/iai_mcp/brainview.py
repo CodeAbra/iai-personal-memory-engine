@@ -27,6 +27,9 @@ BRAINVIEW_DEFAULT_PORT: int = 4477
 SEARCH_CALL_OVERHEAD_TOK: int = 220
 GRAPH_NODE_LIMIT: int = 400
 GRAPH_EDGE_LIMIT: int = 3000
+#: 1-hop closure headroom: strongest edge-partners of the sampled nodes are
+#: added so the picture shows connections, not isolated dots.
+_GRAPH_PARTNER_CAP: int = 300
 SURFACE_TRUNC: int = 280
 _MAX_POST_BYTES: int = 40_000_000
 _BROWSE_ROOT_SCAN_CAP: int = 20_000
@@ -572,15 +575,46 @@ class BrainView:
                     node["ghost"] = True
                 nodes.append(node)
         node_ids = {n["id"] for n in nodes}
-        edges = []
         try:
             rows = conn.execute(
-                "SELECT src, dst, edge_type, weight FROM edges LIMIT ?",
-                (GRAPH_EDGE_LIMIT * 10,),
+                # Self-loops are canonical in the edges table (the graph
+                # algorithms want them) but unrenderable; excluded in SQL so
+                # the scan holds only drawable edges at any loop share.
+                "SELECT src, dst, edge_type, weight FROM edges"
+                " WHERE src != dst LIMIT ?",
+                (GRAPH_EDGE_LIMIT * 100,),
             ).fetchall()
         except Exception as exc:  # noqa: BLE001
             logger.debug("ro edge select failed: %s", exc)
             rows = []
+        # 1-hop closure: a seed's strongest partners join the picture, else a
+        # top-central sample renders as dots — its neighbors are usually
+        # mid-tier records the seed selectors never pick.
+        partner_w: dict[str, float] = {}
+        for row in rows:
+            src, dst = str(row["src"]), str(row["dst"])
+            w = float(row["weight"] or 0.0)
+            if src in node_ids and dst not in node_ids:
+                partner_w[dst] = max(partner_w.get(dst, 0.0), w)
+            elif dst in node_ids and src not in node_ids:
+                partner_w[src] = max(partner_w.get(src, 0.0), w)
+        partners = [
+            p for p, _ in sorted(partner_w.items(), key=lambda kv: -kv[1])
+        ][:_GRAPH_PARTNER_CAP]
+        for pid in partners:
+            try:
+                prow = conn.execute(
+                    "SELECT * FROM records WHERE id = ? AND tombstoned_at IS NULL",
+                    (pid,),
+                ).fetchone()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("ro partner select failed: %s", exc)
+                continue
+            if prow is None or pid in node_ids:
+                continue
+            node_ids.add(pid)
+            nodes.append(self._ro_node_dict(prow))
+        edges = []
         for row in rows:
             src, dst = str(row["src"]), str(row["dst"])
             if src in node_ids and dst in node_ids and src != dst:
@@ -1134,16 +1168,48 @@ class BrainView:
             nodes.append(node)
 
         node_ids = {n["id"] for n in nodes}
-        edges = []
         with db.ro_conn() as conn:
             try:
                 rows = conn.execute(
-                    "SELECT src, dst, edge_type, weight FROM edges LIMIT ?",
-                    (GRAPH_EDGE_LIMIT * 10,),
+                    # Self-loops are canonical in the edges table (the graph
+                    # algorithms want them) but unrenderable; excluded in SQL
+                    # so the scan holds only drawable edges at any loop share.
+                    "SELECT src, dst, edge_type, weight FROM edges"
+                    " WHERE src != dst LIMIT ?",
+                    (GRAPH_EDGE_LIMIT * 100,),
                 ).fetchall()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("brainview edge select failed: %s", exc)
                 rows = []
+        # 1-hop closure: a seed's strongest partners join the picture, else a
+        # top-central sample renders as dots — its neighbors are usually
+        # mid-tier records the seed selectors never pick.
+        partner_w: dict[str, float] = {}
+        for row in rows:
+            src, dst = str(row[0]), str(row[1])
+            w = float(row[3] or 0.0)
+            if src in node_ids and dst not in node_ids:
+                partner_w[dst] = max(partner_w.get(dst, 0.0), w)
+            elif dst in node_ids and src not in node_ids:
+                partner_w[src] = max(partner_w.get(src, 0.0), w)
+        partner_uuids: list[UUID] = []
+        for pid, _ in sorted(partner_w.items(), key=lambda kv: -kv[1]):
+            if len(partner_uuids) >= _GRAPH_PARTNER_CAP:
+                break
+            try:
+                partner_uuids.append(UUID(pid))
+            except ValueError:
+                continue
+        partner_recs = self.store.get_batch(partner_uuids)
+        for pid in partner_uuids:
+            rec = partner_recs.get(pid)
+            if rec is None or getattr(rec, "tombstoned_at", None) is not None:
+                continue
+            if str(pid) in node_ids:
+                continue
+            node_ids.add(str(pid))
+            nodes.append(self._node_dict(rec))
+        edges = []
         for row in rows:
             src, dst = str(row[0]), str(row[1])
             if src in node_ids and dst in node_ids and src != dst:

@@ -279,6 +279,42 @@ def reinforce_edges(
     )
 
 
+WAKE_COACTIVATION_DELTA: float = 0.1
+WAKE_COACTIVATION_MAX_HITS: int = 5
+WAKE_COACTIVATION_MIN_SCORE: float = 0.5
+
+
+def potentiate_coactivation(
+    store: MemoryStore,
+    ids: "list[UUID]",
+    delta: float = WAKE_COACTIVATION_DELTA,
+) -> int:
+    """Awake Hebbian plasticity: records recalled together get a bounded
+    pairwise potentiation, so the connective graph consolidation clusters
+    over reflects actual co-activation — without it the hebbian graph never
+    gains a cross-record edge and the semantic minter starves. The write is
+    DEFERRED through the reinforce queue — plasticity never runs on the
+    synchronous recall path. Kill-switch: IAI_MCP_WAKE_COACTIVATION=0."""
+    import os
+
+    if os.environ.get("IAI_MCP_WAKE_COACTIVATION", "1") == "0":
+        return 0
+    uniq: list[UUID] = []
+    seen: set[UUID] = set()
+    for rid in ids:
+        if rid not in seen:
+            seen.add(rid)
+            uniq.append(rid)
+    uniq = uniq[:WAKE_COACTIVATION_MAX_HITS]
+    if len(uniq) < 2:
+        return 0
+    pairs = [(a, b) for a, b in combinations(uniq, 2) if a != b]
+    if not pairs:
+        return 0
+    store.queue_coactivation(pairs, delta)
+    return len(pairs)
+
+
 def contradict(
     store: MemoryStore,
     original_id: UUID,
@@ -327,6 +363,15 @@ def contradict(
     enforce_english_raw(new_rec)
     new_rec.aaak_index = generate_aaak_index(new_rec)
     store.insert(new_rec)
+    # The insert dedup gate may fold a near-identical corrector into an
+    # existing record (rewriting new_rec.id to the winner). Folding into the
+    # CONTRADICTED record itself would wire a self-contradiction loop — the
+    # correction cannot be the belief it corrects.
+    if new_rec.id == original_id:
+        raise ValueError(
+            "corrector text deduplicated into the contradicted record itself; "
+            "rephrase the correction so it is distinguishable"
+        )
     store.add_contradicts_edge(original_id, new_rec.id)
     invalidate_temporal_validity_cache(store)
 

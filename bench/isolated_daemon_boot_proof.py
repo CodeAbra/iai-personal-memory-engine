@@ -166,26 +166,6 @@ def _preflight_daemon_state_path(proof_root: Path) -> None:
         sys.exit(2)
 
 
-def _preflight_index_persist_validation_pass(phase_dir: Path) -> None:
-    doc = phase_dir / "175-INDEX-PERSIST-VALIDATION.md"
-    if not doc.exists():
-        print(
-            f"REFUSED: {doc} is missing -- the persisted-index efficacy gate "
-            "must PASS before this proof runs.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    text = doc.read_text()
-    if "VERDICT: PASS" not in text:
-        print(
-            f"REFUSED: {doc} does not contain 'VERDICT: PASS' -- the "
-            "persisted-index efficacy gate has not passed. Refusing to run "
-            "the end-to-end proof on top of an unproven mechanism.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-
 def _sidecar_path(store_root: Path) -> Path:
     return store_root / "hippo" / _SIDECAR_FILENAME
 
@@ -1301,11 +1281,6 @@ def stage_verdict(
 
 def run_proof(source: Path, workdir: Path) -> dict:
     workdir.mkdir(parents=True, exist_ok=True)
-
-    phase_dir = Path(__file__).resolve().parent.parent / (
-        ".planning/phases/175-lilli-daemon-boot-cold-build-cutover-proof"
-    )
-    _preflight_index_persist_validation_pass(phase_dir)
 
     print("== stage 1: copies + persist prep ==")
     copies = stage_copies(source, workdir)

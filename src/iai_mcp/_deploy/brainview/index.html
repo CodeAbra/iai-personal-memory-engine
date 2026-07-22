@@ -1611,10 +1611,10 @@ async function refreshEconomy() {
   try {
     const e = await j("/api/economy");
     document.getElementById("economy").innerHTML =
-      `<div class="eco"><b>${e.packs_served}</b> memories handed to your AI</div>` +
-      `<div class="eco"><b>${e.tokens_injected_est.toLocaleString("en-US")}</b> words given for free</div>` +
-      `<div class="eco"><b>${e.agent_searches}</b> times it had to search <small>(~${e.avg_search_tokens_est} tok)</small></div>` +
-      `<div class="eco save"><b>~${e.tokens_saved_lower_est.toLocaleString("en-US")}</b> words saved <small>(lower bound)</small></div>`;
+      `<div class="eco"><b>${e.packs_served}</b> memory packs served</div>` +
+      `<div class="eco"><b>${e.tokens_injected_est.toLocaleString("en-US")}</b> free tokens injected</div>` +
+      `<div class="eco"><b>${e.agent_searches}</b> fallback searches <small>(~${e.avg_search_tokens_est} tok)</small></div>` +
+      `<div class="eco save"><b>~${e.tokens_saved_lower_est.toLocaleString("en-US")}</b> tokens saved <small>(lower bound)</small></div>`;
   } catch (err) { /* observability card, keep last */ }
 }
 

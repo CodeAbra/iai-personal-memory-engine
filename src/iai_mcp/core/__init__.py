@@ -864,6 +864,20 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             store.queue_reinforce(_reinforce_ids)
         except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
             logger.debug("labile_write_failed: %s", exc)
+        try:
+            from iai_mcp.retrieve import (
+                WAKE_COACTIVATION_MIN_SCORE,
+                potentiate_coactivation,
+            )
+            _wire_ids = [
+                hit.record_id
+                for hit in resp.hits
+                if float(getattr(hit, "score", 0.0) or 0.0)
+                >= WAKE_COACTIVATION_MIN_SCORE
+            ]
+            potentiate_coactivation(store, _wire_ids)
+        except Exception as exc:  # noqa: BLE001 -- plasticity MUST NOT break recall
+            logger.debug("coactivation_potentiate_failed: %s", exc)
         _inject_sleep_suggestion(
             response,
             cue=params.get("cue", ""),
@@ -1350,10 +1364,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             "hits": hits_out,
             "changed_since_events": events_out,
         }
+        # Unscoped queries omit the field entirely: the MCP output schema
+        # types _scope as string, and an explicit null fails validation.
         if as_of_norm is not None or changed_since_norm is not None:
             result["_scope"] = "committed_by_time_t"
-        else:
-            result["_scope"] = None
         return result
 
     if method == "audit_query":

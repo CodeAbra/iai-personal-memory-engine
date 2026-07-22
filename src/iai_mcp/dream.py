@@ -64,6 +64,13 @@ async def run_rem_cycle(
                 if isinstance(insight, dict) and insight.get("ok"):
                     result["claude_call_used"] = True
                     result["main_insight_text"] = insight.get("text")
+                elif isinstance(insight, dict):
+                    # A skipped/failed insight must say WHY in the cycle
+                    # record, or a silent night is indistinguishable from a
+                    # gated one.
+                    result["insight_skip_reason"] = str(
+                        insight.get("reason") or "unknown"
+                    )[:200]
 
     except asyncio.TimeoutError:
         result["timed_out"] = True

@@ -79,12 +79,12 @@ def test_tier0_schema_surfacing_uses_iter_record_columns_not_all_records(
     _tier0_schema_surfacing(store)
 
     assert spy_all.call_count == 0, (
-        f"_tier0_schema_surfacing must NOT call store.all_records() post-W3; "
+        f"_tier0_schema_surfacing must NOT call store.all_records(); "
         f"got {spy_all.call_count} call(s)"
     )
     assert spy_iter.call_count == 1, (
         f"_tier0_schema_surfacing must call store.iter_record_columns() exactly "
-        f"once post-W3; got {spy_iter.call_count} call(s)"
+        f"once; got {spy_iter.call_count} call(s)"
     )
 
     args, kwargs = spy_iter.call_args
@@ -92,9 +92,15 @@ def test_tier0_schema_surfacing_uses_iter_record_columns_not_all_records(
         cols = args[0]
     else:
         cols = kwargs.get("columns")
-    assert cols == ["tags_json"], (
-        f"projection must be exactly ['tags_json'] (zero AES-GCM cost); "
-        f"got columns={cols!r}"
+    # The projection must stay off the encrypted columns — reading either one
+    # costs an AES-GCM decrypt per row. Plaintext columns (the tombstone filter)
+    # are free and may be added.
+    assert "tags_json" in cols, f"tags_json must be projected; got {cols!r}"
+    encrypted = {"literal_surface", "provenance_json"}
+    leaked = encrypted.intersection(cols)
+    assert not leaked, (
+        f"projection must carry no encrypted column (zero AES-GCM cost); "
+        f"got {sorted(leaked)} in columns={cols!r}"
     )
 
 def test_tier0_schema_surfacing_zero_decrypt_calls(

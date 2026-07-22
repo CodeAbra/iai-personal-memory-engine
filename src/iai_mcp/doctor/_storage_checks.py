@@ -248,9 +248,51 @@ def check_x_no_collapsed_timestamps() -> CheckResult:
             detail="no collapsed timestamp groups found",
             status="PASS",
         )
-    group_count = len(rows)
-    total_affected = sum(r[1] for r in rows)
-    worst_ts, worst_n = rows[0]
+    # Groups the rederive repair already visited and left in place are
+    # verified batch history (their transcripts really carry one second),
+    # not damage — only groups formed AFTER the last repair warrant a WARN.
+    last_repair = None
+    try:
+        _eng2 = open_store_conn(db_path, read_only=True)
+        _conn2 = _eng2 if _eng2 is not None else _sqlite_stdlib.connect(
+            str(db_path), timeout=2.0,
+        )
+        try:
+            r2 = _conn2.execute(
+                "SELECT ts FROM events"
+                " WHERE kind = 'migration_rederive_timestamps'"
+                " ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+            if r2 is not None:
+                last_repair = str(r2[0]).replace(" ", "T")
+        finally:
+            try:
+                _conn2.close()
+            except Exception:
+                pass
+    except (errors.Error, _LilliParseError):
+        last_repair = None
+
+    def _norm(ts: object) -> str:
+        return str(ts).replace(" ", "T")
+
+    fresh = [
+        r for r in rows
+        if last_repair is None or _norm(r[0]) > last_repair
+    ]
+    if not fresh:
+        return CheckResult(
+            name="(x) no collapsed-timestamp groups",
+            passed=True,
+            detail=(
+                f"{len(rows)} same-second group(s) predate the last"
+                " timestamp repair — verified batch history, not damage"
+            ),
+            status="PASS",
+        )
+    group_count = len(fresh)
+    total_affected = sum(r[1] for r in fresh)
+    worst_ts, worst_n = fresh[0]
     return CheckResult(
         name="(x) no collapsed-timestamp groups",
         passed=False,

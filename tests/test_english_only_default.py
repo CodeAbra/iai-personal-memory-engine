@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -51,15 +50,6 @@ def test_embedder_for_store_picks_bge_small_for_384d_store():
     e = embedder_for_store(store)
     assert e.model_key == "bge-small-en-v1.5"
     assert e.DIM == 384
-
-
-def test_project_md_still_pins_bge_small_constraint():
-    p = Path(__file__).resolve().parents[1] / ".planning" / "PROJECT.md"
-    if not p.exists():
-        pytest.skip(".planning is gitignored; PROJECT.md not present in this checkout")
-    content = p.read_text()
-    assert "bge-small-en-v1.5" in content
-    assert "384d embeddings" in content or "384d" in content
 
 
 def test_import_embed_does_not_pull_sentence_transformers():

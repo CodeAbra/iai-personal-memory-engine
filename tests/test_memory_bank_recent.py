@@ -351,3 +351,31 @@ def test_short_writes_never_tear_a_line(iai_home, monkeypatch):
             assert payload["text"].startswith("short write probe")
     finally:
         store.close()
+
+
+def test_direct_capture_mirrors_into_bank_recent(iai_home):
+    """A direct capture (CLI/MCP path, not a transcript drain) must land in
+    the recent bank too — the daemon-down fallback reads only the bank, so a
+    transit layer fed solely by drains goes blind to live captures."""
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.memory_bank import read_recent_records
+
+    store = MemoryStore()
+    marker = "direct capture transit mirror probe"
+    result = capture_turn(
+        store,
+        cue="probe",
+        text=marker,
+        tier="episodic",
+        session_id="bank-mirror-test",
+        role="user",
+    )
+    assert result["status"] == "inserted", result
+
+    surfaces = [
+        rec.get("literal_surface") or rec.get("text") or ""
+        for rec in read_recent_records()
+    ]
+    assert any(marker in s for s in surfaces), (
+        "direct capture missing from bank/recent windows"
+    )

@@ -53,9 +53,12 @@ def _tag_cooccurrence(records: Iterable) -> dict:
             except (ValueError, AttributeError):
                 continue
 
+        # idem: tags are per-record idempotency hashes — unique by
+        # construction, so any pattern containing one is noise that can
+        # never generalize past its single record.
         tags = [
             t for t in raw_tags
-            if not t.startswith("raw:") and not t.startswith("domain:")
+            if not t.startswith(("raw:", "domain:", "idem:"))
         ]
         for i in range(len(tags)):
             for j in range(i + 1, len(tags)):

@@ -208,3 +208,48 @@ def test_neither_pinned_skip_merge_still_fires(
         f"got body={b_event_body}"
     )
     assert b_event_body["near_dup_hit_id"] == str(a_id), b_event_body
+
+def test_cross_tier_near_dup_never_folds(
+    fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedup is a within-tier operation: a semantic summary quotes its
+    episodic members (cos ~0.96 by construction), and folding it into an
+    episode would collapse knowledge into the very memory it summarizes."""
+    monkeypatch.setenv("IAI_MCP_PATSEP_DRY_RUN", "false")
+
+    episodic = _make_record(embedding=REFERENCE_EMBEDDING, tier="episodic")
+    fresh_store.insert(episodic)
+
+    summary = _make_record(
+        embedding=_make_embedding_at_cosine(0.99),
+        tier="semantic",
+        literal_surface="summary of the tea preference cluster",
+    )
+    summary_id_before = summary.id
+    fresh_store.insert(summary)
+
+    assert summary.id == summary_id_before, (
+        "semantic record folded into an episodic near-neighbor"
+    )
+    tbl = fresh_store.db.open_table(RECORDS_TABLE)
+    from iai_mcp.store._buffers import flush_record_buffer
+    flush_record_buffer(fresh_store)
+    assert tbl.count_rows() == 2
+
+
+def test_same_tier_near_dup_still_folds(
+    fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IAI_MCP_PATSEP_DRY_RUN", "false")
+
+    first = _make_record(embedding=REFERENCE_EMBEDDING, tier="semantic")
+    fresh_store.insert(first)
+
+    second = _make_record(
+        embedding=_make_embedding_at_cosine(0.99), tier="semantic",
+    )
+    fresh_store.insert(second)
+
+    assert second.id == first.id, (
+        "same-tier near-duplicate must still fold into the survivor"
+    )
