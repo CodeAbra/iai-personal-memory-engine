@@ -152,6 +152,14 @@ def step_recall_index_rebuild(
         _persist_col_indexes(self, result)
         _recycle_ro_pool(self, result)
         _prewarm_recall_read_model(self, result, interrupt_check)
+        try:
+            # Full lexical rebuild: reconciles tombstones and updated
+            # surfaces the cheap per-insert feed cannot; from here the feed
+            # keeps recall's warm BM25 lane current until the next cycle.
+            self._store.lexical_search("nightly lexical warm-up", k=1)
+            result["lexical_index_warm"] = True
+        except Exception as lex_exc:  # noqa: BLE001 -- warm-up is best-effort
+            logger.debug("lexical warm-up failed: %s", lex_exc)
         return True, result
 
     except Exception as exc:  # noqa: BLE001 -- step must not crash the pipeline

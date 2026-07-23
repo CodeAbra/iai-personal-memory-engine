@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-07-23
+
+### Changed
+
+- **Recall ranks curated knowledge above raw chatter.** Knowledge-grade sources
+  get a soft multiplier at final rank (default 1.05, `IAI_MCP_TIER_BOOST`, 1.0
+  disables), and it stands down for verbatim cues. Teach chunks (`doc:*`) boost
+  unconditionally — they are literal curated content — while semantic summaries
+  boost only when the `literal_preservation` profile knob is relaxed past its
+  strong default, because that knob is precisely the raw-versus-summary
+  preference. A default install still keeps raw originals on top.
+- **A query worded differently from the stored text can surface its target.**
+  The in-tree BM25 lexical index now fuses into recall: when the cue carries a
+  genuinely rare token (IDF-gated, `IAI_MCP_LEX_MIN_IDF`), warm BM25 hits join
+  the seed set and earn a bounded rank bonus. `IAI_MCP_LEX_FUSION_OFF=true`
+  kills the lane. The recall path never pays the index rebuild — the index is
+  built by scoped search or the nightly warm-up and kept current by a cheap
+  per-insert feed, and a cold index contributes nothing.
+- **Exact-similarity authority no longer wipes a hit's graph rank.** When a
+  record surfaces through both lanes the richer pipeline score survives the
+  merge, so authority keeps guaranteeing inclusion without flattening the final
+  order back to pure cosine.
+
+### Fixed
+
+- **A freshly created store no longer inherits a dead store's unflushed rows.**
+  Write buffers key on the object id and Python reuses freed addresses, so a new
+  store could silently take on another store's pending content. Buffers are now
+  purged at store construction.
+- **A knowledge summary's consolidation edges survive a crash at mint.** They
+  flush to the edges table immediately instead of waiting in the write buffer
+  for a threshold flush.
+
+Both ranking levers came out of a recall-quality measurement on a real 18k-record
+store by [@Marsu6996](https://github.com/Marsu6996), who also prototyped the
+boost factor and the rare-token gate.
+
 ## [2.5.1] — 2026-07-22
 
 ### Fixed

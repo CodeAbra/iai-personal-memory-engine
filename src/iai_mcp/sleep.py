@@ -487,6 +487,12 @@ def _create_semantic_summary(
             edge_type="consolidated_from",
             delta=1.0,
         )
+        # Coverage edges are the summary's provenance ledger — they must
+        # never sit in the crash-vulnerable edge buffer waiting for a
+        # threshold flush.
+        from iai_mcp.store import flush_edge_buffer
+
+        flush_edge_buffer(store)
     return summary.id, summary.id != summary_id
 
 

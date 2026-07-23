@@ -90,6 +90,20 @@ def flush_record_buffer(store: "MemoryStore") -> int:
                     _feed_exact(_item["id"], _item["embedding"])
                 except Exception:  # noqa: BLE001 -- exact-index feed MUST NOT crash flush
                     continue
+        # The lexical postings were fed at insert time (plaintext lives only
+        # in the in-memory record); the generation restamp belongs HERE,
+        # where the rows land and the corpus generation actually moves.
+        try:
+            _lex = getattr(store, "_lexical_idx", None)
+            if _lex is not None and _lex.generation is not None:
+                _gen = None
+                try:
+                    _gen = store._corpus_count_cache.generation()
+                except Exception:  # noqa: BLE001
+                    pass
+                _lex.restamp(_gen)
+        except Exception:  # noqa: BLE001 -- lexical restamp MUST NOT crash flush
+            pass
         try:
             from iai_mcp.events import write_event
             write_event(
@@ -127,6 +141,20 @@ def should_flush_record_buffer_by_time(
 
 _edge_buffer: dict[int, list[dict]] = {}
 _edge_last_flush_at: dict[int, datetime] = {}
+
+
+def reset_store_buffers(store_id: int) -> None:
+    """Purge every buffer entry keyed to store_id. Buffers key on id(store),
+    and CPython reuses freed addresses — a fresh store MUST start clean or
+    it inherits a dead store's unflushed rows, which poisons its own writes
+    and can land another store's content in its tables."""
+    from iai_mcp.events import _BUFFER_LOCK
+
+    with _BUFFER_LOCK:
+        _record_buffer.pop(store_id, None)
+        _record_last_flush_at.pop(store_id, None)
+        _edge_buffer.pop(store_id, None)
+        _edge_last_flush_at.pop(store_id, None)
 
 
 def flush_edge_buffer(store: "MemoryStore") -> int:

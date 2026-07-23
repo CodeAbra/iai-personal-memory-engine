@@ -104,6 +104,55 @@ class LexicalIndex:
         )
         return idf * tf * (_BM25_K1 + 1.0) / denom
 
+    def add_document(self, rid: str, surface: str) -> None:
+        """Incremental feed for an already-built index: one document's
+        postings appended under the lock. Does NOT advance the generation —
+        the writer restamps once the row actually lands (the generation
+        moves at flush, not at buffered insert). A never-built index is not
+        fed."""
+        tokens = tokenize(surface)
+        with self._lock:
+            if self._generation is None:
+                return
+            if rid in self._doc_len:
+                # Re-feeding a known id would double-count its postings; the
+                # next full build reconciles the surface instead.
+                return
+            total = self._avg_len * self._n_docs
+            self._doc_len[rid] = len(tokens)
+            for tok in tokens:
+                bucket = self._postings.setdefault(tok, {})
+                bucket[rid] = bucket.get(rid, 0) + 1
+            self._n_docs += 1
+            self._avg_len = max((total + len(tokens)) / self._n_docs, 1.0)
+
+    def restamp(self, generation: Any) -> None:
+        """Claim currency as of the given generation. Valid ONLY when every
+        corpus change since the last stamp was fed — non-fed changes must
+        leave the stamp behind so the warm lane fails closed."""
+        with self._lock:
+            if self._generation is not None:
+                self._generation = generation
+
+    def max_idf(self, text: str) -> float:
+        """Highest IDF among the query's tokens that occur in the corpus.
+        The rank-fusion gate: a cue made only of ubiquitous words carries no
+        lexical signal worth fusing."""
+        import math
+
+        tokens = list(dict.fromkeys(tokenize(text)))[:MAX_QUERY_TOKENS]
+        with self._lock:
+            postings = self._postings
+            n_docs = self._n_docs
+        best = 0.0
+        for tok in tokens:
+            df = len(postings.get(tok) or ())
+            if df:
+                idf = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+                if idf > best:
+                    best = idf
+        return best
+
     def query(self, text: str, k: int = 10) -> "list[tuple[str, float]]":
         tokens = list(dict.fromkeys(tokenize(text)))[:MAX_QUERY_TOKENS]
         if not tokens:

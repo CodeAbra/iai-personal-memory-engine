@@ -177,6 +177,10 @@ class MemoryStore:
                 "fixture). This guard never fires in normal operation."
             )
         self.root.mkdir(parents=True, exist_ok=True)
+        # id(self) may equal a collected store's id — inherited buffer rows
+        # would poison this store's writes.
+        from iai_mcp.store._buffers import reset_store_buffers
+        reset_store_buffers(id(self))
         self._read_consistency_interval: timedelta | None = read_consistency_interval
         self._user_id: str = user_id
         self._crypto_key_wrapper: CryptoKey = CryptoKey(user_id=user_id, store_root=self.root)
@@ -727,6 +731,27 @@ class MemoryStore:
         except Exception as exc:  # noqa: BLE001 -- hook isolation
             logger.debug("working_feed failed: %s", exc)
 
+    def _feed_lexical(self, record: "MemoryRecord", *, restamp: bool = False) -> None:
+        """Keep an already-built lexical index current across writes —
+        appending one document is cheap, so recall's warm lane never goes
+        stale between full builds. A never-built index stays unbuilt.
+        The feed happens where plaintext exists (the in-memory record);
+        the generation restamp happens where the row lands (buffer flush,
+        or here for direct writes with restamp=True)."""
+        try:
+            idx = getattr(self, "_lexical_idx", None)
+            if idx is None or idx.generation is None:
+                return
+            idx.add_document(str(record.id), record.literal_surface or "")
+            if restamp:
+                try:
+                    gen = self._corpus_count_cache.generation()
+                except Exception:  # noqa: BLE001
+                    gen = None
+                idx.restamp(gen)
+        except Exception as exc:  # noqa: BLE001 -- hook isolation
+            logger.debug("lexical_feed failed: %s", exc)
+
     def _emit_store_watermark(self, record: "MemoryRecord") -> None:
         """Stamp the store-advance sidecar the per-turn hooks watch. It lives
         beside the DB file so readers need no knowledge of the store layout."""
@@ -1154,6 +1179,7 @@ class MemoryStore:
         self._fire_graph_sync_hook("insert", record)
         self._feed_recency(record)
         self._feed_working(record)
+        self._feed_lexical(record)
         self._emit_store_watermark(record)
         if _psep_action == GateAction.INSERT and not _psep_cfg.dry_run:
             self.boost_edges(
@@ -1440,6 +1466,7 @@ class MemoryStore:
         self._fire_graph_sync_hook("update", record)
         self._feed_recency(record)
         self._feed_working(record)
+        self._feed_lexical(record, restamp=True)
 
     def delete(self, record_id: UUID) -> None:
         tbl = self.db.open_table(RECORDS_TABLE)
@@ -2125,8 +2152,9 @@ class MemoryStore:
         code identifiers and env names. Rebuilds on demand when the corpus
         generation moved; surfaces are write-once verbatim, so a generation
         keyed on corpus-changing writes is a sufficient freshness fence.
-        Never used on the recall critical path — this is the scoped-search
-        surface (MCP memory_search / CLI)."""
+        The rebuild never runs on the recall critical path — recall reads
+        the warm index only (``lexical_query_warm``); this building entry is
+        the scoped-search surface (MCP memory_search / CLI / warm-up)."""
         from iai_mcp.store._lexical_index import LexicalIndex
 
         idx = getattr(self, "_lexical_idx", None)
@@ -2176,6 +2204,30 @@ class MemoryStore:
             if rec is not None:
                 out.append((rec, score))
         return out
+
+    def lexical_query_warm(
+        self, query: str, k: int = 10, *, min_idf: "float | None" = None,
+    ) -> "list[tuple[str, float]]":
+        """Recall-path lexical lane: answers ONLY from a warm,
+        generation-current index — a cold or stale index yields empty with
+        ZERO side effects (no rebuild, no thread, no store reads). The
+        index is built by the scoped-search surface or the nightly warm-up
+        and kept current by the per-insert feed.
+
+        min_idf gates fusion on lexical signal: a cue whose in-corpus tokens
+        are all ubiquitous returns empty rather than noise."""
+        idx = getattr(self, "_lexical_idx", None)
+        if idx is None or idx.generation is None:
+            return []
+        try:
+            gen = self._corpus_count_cache.generation()
+        except Exception:  # noqa: BLE001 -- no generation means no freshness fence
+            gen = None
+        if idx.generation != gen:
+            return []
+        if min_idf is not None and idx.max_idf(query) < min_idf:
+            return []
+        return idx.query(query, k=k)
 
     @staticmethod
     def _maybe_uuid(value: str) -> "UUID | None":

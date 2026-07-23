@@ -78,6 +78,25 @@ W_AAAK = 0.3
 W_DEGREE = 0.1
 W_AGE = 0.05
 
+TIER_KNOWLEDGE_BOOST_DEFAULT = 1.05
+"""Bounded soft multiplier for knowledge-grade sources at final rank — a
+nudge past equal-scored raw turns, never a filter; 1.0 disables. Both
+classes stand down for verbatim mode/intent. doc:* teach chunks boost
+regardless of profile (they ARE literal curated content); semantic
+summaries boost only when literal_preservation is not "strong" — that knob
+is precisely the raw-vs-summary preference and the strong default must
+keep outranking condensations."""
+
+LEX_FUSION_W = 0.35
+"""Additive rank-fusion weight for the warm lexical lane: the top BM25 hit
+gains this much, decaying by 1/(1+rank). Comparable to W_AAAK — a signal,
+never a takeover."""
+
+LEX_FUSION_K = 32
+LEX_FUSION_MIN_IDF = 4.0
+"""Fusion fires only when the cue carries at least one genuinely rare
+in-corpus token — common-word cues have no lexical signal worth fusing."""
+
 AGE_HALF_LIFE_DAYS = 30.0
 
 LITERAL_PRESERVATION_W_DEGREE_SCALE: dict[str, float] = {
@@ -172,6 +191,22 @@ def _aaak_overlap(cue_text: str, aaak_index: str) -> float:
     if not cue_set or not idx_set:
         return 0.0
     return len(cue_set & idx_set) / len(cue_set | idx_set)
+
+
+def _has_doc_tag(rec) -> bool:
+    return any(
+        isinstance(t, str) and t.startswith("doc:")
+        for t in (getattr(rec, "tags", None) or ())
+    )
+
+
+def _tier_knowledge_boost() -> float:
+    try:
+        return float(
+            os.environ.get("IAI_MCP_TIER_BOOST", "") or TIER_KNOWLEDGE_BOOST_DEFAULT
+        )
+    except ValueError:
+        return TIER_KNOWLEDGE_BOOST_DEFAULT
 
 
 def _age_penalty(created_at: datetime) -> float:
@@ -801,6 +836,28 @@ def _recall_core(
             if rec.literal_surface and cue_lower in rec.literal_surface.lower():
                 fts_hits.add(rid)
 
+    # Warm BM25 lane: rank map for fusion + extra seed anchors. Answers only
+    # from an already-built, generation-current index — a cold index yields
+    # nothing here and warms in the background instead.
+    lex_rank: dict[UUID, int] = {}
+    if cue and os.environ.get("IAI_MCP_LEX_FUSION_OFF") != "true":
+        try:
+            _min_idf = float(
+                os.environ.get("IAI_MCP_LEX_MIN_IDF", "") or LEX_FUSION_MIN_IDF
+            )
+        except ValueError:
+            _min_idf = LEX_FUSION_MIN_IDF
+        try:
+            for _lrank, (_lrid, _lscore) in enumerate(
+                store.lexical_query_warm(cue, k=LEX_FUSION_K, min_idf=_min_idf)
+            ):
+                try:
+                    lex_rank[UUID(str(_lrid))] = _lrank
+                except (TypeError, ValueError):
+                    continue
+        except Exception as exc:  # noqa: BLE001 -- the lexical lane is a bonus, never a dependency
+            logger.debug("lexical fusion lane skipped: %s", exc)
+
     _pool_t0 = time.perf_counter()
     pool_ids, pool_embs = _collect_graph_pool(graph, records_cache, store)
     _recall_pool_collection_ms = (time.perf_counter() - _pool_t0) * 1000.0
@@ -993,9 +1050,12 @@ def _recall_core(
         compute_spread_depth(top_cosine, hit_count_above_threshold) > 0
         and os.environ.get("IAI_MCP_MULTI_SEED_OFF") != "true"
     ):
-        if fts_hits:
+        _lex_seed_ids = sorted(lex_rank, key=lex_rank.get)
+        if fts_hits or _lex_seed_ids:
             _fts_seed_ids = [
-                rid for rid in fts_hits if rid in id_to_idx and rid not in seed_ids
+                rid
+                for rid in list(fts_hits) + _lex_seed_ids
+                if rid in id_to_idx and rid not in seed_ids
             ]
             remaining = max(0, MULTI_SEED_CAP - len(seed_ids))
             seed_ids = list(dict.fromkeys(seed_ids + _fts_seed_ids[:remaining]))
@@ -1105,6 +1165,7 @@ def _recall_core(
         trace_mark("cleanup_attractor")
 
     scored: list[tuple[float, UUID, float, float, float, float, float, float]] = []
+    tier_boost = _tier_knowledge_boost()
     if reachable_indices.size:
         from iai_mcp.hebbian_structure import structural_similarity
         from iai_mcp.lilli.ops.cleanup import _cleanup_if_confident
@@ -1181,6 +1242,18 @@ def _recall_core(
                 s *= 2.0
             if fts_hits and cid in fts_hits:
                 s *= 3.0
+            if lex_rank and cid in lex_rank:
+                s += LEX_FUSION_W / (1.0 + lex_rank[cid])
+            if (
+                tier_boost != 1.0
+                and mode != "verbatim"
+                and cue_intent != "historical_verbatim"
+                and (
+                    _has_doc_tag(rec)
+                    or (rec.tier == "semantic" and lp_value != "strong")
+                )
+            ):
+                s *= tier_boost
             if cue_intent == "historical_verbatim" and contradicts_dst_set:
                 if str(cid) in contradicts_dst_set:
                     corrector_base_score[str(cid)] = s
@@ -1753,6 +1826,12 @@ def merge_authority_hits(
     ``adjacent_suggestions`` (graph-derived, absent on a fresh authority hit)
     are copied onto the surviving head hit before the tail hit is dropped, so
     the association data is not silently lost to the authority promotion.
+    The displaced hit's SCORE survives the same way when it is higher: the
+    graph rank carries correctness signals the raw cosine cannot (knowledge
+    boost, lexical fusion, community bonus), and the authority contributes
+    inclusion, never a score wipe — otherwise the caller's post-merge
+    re-sort would silently reduce every authority-head candidate back to
+    pure cosine order.
     """
     if not authority_hits:
         return pipeline_hits, sum(len(h.literal_surface) // 4 for h in pipeline_hits)
@@ -1760,8 +1839,11 @@ def merge_authority_hits(
     pipeline_by_id = {h.record_id: h for h in pipeline_hits}
     for h in authority_hits:
         displaced = pipeline_by_id.get(h.record_id)
-        if displaced is not None and displaced.adjacent_suggestions and not h.adjacent_suggestions:
-            h.adjacent_suggestions = list(displaced.adjacent_suggestions)
+        if displaced is not None:
+            if displaced.adjacent_suggestions and not h.adjacent_suggestions:
+                h.adjacent_suggestions = list(displaced.adjacent_suggestions)
+            if displaced.score > h.score:
+                h.score = displaced.score
     head_ids = {h.record_id for h in authority_hits}
     tail = [h for h in pipeline_hits if h.record_id not in head_ids]
     union = list(authority_hits) + tail
