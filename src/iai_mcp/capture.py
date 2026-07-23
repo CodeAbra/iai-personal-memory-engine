@@ -1693,7 +1693,7 @@ _PERMANENT_FAILED_NAMED_RE = re.compile(r"^(.+)\.permanent-failed-([^.]+)\.jsonl
 
 def _count_lines(fpath: Path) -> int:
     try:
-        with fpath.open() as fh:
+        with fpath.open(encoding="utf-8", errors="replace") as fh:
             return sum(1 for ln in fh if ln.strip())
     except OSError:
         return 0
@@ -1758,7 +1758,7 @@ def drain_permanent_failed_files(
         file_dropped = 0
 
         try:
-            with fpath.open() as fh:
+            with fpath.open(encoding="utf-8", errors="replace") as fh:
                 lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
 
             if not lines:
