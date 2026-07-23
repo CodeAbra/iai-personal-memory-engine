@@ -9,7 +9,8 @@ Patterns live in ``scripts/personal_patterns.txt`` (one regex per line,
 ``#`` comments) so the deny-list is data, not code. GitHub-style
 ``@handle`` mentions are additionally rejected in Markdown and commit
 messages (prose surfaces), where a handle is an attribution — never in
-code, where ``@decorator`` is legitimate.
+code, where ``@decorator`` is legitimate, and never in the release notes,
+where crediting a contributor by handle is the point.
 
 Exit: 0 clean, 1 on any violation. Stdlib only.
 """
@@ -32,6 +33,9 @@ SCAN_SUFFIXES: tuple[str, ...] = (".py", ".ts", ".sh", ".md", ".toml", ".json")
 # README carries the owner's own byline by choice; CHANGELOG travels
 # into releases and stays gated.
 ROOT_FILES: tuple[str, ...] = ("CHANGELOG.md",)
+#: Release notes credit contributors by handle deliberately; the deny-list
+#: patterns still apply there, only the handle rule stands down.
+HANDLE_EXEMPT_FILES: frozenset[str] = frozenset({"CHANGELOG.md"})
 
 _HANDLE_RE = re.compile(r"(?<![\w.])@[A-Za-z][A-Za-z0-9-]{2,}\b")
 #: Technical tokens that look like handles but are code, not attribution.
@@ -141,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path.cwd()
     if args.check_staged:
         for rel, added in _staged_added_lines(repo_root).items():
-            prose = rel.endswith(_PROSE_SUFFIXES)
+            prose = (
+                rel.endswith(_PROSE_SUFFIXES) and rel not in HANDLE_EXEMPT_FILES
+            )
             for line_no, line in added:
                 for hit_no, pat, text in scan_text(
                     line, prose=prose, patterns=patterns
@@ -165,8 +171,11 @@ def main(argv: list[str] | None = None) -> int:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        prose = path.suffix in _PROSE_SUFFIXES
         rel = path.relative_to(repo_root) if path.is_absolute() else path
+        prose = (
+            path.suffix in _PROSE_SUFFIXES
+            and str(rel) not in HANDLE_EXEMPT_FILES
+        )
         for line_no, pat, line in scan_text(text, prose=prose, patterns=patterns):
             print(f"{rel}:{line_no}: {pat}: {line}", file=sys.stderr)
             violations += 1
