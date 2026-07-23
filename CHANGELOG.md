@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1+m1] — 2026-07-23
+
+### Added
+
+- **Source-aware recall ranking.** Curated records tagged `doc:` and durable
+  `semantic`-tier digests receive a bounded, configurable score boost without
+  changing candidate eligibility or adding recall-time store queries. Set
+  `IAI_MCP_SOURCE_WEIGHT_FACTOR=1.0` to disable it. The `1.05` default comes
+  from the 63-question production gold run on 2026-07-23.
+
 ## [2.5.1] — 2026-07-22
 
 ### Fixed
@@ -177,7 +187,6 @@ All three were found and verified against a live Windows install by
   Check (e) rejected the `TRANSITIONING` state the daemon legitimately writes on
   the way to drowsy, showing a spurious failed check on a healthy install. It now
   accepts that state.
-
 ## [2.4.0] — 2026-07-17
 
 ### Added

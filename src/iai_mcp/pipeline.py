@@ -20,6 +20,7 @@ from iai_mcp.exceptions import (
     NativeError,
 )
 from iai_mcp.graph import MemoryGraph
+from iai_mcp.source_weighting import source_weight_factor, source_weighted_score
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryHit, RecallResponse
 
@@ -1210,6 +1211,18 @@ def _recall_core(
                 if tgt is not None and row[0] < tgt:
                     scored[j] = (tgt,) + row[1:]
 
+    # M1 source weighting is a final score adjustment, never an eligibility
+    # gate. Candidate records already carry tier + tags from the batched vector /
+    # graph payload reads, so this adds no per-candidate store query.
+    source_factor = source_weight_factor()
+    scored = [
+        (
+            source_weighted_score(
+                row[0], records_cache[row[1]], factor=source_factor,
+            ),
+        ) + row[1:]
+        for row in scored
+    ]
     scored.sort(key=lambda x: (-x[0], str(x[1])))
     if trace_mark is not None:
         trace_mark("soft_gate")

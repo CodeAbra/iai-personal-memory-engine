@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from iai_mcp.aaak import enforce_english_raw, generate_aaak_index
 from iai_mcp.events import query_events, write_event
+from iai_mcp.source_weighting import source_weight_factor, source_weighted_score
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import (
     EMBED_DIM,
@@ -169,6 +170,13 @@ def recall(
             if rec.tier == "episodic"
             and not any(t.startswith("pattern:") for t in (rec.tags or []))
         ]
+
+    source_factor = source_weight_factor()
+    raw = [
+        (record, source_weighted_score(score, record, factor=source_factor))
+        for record, score in raw
+    ]
+    raw.sort(key=lambda pair: pair[1], reverse=True)
 
     hits: list[MemoryHit] = []
     provenance_pending: list[tuple[UUID, dict]] = []

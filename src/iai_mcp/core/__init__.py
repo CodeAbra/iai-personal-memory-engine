@@ -694,6 +694,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     if _authority_pairs:
                         try:
                             from iai_mcp.pipeline import merge_authority_hits
+                            from iai_mcp.source_weighting import (
+                                source_weight_factor,
+                                source_weighted_score,
+                            )
                             from iai_mcp.types import MemoryHit
 
                             _auth_new_ids = [
@@ -704,6 +708,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                 store.get_batch(_auth_new_ids) if _auth_new_ids else {}
                             )
                             _auth_hits = []
+                            _source_factor = source_weight_factor()
                             for _rid, _acos in _authority_pairs:
                                 if str(_rid) not in _live_auth_ids:
                                     # not proven live by the id-set liveness
@@ -723,7 +728,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                     continue
                                 _auth_hits.append(MemoryHit(
                                     record_id=_rid,
-                                    score=float(_acos),
+                                    score=source_weighted_score(
+                                        _acos, _arec, factor=_source_factor,
+                                    ),
                                     reason="exact-cosine",
                                     literal_surface=_arec.literal_surface or "",
                                     adjacent_suggestions=[],
@@ -734,6 +741,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                     ),
                                 ))
                             if _auth_hits:
+                                _auth_hits.sort(
+                                    key=lambda _hit: (-_hit.score, str(_hit.record_id))
+                                )
                                 # This authority merge is unconditional by design: exact_top_k
                                 # (k=10, build_if_cold=False) is measured ~0.5ms, so there is no
                                 # latency case for gating it. The confidence signal drives ONLY
