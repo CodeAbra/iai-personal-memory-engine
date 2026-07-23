@@ -98,7 +98,7 @@ def test_R1_schema_bypass_column_exists_and_default_false(
     tbl = store.db.open_table(RECORDS_TABLE)
     assert "schema_bypass" in tbl.schema.names
     field = tbl.schema.field("schema_bypass")
-    import pyarrow as pa
+    from iai_mcp.hippo import _schema as pa
     assert field.type.equals(pa.bool_()), (
         f"schema_bypass column type must be bool, got {field.type}"
     )
