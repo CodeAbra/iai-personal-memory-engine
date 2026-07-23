@@ -1,6 +1,6 @@
 [project]
 name = "iai-mcp"
-version = "2.5.0"
+version = "2.5.1"
 description = "MCP server giving Claude persistent autistic-style memory + learning"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -43,6 +43,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  # Parses the generated Task Scheduler XML in the Windows daemon-install
+  # tests; the package itself never parses XML.
+  "defusedxml>=0.7",
   # Honors the per-test @pytest.mark.timeout overrides on the prod-scale
   # multi-minute gates; without it a lane-wide --timeout kills them mid-run.
   "pytest-timeout>=2.3",

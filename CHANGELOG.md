@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] — 2026-07-22
+
+### Fixed
+
+- **The daemon starts on Windows.** `serve()` inspected `asyncio.start_unix_server`
+  before the Windows branch returned, and that attribute does not exist on
+  Windows, so the daemon died before reaching its own Windows transport and the
+  install looked unreachable. The inspection now happens only on the POSIX path.
+- **`doctor` runs on Windows.** The store-lock check imported `fcntl` directly —
+  absent on Windows — instead of going through the same portable lock helper its
+  sibling checks already use.
+- **Deferred captures with non-ASCII text no longer fail to replay on Windows.**
+  Capture files are written as UTF-8 but were read back in the system's default
+  encoding, which is not UTF-8 on Windows, so a single accented or non-Latin
+  character could stall the retry path. They are now read as UTF-8.
+
+All three were found and verified against a live Windows install by
+[@LC1207](https://github.com/LC1207).
+
 ## [2.5.0] — 2026-07-21
 
 ### Changed
