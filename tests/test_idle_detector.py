@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 
-from iai_mcp.idle_detector import IdleDetector, IdleStatus
+from iai_mcp.idle_detector import IdleDetector, IdleStatus, _pmset_responsive
 
 
 def _completed_process(
@@ -113,10 +113,10 @@ def test_pmset_recent_sleep_returns_false_when_pmset_missing() -> None:
 
 
 def test_pmset_recent_sleep_survives_invalid_utf8_in_log() -> None:
-    log = _pmset_log_stdout([
-        (_now_pmset_ts(offset_min=2), "System Sleep"),
-    ])
-    corrupted = b"\xd2 garbage line\n" + log.encode("utf-8")
+    corrupted = (
+        f"{_now_pmset_ts(offset_min=2)} ".encode()
+        + b"\xd2 System Sleep Notification clientId=foo\n"
+    )
     fake = _completed_process(stdout=corrupted)
     with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
         result = IdleDetector().pmset_recent_sleep(window_min=5)
@@ -129,6 +129,16 @@ def test_hid_idle_time_sec_survives_invalid_utf8() -> None:
     with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
         result = IdleDetector().hid_idle_time_sec()
     assert result == 42
+
+
+def test_pmset_responsive_survives_invalid_utf8() -> None:
+    fake = _completed_process(stdout=b"AC Power \xd2\n")
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        return_value=fake,
+    ):
+        result = _pmset_responsive()
+    assert result is True
 
 
 def test_sleep_eligible_heartbeat_idle_path() -> None:
@@ -258,6 +268,16 @@ def test_logind_session_paths_picks_own_uid_seat_session() -> None:
             [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
         )
     )
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector()._logind_session_paths()
+    assert result == ["/org/freedesktop/login1/session/c2"]
+
+
+def test_logind_session_paths_survives_invalid_utf8() -> None:
+    raw = _busctl_list_sessions_json(
+        [("c2", _OWN_UID, "testuser", "seat0", "/org/freedesktop/login1/session/c2")]
+    ).encode("utf-8")
+    fake = _completed_process(stdout=raw.replace(b"testuser", b"test\xd2user"))
     with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
         result = IdleDetector()._logind_session_paths()
     assert result == ["/org/freedesktop/login1/session/c2"]
