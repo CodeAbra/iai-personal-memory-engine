@@ -38,6 +38,29 @@ _PMSET_TS_RE = re.compile(
 _PMSET_TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 
+def _run_captured(cmd: list[str], timeout: float) -> str | None:
+    # System command output (pmset logs, ioreg device names) is not
+    # guaranteed valid UTF-8; text=True would raise UnicodeDecodeError,
+    # which escapes an OSError-only handler chain. Decode leniently.
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return None
+
+    if result.returncode != 0:
+        return None
+    return (result.stdout or b"").decode("utf-8", errors="replace")
+
+
 @dataclass
 class IdleStatus:
 
@@ -50,25 +73,13 @@ class IdleDetector:
 
 
     def hid_idle_time_sec(self) -> int | None:
-        try:
-            result = subprocess.run(
-                [_IOREG_BIN, "-c", "IOHIDSystem"],
-                capture_output=True,
-                text=True,
-                timeout=_IOREG_TIMEOUT_SEC,
-                check=False,
-            )
-        except FileNotFoundError:
-            return None
-        except subprocess.TimeoutExpired:
-            return None
-        except OSError:
+        stdout = _run_captured(
+            [_IOREG_BIN, "-c", "IOHIDSystem"], _IOREG_TIMEOUT_SEC
+        )
+        if stdout is None:
             return None
 
-        if result.returncode != 0:
-            return None
-
-        match = _HID_IDLE_RE.search(result.stdout or "")
+        match = _HID_IDLE_RE.search(stdout)
         if match is None:
             return None
         try:
@@ -83,25 +94,11 @@ class IdleDetector:
     def pmset_recent_sleep(
         self, window_min: int = _PMSET_DEFAULT_WINDOW_MIN
     ) -> bool:
-        try:
-            result = subprocess.run(
-                [_PMSET_BIN, "-g", "log"],
-                capture_output=True,
-                text=True,
-                timeout=_PMSET_TIMEOUT_SEC,
-                check=False,
-            )
-        except FileNotFoundError:
-            return False
-        except subprocess.TimeoutExpired:
-            return False
-        except OSError:
+        stdout = _run_captured([_PMSET_BIN, "-g", "log"], _PMSET_TIMEOUT_SEC)
+        if stdout is None:
             return False
 
-        if result.returncode != 0:
-            return False
-
-        return self._scan_pmset_lines(result.stdout or "", window_min)
+        return self._scan_pmset_lines(stdout, window_min)
 
     @staticmethod
     def _scan_pmset_lines(stdout: str, window_min: int) -> bool:
@@ -125,25 +122,13 @@ class IdleDetector:
 
 
     def _busctl_json(self, *args: str) -> object | None:
-        try:
-            result = subprocess.run(
-                [_BUSCTL_BIN, "--json=short", *args],
-                capture_output=True,
-                text=True,
-                timeout=_BUSCTL_TIMEOUT_SEC,
-                check=False,
-            )
-        except FileNotFoundError:
-            return None
-        except subprocess.TimeoutExpired:
-            return None
-        except OSError:
-            return None
-
-        if result.returncode != 0:
+        stdout = _run_captured(
+            [_BUSCTL_BIN, "--json=short", *args], _BUSCTL_TIMEOUT_SEC
+        )
+        if stdout is None:
             return None
         try:
-            return json.loads(result.stdout or "")
+            return json.loads(stdout)
         except json.JSONDecodeError:
             return None
 
@@ -335,18 +320,4 @@ def _parse_pmset_timestamp(line: str) -> datetime | None:
 
 
 def _pmset_responsive() -> bool:
-    try:
-        result = subprocess.run(
-            [_PMSET_BIN, "-g"],
-            capture_output=True,
-            text=True,
-            timeout=_PMSET_TIMEOUT_SEC,
-            check=False,
-        )
-    except FileNotFoundError:
-        return False
-    except subprocess.TimeoutExpired:
-        return False
-    except OSError:
-        return False
-    return result.returncode == 0
+    return _run_captured([_PMSET_BIN, "-g"], _PMSET_TIMEOUT_SEC) is not None

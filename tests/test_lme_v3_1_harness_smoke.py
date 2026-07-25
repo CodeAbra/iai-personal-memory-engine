@@ -20,11 +20,16 @@ HAS_LONGMEMEVAL_CACHE = any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exist
 HAS_BGE_SMALL_CACHE = any(_HF_CACHE.rglob("*bge-small-en*")) if _HF_CACHE.exists() else False
 HAS_HF_HUB = importlib.util.find_spec("huggingface_hub") is not None
 
-pytestmark = pytest.mark.skipif(
-    not (HAS_LONGMEMEVAL_CACHE and HAS_BGE_SMALL_CACHE and HAS_HF_HUB),
-    reason="LongMemEval-S dataset, bge-small-en-v1.5 model, or huggingface_hub "
-    "not available; the harness subprocess needs all three",
-)
+_V3_BASELINE = REPO / "bench" / "lme500" / "output" / "lme500-v3.json"
+
+pytestmark = [
+    pytest.mark.bench,
+    pytest.mark.skipif(
+        not (HAS_LONGMEMEVAL_CACHE and HAS_BGE_SMALL_CACHE and HAS_HF_HUB),
+        reason="LongMemEval-S dataset, bge-small-en-v1.5 model, or huggingface_hub "
+        "not available; the harness subprocess needs all three",
+    ),
+]
 
 
 def _run_harness(embedder: str, qid_filter: str = PINNED_QID_FOR_SMOKE) -> dict:
@@ -61,6 +66,11 @@ def _run_harness(embedder: str, qid_filter: str = PINNED_QID_FOR_SMOKE) -> dict:
     return json.loads(out_path.read_text())
 
 
+@pytest.mark.skipif(
+    not _V3_BASELINE.exists(),
+    reason="bench baseline lme500-v3.json not present; generate it with "
+    "bench.longmemeval_blind before running the drift check",
+)
 def test_bge_small_baseline_reproduces_v3() -> None:
     out = _run_harness(embedder="bge-small-en-v1.5")
     per_row = out["per_row"]

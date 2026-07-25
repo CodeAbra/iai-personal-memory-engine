@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] — 2026-07-24
+
+### Fixed
+
+- **Idle detection survives invalid UTF-8 in system command output.** All four
+  subprocess readers in the idle detector (`pmset -g log`, `ioreg`, `busctl`,
+  `pmset -g`) decoded stdout strictly, so a single non-UTF-8 byte — observed in
+  a multi-megabyte power log — raised `UnicodeDecodeError` past the handler
+  chain and cost the lifecycle tick its sleep-eligibility signal. They now
+  decode leniently (`errors="replace"`), which keeps the check working: the
+  sleep-marker scan and timestamp parse already tolerate replacement characters.
+  Reported with a full root-cause trace by
+  [@res-pstepan](https://github.com/res-pstepan) (#86), whose report also
+  surfaced that all four readers shared the pattern, not just the one that
+  failed.
+- **The LongMemEval harness smoke no longer turns red on a clean checkout.** It
+  armed itself whenever the Hugging Face caches and `huggingface_hub` happened to
+  be present, then read a bench baseline JSON that is not tracked — so installing
+  an unrelated package could flip the suite from green to a failure that looks
+  like a bench regression. The module now sits behind an explicit `--bench`
+  opt-in (same convention as `--perf` and `--live`), and the baseline-drift check
+  additionally skips with a clear reason when the baseline artifact has not been
+  generated.
+
 ## [2.6.0] — 2026-07-23
 
 ### Changed

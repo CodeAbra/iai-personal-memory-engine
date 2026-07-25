@@ -11,10 +11,11 @@ from iai_mcp.idle_detector import IdleDetector, IdleStatus
 
 
 def _completed_process(
-    stdout: str = "", returncode: int = 0
-) -> subprocess.CompletedProcess[str]:
-    proc: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=""
+    stdout: str | bytes = b"", returncode: int = 0
+) -> subprocess.CompletedProcess[bytes]:
+    raw = stdout.encode("utf-8") if isinstance(stdout, str) else stdout
+    proc: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=raw, stderr=b""
     )
     return proc
 
@@ -109,6 +110,25 @@ def test_pmset_recent_sleep_returns_false_when_pmset_missing() -> None:
     ):
         result = IdleDetector().pmset_recent_sleep()
     assert result is False
+
+
+def test_pmset_recent_sleep_survives_invalid_utf8_in_log() -> None:
+    log = _pmset_log_stdout([
+        (_now_pmset_ts(offset_min=2), "System Sleep"),
+    ])
+    corrupted = b"\xd2 garbage line\n" + log.encode("utf-8")
+    fake = _completed_process(stdout=corrupted)
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector().pmset_recent_sleep(window_min=5)
+    assert result is True
+
+
+def test_hid_idle_time_sec_survives_invalid_utf8() -> None:
+    corrupted = b"\xff\xfe" + _ioreg_stdout(idle_ns=42_000_000_000).encode("utf-8")
+    fake = _completed_process(stdout=corrupted)
+    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+        result = IdleDetector().hid_idle_time_sec()
+    assert result == 42
 
 
 def test_sleep_eligible_heartbeat_idle_path() -> None:

@@ -306,6 +306,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run @pytest.mark.live integration tests (real daemon subprocess; out of the default correctness gate)",
     )
+    parser.addoption(
+        "--bench",
+        action="store_true",
+        default=False,
+        help="run @pytest.mark.bench harness smokes (need local HF caches and bench artifacts; out of the default correctness gate)",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -321,6 +327,11 @@ def pytest_collection_modifyitems(
         for item in items:
             if "perf" in item.keywords:
                 item.add_marker(skip_perf)
+    if not config.getoption("--bench"):
+        skip_bench = pytest.mark.skip(reason="need --bench to run the bench-harness smoke")
+        for item in items:
+            if "bench" in item.keywords:
+                item.add_marker(skip_bench)
     if not config.getoption("--live"):
         skip_live = pytest.mark.skip(reason="need --live to run the real-daemon E2E gate")
         for item in items:
