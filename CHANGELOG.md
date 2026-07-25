@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like a bench regression. The module now sits behind an explicit `--bench`
   opt-in (same convention as `--perf` and `--live`), and the baseline-drift check
   additionally skips with a clear reason when the baseline artifact has not been
-  generated.
+  generated. Its harness output also moves out of `tests/fixtures/` into a temp
+  directory, so a `--bench` run no longer leaves untracked files behind in a
+  clean checkout.
 
 ## [2.6.0] — 2026-07-23
 

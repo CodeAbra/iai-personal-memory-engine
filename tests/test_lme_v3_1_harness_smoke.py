@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,16 @@ REPO = Path(__file__).resolve().parent.parent
 
 PINNED_QID_FOR_SMOKE = "e47becba"
 
-FIXTURES = REPO / "tests" / "fixtures"
+_SMOKE_OUT_DIR: Path | None = None
+
+
+def _smoke_out_dir() -> Path:
+    # Harness output must never land in the source tree: it is neither a
+    # tracked fixture nor cleaned up, so a run would dirty a clean checkout.
+    global _SMOKE_OUT_DIR
+    if _SMOKE_OUT_DIR is None:
+        _SMOKE_OUT_DIR = Path(tempfile.mkdtemp(prefix="lme-smoke-v3.1-"))
+    return _SMOKE_OUT_DIR
 
 _HF_CACHE = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 HAS_LONGMEMEVAL_CACHE = any(_HF_CACHE.rglob("longmemeval_s")) if _HF_CACHE.exists() else False
@@ -33,8 +43,7 @@ pytestmark = [
 
 
 def _run_harness(embedder: str, qid_filter: str = PINNED_QID_FOR_SMOKE) -> dict:
-    out_path = FIXTURES / f"smoke-v3.1-{embedder}.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = _smoke_out_dir() / f"smoke-v3.1-{embedder}.json"
     cmd = [
         sys.executable,
         "-m",
@@ -91,7 +100,7 @@ def test_bge_small_baseline_reproduces_v3() -> None:
 
 
 def test_embedder_metadata_recorded_in_output() -> None:
-    bge_path = FIXTURES / "smoke-v3.1-bge-small-en-v1.5.json"
+    bge_path = _smoke_out_dir() / "smoke-v3.1-bge-small-en-v1.5.json"
     if not bge_path.exists():
         _run_harness(embedder="bge-small-en-v1.5")
     bge_out = json.loads(bge_path.read_text())
