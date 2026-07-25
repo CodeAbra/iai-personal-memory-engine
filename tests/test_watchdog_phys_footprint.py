@@ -17,6 +17,8 @@ import json
 import os
 import platform
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -46,12 +48,30 @@ def test_phys_footprint_reads_positive_int_on_macos() -> None:
 
 
 @pytest.mark.skipif(not DARWIN, reason="phys_footprint is a macOS metric")
-def test_phys_footprint_not_above_rss_on_clean_process() -> None:
+def test_phys_footprint_clean_process_smoke() -> None:
+    """Both probes return coherent values in an interpreter without heap history."""
     # phys_footprint excludes reusable (MADV_FREE) pages that still count toward
-    # resident_size, so it can only be <= RSS (a small slack absorbs the race
-    # between the two reads on a live, churning heap).
-    rss = wd._own_rss_bytes()
-    phys = wd._phys_footprint_bytes()
+    # resident_size. A fresh interpreter avoids allocator history; 5% slack
+    # covers the race between the two live-process readings.
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json; "
+                "from iai_mcp.daemon import _watchdog as wd; "
+                "print(json.dumps({'rss': wd._own_rss_bytes(), "
+                "'phys': wd._phys_footprint_bytes()}))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    payload = json.loads(probe.stdout.strip().splitlines()[-1])
+    rss = payload["rss"]
+    phys = payload["phys"]
     assert rss is not None and phys is not None
     assert phys <= rss * 1.05, (
         f"phys_footprint ({phys}) should not exceed resident_size ({rss}); "
