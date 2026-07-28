@@ -21,6 +21,9 @@ jobs:
     name: publish to PyPI
     needs: build
     runs-on: ubuntu-latest
+    # The trusted publisher checks the environment claim when it declares one and
+    # ignores it otherwise, so naming the environment matches either registration.
+    environment: pypi
     permissions:
       id-token: write
     steps:
