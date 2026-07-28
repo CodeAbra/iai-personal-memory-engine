@@ -35,19 +35,25 @@ jobs:
         env:
           CIBW_BUILD: "cp311-* cp312-*"
           CIBW_SKIP: "*-musllinux_* *_i686 *_ppc64le *_s390x *-win32 *-win_arm64"
-          CIBW_ARCHS_MACOS: "arm64 x86_64"
-          # The arm64 runner needs the x86_64 Rust std to cross-compile that wheel.
-          CIBW_BEFORE_ALL_MACOS: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          # Intel macOS is not a viable wheel target: numba, llvmlite and
+          # cryptography no longer publish x86_64 macOS wheels, so the test
+          # install falls back to source builds that cannot succeed.
+          CIBW_ARCHS_MACOS: "arm64"
+          CIBW_BEFORE_ALL_MACOS: rustup target add aarch64-apple-darwin
+          # glibc 2.17 (manylinux2014) predates the wheels our dependencies
+          # publish — scipy/numba/cryptography ship manylinux_2_28 and newer
+          # only, and building them from sdist in the test venv is what fails.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           # The manylinux build container has no Rust toolchain; install it
-          # (pinned to the repo's rust-toolchain.toml channel) plus the OpenSSL
-          # headers the native extension links against.
+          # (pinned to the repo's rust-toolchain.toml channel) plus pkg-config,
+          # which onig_sys probes for.
           CIBW_BEFORE_ALL_LINUX: >
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
             | sh -s -- -y --default-toolchain 1.87 --profile minimal &&
-            (yum install -y openssl-devel pkgconfig ||
-             apt-get update && apt-get install -y libssl-dev pkg-config || true)
+            (yum install -y pkgconfig ||
+             apt-get update && apt-get install -y pkg-config || true)
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
-          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=10.12
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
           # A freshly built native wheel must import before it ships.
           CIBW_TEST_COMMAND: 'python -c "import iai_mcp, iai_mcp_native"'
 
