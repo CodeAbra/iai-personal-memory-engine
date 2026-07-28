@@ -1,0 +1,57 @@
+name: Publish
+
+# Publishing to PyPI happens only when a GitHub release is published, and only
+# through OIDC trusted publishing: no API token, no repository secret. The
+# trusted publisher on PyPI is bound to this workflow file by name, so renaming
+# this file breaks publishing until the publisher is re-registered.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Same lanes that produce the release artifacts, reused rather than copied.
+    uses: ./.github/workflows/wheels.yml
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Collect wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: Collect sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Refuse anything not named iai_pme
+        run: |
+          ls -l dist
+          # The trusted publisher is bound to the `iai-pme` project; a stale
+          # distribution name would be rejected server-side after upload has
+          # already started. Fail here instead, with a readable reason.
+          stray="$(find dist -maxdepth 1 -type f \! -name 'iai_pme-*' -print)"
+          if [ -n "${stray}" ]; then
+            printf 'unexpected distribution names:\n%s\n' "${stray}" >&2
+            exit 1
+          fi
+          test -n "$(find dist -maxdepth 1 -name 'iai_pme-*.whl' -print -quit)" \
+            || { echo "no wheels collected" >&2; exit 1; }
+          test -n "$(find dist -maxdepth 1 -name 'iai_pme-*.tar.gz' -print -quit)" \
+            || { echo "no sdist collected" >&2; exit 1; }
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1

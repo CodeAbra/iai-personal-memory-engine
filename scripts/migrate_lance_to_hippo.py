@@ -36,7 +36,7 @@ def _import_lancedb_or_die():
         print(
             "ERROR: lancedb is required for this migration but is not "
             "installed. Install via:\n"
-            "    pip install iai-mcp[migration]\n"
+            "    pip install iai-pme[migration]\n"
             f"(Original error: {type(exc).__name__}: {exc})",
             file=sys.stderr,
         )

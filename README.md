@@ -152,32 +152,22 @@ iai --version
 This is what makes memory ambient. Without these hooks iai-mcp reads memory but never writes conversation content and never injects recall at session start. One command wires all three:
 
 ```bash
-iai-mcp capture-hooks install       # copies all three hooks + patches ~/.claude/settings.json
+iai-mcp capture-hooks install       # copies all four hooks + patches ~/.claude/settings.json
 iai-mcp capture-hooks status        # verify: should print "status: ACTIVE"
 iai-mcp capture-hooks uninstall     # clean removal if ever needed
 ```
 
-For Codex:
-
-```bash
-iai-mcp capture-hooks install --target codex
-```
-
-To install both:
-
-```bash
-iai-mcp capture-hooks install --target all
-```
 
 <details>
 <summary><b>What the install does</b></summary>
 
 What the install does:
 
-- Copies three hook scripts bundled with the package to `~/.claude/hooks/` (chmod +x):
+- Copies four hook scripts bundled with the package to `~/.claude/hooks/` (chmod +x):
   - `iai-mcp-turn-capture.sh` (`UserPromptSubmit`, timeout 5s) — appends each prompt + the preceding assistant turn(s) to a per-session buffer as pure file IO. Zero engine RPC during the session.
   - `iai-mcp-session-capture.sh` (`Stop`, timeout 35s) — at session end, rolls the buffer over for the local engine to drain, and runs `iai-mcp capture-transcript --no-spawn` as a safety net.
   - `iai-mcp-session-recall.sh` (`SessionStart`, timeout 30s) — calls `iai-mcp session-start` and pipes the assembled memory prefix to stdout, which Claude Code injects as `additionalContext` before the first prompt. Fail-safe: empty store or unreachable local engine yields empty stdout — session start is never blocked.
+  - `iai-mcp-per-turn-recall.sh` — serves the foresight pack: memories the engine expects the *next* turn to need, injected before you ask, each marked with its age and how often it has been revised.
 - Registers iai-mcp in Claude Desktop's config if installed.
 - Idempotent — re-running detects existing entries and makes no changes.
 - No secrets, no tokens, no network calls.
@@ -192,6 +182,7 @@ What happens at runtime:
 - **Every prompt** (per-turn hook): appends new transcript turns to the session buffer. ~5 ms per turn, no embedding, no engine socket.
 - **Every session end** (Stop hook): rolls the buffer over, captures any remaining turns. Fail-safe exit 0.
 - **Every session start** (recall hook): assembles the cached memory prefix and pipes it to Claude. Empty store or unreachable local engine → empty stdout.
+- **Before the next turn** (per-turn recall hook): serves the foresight pack — what the engine predicts you'll need next, with age and revision markers so a stale fact can't pass for a current one.
 - **When idle** (local engine): drains the buffer through the shield → embed → dedup → encrypted insert pipeline on the WAKE → DROWSY edge (5-min idle) and after every REM cycle.
 
 </details>
@@ -233,9 +224,9 @@ IAI_MCP_PYTHON = "/absolute/path/to/iai-mcp/.venv/bin/python"
 IAI_MCP_STORE = "/Users/you/.iai-mcp"
 ```
 
-Codex hooks are stable in current Codex CLI builds. If hooks are disabled by
-local policy or an older install, enable `[features].hooks = true` in
-`~/.codex/config.toml`.
+The MCP tools work on Codex through this config. Ambient capture — the hooks
+that record and recall without being asked — is wired for Claude Code only;
+Codex's native hooks are not implemented yet.
 
 ### Verify
 
@@ -568,11 +559,11 @@ iai-mcp talks to its host over **MCP-over-stdio** — the same protocol every MC
 <p align="center"><img src="docs/assets/slides/slide-12.jpg" width="850" alt="iai-pme"></p>
 
 - **Claude Code** — primary host, validated in daily use.
-- **Codex CLI** — supported, with ambient capture through a `Stop` hook.
+- **Codex CLI** — the memory tools work; ambient capture is not wired for it yet.
 - **Gemini CLI**, **Cursor CLI**, and other MCP-over-stdio CLIs — connect through the same standard protocol; the MCP tools work out of the box.
 - **Claude Desktop** — works; uses `claude_desktop_config.json` instead of `~/.claude.json`.
 
-Ambient capture (the hooks that record and recall automatically) ships for Claude Code and Codex today. On other CLIs the MCP tools work directly; wiring up their native hooks for fully automatic capture is a great first contribution — open an issue or PR.
+Ambient capture (the hooks that record and recall automatically) ships for Claude Code today. On every other host the MCP tools work directly; wiring up a host's native hooks for fully automatic capture is a great first contribution — open an issue or PR.
 
 ---
 

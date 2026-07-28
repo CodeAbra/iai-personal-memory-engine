@@ -1,8 +1,10 @@
 name: Wheels
 
 on:
-  release:
-    types: [published]
+  # Releases come in through publish.yml, which calls this workflow and then
+  # uploads what it produced — keeping the release trigger here too would build
+  # everything twice.
+  workflow_call:
   workflow_dispatch:
 
 permissions:
