@@ -44,15 +44,19 @@ jobs:
           # publish — scipy/numba/cryptography ship manylinux_2_28 and newer
           # only, and building them from sdist in the test venv is what fails.
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          # The manylinux build container has no Rust toolchain; install it
-          # (pinned to the repo's rust-toolchain.toml channel) plus pkg-config,
-          # which onig_sys probes for.
+          # manylinux_2_28 ships its own rustup-managed toolchain, so installing
+          # ours into the default CARGO_HOME collides on bin/cargo-clippy and
+          # rolls back, leaving no compiler at all. Keep our pinned toolchain in
+          # a separate root. pkg-config is what onig_sys probes for.
           CIBW_BEFORE_ALL_LINUX: >
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
-            | sh -s -- -y --default-toolchain 1.87 --profile minimal &&
-            (yum install -y pkgconfig ||
-             apt-get update && apt-get install -y pkg-config || true)
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+            | CARGO_HOME=/opt/iai-rust/cargo RUSTUP_HOME=/opt/iai-rust/rustup
+            sh -s -- -y --default-toolchain 1.87 --profile minimal --no-modify-path &&
+            (yum install -y pkgconfig || true)
+          CIBW_ENVIRONMENT_LINUX: >
+            PATH="/opt/iai-rust/cargo/bin:$PATH"
+            CARGO_HOME=/opt/iai-rust/cargo
+            RUSTUP_HOME=/opt/iai-rust/rustup
           CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
           # A freshly built native wheel must import before it ships.
           CIBW_TEST_COMMAND: 'python -c "import iai_mcp, iai_mcp_native"'
