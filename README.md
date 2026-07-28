@@ -94,7 +94,15 @@ If you need multi-tenant memory for an app you're shipping, use one of them — 
 
 <p align="center"><img src="docs/assets/slides/slide-15.jpg" width="850" alt="iai-pme"></p>
 
-**TL;DR — four lines (the Rust engine compiles from source, so give it a few minutes):**
+**One command** — macOS or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine/main/scripts/bootstrap.sh | bash
+```
+
+It checks your prerequisites, clones the repo to `~/.local/share/iai-pme`, builds, installs the background engine and the capture hooks, registers the MCP server with Claude Code, and finishes with a health check. Re-run it any time to update. Prefer to look before you leap: add `--dry-run` to print every step without changing anything, or `--preflight-only` to check just the prerequisites.
+
+**Or the same thing by hand** (the Rust engine compiles from source, so give it a few minutes):
 
 ```bash
 git clone https://github.com/CodeAbra/iai-personal-memory-engine.git && cd iai-personal-memory-engine
