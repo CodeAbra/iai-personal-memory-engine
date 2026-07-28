@@ -1,6 +1,6 @@
 [project]
 name = "iai-pme"
-version = "2.6.1"
+version = "2.7.0"
 description = "MCP server giving Claude persistent autistic-style memory + learning"
 requires-python = ">=3.11,<3.13"
 dependencies = [

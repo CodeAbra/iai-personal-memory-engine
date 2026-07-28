@@ -5,14 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.7.0] — 2026-07-28
+
+### Added
+
+- **Install in one command.** `scripts/bootstrap.sh` takes a machine from nothing
+  to a working install: it checks prerequisites, clones, builds, registers the
+  background engine and the capture hooks, adds the MCP server to Claude Code and
+  runs `doctor`. Re-run it to update. `--dry-run` prints every step without
+  changing anything; `--preflight-only` checks prerequisites and exits.
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine/main/scripts/bootstrap.sh | bash
+  ```
+
+- **Binary wheels build on every supported platform** — CPython 3.11 and 3.12 for
+  Linux (manylinux_2_28), macOS arm64 and Windows x86_64 — and a release now
+  publishes them to PyPI through OIDC trusted publishing, with no tokens or
+  repository secrets involved.
 
 ### Changed
 
-- The distribution package is named `iai-pme` (IAI Personal Memory Engine) —
-  the future `pip install iai-pme`. The import name (`iai_mcp`), the operator
-  CLI (`iai-mcp`) and the user CLI (`iai`) are unchanged. No release was ever
+- The distribution package is named `iai-pme` (IAI Personal Memory Engine):
+  `pip install iai-pme`. The import name (`iai_mcp`), the operator CLI
+  (`iai-mcp`) and the user CLI (`iai`) are unchanged. No release was ever
   published under the old name, so nothing migrates.
+- Linux wheels require glibc 2.28 or newer (Ubuntu 20.04+, Debian 10+, RHEL 8+).
+  Intel macOS has no wheel: NumPy-stack projects stopped publishing x86_64 macOS
+  wheels, so that platform installs from source with a Rust toolchain.
+- The README leads with the memory in motion, states the token economy a memory
+  pack replaces an agent search at roughly 88% less, compares iai-pme against the
+  memory layers it is mistaken for, and documents the dashboard, the MCP tools and
+  the per-turn recall hook that were already shipping undocumented.
+
+### Fixed
+
+- The Compatibility section no longer claims ambient capture on Codex. The memory
+  tools work on any MCP-over-stdio host; the capture and recall hooks are wired
+  for Claude Code only.
 
 ## [2.6.1] — 2026-07-24
 
