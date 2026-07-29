@@ -7,7 +7,7 @@
 <h3 align="center">Give your coding agent a brain that remembers exactly what you said — forever, on your machine.</h3>
 <p align="center"><b>The best open-source personal memory engine for AI coding assistants.</b><br>Pays for itself in tokens: retrieval from memory is ≈88% cheaper than an agent search.<br>Every claim ships with the harness that proves it — run the benchmarks yourself.</p>
 
-<p align="center"><img src="https://img.shields.io/badge/release-v2.7.1-1f6feb?style=flat-square" alt="Release v2.7.1"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
+<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v2.7.1-1f6feb?style=flat-square" alt="Release v2.7.1"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
 <p align="center"><img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962"> <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000"> <img src="https://img.shields.io/badge/retrieval-%E2%89%8888%25_cheaper_than_search-2ea043?style=flat-square" alt="Memory retrieval ≈88% cheaper than agent search"> <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM"> <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry"> <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible"> <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a></p>
 <p align="center"><a href="#quick-start"><b>Quick start</b></a> · <a href="#benchmarks"><b>Benchmarks</b></a> · <a href="#watch-it-think"><b>Dashboard</b></a> · <a href="https://github.com/CodeAbra/iai-personal-memory-engine/discussions"><b>Discussions</b></a> · <a href="./README_zh-CN.md"><b>中文</b></a></p>
 
@@ -102,7 +102,19 @@ curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine
 
 It checks your prerequisites, clones the repo to `~/.local/share/iai-pme`, builds, installs the background engine and the capture hooks, registers the MCP server with Claude Code, and finishes with a health check. Re-run it any time to update. Prefer to look before you leap: add `--dry-run` to print every step without changing anything, or `--preflight-only` to check just the prerequisites.
 
-**Or the same thing by hand** (the Rust engine compiles from source, so give it a few minutes):
+**Just want the terminal memory?** The package is on PyPI, so the CLI needs neither a clone nor a Rust toolchain — a prebuilt wheel carries the engine:
+
+```bash
+pip install iai-pme
+iai-mcp crypto init          # one-time: creates the encryption key
+iai teach ./notes.md         # study a file
+iai recall "what did we decide about pricing"
+iai brain                    # the dashboard
+```
+
+That gives you the engine, the `iai` CLI and the dashboard. Wiring memory *into* your assistant needs the MCP server, which is built by the one-command installer above.
+
+**Or the whole thing by hand** (the Rust engine compiles from source, so give it a few minutes):
 
 ```bash
 git clone https://github.com/CodeAbra/iai-personal-memory-engine.git && cd iai-personal-memory-engine
@@ -115,9 +127,16 @@ Details, other hosts, and what each step actually does — below.
 
 ### Prerequisites
 
-- macOS (Apple Silicon), Linux, or Windows (beta)
+For `pip install iai-pme` — the CLI and the engine, from a prebuilt wheel:
+
 - Python 3.11 or 3.12
-- Node.js 18+
+- macOS on Apple Silicon, Linux with glibc 2.28 or newer (Ubuntu 20.04+, Debian 10+, RHEL 8+), or Windows x86_64
+- Intel macOS has no wheel — the projects we depend on stopped publishing them — so it installs from source and needs the Rust toolchain below
+
+For the full install — the same engine plus the MCP server your assistant talks to:
+
+- Python 3.11 or 3.12
+- Node.js 18+ — the MCP server is TypeScript
 - A Rust toolchain — the native engine builds from source
 - An MCP-compatible CLI host — [Claude Code](https://docs.claude.com/en/docs/claude-code/overview), Codex CLI, Gemini CLI, Cursor CLI, and others
 - ~500 MB free disk
