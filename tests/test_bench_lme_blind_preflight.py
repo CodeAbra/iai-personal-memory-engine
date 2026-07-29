@@ -4,6 +4,13 @@ import json
 import os
 import secrets
 
+import pytest
+
+# Exercises the bench harness itself, which reaches for huggingface_hub — an
+# optional dependency absent from a plain dev install. Same opt-in as the other
+# harness smokes so a clean checkout stays green.
+pytestmark = pytest.mark.bench
+
 
 
 class _StubLMESession:

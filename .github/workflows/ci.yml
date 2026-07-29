@@ -16,6 +16,11 @@ jobs:
   test-macos:
     name: build & test (macOS)
     runs-on: macos-latest
+    # Pinning the toolchain by env stops rustup re-reading rust-toolchain.toml at
+    # build time and re-installing the components the action already placed
+    # (detected conflict: bin/cargo-clippy, then "can't find Rust compiler").
+    env:
+      RUSTUP_TOOLCHAIN: "1.87"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
