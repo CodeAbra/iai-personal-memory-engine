@@ -1,0 +1,17 @@
+{
+  "name": "iai-pme",
+  "owner": {
+    "name": "Areg Aramovich Noya",
+    "url": "https://github.com/CodeAbra"
+  },
+  "description": "The personal memory engine for AI coding assistants — local, encrypted, verbatim.",
+  "plugins": [
+    {
+      "name": "iai-pme",
+      "source": "./plugin",
+      "description": "Persistent local memory for your assistant: every turn captured verbatim, relevant memory injected at session start and before each turn, and fifteen memory tools over MCP. Requires the iai-pme package (pip install iai-pme).",
+      "category": "productivity",
+      "tags": ["memory", "recall", "local-first", "mcp", "context"]
+    }
+  ]
+}

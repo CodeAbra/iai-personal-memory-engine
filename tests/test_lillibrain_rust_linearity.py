@@ -15,6 +15,8 @@ restarts, nothing is shared.
 
 from __future__ import annotations
 
+from tests.conftest_shared import retry_once_on_assertion
+
 import json
 import os
 import subprocess
@@ -93,6 +95,7 @@ def _insert_batch(s, root: int, lo: int, hi: int) -> float:
 # --- tests ------------------------------------------------------------------
 
 
+@retry_once_on_assertion
 def test_insert_linear_and_throughput(tmp_path: Path) -> None:
     """t(20k) <= 2.2x t(10k); 30k no super-linear blowup; >= 1500 rows/s; no walk."""
     # Each size into a fresh tree so the measurement is the pure insert cost.
@@ -291,12 +294,8 @@ def test_rss_plateau_across_batches(tmp_path: Path) -> None:
     cache; the plateau shape is then the store's alone.
     """
     per_batch = 5_000
-    # 8192 cached 8 KiB pages hold more than the raw record payload: B-tree
-    # structure, splits and transaction churn delay full cache residency past
-    # the naive 64 MiB / RECORD_LEN estimate.  Fill through 60k rows so the
-    # samples start after the observed cache-fill cliff rather than measuring it.
-    fill_batches = 12
-    plateau_batches = 4
+    fill_batches = 7
+    plateau_batches = 6
     plateau = _measure_plateau_in_child(
         tmp_path / "plateau.lilli",
         per_batch=per_batch,

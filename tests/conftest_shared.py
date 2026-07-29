@@ -83,3 +83,35 @@ def set_tmp_env(monkeypatch, tmp_path: Path) -> None:
     """
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "hippo"))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "test.sock"))
+
+
+def retry_once_on_assertion(test_fn):
+    """Wall-clock perf tripwires ONLY. One retry absorbs OS-scheduler
+    jitter on a loaded machine; a genuine regression misses BOTH
+    attempts, so the tripwire keeps its teeth. Each attempt runs in a
+    fresh tmp_path subdirectory so store files never collide across
+    attempts. The first miss is reported loudly, never swallowed.
+    """
+    import functools
+    import sys as _sys
+
+    @functools.wraps(test_fn)
+    def wrapper(tmp_path, *args, **kwargs):
+        last: AssertionError | None = None
+        for attempt in (1, 2):
+            sub = tmp_path / f"attempt{attempt}"
+            sub.mkdir(exist_ok=True)
+            try:
+                return test_fn(sub, *args, **kwargs)
+            except AssertionError as exc:
+                last = exc
+                if attempt == 2:
+                    raise
+                print(
+                    f"perf bound missed on attempt 1 ({test_fn.__name__}): "
+                    f"{exc} — retrying once on a fresh store",
+                    file=_sys.stderr,
+                )
+        raise last  # unreachable; keeps type-checkers honest
+
+    return wrapper

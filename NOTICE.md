@@ -64,10 +64,15 @@ shipped) are:
 | @modelcontextprotocol/sdk     | ^1.0.0                     | MIT     | https://github.com/modelcontextprotocol/typescript-sdk      |
 | zod                           | ^3.23.0                    | MIT     | https://github.com/colinhacks/zod                           |
 
-The wrapper's `devDependencies` (`@types/node`, `typescript`, `tsx`) are
-build-time only — they are not bundled into the shipped wrapper artifact and
-therefore do not require runtime attribution. They are nonetheless listed in
-`mcp-wrapper/package.json` for transparency.
+The wheel ships the wrapper as a single esbuild bundle
+(`iai_mcp/_wrapper/index.js`) with `@modelcontextprotocol/sdk` and `zod`
+inlined — that artifact REDISTRIBUTES both packages, and their MIT license
+texts travel with this NOTICE.
+
+The wrapper's `devDependencies` (`@types/node`, `typescript`, `tsx`,
+`esbuild`) are build-time only — they are not bundled into the shipped wrapper
+artifact and therefore do not require runtime attribution. They are nonetheless
+listed in `mcp-wrapper/package.json` for transparency.
 
 ## License compatibility summary
 

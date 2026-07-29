@@ -1,14 +1,27 @@
 """Concurrency regression: a long engine scan must not hold the GIL.
 
-The probe below disables normal periodic GIL switching, starts an observer
-thread, then runs full-table scans. The observer can make progress before the
-scan loop returns only if the native engine explicitly releases the GIL.
+When the engine holds the GIL during store I/O, thread A's scan starves all
+other Python threads for its full Rust execution window. A counter thread that
+increments a shared integer sees large gaps (near the scan duration) when the
+GIL is held, because it cannot run at all until the Rust scan returns.
+
+After the fix, the engine releases the GIL during the pure-Rust store I/O.
+Thread A yields the GIL when it enters the Rust kernel; the counter thread
+runs continuously, and gap durations stay near the normal OS scheduling jitter.
+
+Proof: the maximum GIL-hold gap measured by the counter thread during a long
+scan must be less than a bound. When the GIL is held, the max gap approaches
+the scan-iteration duration (tens to hundreds of ms). When the GIL is released,
+the max gap stays near the OS preemption window (< sys.getswitchinterval()).
 """
 from __future__ import annotations
+
+from tests.conftest_shared import retry_once_on_assertion
 
 import os
 import sys
 import threading
+import time
 
 import pytest
 
@@ -72,47 +85,65 @@ def _make_store(path: str, n: int = _POPULATE_ROWS) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Synchronized GIL-release probe
+# GIL-gap probe via counter thread
 # ---------------------------------------------------------------------------
 
 
-def _thread_progresses_during_scan(path: str) -> bool:
-    """Return whether another Python thread ran inside the native scan span."""
-    ready = threading.Event()
-    start = threading.Event()
-    progressed = threading.Event()
+def _max_gil_gap_during_scan(
+    path: str,
+    scan_wall_seconds: float = 1.0,
+) -> tuple[float, float]:
+    """Measure the maximum GIL gap seen by a counter thread while A scans.
 
-    def observer() -> None:
-        ready.set()
-        start.wait()
-        progressed.set()
+    Thread A opens `path` and loops full-table SELECTs for `scan_wall_seconds`.
+    A counter thread increments a shared counter as fast as it can, recording
+    the wall time between each successful increment. The maximum gap between
+    increments is the proxy for the longest GIL-hold during A's scan window.
 
-    thread = threading.Thread(target=observer, daemon=True)
-    thread.start()
-    assert ready.wait(timeout=5), "observer thread did not become ready"
+    Returns (max_gap_seconds, baseline_max_gap_seconds) where baseline is
+    measured in a quiet period before A starts.
 
+    When the GIL is held during store I/O: A's full-table scan holds the GIL
+    for its entire Rust execution window; the counter thread cannot run during
+    that window and the max gap approaches the scan-iteration duration.
+
+    When the GIL is released: A yields the GIL on entry to the Rust kernel;
+    the counter thread runs continuously; the max gap stays near OS jitter.
+    """
+    counter: list[int] = [0]
+    run_flag: list[bool] = [True]
+    gaps: list[float] = []
+
+    def counter_thread() -> None:
+        last = time.perf_counter()
+        while run_flag[0]:
+            now = time.perf_counter()
+            gap = now - last
+            gaps.append(gap)
+            counter[0] += 1
+            last = now
+
+    ct = threading.Thread(target=counter_thread, daemon=True)
+    ct.start()
+
+    # Baseline: collect gaps with no engine activity.
+    time.sleep(0.2)
+    baseline_gaps = list(gaps)
+    baseline_max = max(baseline_gaps) if baseline_gaps else 0.0
+    gaps.clear()
+
+    # Scan phase.
     conn = _open_engine(path)
-    old_switch_interval = sys.getswitchinterval()
-    made_progress = False
-    try:
-        # Prevent the Python evaluator from handing the GIL to the observer
-        # between scans. Progress must happen inside py.allow_threads(...).
-        sys.setswitchinterval(10.0)
-        start.set()
-        for _ in range(4):
-            conn.execute(_SELECT_ALL)
-            if progressed.is_set():
-                made_progress = True
-                break
-    finally:
-        # Capture the result above, before restoring normal switching or
-        # joining: either cleanup step would let a GIL-blocked observer run.
-        sys.setswitchinterval(old_switch_interval)
-        start.set()
-        thread.join(timeout=2.0)
-        conn.close()
+    deadline = time.perf_counter() + scan_wall_seconds
+    while time.perf_counter() < deadline:
+        conn.execute(_SELECT_ALL).fetchall()
+    conn.close()
 
-    return made_progress
+    run_flag[0] = False
+    ct.join(timeout=2.0)
+
+    scan_max = max(gaps) if gaps else 0.0
+    return scan_max, baseline_max
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +151,28 @@ def _thread_progresses_during_scan(path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@retry_once_on_assertion
 def test_engine_scan_releases_gil(tmp_path):
-    """The engine releases the GIL while executing a full-table scan."""
+    """The engine scan releases the GIL so other threads are not starved.
+
+    Measured via a counter thread that records the maximum gap between
+    increments. When the GIL is held during the Rust scan, the counter thread
+    cannot increment for the full scan duration (tens to hundreds of ms per
+    iteration on a large table). When the GIL is released, the max gap stays
+    near the OS preemption interval (< 10 ms on a loaded box).
+
+    The bound: max gap during scan < 30 ms.
+
+    This bound is RED on a GIL-held engine where one `run_execute` iteration
+    takes ~80-150 ms on 80 k rows — the counter thread is blocked for that
+    full duration. It is GREEN on a GIL-releasing engine where the gap is
+    bounded by the OS scheduler (typically 1-5 ms), with 30 ms absorbing
+    worst-case scheduling jitter.
+
+    The GIL switch-interval (`sys.getswitchinterval()` = 5 ms default) is
+    the reference lower bound for the baseline; the scan gap must be clearly
+    above it to be RED and clearly below 30 ms to be reliably GREEN.
+    """
     path = str(tmp_path / "scan.lilli")
     _make_store(path)
 
@@ -130,7 +181,17 @@ def test_engine_scan_releases_gil(tmp_path):
     warmup_conn.execute(_SELECT_ALL).fetchall()
     warmup_conn.close()
 
-    assert _thread_progresses_during_scan(path), (
-        "observer thread made no progress during four full-table scans; "
-        "the native engine appears to hold the GIL during store I/O"
+    scan_max, baseline_max = _max_gil_gap_during_scan(path)
+
+    # The bound encodes GIL-release: with the GIL held for ~100+ ms per scan
+    # iteration, the counter thread sees max gaps >> 30 ms. With the GIL
+    # released, the counter thread runs unimpeded and max gap << 30 ms.
+    bound_seconds = 0.030  # 30 ms hard ceiling
+
+    assert scan_max < bound_seconds, (
+        f"counter thread saw a {scan_max * 1000:.1f} ms GIL gap during the engine "
+        f"scan (baseline max gap: {baseline_max * 1000:.2f} ms, switch interval: "
+        f"{sys.getswitchinterval() * 1000:.1f} ms). "
+        f"Expected < {bound_seconds * 1000:.0f} ms — the GIL appears to be held "
+        f"during store I/O, starving other Python threads."
     )

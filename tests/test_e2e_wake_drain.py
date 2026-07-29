@@ -145,6 +145,6 @@ def test_grep_production_callsite_exists():
     text = daemon_src.read_text()
     assert "flush_deferred_provenance" in text, (
         "daemon.py MUST reference flush_deferred_provenance; otherwise the "
-        "deferred-provenance buffer is never drained in production "
+        "MEM-05 deferred-provenance buffer is never drained in production "
         "(wake-drain regression)."
     )

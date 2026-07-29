@@ -6,6 +6,8 @@ __pycache__/
 .Python
 # build-generated wrapper JS (written by the wheel build hook; not committed)
 src/iai_mcp/_wrapper/
+# esbuild bundle staged into the wheel (built on the host, not committed)
+mcp-wrapper/dist-bundle/
 # Rust extension compiled in-tree by maturin develop or pip wheel
 src/iai_mcp_native*.so
 build/

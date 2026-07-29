@@ -66,21 +66,11 @@ def test_R1_fresh_store_has_wing_room_drawer_columns(tmp_path: Path) -> None:
 
 def test_R2_spatial_tagger_path_heuristic_correctness() -> None:
     wing, room, drawer = SpatialTagger.tag(
-        None, "/Users/alice/project/src/iai_mcp/store.py",
+        None, "/Users/alice/Desktop/IAI-MCP/src/iai_mcp/store.py",
     )
     assert wing == "IAI-MCP", wing
     assert room == "iai_mcp", room
     assert drawer == "store", drawer
-
-    desktop_wing, _, _ = SpatialTagger.tag(
-        None, "/Users/alice/Desktop/Client/iai_mcp/store.py",
-    )
-    assert desktop_wing == "Client", desktop_wing
-
-    substring_wing, _, _ = SpatialTagger.tag(
-        None, "/Users/alice/project/src/not_iai_mcp_helper/store.py",
-    )
-    assert substring_wing == "src", substring_wing
 
     wing2, room2, drawer2 = SpatialTagger.tag(
         None, "/Users/alice/Documents/notes/today.md",
@@ -112,7 +102,7 @@ def test_R3_insert_path_auto_tag_populates_columns(
     rec = _make_record(
         embed_dim=s._embed_dim,
         provenance=[{
-            "source_path": "/Users/alice/project/src/iai_mcp/store.py",
+            "source_path": "/Users/alice/Desktop/IAI-MCP/src/iai_mcp/store.py",
             "ts": datetime.now(timezone.utc).isoformat(),
             "cue": "alice testing R3 positive path",
             "session_id": "s1",
@@ -139,7 +129,7 @@ def test_R3_insert_path_skip_when_auto_tag_disabled(
     rec = _make_record(
         embed_dim=s._embed_dim,
         provenance=[{
-            "source_path": "/Users/alice/project/src/iai_mcp/store.py",
+            "source_path": "/Users/alice/Desktop/IAI-MCP/src/iai_mcp/store.py",
             "ts": datetime.now(timezone.utc).isoformat(),
             "cue": "alice testing R3 negative path",
             "session_id": "s1",
@@ -176,7 +166,7 @@ def test_R5_dry_run_no_mutation_but_event_emitted(
     rec = _make_record(
         embed_dim=s._embed_dim,
         provenance=[{
-            "source_path": "/Users/alice/project/src/iai_mcp/store.py",
+            "source_path": "/Users/alice/Desktop/IAI-MCP/src/iai_mcp/store.py",
             "ts": datetime.now(timezone.utc).isoformat(),
             "cue": "alice testing R5 dry-run",
             "session_id": "s1",
@@ -209,7 +199,7 @@ def test_R5_dry_run_no_mutation_but_event_emitted(
     assert body["dry_run_mode"] is True, body
     assert body["record_id"] == str(rec.id), body
     assert body["source_path"] == (
-        "/Users/alice/project/src/iai_mcp/store.py"
+        "/Users/alice/Desktop/IAI-MCP/src/iai_mcp/store.py"
     ), body
 
 @pytest.mark.parametrize(

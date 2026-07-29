@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.3] — 2026-07-29
+
+### Added
+
+- **A Claude Code plugin.** Two lines wire the MCP server and ambient capture
+  together, with no config file to edit:
+
+  ```
+  /plugin marketplace add CodeAbra/iai-personal-memory-engine
+  /plugin install iai-pme@iai-pme
+  ```
+
+  The plugin carries the wiring; `pip install iai-pme` carries the engine. Its
+  launcher asks the installed package where the MCP server lives, so it works
+  from a wheel and from a source checkout alike, and says plainly what to
+  install if the engine is missing.
+
+### Changed
+
+- **`pip install iai-pme` now delivers the MCP server too.** The wheel ships the
+  wrapper as a single self-contained file (its dependencies are bundled in), so a
+  wheel install can be pointed at directly — no `npm install` step, no source
+  checkout. Editable installs keep using the compiled tree as before.
+
+### Fixed
+
+- Performance tripwires retry once before failing. They assert wall-clock bounds,
+  so a busy machine could report a regression that a second attempt disproves; a
+  real regression still fails both attempts.
+
+### Removed
+
+- Nineteen duplicate test modules that shipped under two names at once. Each pair
+  was the same file — one named after the plan that produced it, one named after
+  what it tests — so the suite ran every assertion twice and an update to one copy
+  left the other stale. A new guard fails the suite if a tracked source file name
+  carries a planning code again.
+
 ## [2.7.2] — 2026-07-28
 
 ### Added

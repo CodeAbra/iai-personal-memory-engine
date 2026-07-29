@@ -1,0 +1,44 @@
+#!/bin/sh
+# Launch the MCP server that ships inside the installed iai-pme package.
+#
+# The wrapper's location differs between a wheel install and an editable
+# checkout, so resolution is delegated to the package itself rather than
+# guessed here. IAI_MCP_PYTHON pins the interpreter when the package lives in a
+# venv that is not first on PATH.
+set -eu
+
+resolve_wrapper() {
+    "$1" - <<'PY' 2>/dev/null || true
+try:
+    from iai_mcp.cli._capture import _resolve_wrapper_path
+    print(_resolve_wrapper_path())
+except Exception:
+    pass
+PY
+}
+
+for interpreter in "${IAI_MCP_PYTHON:-}" python3.12 python3.11 python3; do
+    [ -n "${interpreter}" ] || continue
+    command -v "${interpreter}" >/dev/null 2>&1 || continue
+    wrapper="$(resolve_wrapper "${interpreter}")"
+    [ -n "${wrapper}" ] || continue
+    [ -f "${wrapper}" ] || continue
+    command -v node >/dev/null 2>&1 || {
+        echo "iai-pme: node is required to run the MCP server (Node.js 18+)." >&2
+        exit 1
+    }
+    # shellcheck disable=SC2093 # the loop and the message below are the
+    # not-found path: exec only returns if node itself failed to start.
+    exec node "${wrapper}"
+done
+
+cat >&2 <<'MSG'
+iai-pme: the memory engine is not installed for any Python on PATH.
+
+    pip install iai-pme
+
+If it lives in a virtualenv, point this plugin at that interpreter:
+
+    export IAI_MCP_PYTHON=/path/to/venv/bin/python
+MSG
+exit 1

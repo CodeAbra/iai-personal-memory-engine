@@ -27,10 +27,14 @@ jobs:
         with:
           node-version: 20
       - name: Prebuild the MCP wrapper on the host
+        # The build containers have no Node, so both outputs are produced here:
+        # `build` for the editable/source path, `bundle` for the single
+        # self-contained file the wheel ships.
         working-directory: mcp-wrapper
         run: |
           npm ci --prefer-offline
           npm run build
+          npm run bundle
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21

@@ -47,6 +47,8 @@ This module pins:
 """
 from __future__ import annotations
 
+from tests.conftest_shared import retry_once_on_assertion
+
 import ast
 import time
 from pathlib import Path
@@ -203,6 +205,7 @@ except ImportError:
 # Prod-scale by design: a whole-corpus boot rebuild takes minutes on a loaded
 # serial box; the override keeps a lane-wide short --timeout from killing it.
 @pytest.mark.timeout(900)
+@retry_once_on_assertion
 def test_foreground_recall_not_starved_during_boot_rebuild(tmp_path: Path) -> None:
     """A foreground socket recall fired DURING the boot rebuild window must
     return within the warm SLA even while the whole-corpus rebuild runs.

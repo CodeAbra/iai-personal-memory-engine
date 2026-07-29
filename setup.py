@@ -102,6 +102,8 @@ class _BuildWithWrapper(_OrigBuildPy):
         npm_exe = shutil.which("npm")
         force_prebuilt = os.environ.get("IAI_MCP_WRAPPER_PREBUILT") == "1"
 
+        bundle_file = _WRAPPER_SRC / "dist-bundle" / "index.js"
+
         if npm_exe is not None and not force_prebuilt:
             # Install exact locked dependencies.
             subprocess.run(
@@ -122,6 +124,22 @@ class _BuildWithWrapper(_OrigBuildPy):
                     f"Expected {dist_dir} after 'npm run build' but the directory is absent.  "
                     "Check the TypeScript compiler output above for errors."
                 )
+
+            # Bundle → dist-bundle/index.js. The wheel must ship a
+            # SELF-CONTAINED wrapper: the tsc tree keeps bare imports
+            # (@modelcontextprotocol/sdk, zod) that no wheel install can
+            # resolve — a staged tsc tree means every wheel user's MCP
+            # registration dies with ERR_MODULE_NOT_FOUND.
+            subprocess.run(
+                [npm_exe, "run", "bundle"],
+                cwd=str(_WRAPPER_SRC),
+                check=True,
+            )
+            if not bundle_file.exists():
+                raise RuntimeError(
+                    f"Expected {bundle_file} after 'npm run bundle' but it is absent.  "
+                    "Check the esbuild output above for errors."
+                )
         elif dist_dir.exists():
             print(
                 f"npm {'forced off' if force_prebuilt else 'not found'}; "
@@ -136,24 +154,34 @@ class _BuildWithWrapper(_OrigBuildPy):
                 "into this build environment."
             )
 
-        # Stage the freshly built JS into the wheel build directory
-        # (build_lib/iai_mcp/_wrapper/) — never into the source tree, so an
-        # editable checkout stays clean and its resolver falls back to
-        # mcp-wrapper/dist/ as intended.
-        # Copy *.js only — source maps (.js.map) are excluded from the wheel.
+        # Stage into the wheel build directory (build_lib/iai_mcp/_wrapper/)
+        # — never into the source tree, so an editable checkout stays clean
+        # and its resolver falls back to mcp-wrapper/dist/ as intended.
         wrapper_dest = Path(self.build_lib) / "iai_mcp" / "_wrapper"
         if wrapper_dest.exists():
             shutil.rmtree(wrapper_dest)
         wrapper_dest.mkdir(parents=True)
 
-        js_files = sorted(dist_dir.glob("*.js"))
-        if not js_files:
-            raise RuntimeError(
-                f"No *.js files found in {dist_dir}.  "
-                "The 'npm run build' step produced no output."
+        if bundle_file.exists():
+            # The self-contained bundle is the only wrapper a wheel may ship.
+            shutil.copy2(bundle_file, wrapper_dest / "index.js")
+        else:
+            # Prebuilt host provided only the tsc tree (no bundle). Ship it
+            # with a loud warning: bare imports cannot resolve from a wheel.
+            print(
+                "WARN: mcp-wrapper/dist-bundle/index.js absent — staging the "
+                "tsc tree, whose bare imports do NOT resolve from a wheel "
+                "install. Run 'npm run bundle' on the build host.",
+                file=sys.stderr,
             )
-        for js_file in js_files:
-            shutil.copy2(js_file, wrapper_dest / js_file.name)
+            js_files = sorted(dist_dir.glob("*.js"))
+            if not js_files:
+                raise RuntimeError(
+                    f"No *.js files found in {dist_dir}.  "
+                    "The 'npm run build' step produced no output."
+                )
+            for js_file in js_files:
+                shutil.copy2(js_file, wrapper_dest / js_file.name)
 
     def _stage_native_stubs(self) -> None:
         """Stage the native extension type stubs flat into build_lib.
