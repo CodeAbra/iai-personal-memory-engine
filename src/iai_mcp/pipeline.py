@@ -1393,6 +1393,12 @@ def _apply_post_rank_pipeline(
 
     if mode != "verbatim" and s4_scope_hits:
         try:
+            from iai_mcp.curiosity import compute_entropy
+            # Entropy is computed here, where the hit scores are in hand, so the
+            # sleep-cycle drain can replay the input without re-fetching scores.
+            _curiosity_entropy = compute_entropy(
+                [float(h.score) for h in s4_scope_hits]
+            )
             write_event(
                 store,
                 kind="deferred_curiosity_input",
@@ -1400,6 +1406,8 @@ def _apply_post_rank_pipeline(
                     "hit_ids": [str(h.record_id) for h in s4_scope_hits[:10]],
                     "cue": cue[:200],
                     "session_id": session_id,
+                    "entropy": float(_curiosity_entropy),
+                    "turn": int(turn),
                 },
                 severity="info",
                 session_id=session_id,

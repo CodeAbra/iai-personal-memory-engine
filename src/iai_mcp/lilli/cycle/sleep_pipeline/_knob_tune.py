@@ -29,13 +29,23 @@ def step_knob_tune(
         total_edges = tbl.count_rows()
         curiosity_count = tbl.count_rows("edge_type = 'curiosity_bridge'") if total_edges > 0 else 0
         curiosity_ratio = curiosity_count / max(total_edges, 1)
-        if curiosity_ratio > 0.1 or curiosity_ratio < 0.02:
+        target: float | None = None
+        if curiosity_ratio > 0.1:
+            target = 1.5
+        elif curiosity_ratio < 0.02:
+            target = 0.8
+        if target is not None:
             um = _load_um()
-            if curiosity_ratio > 0.1:
-                um.soft_knobs["monotropism"] = 1.5
-            elif curiosity_ratio < 0.02:
-                um.soft_knobs["monotropism"] = 0.8
-            _save_um(um)
+            # Idempotent write: only persist when the knob actually moves.
+            # The prior code re-saved the user model on every sleep cycle
+            # because a corpus with no ``curiosity_bridge`` edges keeps
+            # ``curiosity_ratio`` pinned at 0.0 (< 0.02) forever, so the knob
+            # was rewritten to 0.8 every cycle -- churn the nightly report kept
+            # surfacing. Guarding on the current value stops the rewrite once
+            # the knob has settled.
+            if um.soft_knobs.get("monotropism") != target:
+                um.soft_knobs["monotropism"] = target
+                _save_um(um)
     except (OSError, ValueError, RuntimeError, KeyError, StoreError) as exc:
         logger.debug("non-critical soft_knobs auto-write failed: %s", exc)
 
