@@ -26,6 +26,7 @@ class LMESession:
     session_id: str
     turns: list[dict]
     queries: list[dict]
+    date: str = ""
 
 
 class LongMemEvalAdapter:
@@ -81,13 +82,19 @@ class LongMemEvalAdapter:
             haystack_sessions: list[list[dict]] = list(
                 row.get("haystack_sessions", [])
             )
+            haystack_dates: list[str] = list(row.get("haystack_dates", []))
+            if len(haystack_dates) < len(haystack_session_ids):
+                haystack_dates += [""] * (
+                    len(haystack_session_ids) - len(haystack_dates)
+                )
 
-            for sess_id, turns in zip(
-                haystack_session_ids, haystack_sessions
+            for sess_id, turns, sess_date in zip(
+                haystack_session_ids, haystack_sessions, haystack_dates
             ):
                 yield LMESession(
                     session_id=sess_id,
                     turns=list(turns),
+                    date=str(sess_date or ""),
                     queries=[
                         {
                             "query": question,

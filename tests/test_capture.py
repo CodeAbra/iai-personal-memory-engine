@@ -599,11 +599,11 @@ def test_capture_turn_embeds_content_not_cue(iai_home, monkeypatch):
 
     assert result["status"] == "inserted", result
     assert seen, "embedder was never called"
-    assert content in seen, (
+    assert any(s.endswith(content) for s in seen), (
         f"embedder never saw the content string; saw {seen!r}. "
-        f"capture_turn must embed text, not the cue."
+        f"capture_turn must embed text (optionally date-prefixed), not the cue."
     )
-    assert cue_label not in seen, (
+    assert not any(cue_label in s for s in seen), (
         f"embedder was handed the cue label {cue_label!r}; this collapses the "
         f"stored vector space and breaks semantic recall."
     )

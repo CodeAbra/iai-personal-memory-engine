@@ -33,7 +33,7 @@ _STRUCTURAL_DECODE_LOCK_GUARD = threading.Lock()
 rebuild_ready: threading.Event = threading.Event()
 
 
-CACHE_VERSION: str = "62-02-v7"
+CACHE_VERSION: str = "62-02-v8"
 
 _STALENESS_WINDOW: int = 10
 
@@ -426,11 +426,11 @@ def _stream_graph_to_child(parent_conn, graph) -> None:
     parent_conn.send(("nodes_end", None))
 
     edge_chunk: list = []
-    for src, dst, weight in sorted(
-        graph.iter_edges_with_weight(),
+    for src, dst, weight, edge_type in sorted(
+        graph.iter_edges_with_weight_and_type(),
         key=lambda e: (e[0].bytes, e[1].bytes),
     ):
-        edge_chunk.append((str(src), str(dst), float(weight)))
+        edge_chunk.append((str(src), str(dst), float(weight), edge_type))
         if len(edge_chunk) >= _STREAM_CHUNK:
             parent_conn.send(("edges", edge_chunk))
             edge_chunk = []
@@ -459,11 +459,11 @@ def _stream_topology_to_child(parent_conn, graph) -> None:
     parent_conn.send(("nodes_end", None))
 
     edge_chunk: list = []
-    for src, dst, weight in sorted(
-        graph.iter_edges_with_weight(),
+    for src, dst, weight, edge_type in sorted(
+        graph.iter_edges_with_weight_and_type(),
         key=lambda e: (e[0].bytes, e[1].bytes),
     ):
-        edge_chunk.append((str(src), str(dst), float(weight)))
+        edge_chunk.append((str(src), str(dst), float(weight), edge_type))
         if len(edge_chunk) >= _STREAM_CHUNK:
             parent_conn.send(("edges", edge_chunk))
             edge_chunk = []

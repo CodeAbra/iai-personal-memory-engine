@@ -176,6 +176,8 @@ def _run_one_row(
     granularity: str = "turn",
     embedder_key: str = "bge-small-en-v1.5",
     run_hybrid: bool = False,
+    warm_lexical: bool = False,
+    embed_date: bool = False,
 ) -> dict[str, Any]:
     t0 = time.time()
 
@@ -203,7 +205,13 @@ def _run_one_row(
             if not user_turns:
                 continue
             doc_text = "\n".join(user_turns)
-            vec = embedder.embed(doc_text)
+            # Date goes into the embedded text only; stored content stays
+            # verbatim — mirrors the capture-path change under evaluation.
+            embed_input = (
+                f"On {sess.date}: {doc_text}"
+                if embed_date and sess.date else doc_text
+            )
+            vec = embedder.embed(embed_input)
             rec = _make_record(
                 content=doc_text,
                 session_id=sess.session_id,
@@ -221,7 +229,11 @@ def _run_one_row(
                 content = str(turn.get("content", "")).strip()
                 if not content:
                     continue
-                vec = embedder.embed(content)
+                embed_input = (
+                    f"On {sess.date}: {content}"
+                    if embed_date and sess.date else content
+                )
+                vec = embedder.embed(embed_input)
                 rec = _make_record(
                     content=content,
                     session_id=sess.session_id,
@@ -247,6 +259,9 @@ def _run_one_row(
             file=sys.stderr,
         )
     t_after_graph = time.time()
+
+    if warm_lexical:
+        store.lexical_search("lexical warm-up", k=1)
 
     cue_embedding = embedder.embed(question)
     resp_x = retrieve_recall(
@@ -422,8 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "corpus-construction granularity. "
             "'session' (default): one record per session, "
-            "content = '\\n'.join(user-only turns) — matches mempalace's "
-            "reference. 'turn': one record per turn (v1/v2 baseline; "
+            "content = '\\n'.join(user-only turns) — the common external "
+            "baseline convention. 'turn': one record per turn (v1/v2 baseline; "
             "use with --dataset raw to reproduce v2's 0.956)."
         ),
     )
@@ -449,14 +464,34 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--warm-lexical",
+        action="store_true",
+        default=False,
+        help=(
+            "build the per-store lexical index after ingest so the "
+            "pipeline prong queries with the BM25 fusion lane live "
+            "(matches a long-lived daemon after its nightly warm-up; "
+            "cold stores keep the lane silent)"
+        ),
+    )
+    parser.add_argument(
+        "--embed-date",
+        action="store_true",
+        default=False,
+        help=(
+            "prefix the session date into the embedded text only; stored "
+            "content stays verbatim (evaluates the capture-path change)"
+        ),
+    )
+    parser.add_argument(
         "--embedder",
         choices=["bge-small-en-v1.5", "all-MiniLM-L6-v2"],
         default="bge-small-en-v1.5",
         help=(
             "embedder model_key. 'bge-small-en-v1.5' (default "
             "baseline) routes via the production English-only embedder. "
-            "'all-MiniLM-L6-v2' (ablation) is mempalace's "
-            "ChromaDB default — bench-only swap, production unchanged."
+            "'all-MiniLM-L6-v2' (ablation) is a common external-baseline "
+            "default — bench-only swap, production unchanged."
         ),
     )
     parser.add_argument(
@@ -692,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
                 granularity=args.granularity,
                 embedder_key=args.embedder,
                 run_hybrid=run_hybrid,
+                warm_lexical=args.warm_lexical,
+                embed_date=args.embed_date,
             )
             per_row.append(res)
             r5_x_values.append(res["r_at_5_retrieve"])

@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import random
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -78,6 +79,37 @@ W_AAAK = 0.3
 W_DEGREE = 0.1
 W_AGE = 0.05
 
+W_SPREAD_ACT = 0.0
+"""Activation transfer: a graph-reached candidate inherits a decayed
+fraction of its originating seed's cue-cosine. MUST stay 0.0 in prod:
+cross-bench gates fail at every measured weight — an all-edges transfer
+floods turn-granularity corpora with seed near-neighbours, and an
+entity-gated transfer promotes shared-token distractors over evidence.
+Do not enable (IAI_MCP_W_SPREAD_ACT) without fresh cross-bench proof."""
+
+SPREAD_ACT_DECAY = 0.6
+"""Per-hop attenuation of the transferred activation."""
+
+TEMPORAL_MATCH_BOOST = 1.15
+"""Rank multiplier for records whose creation date matches an explicit
+date mention in the cue. Fires ONLY when the cue names a date (ISO or an
+unambiguous month form) — non-temporal recall is byte-identical. This is
+where temporal binding lives: encoding the date into the stored vector
+inflates same-day unrelated-pair cosine past the similarity floors."""
+
+
+def _env_weight(name: str, default: float) -> float:
+    # Bench-only override tier, same convention as the mechanism
+    # kill-switches: lets a measurement isolate one ranking term without a
+    # rebuild. Absent env means the shipped constant.
+    raw = os.environ.get(name, "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return default
+
 TIER_KNOWLEDGE_BOOST_DEFAULT = 1.05
 """Bounded soft multiplier for knowledge-grade sources at final rank — a
 nudge past equal-scored raw turns, never a filter; 1.0 disables. Both
@@ -90,12 +122,48 @@ keep outranking condensations."""
 LEX_FUSION_W = 0.35
 """Additive rank-fusion weight for the warm lexical lane: the top BM25 hit
 gains this much, decaying by 1/(1+rank). Comparable to W_AAAK — a signal,
-never a takeover."""
+never a takeover. `IAI_MCP_LEX_FUSION_W` overrides."""
+
+
+def _lex_fusion_w() -> float:
+    raw = os.environ.get("IAI_MCP_LEX_FUSION_W", "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return LEX_FUSION_W
 
 LEX_FUSION_K = 32
 LEX_FUSION_MIN_IDF = 4.0
 """Fusion fires only when the cue carries at least one genuinely rare
 in-corpus token — common-word cues have no lexical signal worth fusing."""
+
+_IDENTIFIER_CUE_RE = re.compile(
+    r'"[^"]{4,}"'                              # quoted exact phrase
+    r"|\b(?=\w*[A-Za-z])(?=\w*\d)\w+\b"        # letter+digit mix
+    r"|\b\w+_\w+\b"                            # snake_case
+    r"|\b[a-z]+[A-Z]\w*\b"                     # camelCase
+    r"|\b[A-Z]{5,}\b"                          # long ALL-CAPS name
+    r"|\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b"    # dotted.path (letter-led)
+    r"|\b[A-Za-z_]\w*/[A-Za-z_]\w\S*"          # path-like
+)
+
+# Mid-cue capitalized token (not sentence-initial): a proper-name signal.
+_PROPER_NAME_CUE_RE = re.compile(r"(?<=[a-z0-9,;] )[A-Z][a-z]{2,}\b")
+
+
+def _cue_identifier_grade(cue: str) -> bool:
+    """Whether the cue carries an identifier-shaped token (code name, env
+    var, path, quoted phrase). The lexical lane is trustworthy exactly
+    there; on natural prose, literal-token evidence is anti-correlated
+    with the right answer on paraphrase-style cues (measured -1pp), so
+    the lane must stay silent for prose no matter how rare the words."""
+    if _IDENTIFIER_CUE_RE.search(cue):
+        return True
+    if os.environ.get("IAI_MCP_LEX_PROPER") == "true":
+        return bool(_PROPER_NAME_CUE_RE.search(cue))
+    return False
 
 AGE_HALF_LIFE_DAYS = 30.0
 
@@ -132,7 +200,9 @@ def _build_contradicts_dst_set(
 
 
 def _gate_bias_for_mode(mode: str) -> float:
-    return COMMUNITY_BIAS_CONCEPT if mode == "concept" else COMMUNITY_BIAS_VERBATIM
+    if mode == "concept":
+        return _env_weight("IAI_MCP_COMMUNITY_BIAS", COMMUNITY_BIAS_CONCEPT)
+    return COMMUNITY_BIAS_VERBATIM
 
 
 @dataclass
@@ -836,28 +906,6 @@ def _recall_core(
             if rec.literal_surface and cue_lower in rec.literal_surface.lower():
                 fts_hits.add(rid)
 
-    # Warm BM25 lane: rank map for fusion + extra seed anchors. Answers only
-    # from an already-built, generation-current index — a cold index yields
-    # nothing here and warms in the background instead.
-    lex_rank: dict[UUID, int] = {}
-    if cue and os.environ.get("IAI_MCP_LEX_FUSION_OFF") != "true":
-        try:
-            _min_idf = float(
-                os.environ.get("IAI_MCP_LEX_MIN_IDF", "") or LEX_FUSION_MIN_IDF
-            )
-        except ValueError:
-            _min_idf = LEX_FUSION_MIN_IDF
-        try:
-            for _lrank, (_lrid, _lscore) in enumerate(
-                store.lexical_query_warm(cue, k=LEX_FUSION_K, min_idf=_min_idf)
-            ):
-                try:
-                    lex_rank[UUID(str(_lrid))] = _lrank
-                except (TypeError, ValueError):
-                    continue
-        except Exception as exc:  # noqa: BLE001 -- the lexical lane is a bonus, never a dependency
-            logger.debug("lexical fusion lane skipped: %s", exc)
-
     _pool_t0 = time.perf_counter()
     pool_ids, pool_embs = _collect_graph_pool(graph, records_cache, store)
     _recall_pool_collection_ms = (time.perf_counter() - _pool_t0) * 1000.0
@@ -883,6 +931,33 @@ def _recall_core(
     hit_count_above_threshold = int(
         (shared_cos >= _CONF_HIGH_COSINE_THRESHOLD).sum()
     ) if shared_cos.size else 0
+
+    # Warm BM25 lane: rank map for the fusion bonus + candidate inclusion.
+    # Fires only for identifier-grade cues — the lane's designed competence.
+    # Answers only from an already-built, generation-current index — a cold
+    # index yields nothing here and warms in the background instead.
+    lex_rank: dict[UUID, int] = {}
+    if (
+        cue
+        and os.environ.get("IAI_MCP_LEX_FUSION_OFF") != "true"
+        and _cue_identifier_grade(cue)
+    ):
+        try:
+            _min_idf = float(
+                os.environ.get("IAI_MCP_LEX_MIN_IDF", "") or LEX_FUSION_MIN_IDF
+            )
+        except ValueError:
+            _min_idf = LEX_FUSION_MIN_IDF
+        try:
+            for _lrank, (_lrid, _lscore) in enumerate(
+                store.lexical_query_warm(cue, k=LEX_FUSION_K, min_idf=_min_idf)
+            ):
+                try:
+                    lex_rank[UUID(str(_lrid))] = _lrank
+                except (TypeError, ValueError):
+                    continue
+        except Exception as exc:  # noqa: BLE001 -- the lexical lane is a bonus, never a dependency
+            logger.debug("lexical fusion lane skipped: %s", exc)
     # Bench-only kill-switch: allows a strict baseline measurement to be taken
     # against the shipped mechanism-on default. The env-var ON-value is "true"
     # by convention for these toggles; the older IAI_MCP_EXACT_AUTHORITY_OFF
@@ -1050,11 +1125,10 @@ def _recall_core(
         compute_spread_depth(top_cosine, hit_count_above_threshold) > 0
         and os.environ.get("IAI_MCP_MULTI_SEED_OFF") != "true"
     ):
-        _lex_seed_ids = sorted(lex_rank, key=lex_rank.get)
-        if fts_hits or _lex_seed_ids:
+        if fts_hits:
             _fts_seed_ids = [
                 rid
-                for rid in list(fts_hits) + _lex_seed_ids
+                for rid in fts_hits
                 if rid in id_to_idx and rid not in seed_ids
             ]
             remaining = max(0, MULTI_SEED_CAP - len(seed_ids))
@@ -1062,7 +1136,12 @@ def _recall_core(
         if trace_mark is not None:
             trace_mark("multi_seed")
 
-    spread_ids = graph.two_hop_neighborhood(seed_ids, top_k=5) if spread_hops > 0 else []
+    spread_provenance: "dict[UUID, tuple[UUID, int, bool]]" = (
+        graph.two_hop_neighborhood_with_provenance(seed_ids, top_k=5)
+        if spread_hops > 0
+        else {}
+    )
+    spread_ids = sorted(spread_provenance, key=str)
     spread_indices = np.array(
         [id_to_idx[r] for r in spread_ids if r in id_to_idx],
         dtype=np.int64,
@@ -1080,10 +1159,31 @@ def _recall_core(
             rich_indices = rich_indices[
                 shared_cos[rich_indices] >= _arousal_rank_threshold_used
             ]
-    if cosine_top_indices.size or spread_indices.size or rich_indices.size:
+    # Warm-lexical hits join as scored CANDIDATES only — never as spread
+    # seeds: seeding them dilutes the shared two-hop quota and starves the
+    # dense seeds' structural neighborhoods (measured -1pp on natural
+    # questions). Inclusion, not steering — mirror of the exact-authority
+    # contract.
+    lex_indices = (
+        np.array(
+            [id_to_idx[r] for r in lex_rank if r in id_to_idx],
+            dtype=np.int64,
+        )
+        if lex_rank
+        else np.empty(0, dtype=np.int64)
+    )
+    if (
+        cosine_top_indices.size
+        or spread_indices.size
+        or rich_indices.size
+        or lex_indices.size
+    ):
         reachable_indices = np.union1d(
-            np.union1d(cosine_top_indices, spread_indices),
-            rich_indices,
+            np.union1d(
+                np.union1d(cosine_top_indices, spread_indices),
+                rich_indices,
+            ),
+            lex_indices,
         ).astype(np.int64)
     else:
         reachable_indices = np.empty(0, dtype=np.int64)
@@ -1125,7 +1225,7 @@ def _recall_core(
             logger.debug("literal_preservation_parse_failed: %s", exc)
             lp_value = "medium"
     lp_scale = LITERAL_PRESERVATION_W_DEGREE_SCALE[lp_value]
-    effective_w_degree = W_DEGREE * lp_scale
+    effective_w_degree = _env_weight("IAI_MCP_W_DEGREE", W_DEGREE) * lp_scale
     if mode == "verbatim":
         effective_w_degree = 0.0
 
@@ -1133,13 +1233,25 @@ def _recall_core(
         from iai_mcp import tem
         cue_structure_hv = tem.pack_pairs([("TOPIC", tem.filler_hv(cue))])
 
-    max_deg = float(getattr(graph, "_max_degree", 0) or 0)
-    log_max_deg = log(1.0 + max_deg) if max_deg > 0 else 0.0
     _global_deg_override: "dict[str, int] | None" = getattr(graph, "_global_degree", None)
     if _global_deg_override:
         degree = _global_deg_override
+        max_deg = float(getattr(graph, "_max_degree", 0) or 0)
     else:
-        degree = {str(nid): deg for nid, deg in graph.degrees()}
+        # Ranking degree counts EARNED edges only: similarity links inferred
+        # at insert and entity anchors minted at sleep must not inflate hub
+        # rank — on look-alike corpora the inferred clique otherwise
+        # outranks the true target on degree alone. Every other edge type
+        # (hebbian, contradicts, schema, temporal) is earned by use or by
+        # consolidation and keeps its degree weight.
+        degree = {
+            str(nid): deg
+            for nid, deg in graph.degrees(
+                exclude_types=graph.RANKING_DEGREE_EXCLUDED
+            )
+        }
+        max_deg = float(max(degree.values(), default=0))
+    log_max_deg = log(1.0 + max_deg) if max_deg > 0 else 0.0
 
     mode_bias = _gate_bias_for_mode(mode)
     mode_bias = mode_bias + _arousal_mode_bias_adjust
@@ -1166,6 +1278,13 @@ def _recall_core(
 
     scored: list[tuple[float, UUID, float, float, float, float, float, float]] = []
     tier_boost = _tier_knowledge_boost()
+    w_spread_act = _env_weight("IAI_MCP_W_SPREAD_ACT", W_SPREAD_ACT)
+    spread_act_decay = _env_weight("IAI_MCP_SPREAD_ACT_DECAY", SPREAD_ACT_DECAY)
+    temporal_boost = _env_weight("IAI_MCP_TEMPORAL_BOOST", TEMPORAL_MATCH_BOOST)
+    date_mentions: list = []
+    if cue and temporal_boost != 1.0:
+        from iai_mcp.temporal_cue import parse_date_mentions
+        date_mentions = parse_date_mentions(cue)
     if reachable_indices.size:
         from iai_mcp.hebbian_structure import structural_similarity
         from iai_mcp.lilli.ops.cleanup import _cleanup_if_confident
@@ -1189,6 +1308,18 @@ def _recall_core(
                 + effective_w_degree * deg_norm
                 - W_AGE * age
             )
+            if w_spread_act > 0.0:
+                _prov = spread_provenance.get(cid)
+                # Transfer rides ONLY a fully transfer-carrying path (entity
+                # anchors); the similarity/hebbian mesh must not carry it.
+                if _prov is not None and _prov[2]:
+                    _seed_idx = id_to_idx.get(_prov[0])
+                    if _seed_idx is not None:
+                        base_s += (
+                            w_spread_act
+                            * float(shared_cos[int(_seed_idx)])
+                            * (spread_act_decay ** _prov[1])
+                        )
             cand_community = community_id_by_member.get(cid)
             if cand_community is not None and max_community_score > 0.0:
                 graded_weight = max(
@@ -1243,7 +1374,7 @@ def _recall_core(
             if fts_hits and cid in fts_hits:
                 s *= 3.0
             if lex_rank and cid in lex_rank:
-                s += LEX_FUSION_W / (1.0 + lex_rank[cid])
+                s += _lex_fusion_w() / (1.0 + lex_rank[cid])
             if (
                 tier_boost != 1.0
                 and mode != "verbatim"
@@ -1254,6 +1385,10 @@ def _recall_core(
                 )
             ):
                 s *= tier_boost
+            if date_mentions:
+                from iai_mcp.temporal_cue import matches_mentions
+                if matches_mentions(rec.created_at, date_mentions):
+                    s *= temporal_boost
             if cue_intent == "historical_verbatim" and contradicts_dst_set:
                 if str(cid) in contradicts_dst_set:
                     corrector_base_score[str(cid)] = s
@@ -1584,6 +1719,7 @@ def recall_for_response(
     from iai_mcp.cue_router import _classify_cue
     from iai_mcp.retrieve import (
         apply_stale_downweight,
+        apply_supersede_cap,
         build_temporal_validity_maps,
         derive_temporal_validity,
     )
@@ -1617,6 +1753,7 @@ def recall_for_response(
     )
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
+    apply_supersede_cap(core.scored_hits, _tv_outgoing, cue_intent=_cue_intent)
     core.scored_hits.sort(key=lambda h: h.score, reverse=True)
 
     if (
@@ -1878,10 +2015,15 @@ def recall_for_benchmark(
     knobs_applied: dict | None = None,
 ) -> RecallResponse:
     from iai_mcp.cue_router import _classify_cue
-    from iai_mcp.retrieve import build_temporal_validity_maps
+    from iai_mcp.retrieve import (
+        apply_stale_downweight,
+        apply_supersede_cap,
+        build_temporal_validity_maps,
+        derive_temporal_validity,
+    )
     _cue_mode_unused, _cue_intent, _cue_label_unused = _classify_cue(cue)
     _tv_maps = build_temporal_validity_maps(store)
-    _tv_outgoing, _tv_ts_unused = (_tv_maps if _tv_maps is not None else ({}, {}))
+    _tv_outgoing, _tv_ts = (_tv_maps if _tv_maps is not None else ({}, {}))
 
     core = _recall_core(
         store=store, graph=graph, assignment=assignment, rich_club=rich_club,
@@ -1904,6 +2046,20 @@ def recall_for_benchmark(
             cue_mode=core.cue_mode,
             patterns_observed=core.patterns_observed,
         )
+
+    # Parity with the production recall path: superseded hits carry a past
+    # valid_to and are downweighted BEFORE truncation, so the benchmark
+    # measures the ordering production actually serves.
+    derive_temporal_validity(
+        store, core.scored_hits, outgoing=_tv_outgoing, ts_by_id=_tv_ts,
+    )
+    derive_temporal_validity(
+        store, core.anti_hits, outgoing=_tv_outgoing, ts_by_id=_tv_ts,
+    )
+    apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
+    apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
+    apply_supersede_cap(core.scored_hits, _tv_outgoing, cue_intent=_cue_intent)
+    core.scored_hits.sort(key=lambda h: h.score, reverse=True)
 
     hits = core.scored_hits[:k_hits]
     budget_used = sum(len(h.literal_surface) // 4 for h in hits)

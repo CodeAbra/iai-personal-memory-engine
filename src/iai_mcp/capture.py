@@ -106,6 +106,43 @@ MIN_CAPTURE_LEN = 12
 MAX_CAPTURE_LEN = 8000
 
 
+_EMBED_DATE_ALPHA_DEFAULT = 0.15
+
+
+def _embed_date_alpha() -> float:
+    try:
+        raw = float(
+            os.environ.get("IAI_MCP_EMBED_DATE_ALPHA", _EMBED_DATE_ALPHA_DEFAULT)
+        )
+    except (TypeError, ValueError):
+        return _EMBED_DATE_ALPHA_DEFAULT
+    return min(1.0, max(0.0, raw))
+
+
+def _blend_date_component(embedder, text: str, now, *, alpha: float) -> list:
+    """normalize(v_text + alpha * perp(v_date, v_text)): the capture date
+    contributes a bounded direction ORTHOGONAL to the text, so temporal
+    cues bind while the text's own alignment is untouched. The projection
+    matters: the encoder's space is anisotropic (arbitrary sentence pairs
+    already share a high baseline cosine), so a raw date vector acts as a
+    hub that inflates same-day unrelated pairs past similarity floors."""
+    v_text = list(embedder.embed(text))
+    if alpha <= 0.0:
+        return v_text
+    v_date = list(embedder.embed(f"On {now.strftime('%-d %B %Y')}."))
+    t_norm = sum(x * x for x in v_text) ** 0.5
+    if t_norm <= 0.0:
+        return v_text
+    t_hat = [x / t_norm for x in v_text]
+    dot = sum(t * d for t, d in zip(t_hat, v_date))
+    perp = [d - dot * t for t, d in zip(t_hat, v_date)]
+    blended = [t + alpha * p for t, p in zip(v_text, perp)]
+    norm = sum(x * x for x in blended) ** 0.5
+    if norm <= 0.0:
+        return v_text
+    return [x / norm for x in blended]
+
+
 def _dedup_cos_threshold() -> float:
     """Operator-tunable near-duplicate floor for the capture-time cosine gate."""
     raw = os.environ.get("IAI_MCP_DEDUP_COS_THRESHOLD")
@@ -381,7 +418,28 @@ def capture_turn(
         # stored vector space and broke semantic recall. text is already
         # validated non-empty above (the MIN_CAPTURE_LEN guard), so embedding
         # text is safe for every caller.
-        emb = embedder_for_store(store).embed(text)
+        #
+        # The capture date goes into the VECTOR only — the stored surface
+        # stays verbatim. Both modes MUST stay opt-in: same-day binding at
+        # the embedding layer NECESSARILY raises same-day unrelated-pair
+        # cosine, and the similarity floors leave ~0.03 headroom on natural
+        # short turns — any strength that binds also breaches a floor.
+        # Temporal binding belongs in the rank layer (date-mention cues
+        # matched against created_at), not in the vector.
+        #   "true"  — literal shared prefix (+~0.18 same-day inflation).
+        #   "blend" — normalize(v_text + alpha*perp(v_date, v_text));
+        #             +~0.07 inflation at alpha=0.15, still a floor breach;
+        #             a floor-safe alpha no longer binds.
+        _embedder = embedder_for_store(store)
+        _date_mode = os.environ.get("IAI_MCP_EMBED_DATE", "")
+        if _date_mode == "true":
+            emb = _embedder.embed(f"On {now.strftime('%-d %B %Y')}: {text}")
+        elif _date_mode == "blend":
+            emb = _blend_date_component(
+                _embedder, text, now, alpha=_embed_date_alpha(),
+            )
+        else:
+            emb = _embedder.embed(text)
     except Exception as exc:
         write_event(
             store,
@@ -788,6 +846,31 @@ def _parse_transcript_line(
         obj = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return None
+    if obj.get("type") == "response_item":
+        # Codex rollout transcript: user messages also appear as event_msg
+        # records, so ONLY response_item is consumed — anything else would
+        # double-capture every user turn.
+        payload = obj.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "message":
+            return None
+        role = payload.get("role", "")
+        if role not in {"user", "assistant"}:
+            return None
+        content = payload.get("content", [])
+        if isinstance(content, list):
+            parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and isinstance(b.get("text"), str)
+            ]
+            text = "\n".join(p for p in parts if p).strip()
+        else:
+            text = str(content or "").strip()
+        if not text or text.lstrip().startswith("<environment_context>"):
+            return None
+        if _is_noise(text):
+            return None
+        return role, text, payload.get("id") or obj.get("uuid"), obj.get("timestamp")
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
     role = obj.get("type") or msg.get("role", "")
     if role not in {"user", "assistant"}:
@@ -1693,7 +1776,7 @@ _PERMANENT_FAILED_NAMED_RE = re.compile(r"^(.+)\.permanent-failed-([^.]+)\.jsonl
 
 def _count_lines(fpath: Path) -> int:
     try:
-        with fpath.open(encoding="utf-8", errors="replace") as fh:
+        with fpath.open() as fh:
             return sum(1 for ln in fh if ln.strip())
     except OSError:
         return 0
@@ -1758,7 +1841,7 @@ def drain_permanent_failed_files(
         file_dropped = 0
 
         try:
-            with fpath.open(encoding="utf-8", errors="replace") as fh:
+            with fpath.open() as fh:
                 lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
 
             if not lines:

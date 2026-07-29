@@ -198,7 +198,7 @@ def test_warm_lexical_lane_surfaces_vocab_gap_target(tmp_path, monkeypatch):
     _fillers, target = _seed_vocab_gap_world(store, monkeypatch)
 
     store.lexical_search("warm the lane", k=1)
-    resp = _dispatch(store, "zephyrblatt config", _unit(0))
+    resp = _dispatch(store, "zephyrblatt_rotor config", _unit(0))
     assert resp["hits"][0]["record_id"] == str(target.id), (
         "the vocabulary-gap target must surface first via BM25 fusion: "
         f"{[h['record_id'] for h in resp['hits']]}"
@@ -212,7 +212,7 @@ def test_lex_fusion_kill_switch(tmp_path, monkeypatch):
     _fillers, target = _seed_vocab_gap_world(store, monkeypatch)
 
     store.lexical_search("warm the lane", k=1)
-    resp = _dispatch(store, "zephyrblatt config", _unit(0))
+    resp = _dispatch(store, "zephyrblatt_rotor config", _unit(0))
     assert resp["hits"][0]["record_id"] != str(target.id), (
         "with fusion off the zero-cosine target must not lead"
     )
@@ -232,7 +232,7 @@ def test_recall_never_builds_the_lexical_index(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_li.LexicalIndex, "build", _forbidden_build)
 
-    resp = _dispatch(store, "zephyrblatt config", _unit(0))
+    resp = _dispatch(store, "zephyrblatt_rotor config", _unit(0))
     assert resp["hits"], "cold lexical lane must not break recall"
 
 

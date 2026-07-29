@@ -264,3 +264,27 @@ def test_clear_and_rebuild_empty_yields_empty_graph() -> None:
     g.clear_and_rebuild([], [])
     assert g.node_count() == 0
     assert g.centrality() == {}
+
+
+def test_degrees_filtered_by_edge_type() -> None:
+    g = MemoryGraph()
+    hub, a, b, c = uuid4(), uuid4(), uuid4(), uuid4()
+    for nid in (hub, a, b, c):
+        g.add_node(nid, community_id=None, embedding=[0.0] * 384)
+    g.add_edge(hub, a, weight=0.9, edge_type="hebbian")
+    g.add_edge(hub, b, weight=0.7, edge_type="pattern_separation_seed")
+    g.add_edge(hub, c, weight=0.8, edge_type="pattern_separation_seed")
+
+    all_deg = dict(g.degrees())
+    assert all_deg[hub] == 3
+
+    only_hebb = dict(g.degrees(edge_types=frozenset({"hebbian"})))
+    assert only_hebb[hub] == 1
+    assert only_hebb[b] == 0
+
+    earned = dict(
+        g.degrees(exclude_types=frozenset({"pattern_separation_seed"}))
+    )
+    assert earned[hub] == 1
+    assert earned[a] == 1
+    assert earned[b] == 0

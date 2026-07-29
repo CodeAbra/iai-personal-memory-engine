@@ -119,12 +119,14 @@ def _worker_entry(conn) -> None:
             elif kind == "nodes_end":
                 continue
             elif kind == "edges":
-                for src_str, dst_str, weight in payload:
+                for edge_row in payload:
+                    src_str, dst_str, weight = edge_row[0], edge_row[1], edge_row[2]
+                    edge_type = edge_row[3] if len(edge_row) > 3 else "hebbian"
                     edges_buf.append((
                         UUID(src_str),
                         UUID(dst_str),
                         float(weight),
-                        "hebbian",
+                        str(edge_type or "hebbian"),
                     ))
             elif kind == "edges_end":
                 break
@@ -141,7 +143,12 @@ def _worker_entry(conn) -> None:
         # that exact pass is what stalled this child at scale.
         worker_centrality = centrality_for_runtime(graph)
         rc = rich_club_nodes(graph, centrality=worker_centrality)
-        _degree_pairs = list(graph.degrees())
+        # Ranking degree counts EARNED edges only — same exclusion as the
+        # cold recall path: inferred links (similarity seeds, entity
+        # anchors) must not inflate hub rank on look-alike corpora.
+        _degree_pairs = list(graph.degrees(
+            exclude_types=graph.RANKING_DEGREE_EXCLUDED
+        ))
         max_degree = max((d for _, d in _degree_pairs), default=0)
         # Build per-node degree map as a byproduct of the same pass — emitted
         # alongside max_degree so the parent can populate ranking degree from
@@ -346,12 +353,14 @@ def _community_only_worker_entry(conn) -> None:
             elif kind == "nodes_end":
                 continue
             elif kind == "edges":
-                for src_str, dst_str, weight in payload:
+                for edge_row in payload:
+                    src_str, dst_str, weight = edge_row[0], edge_row[1], edge_row[2]
+                    edge_type = edge_row[3] if len(edge_row) > 3 else "hebbian"
                     edges_buf.append((
                         UUID(src_str),
                         UUID(dst_str),
                         float(weight),
-                        "hebbian",
+                        str(edge_type or "hebbian"),
                     ))
             elif kind == "edges_end":
                 break

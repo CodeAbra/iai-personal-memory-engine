@@ -540,10 +540,10 @@ def iter_study_files(root: "str | Path", *, max_files: "int | None" = None) -> "
     walk never enumerates files under .git/node_modules."""
     import os as _os
 
-    from iai_mcp.ingest._parsers import PLAINTEXT_SUFFIXES
+    from iai_mcp.ingest._parsers import SUPPORTED_SUFFIXES
 
     root = Path(root).expanduser().resolve()
-    allowed = set(PLAINTEXT_SUFFIXES) | {".csv", ".pdf"}
+    allowed = set(SUPPORTED_SUFFIXES)
     if max_files is None:
         try:
             max_files = int(_os.environ.get(STUDY_DIR_MAX_FILES_ENV, "500"))

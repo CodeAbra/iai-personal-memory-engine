@@ -147,8 +147,8 @@ def _fetch_active_ids(conn: Any) -> set[str]:
 def iter_edges_chunks(
     conn: Any,
     chunk_size: int = DEFAULT_EDGES_CHUNK_SIZE,
-) -> Iterator[list[tuple[str, str, float]]]:
-    """Yield lists of `(src_str, dst_str, weight_float)` of length <= chunk_size.
+) -> Iterator[list[tuple[str, str, float, str]]]:
+    """Yield `(src_str, dst_str, weight_float, edge_type)` lists <= chunk_size.
 
     Edges whose src or dst is not in the active-records set (tombstoned or
     embedding-pending) are dropped at the Python layer.  Active ids are
@@ -168,8 +168,8 @@ def iter_edges_chunks(
       the tuple-comparison syntax that the engine's SQL parser does not
       support.
 
-    The `edge_type` is consumed for cursor advancement but not yielded — the
-    worker hardcodes `"hebbian"` to match the in-process build's edge type.
+    The `edge_type` travels with each edge so the worker's ranking-degree
+    map can count earned edges only, matching the cold recall path.
     """
     active_ids = _fetch_active_ids(conn)
 
@@ -181,12 +181,15 @@ def iter_edges_chunks(
         # the graph-rebuild consumer.
         sql = "SELECT src, dst, edge_type, weight FROM edges"
         all_rows = conn.execute(sql).fetchall()
-        chunk: list[tuple[str, str, float]] = []
+        chunk: list[tuple[str, str, float, str]] = []
         for row in all_rows:
             row_src = str(row["src"])
             row_dst = str(row["dst"])
             if row_src in active_ids and row_dst in active_ids:
-                chunk.append((row_src, row_dst, float(row["weight"])))
+                chunk.append((
+                    row_src, row_dst, float(row["weight"]),
+                    str(row["edge_type"]),
+                ))
                 if len(chunk) >= chunk_size:
                     yield chunk
                     chunk = []
@@ -218,7 +221,7 @@ def iter_edges_chunks(
             dst = row_dst
             edge_type = row_et
             if row_src in active_ids and row_dst in active_ids:
-                chunk.append((row_src, row_dst, float(row["weight"])))
+                chunk.append((row_src, row_dst, float(row["weight"]), row_et))
         if chunk:
             yield chunk
         if len(rows) < chunk_size:

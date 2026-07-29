@@ -49,6 +49,7 @@ class SleepStep(Enum):
     DMN_REFLECTION = 11
     CLUSTER_SUMMARY = 12
     RECALL_INDEX_REBUILD = 13
+    ENTITY_LINK = 14
 
 
 class SleepPhase(Enum):
@@ -71,6 +72,7 @@ STEP_PHASE: dict[SleepStep, SleepPhase] = {
     SleepStep.CRISIS_RECLUSTER: SleepPhase.REM,
     SleepStep.CLUSTER_SUMMARY: SleepPhase.REM,
     SleepStep.RECALL_INDEX_REBUILD: SleepPhase.REM,
+    SleepStep.ENTITY_LINK: SleepPhase.REM,
 }
 
 
@@ -391,6 +393,7 @@ class SleepPipeline:
             SleepStep.CRISIS_RECLUSTER: self._step_crisis_recluster,
             SleepStep.CLUSTER_SUMMARY: self._step_cluster_summary,
             SleepStep.RECALL_INDEX_REBUILD: self._step_recall_index_rebuild,
+            SleepStep.ENTITY_LINK: self._step_entity_link,
         }
 
 
@@ -408,6 +411,11 @@ class SleepPipeline:
         SleepStep.CRISIS_RECLUSTER,
         SleepStep.CLUSTER_SUMMARY,
         SleepStep.RECALL_INDEX_REBUILD,
+        # Appended at the TAIL: WAL recovery persists step POSITIONS, so
+        # every pre-existing step keeps its index and in-flight cycles from
+        # an older binary resume correctly. Entity edges land at cycle end;
+        # the next graph build reads them from the edges table.
+        SleepStep.ENTITY_LINK,
     )
 
     # Steps whose bodies materialize large transients (clustering / columnar
@@ -619,7 +627,7 @@ class SleepPipeline:
 from iai_mcp.lilli.cycle.sleep_pipeline import (  # noqa: E402
     _schema_mine, _knob_tune, _dream_decay, _erasure, _optimize, _compact,
     _cluster_replay, _reconsolidation, _user_model, _dmn, _crisis,
-    _cluster_summary, _recall_index, _essential_variable,
+    _cluster_summary, _recall_index, _essential_variable, _entity_link,
 )
 
 SleepPipeline._step_schema_mine = _schema_mine.step_schema_mine
@@ -637,6 +645,7 @@ SleepPipeline._step_dmn_reflection = _dmn.step_dmn_reflection
 SleepPipeline._step_crisis_recluster = _crisis.step_crisis_recluster
 SleepPipeline._step_cluster_summary = _cluster_summary.step_cluster_summary
 SleepPipeline._step_recall_index_rebuild = _recall_index.step_recall_index_rebuild
+SleepPipeline._step_entity_link = _entity_link.step_entity_link
 SleepPipeline._run_essential_variable_tracker_hook = _essential_variable.run_essential_variable_tracker_hook
 SleepPipeline._clear_crisis_mode_via_s2_or_fallback = _essential_variable.clear_crisis_mode_via_s2_or_fallback
 SleepPipeline._set_crisis_mode_via_s2_or_fallback = _essential_variable.set_crisis_mode_via_s2_or_fallback

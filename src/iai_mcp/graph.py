@@ -182,14 +182,35 @@ class MemoryGraph:
             self._dirty_since_centrality = False
         return result
 
+    TRANSFER_EDGE_TYPES: frozenset = frozenset({"entity_shared"})
+    """Edge types that carry activation transfer at rank. Entity anchors are
+    the designed associative bridge; letting the dense similarity/hebbian
+    mesh carry transfer floods rank with near-neighbours of the seeds and
+    displaces true evidence (measured on turn-granularity corpora)."""
+
     def two_hop_neighborhood(
         self, seeds: list[UUID], top_k: int = 5
     ) -> list[UUID]:
+        return sorted(
+            self.two_hop_neighborhood_with_provenance(seeds, top_k), key=str
+        )
+
+    def two_hop_neighborhood_with_provenance(
+        self, seeds: list[UUID], top_k: int = 5
+    ) -> "dict[UUID, tuple[UUID, int, bool]]":
+        """Same traversal as two_hop_neighborhood, additionally mapping each
+        reached node to (originating seed, hop depth, transfer-carrying path).
+        A path carries transfer only when EVERY hop is a TRANSFER_EDGE_TYPES
+        edge. First discoverer in the deterministic sweep wins the
+        attribution — the reached SET must stay byte-identical to the plain
+        variant."""
         visited: set[str] = {str(s) for s in seeds}
         frontier: set[str] = {str(s) for s in seeds if str(s) in self._adj}
-        collected: set[str] = set()
+        origin: dict[str, str] = {str(s): str(s) for s in seeds}
+        carries: dict[str, bool] = {str(s): True for s in seeds}
+        collected: dict[str, tuple[str, int, bool]] = {}
 
-        for _ in range(2):
+        for hop in (1, 2):
             next_frontier: set[str] = set()
             # Deterministic frontier order: which neighbours win the top_k cut and
             # the visited race depends on processing order, so a hash-randomized
@@ -199,22 +220,31 @@ class MemoryGraph:
                 if node not in self._adj:
                     continue
                 neighbours = [
-                    (n, float(attrs.get("weight", 1.0)))
+                    (n, float(attrs.get("weight", 1.0)), attrs)
                     for n, attrs in self._adj[node].items()
                 ]
                 # Weight descending, then node id ascending, so weight ties break
                 # reproducibly rather than by dict insertion order.
                 neighbours.sort(key=lambda x: (-x[1], x[0]))
-                for n, _ in neighbours[:top_k]:
+                for n, _, attrs in neighbours[:top_k]:
                     if n not in visited:
                         next_frontier.add(n)
-                        collected.add(n)
+                        hop_carries = (
+                            carries[node]
+                            and attrs.get("edge_type") in self.TRANSFER_EDGE_TYPES
+                        )
+                        collected[n] = (origin[node], hop, hop_carries)
+                        origin[n] = origin[node]
+                        carries[n] = hop_carries
                         visited.add(n)
             frontier = next_frontier
             if not frontier:
                 break
 
-        return [UUID(n) for n in sorted(collected)]
+        return {
+            UUID(n): (UUID(seed), hop, ok)
+            for n, (seed, hop, ok) in collected.items()
+        }
 
     def rich_club_coefficient(self, k_threshold: int | None = None) -> float:
         edges_no_selfloop: list[tuple[UUID, UUID]] = [
@@ -250,6 +280,13 @@ class MemoryGraph:
     def nodes(self) -> Iterator[UUID]:
         return self.iter_nodes()
 
+    # Edge types INFERRED at insert/consolidation rather than earned by
+    # use: they widen spread reach but must not manufacture ranking hubs.
+    RANKING_DEGREE_EXCLUDED: "frozenset[str]" = frozenset({
+        "pattern_separation_seed",
+        "entity_shared",
+    })
+
     def iter_edges_with_weight(
         self,
     ) -> Iterator[tuple[UUID, UUID, float]]:
@@ -262,9 +299,40 @@ class MemoryGraph:
                         weight = 1.0
                     yield UUID(u_label), UUID(v_label), weight
 
-    def degrees(self) -> Iterator[tuple[UUID, int]]:
+    def iter_edges_with_weight_and_type(
+        self,
+    ) -> Iterator[tuple[UUID, UUID, float, str]]:
+        for u_label, neighbors in self._adj.items():
+            for v_label, attrs in neighbors.items():
+                if u_label <= v_label:
+                    try:
+                        weight = float(attrs.get("weight", 1.0))
+                    except (TypeError, ValueError):
+                        weight = 1.0
+                    yield (
+                        UUID(u_label), UUID(v_label), weight,
+                        str(attrs.get("edge_type", "hebbian")),
+                    )
+
+    def degrees(
+        self,
+        edge_types: "frozenset[str] | None" = None,
+        exclude_types: "frozenset[str] | None" = None,
+    ) -> Iterator[tuple[UUID, int]]:
+        if edge_types is None and exclude_types is None:
+            for label, neighbors in self._adj.items():
+                yield UUID(label), len(neighbors)
+            return
         for label, neighbors in self._adj.items():
-            yield UUID(label), len(neighbors)
+            count = 0
+            for attrs in neighbors.values():
+                etype = attrs.get("edge_type")
+                if edge_types is not None and etype not in edge_types:
+                    continue
+                if exclude_types is not None and etype in exclude_types:
+                    continue
+                count += 1
+            yield UUID(label), count
 
     def to_csr_arrays(
         self,

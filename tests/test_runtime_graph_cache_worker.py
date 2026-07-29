@@ -215,6 +215,49 @@ def test_worker_empty_graph_round_trip():
     assert result["node_to_community"] == {}
 
 
+def test_worker_degree_map_counts_earned_edges_only():
+    # Hub with one hebbian edge and two pattern-separation seeds: the
+    # cached ranking-degree map must count the earned edge only, matching
+    # the cold recall path's exclusion.
+    ids = [uuid4() for _ in range(4)]
+    nodes = [(str(uid), _emb_bytes(31 + i)) for i, uid in enumerate(ids)]
+    hub, a, b, c = ids
+    edges = [
+        (str(hub), str(a), 1.0, "hebbian"),
+        (str(hub), str(b), 0.7, "pattern_separation_seed"),
+        (str(hub), str(c), 0.8, "pattern_separation_seed"),
+    ]
+    messages = _drive_worker([nodes], [edges])
+
+    node_degrees: dict[UUID, int] = {}
+    max_degree = None
+    for kind, payload in messages:
+        if kind == "node_degrees":
+            for node_bytes, deg in payload:
+                node_degrees[UUID(bytes=node_bytes)] = int(deg)
+        elif kind == "max_degree":
+            max_degree = int(payload)
+
+    assert node_degrees[hub] == 1
+    assert node_degrees[a] == 1
+    assert node_degrees[b] == 0
+    assert max_degree == 1
+
+
+def test_worker_legacy_three_tuple_edges_default_hebbian():
+    ids = [uuid4() for _ in range(2)]
+    nodes = [(str(uid), _emb_bytes(41 + i)) for i, uid in enumerate(ids)]
+    edges = [(str(ids[0]), str(ids[1]), 1.0)]
+    messages = _drive_worker([nodes], [edges])
+
+    node_degrees: dict[UUID, int] = {}
+    for kind, payload in messages:
+        if kind == "node_degrees":
+            for node_bytes, deg in payload:
+                node_degrees[UUID(bytes=node_bytes)] = int(deg)
+    assert node_degrees[ids[0]] == 1
+
+
 def test_worker_aborts_on_unknown_kind():
     parent_conn, child_conn = mp.Pipe(duplex=True)
     parent_conn.send(("garbage", None))

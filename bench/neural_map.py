@@ -213,8 +213,7 @@ def main(
     iterations: int = 10,
     store_path: Path | str | None = None,
     *,
-    ref_mempalace_p95_ms: float | None = None,
-    ref_claude_mem_p95_ms: float | None = None,
+    refs_p95_ms: "dict[str, float] | None" = None,
     with_cascade: bool = False,
 ) -> int:
     ns = ns or [100, 1_000, 5_000, 10_000]
@@ -228,25 +227,16 @@ def main(
             warm_cascade=with_cascade,
         )
 
-        refs: dict[str, float] = {}
+        refs: dict[str, float] = dict(refs_p95_ms or {})
         reason: str | None = None
-        if ref_mempalace_p95_ms is not None:
-            refs["mempalace"] = ref_mempalace_p95_ms
-            if out["latency_ms_p95"] > ref_mempalace_p95_ms:
+        for ref_name, ref_value in refs.items():
+            if out["latency_ms_p95"] > ref_value:
                 out["passed"] = False
-                reason = (
-                    f"exceeds mempalace ref {ref_mempalace_p95_ms}ms "
-                    f"(IAI p95={out['latency_ms_p95']:.2f}ms)"
-                )
-        if ref_claude_mem_p95_ms is not None:
-            refs["claude_mem"] = ref_claude_mem_p95_ms
-            if out["latency_ms_p95"] > ref_claude_mem_p95_ms:
-                out["passed"] = False
-                cm_reason = (
-                    f"exceeds claude-mem ref {ref_claude_mem_p95_ms}ms "
-                    f"(IAI p95={out['latency_ms_p95']:.2f}ms)"
-                )
-                reason = reason or cm_reason
+                if reason is None:
+                    reason = (
+                        f"exceeds {ref_name} ref {ref_value}ms "
+                        f"(IAI p95={out['latency_ms_p95']:.2f}ms)"
+                    )
         if refs:
             out["refs"] = refs
         if reason is not None:
@@ -293,21 +283,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument(
-        "--ref-mempalace-p95-ms",
-        dest="ref_mempalace_p95_ms",
-        type=float, default=None,
+        "--ref-p95-ms",
+        dest="refs_p95_ms",
+        action="append",
+        default=[],
+        metavar="NAME=MS",
         help=(
-            "OPS-10 comparative reference p95 (ms) — IAI must be <= this to "
-            "pass the gate."
-        ),
-    )
-    parser.add_argument(
-        "--ref-claude-mem-p95-ms",
-        dest="ref_claude_mem_p95_ms",
-        type=float, default=None,
-        help=(
-            "OPS-10 comparative reference p95 (ms) — IAI must be <= this to "
-            "pass the gate."
+            "comparative reference p95 in ms; repeatable "
+            "(e.g. --ref-p95-ms external=120). IAI must be <= every "
+            "reference to pass the gate."
         ),
     )
     parser.add_argument(
@@ -352,10 +336,18 @@ def _install_bench_noop_keyring() -> None:
 if __name__ == "__main__":
     _install_bench_noop_keyring()
     args = _parse_args()
+    _parsed_refs: dict[str, float] = {}
+    for _spec in args.refs_p95_ms:
+        _name, _sep, _value = str(_spec).partition("=")
+        if not _sep or not _name:
+            raise SystemExit(f"--ref-p95-ms expects NAME=MS, got {_spec!r}")
+        try:
+            _parsed_refs[_name] = float(_value)
+        except ValueError:
+            raise SystemExit(f"--ref-p95-ms expects a number, got {_value!r}")
     sys.exit(main(
         ns=args.n,
         iterations=args.iterations,
-        ref_mempalace_p95_ms=args.ref_mempalace_p95_ms,
-        ref_claude_mem_p95_ms=args.ref_claude_mem_p95_ms,
+        refs_p95_ms=_parsed_refs,
         with_cascade=args.with_cascade,
     ))

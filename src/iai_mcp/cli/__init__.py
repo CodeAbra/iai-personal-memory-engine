@@ -687,18 +687,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ch = sub.add_parser(
         "capture-hooks",
-        help="install/uninstall/status the Claude Code Stop hook for ambient session capture",
+        help="install/uninstall/status the ambient-capture hooks (Claude Code, Codex)",
     )
     ch_sub = ch.add_subparsers(dest="capture_hooks_cmd", required=True)
-    ch_sub.add_parser("install",
-                      help="copy Stop hook to ~/.claude/hooks/ and register in settings.json"
-                      ).set_defaults(func=cmd_capture_hooks_install)
-    ch_sub.add_parser("uninstall",
-                      help="remove the Stop hook and its settings.json entry"
-                      ).set_defaults(func=cmd_capture_hooks_uninstall)
-    ch_sub.add_parser("status",
-                      help="show whether the Stop hook is installed and active"
-                      ).set_defaults(func=cmd_capture_hooks_status)
+    _target_kwargs = {
+        "choices": ("claude", "codex", "all"),
+        "default": "claude",
+        "help": "host to wire: claude (default), codex, or all",
+    }
+    ch_install = ch_sub.add_parser(
+        "install",
+        help="copy the hook scripts and register them with the host",
+    )
+    ch_install.add_argument("--target", **_target_kwargs)
+    ch_install.set_defaults(func=cmd_capture_hooks_install)
+    ch_uninstall = ch_sub.add_parser(
+        "uninstall",
+        help="remove the hook scripts and their host registration",
+    )
+    ch_uninstall.add_argument("--target", **_target_kwargs)
+    ch_uninstall.set_defaults(func=cmd_capture_hooks_uninstall)
+    ch_status = ch_sub.add_parser(
+        "status",
+        help="show whether the hooks are installed and active",
+    )
+    ch_status.add_argument("--target", **_target_kwargs)
+    ch_status.set_defaults(func=cmd_capture_hooks_status)
 
     cw = sub.add_parser(
         "cowork",

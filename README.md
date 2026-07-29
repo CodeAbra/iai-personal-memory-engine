@@ -7,7 +7,7 @@
 <h3 align="center">Give your coding agent a brain that remembers exactly what you said — forever, on your machine.</h3>
 <p align="center"><b>The best open-source personal memory engine for AI coding assistants.</b><br>Pays for itself in tokens: retrieval from memory is ≈88% cheaper than an agent search.<br>Every claim ships with the harness that proves it — run the benchmarks yourself.</p>
 
-<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v2.7.1-1f6feb?style=flat-square" alt="Release v2.7.1"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
+<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v2.7.2-1f6feb?style=flat-square" alt="Release v2.7.2"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
 <p align="center"><img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962"> <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000"> <img src="https://img.shields.io/badge/retrieval-%E2%89%8888%25_cheaper_than_search-2ea043?style=flat-square" alt="Memory retrieval ≈88% cheaper than agent search"> <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM"> <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry"> <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible"> <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a></p>
 <p align="center"><a href="#quick-start"><b>Quick start</b></a> · <a href="#benchmarks"><b>Benchmarks</b></a> · <a href="#watch-it-think"><b>Dashboard</b></a> · <a href="https://github.com/CodeAbra/iai-personal-memory-engine/discussions"><b>Discussions</b></a> · <a href="./README_zh-CN.md"><b>中文</b></a></p>
 
@@ -168,13 +168,22 @@ iai --version
 
 ### Install the capture + recall hooks
 
-This is what makes memory ambient. Without these hooks iai-mcp reads memory but never writes conversation content and never injects recall at session start. One command wires all three:
+This is what makes memory ambient. Without these hooks iai-mcp reads memory but never writes conversation content and never injects recall at session start. One command wires all four:
 
 ```bash
 iai-mcp capture-hooks install       # copies all four hooks + patches ~/.claude/settings.json
 iai-mcp capture-hooks status        # verify: should print "status: ACTIVE"
 iai-mcp capture-hooks uninstall     # clean removal if ever needed
 ```
+
+For Codex, or for both hosts at once:
+
+```bash
+iai-mcp capture-hooks install --target codex
+iai-mcp capture-hooks install --target all
+```
+
+The Codex target writes the same four scripts into `~/.codex/hooks/` and registers them in `~/.codex/hooks.json`, leaving any hooks you already had in place.
 
 
 <details>
@@ -243,9 +252,7 @@ IAI_MCP_PYTHON = "/absolute/path/to/iai-mcp/.venv/bin/python"
 IAI_MCP_STORE = "/Users/you/.iai-mcp"
 ```
 
-The MCP tools work on Codex through this config. Ambient capture — the hooks
-that record and recall without being asked — is wired for Claude Code only;
-Codex's native hooks are not implemented yet.
+That config gives Codex the memory tools; `iai-mcp capture-hooks install --target codex` adds ambient capture and recall on top, through Codex's own hook system.
 
 ### Verify
 
@@ -578,11 +585,11 @@ iai-mcp talks to its host over **MCP-over-stdio** — the same protocol every MC
 <p align="center"><img src="docs/assets/slides/slide-12.jpg" width="850" alt="iai-pme"></p>
 
 - **Claude Code** — primary host, validated in daily use.
-- **Codex CLI** — the memory tools work; ambient capture is not wired for it yet.
+- **Codex CLI** — supported, including ambient capture through Codex's hooks (`--target codex`).
 - **Gemini CLI**, **Cursor CLI**, and other MCP-over-stdio CLIs — connect through the same standard protocol; the MCP tools work out of the box.
 - **Claude Desktop** — works; uses `claude_desktop_config.json` instead of `~/.claude.json`.
 
-Ambient capture (the hooks that record and recall automatically) ships for Claude Code today. On every other host the MCP tools work directly; wiring up a host's native hooks for fully automatic capture is a great first contribution — open an issue or PR.
+Ambient capture (the hooks that record and recall automatically) ships for Claude Code and Codex today. On every other host the MCP tools work directly; wiring up a host's native hooks for fully automatic capture is a great first contribution — open an issue or PR.
 
 ---
 

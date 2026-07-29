@@ -87,11 +87,14 @@ def _discover_cowork_homes() -> list[Path]:
 
 def _plugin_version() -> str:
     try:
-        from importlib.metadata import version
+        from iai_mcp import _distribution_version
 
-        return version("iai-mcp")
+        resolved = _distribution_version()
+        if resolved != "0+unknown":
+            return resolved
     except Exception:
-        return "0.0.0"
+        pass
+    return "0.0.0"
 
 
 def _hook_entry(script: str, timeout: int) -> dict:

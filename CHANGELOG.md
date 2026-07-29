@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.2] — 2026-07-28
+
+### Added
+
+- **Codex CLI gets ambient memory.** `iai-mcp capture-hooks install --target
+  codex` wires the same four hook scripts into `~/.codex/hooks.json` — with
+  uninstall and status parity, idempotent, and any hooks you already had are
+  preserved — and the transcript reader now understands Codex rollout files. So
+  capture, per-turn capture and both recall hooks work on Codex unchanged. A
+  missing transcript degrades to a skip; the host is never blocked.
+- **A cue that names a date finds that day.** "on July 4", "in March 2026" or an
+  ISO date now earns records created on the matching day or month a bounded rank
+  boost (`IAI_MCP_TEMPORAL_BOOST`, default 1.15). Cues without a date rank
+  exactly as before, and ambiguous English month words ("may I ask", "they
+  march") never trigger it. The stored vectors stay pure text: encoding dates
+  into embeddings measurably drags unrelated same-day records together, so the
+  date lives in the rank term instead.
+- **Injected memories now say how much to trust them.** Every hint carries a
+  relative age next to its date (`Jul 14 (13d ago)`), a fact that has already
+  replaced earlier beliefs is marked `↻N`, and each surface states the contract:
+  hints are advisory, and the older or more-revised a memory is, the more it
+  deserves re-verification. Session-start lines carry the same markers.
+- **`iai teach` reads office and book formats** — `.docx`, `.pptx`, `.xlsx`,
+  `.rtf`, `.epub`, plus `.tex` and `.bib` as plain text — with no new
+  dependencies. The OOXML containers are parsed with the standard library alone,
+  guarded against decompression bombs (per-member size cap read through the
+  stream) and against XML entity attacks (any DTD-carrying payload is refused;
+  legitimate office XML never declares one).
+- **Sleep mines entity links.** The consolidation pass now draws `entity_shared`
+  edges between memories that name the same identifiers, using the lexical
+  postings it already maintains — so recall spreads along "same thing mentioned"
+  paths, not similarity alone.
+- New blind retrieval harnesses in `bench/` — LoCoMo, ConvoMem, and a portable
+  longitudinal export plus its reference scorer — so the longitudinal claims can
+  be reproduced against public datasets.
+
+### Fixed
+
+- **Wheel installs report their real version again.** The two
+  `importlib.metadata` lookups still keyed on the old distribution name now
+  resolve `iai-pme` first. From the published wheel `iai --version` printed
+  `0+unknown` and the Cowork plugin `0.0.0`; source checkouts masked it by
+  reading `pyproject.toml` first.
+- **A look-alike clique can no longer outrank the real answer.** Cold-path
+  ranking degree counts earned edges only — hebbian, contradicts, schema,
+  temporal — and excludes the similarity links inferred at insert. Measured as a
+  1.2 pp R@5 loss on 500 natural questions, fully recovered (pipeline back to
+  parity with raw retrieve, 0.962 / 0.978). Warm daemons were never affected;
+  fresh processes and daemon-down CLI recall were.
+- **A superseded fact never outranks the fact that corrected it**, and the cap
+  respects the serving window.
+- The search dropdown in the brain dashboard now has a solid backing, so hits no
+  longer blend into the memory graph behind them.
+
+### Changed
+
+- The warm lexical lane fires only for identifier-grade cues (snake_case,
+  camelCase, letter+digit names, long ALL-CAPS, dotted or slashed paths, quoted
+  phrases) and joins ranking as scored candidates rather than spread seeds.
+  Measured on 500 natural-language questions, literal-token evidence is
+  anti-correlated with the right answer for paraphrase-style prose at any token
+  rarity, while identifier cues are exactly where the index is trustworthy — so
+  the trigger now matches the lane's competence and prose recall is untouched by
+  warmth. `IAI_MCP_LEX_FUSION_W` tunes the bonus.
+
 ## [2.7.1] — 2026-07-28
 
 ### Fixed

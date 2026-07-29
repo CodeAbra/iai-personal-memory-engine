@@ -564,6 +564,64 @@ def apply_stale_downweight(
     return hits
 
 
+_SUPERSEDE_CAP_EPSILON = 1e-4
+SUPERSEDE_CAP_WINDOW = 10
+
+
+def apply_supersede_cap(
+    hits: list[MemoryHit],
+    outgoing: dict[str, list[str]] | None,
+    now: datetime | None = None,
+    *,
+    cue_intent: str | None = None,
+    window: int = SUPERSEDE_CAP_WINDOW,
+) -> list[MemoryHit]:
+    """Ordering guarantee for current-intent cues: a superseded hit (past
+    valid_to) never outranks its best retrieved corrector.
+
+    Mirror image of the historical-verbatim anchor, which lifts the original
+    to just below its corrector; here the stale end is capped to just below
+    its best corrector. Multiplicative lexical boosts on the stale phrasing
+    cannot outbid the cap. Fixpoint loop covers correction chains (A
+    corrected by B, B corrected by C).
+
+    A corrector qualifies only while it ranks inside the top-`window` of the
+    current scores — the guarantee concerns the SERVED ordering. A corrector
+    that is irrelevant to the cue (ranked far below everything) must not drag
+    a legitimately matching hit under the noise floor; the dual-route
+    anti-hit channel still flags that contradiction.
+    """
+    if cue_intent == "historical_verbatim" or not outgoing or not hits:
+        return hits
+    now_value = now or datetime.now(timezone.utc)
+    by_id = {str(h.record_id): h for h in hits}
+    for _ in range(len(hits)):
+        top_ids = {
+            str(h.record_id)
+            for h in sorted(hits, key=lambda h: h.score, reverse=True)[:window]
+        }
+        changed = False
+        for src_s, dsts in outgoing.items():
+            src_hit = by_id.get(src_s)
+            if src_hit is None:
+                continue
+            if src_hit.valid_to is None or src_hit.valid_to >= now_value:
+                continue
+            best: float | None = None
+            for dst_s in dsts or []:
+                if str(dst_s) not in top_ids:
+                    continue
+                dst_hit = by_id.get(str(dst_s))
+                if dst_hit is not None and (best is None or dst_hit.score > best):
+                    best = dst_hit.score
+            if best is not None and src_hit.score >= best:
+                src_hit.score = best - _SUPERSEDE_CAP_EPSILON
+                changed = True
+        if not changed:
+            break
+    return hits
+
+
 def link_temporal_next(
     store: MemoryStore,
     new_record: MemoryRecord,

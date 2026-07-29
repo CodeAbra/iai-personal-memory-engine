@@ -59,14 +59,12 @@ def test_neural_map_main_with_matrix_returns_int(tmp_path: Path):
 def test_neural_map_argparse_has_reference_flags():
     from bench import neural_map
 
-    parser = neural_map._parse_args.__defaults__  # noqa: SLF001
     ns = neural_map._parse_args([
         "--n", "100",
-        "--ref-mempalace-p95-ms", "42.5",
-        "--ref-claude-mem-p95-ms", "61.0",
+        "--ref-p95-ms", "external=42.5",
+        "--ref-p95-ms", "other=61.0",
     ])
-    assert getattr(ns, "ref_mempalace_p95_ms", None) == 42.5
-    assert getattr(ns, "ref_claude_mem_p95_ms", None) == 61.0
+    assert ns.refs_p95_ms == ["external=42.5", "other=61.0"]
 
 
 def test_neural_map_comparative_gate_flips_passed_false_when_above_ref(tmp_path: Path):
@@ -76,6 +74,6 @@ def test_neural_map_comparative_gate_flips_passed_false_when_above_ref(tmp_path:
         ns=[50],
         iterations=3,
         store_path=tmp_path,
-        ref_mempalace_p95_ms=0.0001,
+        refs_p95_ms={"external": 0.0001},
     )
     assert code == 1

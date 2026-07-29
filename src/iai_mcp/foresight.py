@@ -60,7 +60,10 @@ PACK_HEADER = (
 PACK_FOOTER = (
     "· hints, NOT an exhaustive search and not an authority — verify against "
     "current sources; excerpts may be truncated; you are free to search "
-    "further (memory_recall for the full memory, or any other tool)."
+    "further (memory_recall for the full memory, or any other tool).\n"
+    "· age and ↻N (this fact already replaced N earlier beliefs) are "
+    "volatility signals — the older or the more revised a hint, the more it "
+    "deserves re-verification before you rely on it."
 )
 
 
@@ -196,6 +199,49 @@ def _snippet(text: str) -> str:
     return clean[:_SNIPPET_CHARS] + ("…" if len(clean) > _SNIPPET_CHARS else "")
 
 
+def age_label(created_at: Any, now: Any) -> str:
+    """Coarse single-unit age ('45m', '3h', '12d', '5w', '8mo', '2y'): the
+    agent must see how stale a hint is without doing date arithmetic."""
+    try:
+        delta = (now - created_at).total_seconds()
+    except (TypeError, AttributeError):
+        return ""
+    if delta < 0:
+        return ""
+    minutes = delta / 60.0
+    if minutes < 60:
+        return f"{max(1, int(minutes))}m"
+    hours = minutes / 60.0
+    if hours < 48:
+        return f"{int(hours)}h"
+    days = hours / 24.0
+    if days < 14:
+        return f"{int(days)}d"
+    weeks = days / 7.0
+    if weeks < 9:
+        return f"{int(weeks)}w"
+    months = days / 30.44
+    if months < 18:
+        return f"{int(months)}mo"
+    return f"{delta / (365.25 * 86400.0):.0f}y"
+
+
+def _revision_fanin(store: Any, record_id: str) -> int:
+    """Indexed point probe: how many earlier beliefs this record replaced.
+    A fact that already changed once is volatile — the pack marks it ↻N so
+    the agent re-verifies instead of treating it as settled."""
+    try:
+        with store.db.ro_conn() as conn:
+            rows = conn.execute(
+                "SELECT src FROM edges WHERE dst = ? AND edge_type = 'contradicts'",
+                (record_id,),
+            ).fetchall()
+        return len(rows)
+    except Exception as exc:  # noqa: BLE001 -- volatility probe is best-effort
+        logger.debug("foresight revision probe failed: %s", exc)
+        return 0
+
+
 def _blended_cue(
     store: Any, cue_embedding: "list[float]", session_id: "str | None" = None
 ) -> "list[float]":
@@ -301,6 +347,7 @@ def refresh_pack(
         repeat_after = _f(FORESIGHT_REPEAT_AFTER_ENV, FORESIGHT_REPEAT_AFTER_DEFAULT)
         state = _load_state(store, session_id)
         now_ts = _time.time()
+        now_dt = datetime.now(timezone.utc)
         # A served id blocks re-serving only within the TTL.
         served = state["served"]
         blocked = {
@@ -372,9 +419,11 @@ def refresh_pack(
                     default=None,
                 )
                 if corr_rec is not None:
+                    corr_age = age_label(corr_rec.created_at, now_dt)
+                    corr_ago = f" ({corr_age} ago)" if corr_age else ""
                     line = (
                         f"- ⚠ superseded belief: “{_snippet(rec.literal_surface)}” — "
-                        f"current: “{_snippet(corr_rec.literal_surface)}”"
+                        f"current{corr_ago}: “{_snippet(corr_rec.literal_surface)}”"
                     )
                     new_ids.append(str(corr_rec.id))
                     superseded = True
@@ -384,10 +433,14 @@ def refresh_pack(
                 stamp = ""
                 try:
                     if rec.created_at:
-                        stamp = rec.created_at.strftime("%b %d") + " · "
+                        age = age_label(rec.created_at, now_dt)
+                        ago = f" ({age} ago)" if age else ""
+                        stamp = rec.created_at.strftime("%b %d") + ago + " · "
                 except Exception:  # noqa: BLE001
                     stamp = ""
-                line = f"- [{rec.tier} · {stamp}cos {cos:.2f}] {_snippet(rec.literal_surface)}"
+                revisions = _revision_fanin(store, rid)
+                rev = f"↻{revisions} · " if revisions else ""
+                line = f"- [{rec.tier} · {stamp}{rev}cos {cos:.2f}] {_snippet(rec.literal_surface)}"
             if used_chars + len(line) > budget_chars:
                 break
             lines.append(line)

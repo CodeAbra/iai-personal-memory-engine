@@ -44,9 +44,9 @@ def test_total_session_cost_counter_mode_disclosed():
 def test_total_session_cost_fails_when_above_ref():
     from bench.total_session_cost import run_total_session_cost
 
-    out = run_total_session_cost(wake_depth="standard", mempalace_ref=1)
+    out = run_total_session_cost(wake_depth="standard", refs={"external": 1})
     assert out["passed"] is False
-    assert out["refs"]["mempalace"] == 1
+    assert out["refs"]["external"] == 1
 
 
 def test_total_session_cost_passes_without_refs():

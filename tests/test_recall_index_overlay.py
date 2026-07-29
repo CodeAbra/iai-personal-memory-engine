@@ -59,7 +59,7 @@ def test_cache_version_bumped():
     assert rgc.CACHE_VERSION != "62-04-v4", (
         f"CACHE_VERSION must be bumped from 62-04-v4; got {rgc.CACHE_VERSION!r}"
     )
-    assert rgc.CACHE_VERSION == "62-02-v7"
+    assert rgc.CACHE_VERSION == "62-02-v8"
 
 def test_overlay_hit_serves_cached_o1(tmp_path, monkeypatch):
     from iai_mcp import runtime_graph_cache as rgc
@@ -567,8 +567,14 @@ def test_recall_index_rebuild_step_position():
         f"RECALL_INDEX_REBUILD (index={idx_rebuild}) must be AFTER "
         f"CLUSTER_SUMMARY (index={idx_cluster}) in _STEP_ORDER"
     )
-    assert idx_rebuild == len(step_order) - 1, (
-        "RECALL_INDEX_REBUILD must be the last step in _STEP_ORDER"
+    # The rebuild must follow every RECORD-mutating step: the vector index
+    # must contain the summaries minted this cycle. Edges-only steps may
+    # trail it (they never touch the vector index), and new steps append at
+    # the tail so WAL-recovery positions stay frozen.
+    edges_only = {SleepStep.ENTITY_LINK}
+    trailing = set(step_order[idx_rebuild + 1:])
+    assert trailing <= edges_only, (
+        f"steps after RECALL_INDEX_REBUILD must be edges-only, got {trailing}"
     )
 
 def test_recall_index_rebuild_step_stamps_fresh_generation(tmp_path, monkeypatch):

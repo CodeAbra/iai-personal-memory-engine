@@ -148,28 +148,24 @@ def test_extract_text_pdf_malformed_raises_value_error(tmp_path):
     assert "malformed.pdf" in msg
 
 
-def test_extract_text_docx_deferred(tmp_path):
+def test_extract_text_docx_truncated_container(tmp_path):
     from iai_mcp.ingest import extract_text
 
     fixture = tmp_path / "file.docx"
     fixture.write_bytes(b"PK\x03\x04")
-    with pytest.raises(NotImplementedError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         extract_text(fixture)
-    msg = str(exc_info.value)
-    assert ".docx" in msg
-    assert "python-docx" in msg
+    assert "file.docx" in str(exc_info.value)
 
 
-def test_extract_text_xlsx_deferred(tmp_path):
+def test_extract_text_xlsx_truncated_container(tmp_path):
     from iai_mcp.ingest import extract_text
 
     fixture = tmp_path / "sheet.xlsx"
     fixture.write_bytes(b"PK\x03\x04")
-    with pytest.raises(NotImplementedError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         extract_text(fixture)
-    msg = str(exc_info.value)
-    assert ".xlsx" in msg
-    assert "openpyxl" in msg
+    assert "sheet.xlsx" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

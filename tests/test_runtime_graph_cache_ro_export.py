@@ -232,7 +232,7 @@ def test_iter_edges_chunks_compound_keyset(tmp_path: Path):
             page_sizes = []
             for chunk in roexp.iter_edges_chunks(ro, chunk_size=30):
                 page_sizes.append(len(chunk))
-                for src, dst, _w in chunk:
+                for src, dst, _w, _et in chunk:
                     seen.add((src, dst))
     finally:
         ro.close()
@@ -277,7 +277,7 @@ def test_read_transaction_and_edges_branch_on_connection_not_env_reverse(
             assert ro.in_transaction
             seen = set()
             for chunk in roexp.iter_edges_chunks(ro, chunk_size=1):
-                for src, dst, _w in chunk:
+                for src, dst, _w, _et in chunk:
                     seen.add((src, dst))
     finally:
         ro.close()
@@ -396,9 +396,9 @@ def test_dangling_endpoint_unchanged_partition(tmp_path: Path):
                         emb = np.frombuffer(emb_blob, dtype=np.float32).tolist()
                         nodes.append((UUID(id_str), None, emb, {}))
                 for chunk in roexp.iter_edges_chunks(ro):
-                    for src_str, dst_str, weight in chunk:
+                    for src_str, dst_str, weight, edge_type in chunk:
                         edges.append((
-                            UUID(src_str), UUID(dst_str), float(weight), "hebbian"
+                            UUID(src_str), UUID(dst_str), float(weight), edge_type
                         ))
         finally:
             ro.close()

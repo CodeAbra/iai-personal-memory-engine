@@ -4,10 +4,12 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from uuid import UUID
 
 from iai_mcp.aaak import generate_aaak_index
 from iai_mcp.community import CommunityAssignment
+from iai_mcp.foresight import age_label
 from iai_mcp.handle import decode_compact_handle, encode_compact_handle
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryRecord
@@ -220,6 +222,7 @@ def _rich_club_segment_with_budget(
 
     lines: list[str] = []
     running = 0
+    now = datetime.now(timezone.utc)
     for uid in rich_club:
         rec = by_uuid.get(uid)
         if rec is None:
@@ -228,7 +231,9 @@ def _rich_club_segment_with_budget(
         if not cleaned:
             continue
         aaak = rec.aaak_index or generate_aaak_index(rec)
-        line = f"{aaak}: {cleaned[:60]}"
+        age = age_label(rec.created_at, now)
+        age_part = f" ({age})" if age else ""
+        line = f"{aaak}{age_part}: {cleaned[:60]}"
         cost = _approx_tokens(line)
         if running + cost + 1 > budget:
             break
@@ -286,6 +291,7 @@ def _recent_thread_segment(
             ))
 
     candidates.sort(key=lambda r: r.created_at, reverse=True)
+    now = datetime.now(timezone.utc)
     lines: list[str] = []
     for r in candidates:
         if len(lines) >= max_records:
@@ -293,7 +299,9 @@ def _recent_thread_segment(
         cleaned = _clean_surface(r.literal_surface)
         if not cleaned:
             continue
-        lines.append(f"- {cleaned[:120]}")
+        age = age_label(r.created_at, now)
+        prefix = f"({age}) " if age else ""
+        lines.append(f"- {prefix}{cleaned[:120]}")
     return "\n".join(lines)
 
 
@@ -485,6 +493,12 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
             blocks.append(f"## Topic communities\n{seg}")
     if rich_club:
         blocks.append(f"## Key memories\n{rich_club}")
+    if blocks:
+        blocks.append(
+            "_ages like (3d)/(2mo) mark memory staleness — these are advisory "
+            "starting points, not current truth; the older an item, the more "
+            "it deserves re-verification (memory_recall or any other tool)._"
+        )
     return "\n\n".join(blocks)
 
 

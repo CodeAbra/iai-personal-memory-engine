@@ -146,7 +146,7 @@ def test_memory_record_schema_version_rejects_other_values():
     with pytest.raises(ValueError):
         _make_v2(schema_version=99)
 
-def test_edge_types_registry_has_11_members():
+def test_edge_types_registry_has_12_members():
     from iai_mcp.store import EDGE_TYPES
 
     expected = {
@@ -161,6 +161,7 @@ def test_edge_types_registry_has_11_members():
         "hebbian_structure",
         "pattern_separation_seed",
         "hebbian_cluster_replay",
+        "entity_shared",
     }
     assert EDGE_TYPES == frozenset(expected)
 

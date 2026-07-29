@@ -65,7 +65,10 @@
   #find::placeholder { color: var(--faint); }
   #find:focus { border-bottom-color: var(--epi); }
   #results { margin-top: 10px; display: none; flex-direction: column;
-    max-height: 46vh; overflow: auto; }
+    max-height: 46vh; overflow: auto;
+    background: rgba(9, 7, 18, .95); backdrop-filter: blur(7px);
+    border-radius: 10px; padding: 6px 14px;
+    box-shadow: 0 10px 50px rgba(0, 0, 0, .6); }
   .hit { padding: 8px 2px; cursor: pointer; display: flex; gap: 10px; align-items: baseline;
     border-bottom: 1px solid rgba(186,220,240,.06); }
   .hit:hover .sn { color: var(--epi); }

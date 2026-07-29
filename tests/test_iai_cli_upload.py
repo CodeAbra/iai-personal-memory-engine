@@ -183,7 +183,7 @@ def test_unsupported_suffix_clean_exit(tmp_path):
         pytest.fail("cmd_upload not yet implemented")
 
     fixture = tmp_path / "doc.docx"
-    fixture.write_bytes(b"PK\x03\x04 stub bytes - never parsed; suffix dispatch only")
+    fixture.write_bytes(b"PK\x03\x04 stub bytes - a truncated, unparsable container")
 
     err = io.StringIO()
     with redirect_stderr(err):
@@ -191,7 +191,7 @@ def test_unsupported_suffix_clean_exit(tmp_path):
 
     assert rc == 1
     msg = err.getvalue()
-    assert "deferred" in msg.lower()
+    assert "could not parse" in msg.lower()
     assert ".docx" in msg
 
 

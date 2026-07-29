@@ -70,6 +70,14 @@ class LexicalIndex:
     def generation(self) -> Any:
         return self._generation
 
+    def iter_token_postings(self) -> "list[tuple[str, dict[str, int]]]":
+        """Snapshot of (token, {record_id: tf}) pairs for offline consumers.
+
+        Taken under the lock as a shallow list copy: consolidation-side
+        miners iterate it without racing a concurrent build swap."""
+        with self._lock:
+            return list(self._postings.items())
+
     def build(self, rows: "list[tuple[str, str]]", generation: Any) -> None:
         import math
 

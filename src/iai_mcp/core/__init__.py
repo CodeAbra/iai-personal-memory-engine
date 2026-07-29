@@ -614,6 +614,12 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                             }
                         else:
                             _global_edges_hebb = _hebb_split  # cold path: true unbounded degree count
+                            # Hebbian-only ON PURPOSE: a node whose only edge
+                            # is contradicts must not gain rank from it — on a
+                            # small candidate set that degree alone lifts an
+                            # irrelevant contradicted record into hits, which
+                            # both pollutes recall and starves the anti-hit
+                            # channel (it only flags non-hits).
                             graph._global_degree = {
                                 str(_cid): len(_nbrs)
                                 for _cid, _nbrs in _global_edges_hebb.items()

@@ -1573,9 +1573,9 @@ class BrainView:
 
         suffix = Path(name).suffix.lower() or ".txt"
         try:
-            from iai_mcp.ingest._parsers import PLAINTEXT_SUFFIXES
+            from iai_mcp.ingest._parsers import SUPPORTED_SUFFIXES
 
-            allowed = set(PLAINTEXT_SUFFIXES) | {".csv", ".pdf"}
+            allowed = set(SUPPORTED_SUFFIXES)
         except Exception:  # noqa: BLE001 -- fall back to the core text formats
             allowed = {".txt", ".md", ".csv", ".pdf"}
         if suffix not in allowed:

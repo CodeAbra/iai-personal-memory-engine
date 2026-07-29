@@ -73,6 +73,7 @@ EDGE_TYPES: frozenset[str] = frozenset({
     "hebbian_structure",
     "pattern_separation_seed",
     "hebbian_cluster_replay",
+    "entity_shared",
 })
 
 

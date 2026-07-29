@@ -531,6 +531,13 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     import json as _json
     import stat
 
+    target = getattr(args, "target", "claude")
+    if target in ("codex", "all"):
+        from iai_mcp.cli._codex_hooks import install_codex_hooks
+        codex_rc = install_codex_hooks()
+        if target == "codex":
+            return codex_rc
+
     src, dst, settings = _capture_hook_paths()
     turn_src, turn_dst = _turn_hook_paths()
 
@@ -646,6 +653,13 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
 def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
     import json as _json
 
+    target = getattr(args, "target", "claude")
+    if target in ("codex", "all"):
+        from iai_mcp.cli._codex_hooks import uninstall_codex_hooks
+        codex_rc = uninstall_codex_hooks()
+        if target == "codex":
+            return codex_rc
+
     _, dst, settings = _capture_hook_paths()
     _, turn_dst = _turn_hook_paths()
     _, dst_recall, _ = _session_recall_hook_paths()
@@ -729,6 +743,15 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
 def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     import json as _json
+
+    target = getattr(args, "target", "claude")
+    codex_rc = 0
+    if target in ("codex", "all"):
+        from iai_mcp.cli._codex_hooks import status_codex_hooks
+        codex_rc = status_codex_hooks()
+        if target == "codex":
+            return codex_rc
+        print()
 
     src, dst, settings = _capture_hook_paths()
     turn_src, turn_dst = _turn_hook_paths()
