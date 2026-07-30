@@ -161,17 +161,20 @@ def test_engine_scan_releases_gil(tmp_path):
     iteration on a large table). When the GIL is released, the max gap stays
     near the OS preemption interval (< 10 ms on a loaded box).
 
-    The bound: max gap during scan < 30 ms.
+    The bound: max gap during scan < 60 ms.
 
     This bound is RED on a GIL-held engine where one `run_execute` iteration
     takes ~80-150 ms on 80 k rows — the counter thread is blocked for that
     full duration. It is GREEN on a GIL-releasing engine where the gap is
-    bounded by the OS scheduler (typically 1-5 ms), with 30 ms absorbing
-    worst-case scheduling jitter.
+    bounded by the OS scheduler: typically 1-5 ms on a quiet box, but
+    measured up to ~35 ms on shared CI runners, where a tighter ceiling
+    fails BOTH retry attempts systematically. 60 ms still separates the
+    two regimes cleanly — jitter tops out well below it, the GIL-held
+    regime starts well above it.
 
     The GIL switch-interval (`sys.getswitchinterval()` = 5 ms default) is
     the reference lower bound for the baseline; the scan gap must be clearly
-    above it to be RED and clearly below 30 ms to be reliably GREEN.
+    above it to be RED and clearly below the ceiling to be reliably GREEN.
     """
     path = str(tmp_path / "scan.lilli")
     _make_store(path)
@@ -186,7 +189,7 @@ def test_engine_scan_releases_gil(tmp_path):
     # The bound encodes GIL-release: with the GIL held for ~100+ ms per scan
     # iteration, the counter thread sees max gaps >> 30 ms. With the GIL
     # released, the counter thread runs unimpeded and max gap << 30 ms.
-    bound_seconds = 0.030  # 30 ms hard ceiling
+    bound_seconds = 0.060  # hard ceiling; see the regime math in the docstring
 
     assert scan_max < bound_seconds, (
         f"counter thread saw a {scan_max * 1000:.1f} ms GIL gap during the engine "

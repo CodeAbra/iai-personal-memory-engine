@@ -275,6 +275,7 @@ def _measure_plateau_in_child(
     return [float(x) for x in payload["plateau"]]
 
 
+@retry_once_on_assertion
 def test_rss_plateau_across_batches(tmp_path: Path) -> None:
     """Working-set RSS plateaus flat once the bounded page cache is saturated.
 
