@@ -111,7 +111,7 @@ claude mcp add iai-pme -- node "$(python -c 'from iai_mcp.cli._capture import _r
 
 ```
 /plugin marketplace add CodeAbra/iai-personal-memory-engine
-/plugin install iai-pme@iai-pme
+/plugin install iai-memory@iai-pme
 ```
 
 Restart the session and work normally: capture and recall are automatic from there. (`pip install iai-pme` first — the plugin carries the wiring, the package carries the engine.)

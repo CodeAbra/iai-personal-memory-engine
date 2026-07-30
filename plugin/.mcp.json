@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "iai-pme": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/iai-pme-mcp"
+    }
+  }
+}

@@ -8,6 +8,9 @@ __pycache__/
 src/iai_mcp/_wrapper/
 # esbuild bundle staged into the wheel (built on the host, not committed)
 mcp-wrapper/dist-bundle/
+# The plugin's MCP declaration is part of the shipped plugin — a global
+# ignore of .mcp.json must not silently drop it from the repository.
+!plugin/.mcp.json
 # Rust extension compiled in-tree by maturin develop or pip wheel
 src/iai_mcp_native*.so
 build/

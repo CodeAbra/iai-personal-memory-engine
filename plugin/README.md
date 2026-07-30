@@ -16,7 +16,7 @@ Then add the marketplace and install the plugin:
 
 ```
 /plugin marketplace add CodeAbra/iai-personal-memory-engine
-/plugin install iai-pme@iai-pme
+/plugin install iai-memory@iai-pme
 ```
 
 Restart the session. Nothing else to configure — capture and recall are

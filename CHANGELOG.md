@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   ```
   /plugin marketplace add CodeAbra/iai-personal-memory-engine
-  /plugin install iai-pme@iai-pme
+  /plugin install iai-memory@iai-pme
   ```
 
   The plugin carries the wiring; `pip install iai-pme` carries the engine. Its
