@@ -165,6 +165,7 @@ def query_events(
     limit: int = 100,
     *,
     since_exclusive: bool = False,
+    session_id: str | None = None,
 ) -> list[dict]:
     # Lazy import — avoids a circular at module load between events <-> store/_store.
     from iai_mcp.store._store import _normalize_ts_for_compare
@@ -181,6 +182,9 @@ def query_events(
     if severity is not None:
         where_parts.append("severity = ?")
         params.append(severity)
+    if session_id is not None:
+        where_parts.append("session_id = ?")
+        params.append(session_id)
     if since is not None:
         # events.ts is always written by write_event via the raw-datetime
         # default adapter (space-form, full-microsecond TEXT). Normalize the

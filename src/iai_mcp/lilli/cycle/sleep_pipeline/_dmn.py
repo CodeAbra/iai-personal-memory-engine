@@ -15,6 +15,26 @@ def step_dmn_reflection(
     from iai_mcp.dmn_reflection import MetaAnalyst, ReflectionAgent
     from iai_mcp.events import write_event
 
+    # Curiosity consumer. Recall only records a cheap ``deferred_curiosity_input``
+    # event on the hot path; this REM reflection pass is where those inputs are
+    # replayed into ``curiosity_question`` events and ``curiosity_bridge`` edges
+    # via ``fire_curiosity``. Self-contained and fail-soft -- it never alters the
+    # DMN result and never aborts the step, so a curiosity hiccup cannot stall
+    # reflection or trip sleep-cycle quarantine.
+    try:
+        from iai_mcp.curiosity import drain_deferred_curiosity
+
+        _drain = drain_deferred_curiosity(self._store)
+        if _drain.get("drained"):
+            write_event(
+                self._store,
+                "curiosity_drain_pass",
+                _drain,
+                severity="info",
+            )
+    except Exception as exc:  # noqa: BLE001 -- curiosity drain never aborts DMN
+        logger.debug("curiosity_drain within dmn failed: %s", exc)
+
     meta_analyst_emitted = False
     reflection_synthesized = False
     try:

@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from iai_mcp.events import query_events, write_event
@@ -15,6 +16,21 @@ ENTROPY_LOW: float = 0.4
 ENTROPY_MID: float = 0.7
 ENTROPY_HIGH: float = 0.9
 COOLDOWN_TURNS: int = 3
+
+# An unresolved question older than this stops counting as "pending" on the
+# recall projection path. Without it the pending set only ever grows: every
+# curiosity_question that is never explicitly resolved lingers forever, so the
+# surfaced signal (and the nightly report that reads it) drifts upward without
+# bound. The live ``curiosity_pending`` MCP tool still passes ``None`` for a
+# full, unexpired read.
+_PENDING_MAX_AGE_DAYS: float = 30.0
+
+# Kind marker for the drain watermark. The deferred-curiosity consumer records
+# the timestamp of the newest ``deferred_curiosity_input`` it has processed so
+# the next sleep cycle only fires on inputs that arrived since — no event is
+# ever double-fired, and old inputs are not re-scanned every cycle.
+_DRAIN_CURSOR_KIND: str = "curiosity_drain_cursor"
+_DRAIN_BATCH: int = 200
 
 _log = logging.getLogger(__name__)
 
@@ -37,28 +53,44 @@ class CuriosityQuestion:
 
 
 def compute_entropy(scores: list[float]) -> float:
+    """Normalized Shannon entropy of a score distribution, in ``[0, 1]``.
+
+    The raw Shannon sum is in *bits* and ranges over ``[0, log2(k)]`` for ``k``
+    non-zero outcomes, so it inflates with the number of hits. The curiosity
+    tiers (``ENTROPY_LOW/MID/HIGH`` = 0.4/0.7/0.9) are calibrated against a
+    unit scale, so the raw sum is divided by ``log2(k)`` to land in ``[0, 1]``
+    regardless of hit count. For ``k <= 1`` (a degenerate, single-outcome
+    distribution) entropy is exactly 0. Two equal outcomes still yield 1.0.
+    """
     if not scores:
         return 0.0
     positive = [max(0.0, float(s)) for s in scores]
     total = sum(positive)
     if total <= 0:
         return 0.0
-    probs = [p / total for p in positive]
+    probs = [p / total for p in positive if p > 0]
+    if len(probs) <= 1:
+        return 0.0
     h = 0.0
     for p in probs:
-        if p > 0:
-            h -= p * math.log2(p)
-    return h
+        h -= p * math.log2(p)
+    return h / math.log2(len(probs))
 
 
 def _last_curiosity_turn(store: MemoryStore, session_id: str) -> int | None:
-    events = query_events(store, kind="curiosity_question", limit=20)
+    # Session-scoped at the SQL layer: the previous implementation pulled the
+    # 20 most-recent *global* curiosity_question events and filtered in Python,
+    # so on a multi-session engine a given session's last question routinely
+    # fell outside the window and the cooldown silently stopped firing. Filter
+    # by session in the query and take the single newest row.
+    events = query_events(
+        store, kind="curiosity_question", session_id=session_id, limit=1,
+    )
     for e in events:
-        if e.get("session_id") == session_id:
-            try:
-                return int(e["data"].get("turn", 0))
-            except (TypeError, ValueError):
-                return None
+        try:
+            return int(e["data"].get("turn", 0))
+        except (TypeError, ValueError):
+            return None
     return None
 
 
@@ -140,6 +172,8 @@ def fire_curiosity(
 def pending_questions(
     store: MemoryStore,
     session_id: str | None = None,
+    *,
+    max_age_days: float | None = None,
 ) -> list[CuriosityQuestion]:
     events = query_events(store, kind="curiosity_question", limit=200)
     resolved_events = query_events(store, kind="curiosity_resolved", limit=500)
@@ -148,10 +182,17 @@ def pending_questions(
         for r in resolved_events
         if r["data"].get("question_id")
     }
+    cutoff: datetime | None = None
+    if max_age_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=float(max_age_days))
     out: list[CuriosityQuestion] = []
     for e in events:
         if session_id is not None and e.get("session_id") != session_id:
             continue
+        if cutoff is not None:
+            ts = e.get("ts")
+            if isinstance(ts, datetime) and ts < cutoff:
+                continue
         data = e["data"]
         qid_raw = data.get("question_id")
         if not qid_raw:
@@ -182,7 +223,9 @@ def pending_questions(
 
 
 def get_pending_questions(store: MemoryStore, limit: int = 2) -> list[dict]:
-    qs = pending_questions(store)
+    # Recall-projection read: apply the pending-age bound so a never-resolved
+    # backlog cannot inflate the surfaced signal indefinitely.
+    qs = pending_questions(store, max_age_days=_PENDING_MAX_AGE_DAYS)
     return [
         {"text": q.text, "entropy": q.entropy, "tier": q.tier}
         for q in qs[:limit]
@@ -288,3 +331,117 @@ def get_pending_questions_cached(store: MemoryStore, limit: int = 2) -> list[dic
     MCP tool) should keep calling ``get_pending_questions`` directly.
     """
     return _cache_for(store).get(store, limit=limit)
+
+
+class _DrainHit:
+    """Minimal ``MemoryHit`` stand-in for the deferred-curiosity consumer.
+
+    ``fire_curiosity`` only ever reads ``.record_id`` off its hits, so the
+    drain reconstructs that single field from the ``hit_ids`` recorded on the
+    deferred event rather than re-fetching whole records.
+    """
+
+    __slots__ = ("record_id",)
+
+    def __init__(self, record_id: UUID) -> None:
+        self.record_id = record_id
+
+
+def _load_drain_cursor(store: MemoryStore) -> datetime | None:
+    events = query_events(store, kind=_DRAIN_CURSOR_KIND, limit=1)
+    if not events:
+        return None
+    raw = events[0]["data"].get("through_ts")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def drain_deferred_curiosity(
+    store: MemoryStore,
+    *,
+    batch: int = _DRAIN_BATCH,
+) -> dict[str, int]:
+    """Turn buffered ``deferred_curiosity_input`` events into questions.
+
+    The recall hot path only records a cheap ``deferred_curiosity_input`` event
+    (hit ids, cue, precomputed normalized entropy, turn) so it never blocks on
+    curiosity work. This consumer -- invoked once per sleep cycle -- reads the
+    inputs that have arrived since the last watermark, and replays each through
+    ``fire_curiosity``, which applies the entropy tiers and the per-session
+    cooldown and, above threshold, writes the ``curiosity_question`` event plus
+    the ``curiosity_bridge`` edges. The watermark advances to the newest input
+    seen so no event is ever fired twice.
+
+    Returns ``{"drained": n, "fired": m}``. Never raises: a malformed event is
+    skipped, and a store-level failure degrades to a no-op count.
+    """
+    try:
+        cursor = _load_drain_cursor(store)
+        # query_events returns newest-first, so under a backlog larger than the
+        # batch this keeps the freshest ``batch`` inputs and lets the very
+        # oldest overflow age out. That is deliberate for an advisory signal:
+        # the watermark still advances monotonically to the newest input seen,
+        # so the drain always makes forward progress and never re-fires.
+        deferred = query_events(
+            store,
+            kind="deferred_curiosity_input",
+            since=cursor,
+            since_exclusive=True,
+            limit=batch,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        _log.debug("curiosity_drain_scan_failed: %s", exc)
+        return {"drained": 0, "fired": 0}
+
+    if not deferred:
+        return {"drained": 0, "fired": 0}
+
+    deferred_sorted = sorted(deferred, key=lambda e: e["ts"])
+    newest_ts = deferred_sorted[-1]["ts"]
+    fired = 0
+    for e in deferred_sorted:
+        data = e["data"]
+        try:
+            entropy = float(data.get("entropy", 0.0))
+        except (TypeError, ValueError):
+            continue
+        # Legacy inputs (written before entropy was recorded) carry 0.0 and are
+        # simply consumed, not fired.
+        if entropy < ENTROPY_LOW:
+            continue
+        try:
+            turn = int(data.get("turn", 0))
+        except (TypeError, ValueError):
+            turn = 0
+        session_id = data.get("session_id") or e.get("session_id") or "-"
+        cue = str(data.get("cue", ""))
+        hits: list[_DrainHit] = []
+        for hid in data.get("hit_ids", []):
+            try:
+                hits.append(_DrainHit(UUID(str(hid))))
+            except (TypeError, ValueError):
+                continue
+        try:
+            question = fire_curiosity(store, hits, cue, entropy, session_id, turn)
+        except (OSError, RuntimeError, ValueError) as exc:
+            _log.debug("curiosity_drain_fire_failed: %s", exc)
+            continue
+        if question is not None:
+            fired += 1
+
+    try:
+        write_event(
+            store,
+            kind=_DRAIN_CURSOR_KIND,
+            data={"through_ts": newest_ts.isoformat()},
+            severity="info",
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        _log.debug("curiosity_drain_cursor_write_failed: %s", exc)
+
+    return {"drained": len(deferred_sorted), "fired": fired}
