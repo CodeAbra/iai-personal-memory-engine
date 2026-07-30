@@ -18,7 +18,8 @@ def step_dmn_reflection(
     # Curiosity consumer. Recall only records a cheap ``deferred_curiosity_input``
     # event on the hot path; this REM reflection pass is where those inputs are
     # replayed into ``curiosity_question`` events and ``curiosity_bridge`` edges
-    # via ``fire_curiosity``. Self-contained and fail-soft -- it never alters the
+    # via ``fire_curiosity``. The same pass closes questions whose cue has since
+    # come back unambiguous. Self-contained and fail-soft -- it never alters the
     # DMN result and never aborts the step, so a curiosity hiccup cannot stall
     # reflection or trip sleep-cycle quarantine.
     try:

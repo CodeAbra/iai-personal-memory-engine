@@ -23,7 +23,7 @@ COOLDOWN_TURNS: int = 3
 # surfaced signal (and the nightly report that reads it) drifts upward without
 # bound. The live ``curiosity_pending`` MCP tool still passes ``None`` for a
 # full, unexpired read.
-_PENDING_MAX_AGE_DAYS: float = 30.0
+PENDING_MAX_AGE_DAYS: float = 30.0
 
 # Kind marker for the drain watermark. The deferred-curiosity consumer records
 # the timestamp of the newest ``deferred_curiosity_input`` it has processed so
@@ -32,7 +32,22 @@ _PENDING_MAX_AGE_DAYS: float = 30.0
 _DRAIN_CURSOR_KIND: str = "curiosity_drain_cursor"
 _DRAIN_BATCH: int = 200
 
+# How many recent questions the resolution pass considers per drain. Bounded so
+# a large historical backlog cannot make the pass scan without limit.
+_RESOLVE_SCAN_LIMIT: int = 200
+
 _log = logging.getLogger(__name__)
+
+
+def _cue_key(cue: str) -> str:
+    """Normalized match key for a retrieval cue.
+
+    Curiosity fires on an ambiguous cue and resolves when the *same* cue later
+    comes back confident, so the two events must agree on what "same" means.
+    Casefold + whitespace collapse absorbs the incidental variation between two
+    phrasings of one question without pulling in a similarity model.
+    """
+    return " ".join(str(cue).split()).casefold()[:200]
 
 # Curiosity signals are advisory: the recall dispatch does not need
 # per-recall freshness. A cached projection older than this threshold
@@ -157,6 +172,10 @@ def fire_curiosity(
         data={
             "question_id": str(q_id),
             "text": text,
+            # The normalized cue is recorded alongside the rendered text so a
+            # later confident recall on the same cue can resolve this question
+            # without re-parsing the question prose.
+            "cue_key": _cue_key(cue),
             "tier": tier,
             "entropy": float(entropy),
             "turn": int(turn),
@@ -225,7 +244,7 @@ def pending_questions(
 def get_pending_questions(store: MemoryStore, limit: int = 2) -> list[dict]:
     # Recall-projection read: apply the pending-age bound so a never-resolved
     # backlog cannot inflate the surfaced signal indefinitely.
-    qs = pending_questions(store, max_age_days=_PENDING_MAX_AGE_DAYS)
+    qs = pending_questions(store, max_age_days=PENDING_MAX_AGE_DAYS)
     return [
         {"text": q.text, "entropy": q.entropy, "tier": q.tier}
         for q in qs[:limit]
@@ -361,6 +380,155 @@ def _load_drain_cursor(store: MemoryStore) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def prune_consumed_curiosity_events(store: MemoryStore) -> dict[str, int]:
+    """Drop deferred inputs the drain has already consumed, and stale cursors.
+
+    The drain consumes ``deferred_curiosity_input`` *logically* by advancing a
+    watermark, which leaves the rows themselves in the events table forever —
+    one per non-verbatim recall, plus one ``curiosity_drain_cursor`` per sleep
+    cycle. Both are pure residue once the watermark has passed them: deleting
+    inputs at or before the cursor cannot un-consume anything (the cursor is
+    what gates re-firing), and only the newest cursor is ever read.
+
+    Returns ``{"inputs_pruned": n, "cursors_pruned": m}``. Never raises.
+    """
+    from iai_mcp.store import EVENTS_TABLE
+
+    out = {"inputs_pruned": 0, "cursors_pruned": 0}
+    cursor = _load_drain_cursor(store)
+    if cursor is None:
+        # Nothing has been consumed yet; deleting inputs now would drop
+        # questions that were never fired.
+        return out
+
+    from iai_mcp.store._store import _normalize_ts_for_compare
+
+    boundary = _normalize_ts_for_compare(cursor).replace("T", " ")
+    table = store.db.open_table(EVENTS_TABLE)
+    try:
+        with store.db._conn_lock:
+            rows = store.db._conn.execute(
+                f"SELECT COUNT(*) AS n FROM {EVENTS_TABLE} "
+                "WHERE kind = 'deferred_curiosity_input' AND ts <= ?",
+                [boundary],
+            ).fetchone()
+        consumed = int(rows["n"]) if rows else 0
+        if consumed:
+            table.delete(
+                "kind = 'deferred_curiosity_input' "
+                f"AND ts <= '{boundary}'",
+            )
+            out["inputs_pruned"] = consumed
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        _log.debug("curiosity_input_prune_failed: %s", exc)
+
+    # Keep only the newest cursor: it is the only one _load_drain_cursor reads.
+    # Keyed on the newest cursor row's own write time, not on the watermark
+    # above -- a cursor is written after the inputs it covers, so its ts always
+    # sorts later than its own through_ts.
+    try:
+        with store.db._conn_lock:
+            newest = store.db._conn.execute(
+                f"SELECT MAX(ts) AS newest FROM {EVENTS_TABLE} "
+                f"WHERE kind = '{_DRAIN_CURSOR_KIND}'",
+            ).fetchone()
+            raw_newest = newest["newest"] if newest else None
+            if raw_newest is None:
+                return out
+            # MAX(ts) comes back as a datetime or a TEXT string depending on the
+            # connection's converters; normalize to the stored space-form shape
+            # either way so the comparison below is exact.
+            newest_cursor_ts = _normalize_ts_for_compare(raw_newest).replace(
+                "T", " ",
+            )
+            stale = store.db._conn.execute(
+                f"SELECT COUNT(*) AS n FROM {EVENTS_TABLE} "
+                f"WHERE kind = '{_DRAIN_CURSOR_KIND}' AND ts < ?",
+                [newest_cursor_ts],
+            ).fetchone()
+        n_stale = int(stale["n"]) if stale else 0
+        if n_stale:
+            table.delete(
+                f"kind = '{_DRAIN_CURSOR_KIND}' "
+                f"AND ts < '{newest_cursor_ts}'",
+            )
+            out["cursors_pruned"] = n_stale
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        _log.debug("curiosity_cursor_prune_failed: %s", exc)
+
+    return out
+
+
+def resolve_answered_questions(
+    store: MemoryStore,
+    cue_key: str,
+    session_id: str,
+) -> int:
+    """Close pending questions whose cue has since come back confident.
+
+    A curiosity question is a recorded ambiguity: the engine could not tell
+    which memory a cue meant. When a later recall on that same cue returns a
+    confident (low-entropy) distribution, the ambiguity is gone, so the
+    question is answered in substance whether or not the user ever replied to
+    it. This writes the ``curiosity_resolved`` event that ``pending_questions``
+    already filters on -- previously nothing in the engine ever did, so
+    questions could only age out.
+
+    Returns the number of questions resolved. Never raises.
+    """
+    if not cue_key:
+        return 0
+    try:
+        questions = query_events(
+            store,
+            kind="curiosity_question",
+            session_id=session_id,
+            limit=_RESOLVE_SCAN_LIMIT,
+        )
+        if not questions:
+            return 0
+        resolved_events = query_events(
+            store, kind="curiosity_resolved", limit=_RESOLVE_SCAN_LIMIT * 2,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        _log.debug("curiosity_resolve_scan_failed: %s", exc)
+        return 0
+
+    already = {
+        r["data"].get("question_id")
+        for r in resolved_events
+        if r["data"].get("question_id")
+    }
+    resolved = 0
+    for e in questions:
+        data = e["data"]
+        qid = data.get("question_id")
+        if not qid or qid in already:
+            continue
+        # Questions written before cue_key existed carry no key and can never
+        # be matched; they age out via the pending-age bound instead.
+        if data.get("cue_key") != cue_key:
+            continue
+        try:
+            write_event(
+                store,
+                kind="curiosity_resolved",
+                data={
+                    "question_id": qid,
+                    "cue_key": cue_key,
+                    "reason": "confident_recall",
+                },
+                severity="info",
+                session_id=session_id,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            _log.debug("curiosity_resolved_write_failed: %s", exc)
+            continue
+        already.add(qid)
+        resolved += 1
+    return resolved
+
+
 def drain_deferred_curiosity(
     store: MemoryStore,
     *,
@@ -377,8 +545,13 @@ def drain_deferred_curiosity(
     the ``curiosity_bridge`` edges. The watermark advances to the newest input
     seen so no event is ever fired twice.
 
-    Returns ``{"drained": n, "fired": m}``. Never raises: a malformed event is
-    skipped, and a store-level failure degrades to a no-op count.
+    Inputs below the firing floor are not discarded: an unambiguous recall on a
+    cue that previously fired a question resolves that question, which is the
+    engine's only path to closing one.
+
+    Returns ``{"drained": n, "fired": m, "resolved": k}``. Never raises: a
+    malformed event is skipped, and a store-level failure degrades to a no-op
+    count.
     """
     try:
         cursor = _load_drain_cursor(store)
@@ -396,30 +569,36 @@ def drain_deferred_curiosity(
         )
     except (OSError, RuntimeError, ValueError) as exc:
         _log.debug("curiosity_drain_scan_failed: %s", exc)
-        return {"drained": 0, "fired": 0}
+        return {"drained": 0, "fired": 0, "resolved": 0}
 
     if not deferred:
-        return {"drained": 0, "fired": 0}
+        return {"drained": 0, "fired": 0, "resolved": 0}
 
     deferred_sorted = sorted(deferred, key=lambda e: e["ts"])
     newest_ts = deferred_sorted[-1]["ts"]
     fired = 0
+    resolved = 0
     for e in deferred_sorted:
         data = e["data"]
         try:
             entropy = float(data.get("entropy", 0.0))
         except (TypeError, ValueError):
             continue
-        # Legacy inputs (written before entropy was recorded) carry 0.0 and are
-        # simply consumed, not fired.
+        session_id = data.get("session_id") or e.get("session_id") or "-"
+        cue = str(data.get("cue", ""))
+        # Below the firing floor the recall was unambiguous. A legacy input
+        # (written before entropy was recorded) also lands here and carries no
+        # usable cue signal, so resolution is keyed on the cue and no-ops when
+        # absent. Either way the input is consumed, never fired.
         if entropy < ENTROPY_LOW:
+            resolved += resolve_answered_questions(
+                store, _cue_key(cue), session_id,
+            )
             continue
         try:
             turn = int(data.get("turn", 0))
         except (TypeError, ValueError):
             turn = 0
-        session_id = data.get("session_id") or e.get("session_id") or "-"
-        cue = str(data.get("cue", ""))
         hits: list[_DrainHit] = []
         for hid in data.get("hit_ids", []):
             try:
@@ -444,4 +623,8 @@ def drain_deferred_curiosity(
     except (OSError, RuntimeError, ValueError) as exc:
         _log.debug("curiosity_drain_cursor_write_failed: %s", exc)
 
-    return {"drained": len(deferred_sorted), "fired": fired}
+    return {
+        "drained": len(deferred_sorted),
+        "fired": fired,
+        "resolved": resolved,
+    }

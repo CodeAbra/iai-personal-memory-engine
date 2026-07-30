@@ -1251,9 +1251,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         }
 
     if method == "curiosity_pending":
-        from iai_mcp.curiosity import pending_questions
+        from iai_mcp.curiosity import PENDING_MAX_AGE_DAYS, pending_questions
 
-        qs = pending_questions(store, params.get("session_id"))
+        # Live read, age-bounded (see PENDING_MAX_AGE_DAYS).
+        qs = pending_questions(store, params.get("session_id"), max_age_days=PENDING_MAX_AGE_DAYS)
         return {
             "questions": [
                 {
