@@ -81,6 +81,36 @@ def _rec(text: str, emb: list[float], *, tier: str = "episodic", tags: list[str]
     )
 
 
+def _rank_debug(resp: dict, labels: dict[str, str], *, expected: str) -> str:
+    """Explain a rank assertion failure in terms of the ranking itself.
+
+    These assertions compare record ids, so a failure prints two opaque UUIDs
+    and nothing about WHY the order flipped. This renders the served ordering
+    with scores and the gate inputs that decide it, so an occurrence that only
+    reproduces on CI is diagnosable from the log alone.
+    """
+    import os
+
+    from iai_mcp import core as _core
+
+    lines = [
+        f"expected {expected!r} to rank first; served ordering was:",
+    ]
+    for i, hit in enumerate(resp.get("hits") or []):
+        rid = str(hit.get("record_id"))
+        lines.append(
+            f"  [{i}] {labels.get(rid, 'UNKNOWN-RECORD')} "
+            f"score={hit.get('score')!r} reason={hit.get('reason')!r} id={rid}"
+        )
+    lines.append(
+        "gate inputs: "
+        f"IAI_MCP_TIER_BOOST={os.environ.get('IAI_MCP_TIER_BOOST', '<unset>')!r} "
+        f"literal_preservation="
+        f"{_core._profile_state.get('literal_preservation', '<absent>')!r}"
+    )
+    return "\n".join(lines)
+
+
 def _dispatch(store: MemoryStore, cue: str, cue_vec: list[float]) -> dict:
     resp = core.dispatch(store, "memory_recall", {
         "cue": cue,
@@ -132,7 +162,10 @@ def test_semantic_boost_stands_down_under_strong_literal_preservation(tmp_path, 
     flush_record_buffer(store)
 
     resp = _dispatch(store, "rank fusion strong-lp probe", _unit(0))
-    assert resp["hits"][0]["record_id"] == str(raw.id)
+    assert resp["hits"][0]["record_id"] == str(raw.id), _rank_debug(
+        resp, {str(raw.id): "raw", str(knowledge.id): "knowledge"},
+        expected="raw",
+    )
 
 
 def test_doc_chunk_counts_as_knowledge(tmp_path, monkeypatch):
@@ -169,7 +202,11 @@ def test_tier_boost_env_disables(tmp_path, monkeypatch):
 
     resp = _dispatch(store, "rank fusion boost-off probe", _unit(0))
     assert resp["hits"][0]["record_id"] == str(raw.id), (
-        "with the boost disabled the closer record must win on cosine"
+        "with the boost disabled the closer record must win on cosine\n"
+        + _rank_debug(
+            resp, {str(raw.id): "raw", str(knowledge.id): "knowledge"},
+            expected="raw",
+        )
     )
 
 
