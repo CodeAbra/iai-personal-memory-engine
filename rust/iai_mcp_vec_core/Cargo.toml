@@ -2,6 +2,11 @@
 name    = "iai_mcp_vec_core"
 version = "0.1.0"
 edition = "2021"
+# Inherited from [workspace.package], matching every sibling crate. Without
+# these the crate carried no licence expression at all and cargo-deny rejected
+# it as error[unlicensed] — the first thing the new Rust CI lane caught.
+license.workspace    = true
+repository.workspace = true
 
 [lib]
 name       = "iai_mcp_vec_core"

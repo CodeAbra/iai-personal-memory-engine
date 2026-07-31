@@ -62,10 +62,9 @@ jobs:
     #     deliberately: golden_parity.rs forbids regenerating a golden to make
     #     a test pass, and relaxing byte-exact parity is a maintainer call.
     # Promote to the blocking ci.yml gate once both are resolved.
-    env:
-      # Same pin as ci.yml: stops rustup re-reading rust-toolchain.toml at build
-      # time and re-installing components the action already placed.
-      RUSTUP_TOOLCHAIN: "1.87"
+    # RUSTUP_TOOLCHAIN is set per cargo step below rather than job-wide. Job-wide
+    # it also entered the cargo-deny container, which then failed to resolve
+    # `1.87-x86_64-unknown-linux-musl`.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.87.0
@@ -78,16 +77,30 @@ jobs:
       # rest. Without it a failing `cargo fmt` would skip the tests entirely,
       # which is the opposite of what this lane is for. The job still reports
       # failure if any step fails.
+      # RUSTUP_TOOLCHAIN must name the toolchain dtolnay/rust-toolchain actually
+      # installed — "1.87.0", not "1.87". Pinned to "1.87" rustup resolves a
+      # different, component-less toolchain and cargo-fmt/cargo-clippy are "not
+      # installed"; unset, rustup reads rust-toolchain.toml (channel "1.87") and
+      # minimal-installs it without those components, which fails the same way.
       - name: Formatting
+        env:
+          RUSTUP_TOOLCHAIN: "1.87.0"
         run: cargo fmt --all --check
       - name: Clippy
         # Deliberately not -D warnings yet: the workspace already emits warnings
         # (lilliengine alone generates 6). Record the count first, then promote.
         if: always()
+        env:
+          RUSTUP_TOOLCHAIN: "1.87.0"
         run: cargo clippy --workspace --all-targets
       - name: Tests
+        # --no-fail-fast: without it cargo stops at the first failing crate, and
+        # the first run reported only ~78 of ~482 tests before aborting on
+        # lilli-hd. A discovery lane needs the whole picture.
         if: always()
-        run: cargo test --workspace
+        env:
+          RUSTUP_TOOLCHAIN: "1.87.0"
+        run: cargo test --workspace --no-fail-fast
       - name: Supply-chain policy
         # deny.toml has encoded the licence allow-list and the GPL/AGPL/LGPL ban
         # since it was written; this is the first thing to actually run it.
