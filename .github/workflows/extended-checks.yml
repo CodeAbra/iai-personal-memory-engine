@@ -87,8 +87,12 @@ jobs:
           RUSTUP_TOOLCHAIN: "1.87.0"
         run: cargo fmt --all --check
       - name: Clippy
-        # Deliberately not -D warnings yet: the workspace already emits warnings
-        # (lilliengine alone generates 6). Record the count first, then promote.
+        # Deliberately not -D warnings yet: a local run reports ~165 warnings
+        # across the workspace. Note this step goes red anyway, and not because
+        # of those: clippy::approx_constant is deny-by-default and fires on
+        # crates/lillibrain/src/codec.rs:498 (`Value::Float(3.141592653589793)`
+        # — PI written out longhand). One error, one line, left for a maintainer
+        # rather than folded into a CI change.
         if: always()
         env:
           RUSTUP_TOOLCHAIN: "1.87.0"
