@@ -1215,15 +1215,26 @@ def _recall_core(
             structural_weight = 0.0
         structural_weight = max(0.0, min(1.0, structural_weight))
 
+    # literal_preservation is the raw-vs-summary preference and it gates the
+    # semantic tier boost below, so silently defaulting it changes served
+    # ordering. "No profile supplied" and "profile says medium" are different
+    # situations that produce the same value -- log the former, since it is
+    # otherwise indistinguishable after the fact.
     lp_value = "medium"
     if profile_state:
         try:
             raw_lp = profile_state.get("literal_preservation", "medium")
             if isinstance(raw_lp, str) and raw_lp in LITERAL_PRESERVATION_W_DEGREE_SCALE:
                 lp_value = raw_lp
+            else:
+                logger.debug(
+                    "literal_preservation_unrecognized: %r -> medium", raw_lp,
+                )
         except (TypeError, ValueError, AttributeError) as exc:
             logger.debug("literal_preservation_parse_failed: %s", exc)
             lp_value = "medium"
+    else:
+        logger.debug("literal_preservation_no_profile_state -> medium")
     lp_scale = LITERAL_PRESERVATION_W_DEGREE_SCALE[lp_value]
     effective_w_degree = _env_weight("IAI_MCP_W_DEGREE", W_DEGREE) * lp_scale
     if mode == "verbatim":
@@ -1762,7 +1773,11 @@ def recall_for_response(
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
     apply_supersede_cap(core.scored_hits, _tv_outgoing, cue_intent=_cue_intent)
-    core.scored_hits.sort(key=lambda h: h.score, reverse=True)
+    # Ties break on record id, matching the candidate sort above. A plain
+    # score sort is stable, so equal-scored hits would otherwise inherit
+    # whatever order the candidate scan happened to produce — making the
+    # served ordering depend on scan order rather than on the ranking.
+    core.scored_hits.sort(key=lambda h: (-h.score, str(h.record_id)))
 
     if (
         len(core.scored_hits) == 1
@@ -2067,7 +2082,9 @@ def recall_for_benchmark(
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
     apply_supersede_cap(core.scored_hits, _tv_outgoing, cue_intent=_cue_intent)
-    core.scored_hits.sort(key=lambda h: h.score, reverse=True)
+    # Same deterministic tie-break as the production path: the benchmark must
+    # measure the ordering production actually serves.
+    core.scored_hits.sort(key=lambda h: (-h.score, str(h.record_id)))
 
     hits = core.scored_hits[:k_hits]
     budget_used = sum(len(h.literal_surface) // 4 for h in hits)

@@ -50,6 +50,15 @@ def step_hippo_cleanup(
         )
     except Exception as exc:  # noqa: BLE001 -- hygiene must never fail the step
         logger.warning("mistier coverage prune failed: %s", exc, exc_info=True)
+    try:
+        # Deferred curiosity inputs are consumed by watermark, not deleted, so
+        # the rows outlive their use; the same holds for superseded drain
+        # cursors. Both are residue once the watermark has passed them.
+        from iai_mcp.curiosity import prune_consumed_curiosity_events
+
+        payload.update(prune_consumed_curiosity_events(self._store))
+    except Exception as exc:  # noqa: BLE001 -- hygiene must never fail the step
+        logger.warning("curiosity event prune failed: %s", exc, exc_info=True)
     return True, payload
 
 
