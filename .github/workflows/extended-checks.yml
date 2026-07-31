@@ -46,9 +46,11 @@ jobs:
     # now, so this lane starts non-blocking. Two known reds, both pre-existing
     # and neither a reason to hold up the tests actually running:
     #   * `cargo fmt --all --check` — the workspace has never been rustfmt
-    #     enforced (69 files / 517 hunks). Mechanical, but far too large to fold
-    #     into the PR that introduces the gate; its own cleanup, like the ruff
-    #     backlog above.
+    #     enforced. Mechanical, but far too large to fold into the PR that
+    #     introduces the gate; its own cleanup, like the ruff backlog above.
+    #     Read the step's own output for the current scale rather than trusting
+    #     a number here: this lane is the first thing to run rustfmt at all, and
+    #     a pre-CI local estimate did not match what CI reported.
     #   * lilli-hd FHRR golden-parity `bundle` — fails on x86-64 (the blocking
     #     gate runs on ARM macOS). Measured, not guessed: on x86-64 the Python
     #     reference in src/iai_mcp/lilli/tiers/fhrr.py misses its OWN golden in
@@ -62,10 +64,9 @@ jobs:
     #     deliberately: golden_parity.rs forbids regenerating a golden to make
     #     a test pass, and relaxing byte-exact parity is a maintainer call.
     # Promote to the blocking ci.yml gate once both are resolved.
-    env:
-      # Same pin as ci.yml: stops rustup re-reading rust-toolchain.toml at build
-      # time and re-installing components the action already placed.
-      RUSTUP_TOOLCHAIN: "1.87"
+    # RUSTUP_TOOLCHAIN is set per cargo step below rather than job-wide. Job-wide
+    # it also entered the cargo-deny container, which then failed to resolve
+    # `1.87-x86_64-unknown-linux-musl`.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.87.0
@@ -78,16 +79,34 @@ jobs:
       # rest. Without it a failing `cargo fmt` would skip the tests entirely,
       # which is the opposite of what this lane is for. The job still reports
       # failure if any step fails.
+      # RUSTUP_TOOLCHAIN must name the toolchain dtolnay/rust-toolchain actually
+      # installed — "1.87.0", not "1.87". Pinned to "1.87" rustup resolves a
+      # different, component-less toolchain and cargo-fmt/cargo-clippy are "not
+      # installed"; unset, rustup reads rust-toolchain.toml (channel "1.87") and
+      # minimal-installs it without those components, which fails the same way.
       - name: Formatting
+        env:
+          RUSTUP_TOOLCHAIN: "1.87.0"
         run: cargo fmt --all --check
       - name: Clippy
-        # Deliberately not -D warnings yet: the workspace already emits warnings
-        # (lilliengine alone generates 6). Record the count first, then promote.
+        # Deliberately not -D warnings yet: a local run reports ~165 warnings
+        # across the workspace. Note this step goes red anyway, and not because
+        # of those: clippy::approx_constant is deny-by-default and fires on
+        # crates/lillibrain/src/codec.rs:498 (`Value::Float(3.141592653589793)`
+        # — PI written out longhand). One error, one line, left for a maintainer
+        # rather than folded into a CI change.
         if: always()
+        env:
+          RUSTUP_TOOLCHAIN: "1.87.0"
         run: cargo clippy --workspace --all-targets
       - name: Tests
+        # --no-fail-fast: without it cargo stops at the first failing crate, and
+        # the first run reported only ~78 of ~482 tests before aborting on
+        # lilli-hd. A discovery lane needs the whole picture.
         if: always()
-        run: cargo test --workspace
+        env:
+          RUSTUP_TOOLCHAIN: "1.87.0"
+        run: cargo test --workspace --no-fail-fast
       - name: Supply-chain policy
         # deny.toml has encoded the licence allow-list and the GPL/AGPL/LGPL ban
         # since it was written; this is the first thing to actually run it.
