@@ -46,9 +46,11 @@ jobs:
     # now, so this lane starts non-blocking. Two known reds, both pre-existing
     # and neither a reason to hold up the tests actually running:
     #   * `cargo fmt --all --check` — the workspace has never been rustfmt
-    #     enforced (69 files / 517 hunks). Mechanical, but far too large to fold
-    #     into the PR that introduces the gate; its own cleanup, like the ruff
-    #     backlog above.
+    #     enforced. Mechanical, but far too large to fold into the PR that
+    #     introduces the gate; its own cleanup, like the ruff backlog above.
+    #     Read the step's own output for the current scale rather than trusting
+    #     a number here: this lane is the first thing to run rustfmt at all, and
+    #     a pre-CI local estimate did not match what CI reported.
     #   * lilli-hd FHRR golden-parity `bundle` — fails on x86-64 (the blocking
     #     gate runs on ARM macOS). Measured, not guessed: on x86-64 the Python
     #     reference in src/iai_mcp/lilli/tiers/fhrr.py misses its OWN golden in
