@@ -26,9 +26,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - uses: dtolnay/rust-toolchain@1.87.0
         with:
           components: rustfmt, clippy
+      # This job builds the native extension from source on every run; caching
+      # the Cargo artifacts is the cheapest lever on a gate that takes ~1h14m.
+      - uses: Swatinem/rust-cache@v2
       - name: Install with dev extras
         run: |
           python -m pip install --upgrade pip

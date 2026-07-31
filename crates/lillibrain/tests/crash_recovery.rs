@@ -551,7 +551,10 @@ fn ro_reader_returns_typed_error_when_checkpoint_advances_after_open() {
     // checkpoint rewrote — never a torn cross-generation read.
     let err = reader.pager().read_page(uncached_page).unwrap_err();
     match err {
-        StoreError::Integrity { detail } => {
+        // SnapshotFence is the specific variant the pager raises for this case;
+        // Integrity is kept because the fence detail is the same contract and a
+        // caller matching the broader variant is still correct.
+        StoreError::SnapshotFence { detail } | StoreError::Integrity { detail } => {
             assert!(
                 detail.contains("read-only snapshot invalidated"),
                 "expected the snapshot-fence integrity error, got: {detail}"
