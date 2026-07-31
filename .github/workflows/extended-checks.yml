@@ -49,10 +49,18 @@ jobs:
     #     enforced (69 files / 517 hunks). Mechanical, but far too large to fold
     #     into the PR that introduces the gate; its own cleanup, like the ruff
     #     backlog above.
-    #   * lilli-hd FHRR golden-parity `bundle` — reproduces on x86-64 but the
-    #     blocking gate runs on ARM macOS. An open question for the kernel, not
-    #     a CI defect; see crates/lilli-hd/tests/golden_parity.rs, whose header
-    #     forbids regenerating a golden to make a test pass.
+    #   * lilli-hd FHRR golden-parity `bundle` — fails on x86-64 (the blocking
+    #     gate runs on ARM macOS). Measured, not guessed: on x86-64 the Python
+    #     reference in src/iai_mcp/lilli/tiers/fhrr.py misses its OWN golden in
+    #     328/10000 components while the Rust kernel misses 164, so the kernel
+    #     is not the outlier. ~95% of the diffs are components whose
+    #     pre-truncation value sits within 1e-6 of an integer boundary (byte
+    #     inputs make angles exact multiples of TAU/256, so their means land on
+    #     quantisation knife-edges); the rest are components whose resultant
+    #     magnitude is ~1e-16, i.e. antipodal phasors where atan2 is undefined.
+    #     The golden therefore encodes one machine's libm rounding. Left as-is
+    #     deliberately: golden_parity.rs forbids regenerating a golden to make
+    #     a test pass, and relaxing byte-exact parity is a maintainer call.
     # Promote to the blocking ci.yml gate once both are resolved.
     env:
       # Same pin as ci.yml: stops rustup re-reading rust-toolchain.toml at build
