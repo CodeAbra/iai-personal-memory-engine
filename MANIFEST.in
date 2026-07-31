@@ -10,7 +10,7 @@ include rust/iai_mcp_native/iai_mcp_native/py.typed
 include src/iai_mcp_native.pyi
 include src/embed.pyi
 include src/graph.pyi
-include src/py.typed
+include src/iai_mcp/py.typed
 
 # Deploy files: launchd plist, systemd unit, hook scripts
 recursive-include src/iai_mcp/_deploy *

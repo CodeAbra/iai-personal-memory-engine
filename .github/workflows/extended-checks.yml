@@ -3,6 +3,7 @@ name: Extended checks
 # Non-blocking checks that track work in progress without gating every push:
 #   - Linux build/test (the native engine is code-complete on Linux but not yet
 #     validated end-to-end)
+#   - the Rust workspace gate (fmt / clippy / test / supply-chain policy)
 #   - the lint backlog
 # Runs weekly and on demand, so day-to-day pushes stay quiet.
 
@@ -23,9 +24,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - uses: dtolnay/rust-toolchain@1.87.0
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: System build deps
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Install with dev extras
@@ -35,6 +39,55 @@ jobs:
       - name: Correctness gate
         run: pytest -m "not perf and not slow and not live"
 
+  rust:
+    name: rust workspace (fmt / clippy / test / deny)
+    runs-on: ubuntu-latest
+    # The workspace carries ~482 tests across 8 crates that nothing ran until
+    # now, so this lane starts non-blocking. Two known reds, both pre-existing
+    # and neither a reason to hold up the tests actually running:
+    #   * `cargo fmt --all --check` — the workspace has never been rustfmt
+    #     enforced (69 files / 517 hunks). Mechanical, but far too large to fold
+    #     into the PR that introduces the gate; its own cleanup, like the ruff
+    #     backlog above.
+    #   * lilli-hd FHRR golden-parity `bundle` — reproduces on x86-64 but the
+    #     blocking gate runs on ARM macOS. An open question for the kernel, not
+    #     a CI defect; see crates/lilli-hd/tests/golden_parity.rs, whose header
+    #     forbids regenerating a golden to make a test pass.
+    # Promote to the blocking ci.yml gate once both are resolved.
+    env:
+      # Same pin as ci.yml: stops rustup re-reading rust-toolchain.toml at build
+      # time and re-installing components the action already placed.
+      RUSTUP_TOOLCHAIN: "1.87"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: System build deps
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      # Every check below carries `if: always()` so one red does not mask the
+      # rest. Without it a failing `cargo fmt` would skip the tests entirely,
+      # which is the opposite of what this lane is for. The job still reports
+      # failure if any step fails.
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        # Deliberately not -D warnings yet: the workspace already emits warnings
+        # (lilliengine alone generates 6). Record the count first, then promote.
+        if: always()
+        run: cargo clippy --workspace --all-targets
+      - name: Tests
+        if: always()
+        run: cargo test --workspace
+      - name: Supply-chain policy
+        # deny.toml has encoded the licence allow-list and the GPL/AGPL/LGPL ban
+        # since it was written; this is the first thing to actually run it.
+        if: always()
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans
+
   lint:
     name: ruff
     runs-on: ubuntu-latest
@@ -43,5 +96,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python -m pip install "ruff>=0.5"
       - run: ruff check .

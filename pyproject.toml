@@ -81,6 +81,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 iai_mcp = [
+    # PEP 561 marker. It must ship INSIDE the package: at src/py.typed it was
+    # outside `iai_mcp` and never reached the wheel, so no downstream checker
+    # treated this package as typed despite it advertising inline types.
+    "py.typed",
     "_deploy/launchd/*.plist",
     "_deploy/systemd/*.service",
     "_deploy/windows/*.xml",
