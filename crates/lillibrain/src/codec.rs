@@ -495,7 +495,7 @@ mod tests {
             Value::Int(2_000_000_000),
             Value::Int(i64::MIN),
             Value::Int(i64::MAX),
-            Value::Float(3.141592653589793),
+            Value::Float(std::f64::consts::PI),
             Value::Float(-0.0),
             Value::Text("hello".to_string()),
             Value::Blob(vec![0, 1, 2, 255]),
