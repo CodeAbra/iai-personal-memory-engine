@@ -216,17 +216,17 @@ fn cursor_insert_path_cost_is_independent_of_row_count() {
     let t = store.tree(root);
 
     for k in 1..=50 {
-        t.insert(k, &vec![0u8; 64]).unwrap();
+        t.insert(k, &[0u8; 64]).unwrap();
     }
     store.pager().reset_read_count();
-    t.insert(51, &vec![0u8; 64]).unwrap();
+    t.insert(51, &[0u8; 64]).unwrap();
     let small_reads = store.pager().read_count();
 
     for k in 52..=4000 {
-        t.insert(k, &vec![0u8; 64]).unwrap();
+        t.insert(k, &[0u8; 64]).unwrap();
     }
     store.pager().reset_read_count();
-    t.insert(4001, &vec![0u8; 64]).unwrap();
+    t.insert(4001, &[0u8; 64]).unwrap();
     let large_reads = store.pager().read_count();
 
     // A whole-tree-scan insert would make large_reads grow ~linearly in the row
@@ -391,7 +391,7 @@ fn delete_all_then_reinsert_collapses_and_regrows() {
     let (_d, store, root) = open_tree();
     let t = store.tree(root);
     for k in 1..=150 {
-        t.insert(k, &vec![(k % 256) as u8; 150]).unwrap();
+        t.insert(k, &[(k % 256) as u8; 150]).unwrap();
     }
     for k in 1..=150 {
         t.delete(k).unwrap();

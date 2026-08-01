@@ -435,7 +435,6 @@ fn ro_reader_under_concurrent_checkpoint_is_consistent_or_typed_error() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let writer_stop = stop.clone();
-    let writer_path = path.clone();
     let churn = std::thread::spawn(move || {
         // Repeatedly mutate and checkpoint, advancing the checkpoint generation
         // and rewriting main-file pages while the reader is live.

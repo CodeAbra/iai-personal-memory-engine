@@ -24,3 +24,6 @@ ciborium = "0.2"
 [[bench]]
 name = "edges_upsert"
 harness = false
+
+[lints]
+workspace = true

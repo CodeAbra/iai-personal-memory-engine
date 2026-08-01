@@ -658,7 +658,7 @@ impl Connection {
     fn export_built_indexes(&self, py: Python<'_>) -> PyResult<IndexSnapshot> {
         let arc = self.arc()?;
         let inner = py.allow_threads(move || {
-            let guard = lock(&arc);
+            let guard = lock(arc);
             guard.export_built_indexes()
         });
         Ok(IndexSnapshot { inner })
@@ -689,7 +689,7 @@ impl Connection {
         let arc = self.arc()?;
         let inner = snapshot.inner.clone();
         py.allow_threads(move || {
-            let mut guard = lock(&arc);
+            let mut guard = lock(arc);
             guard.adopt_built_indexes(&inner);
         });
         Ok(())

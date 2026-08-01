@@ -17,3 +17,6 @@ pyo3           = { workspace = true }
 numpy          = { workspace = true }
 rayon          = "1.10"
 crc32fast      = "1.4"
+
+[lints]
+workspace = true

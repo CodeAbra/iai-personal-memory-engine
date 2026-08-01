@@ -424,7 +424,7 @@ pub fn execute_select_instrumented(
     // Only a plain (non-`datetime()`) single-key ORDER BY on the indexed
     // column qualifies; the walk start is seeded from any `col >= bound`
     // conjunct so an ascending bounded probe never decodes below its bound.
-    if let Some(oidx) = ordered_index.as_deref_mut() {
+    if let Some(oidx) = ordered_index {
         if let (Some(k1), Some(lim)) = (plan.order_by.as_ref(), effective_limit) {
             if k1.col == oidx.column()
                 && !k1.datetime
@@ -962,7 +962,7 @@ fn scan_rows_two_phase(
             let mut pairs: Vec<(String, Value)> = col_names
                 .iter()
                 .cloned()
-                .zip(vals.into_iter())
+                .zip(vals)
                 .collect();
             pairs.push((ROWKEY.to_string(), Value::Int(key)));
             let mut row = Row::from_pairs(pairs);
@@ -3029,7 +3029,7 @@ pub fn execute_insert(
     // (no conflict clause on this INSERT) the entry simply primes it for a later
     // ensure_built no-op only when `built` is already set — otherwise the next
     // conflict probe rebuilds from the tree, which includes this row.
-    if let (Some(idx), Some(ck)) = (conflict_index.as_deref_mut(), attempted_ckey) {
+    if let (Some(idx), Some(ck)) = (conflict_index, attempted_ckey) {
         if idx.built {
             idx.insert(ck, next_key);
         }
@@ -3038,7 +3038,7 @@ pub fn execute_insert(
     // value to the new row-key. A no-op when the index is unbuilt (the next probe
     // rebuilds from the tree, which includes this row), so a write to a table whose
     // col-index was never built stays free.
-    if let Some(cidx) = col_index.as_deref_mut() {
+    if let Some(cidx) = col_index {
         let inserted = Row::from_pairs(
             col_names.iter().cloned().zip(payload_vals.iter().cloned()).collect(),
         );

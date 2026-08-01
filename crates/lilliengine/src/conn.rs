@@ -1188,7 +1188,6 @@ impl Connection {
         // compacted incrementally by the pager.
         let maint_head = upper
             .trim_end_matches(';')
-            .trim_end()
             .split_whitespace()
             .next()
             .unwrap_or("");
@@ -2321,15 +2320,16 @@ const BUILT_INDEX_CACHE_CAP: usize = 32;
 /// incrementally-maintained pair matches the committed tree at the
 /// post-commit generation) — never mid-write, never inside a transaction, so
 /// an uncommitted state can never be cached.
-static BUILT_INDEX_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<
-        HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>,
-    >,
-> = std::sync::OnceLock::new();
+/// `(db path, table, generation)` — what a cached artefact is keyed on. The
+/// generation is the post-commit counter, so an entry can never outlive the
+/// write that produced it.
+type CacheKey = (std::path::PathBuf, String, i64);
+type BuiltIndexMap = HashMap<CacheKey, (ColIndex, IdIndex, Option<i64>)>;
 
-fn built_index_cache() -> &'static std::sync::Mutex<
-    HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>,
-> {
+static BUILT_INDEX_CACHE: std::sync::OnceLock<std::sync::Mutex<BuiltIndexMap>> =
+    std::sync::OnceLock::new();
+
+fn built_index_cache() -> &'static std::sync::Mutex<BuiltIndexMap> {
     BUILT_INDEX_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -2512,24 +2512,6 @@ fn ro_index_publish_allowed(path: &std::path::Path, table: &str) -> bool {
     false
 }
 
-#[cfg(test)]
-mod publish_spacing_tests {
-    use super::publish_spacing_ok;
-    use std::time::Duration;
-
-    #[test]
-    fn first_publish_always_allowed() {
-        assert!(publish_spacing_ok(None, Duration::from_millis(1500)));
-    }
-
-    #[test]
-    fn within_interval_blocked_past_interval_allowed() {
-        let interval = Duration::from_millis(1500);
-        assert!(!publish_spacing_ok(Some(Duration::from_millis(10)), interval));
-        assert!(publish_spacing_ok(Some(Duration::from_millis(1501)), interval));
-    }
-}
-
 /// Process-wide memo for the load gate's row-count cross-check, keyed by
 /// `(store path, table, committed write-generation)`.
 ///
@@ -2543,9 +2525,8 @@ mod publish_spacing_tests {
 /// still reads G: the memo re-keys itself out of existence on any committed
 /// write. The count remains exactly the same defense-in-depth cross-check —
 /// only its recomputation frequency changes from per-open to per-generation.
-static GATE_COUNT_MEMO: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), u64>>,
-> = std::sync::OnceLock::new();
+static GATE_COUNT_MEMO: std::sync::OnceLock<std::sync::Mutex<HashMap<CacheKey, u64>>> =
+    std::sync::OnceLock::new();
 
 /// The row count for the load gate: memo hit on `(path, table, generation)`,
 /// else one real `count_cells()` walk whose result is memoized.
@@ -2638,4 +2619,22 @@ fn cached_sidecar_envelope(
         );
     }
     Some(envelope)
+}
+
+#[cfg(test)]
+mod publish_spacing_tests {
+    use super::publish_spacing_ok;
+    use std::time::Duration;
+
+    #[test]
+    fn first_publish_always_allowed() {
+        assert!(publish_spacing_ok(None, Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn within_interval_blocked_past_interval_allowed() {
+        let interval = Duration::from_millis(1500);
+        assert!(!publish_spacing_ok(Some(Duration::from_millis(10)), interval));
+        assert!(publish_spacing_ok(Some(Duration::from_millis(1501)), interval));
+    }
 }

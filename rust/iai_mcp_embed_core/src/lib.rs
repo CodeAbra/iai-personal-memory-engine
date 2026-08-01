@@ -58,7 +58,7 @@ impl Embedder {
     #[new]
     fn py_new(py: Python<'_>) -> PyResult<Self> {
         let inner = py
-            .allow_threads(|| BertEmbedder::load())
+            .allow_threads(BertEmbedder::load)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }

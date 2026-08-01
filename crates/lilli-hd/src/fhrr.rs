@@ -95,9 +95,9 @@ pub fn permute_impl(hv: &[u8], shift: i64) -> Vec<u8> {
     // shifts.
     let s = ((shift % n_i) + n_i) % n_i;
     let mut out = vec![0u8; n];
-    for i in 0..n {
+    for (i, dst) in out.iter_mut().enumerate() {
         let src = ((i as i64 - s) % n_i + n_i) % n_i;
-        out[i] = hv[src as usize];
+        *dst = hv[src as usize];
     }
     out
 }

@@ -28,3 +28,6 @@ iai_mcp_vec_core    = { path = "../iai_mcp_vec_core" }
 lilli-hd            = { path = "../../crates/lilli-hd" }
 lillibrain          = { path = "../../crates/lillibrain" }
 lilliengine         = { path = "../../crates/lilliengine" }
+
+[lints]
+workspace = true

@@ -121,7 +121,7 @@ pub fn load_golden(manifest_path: impl AsRef<Path>) -> Result<GoldenBytes, Golde
     // dimension makes it return 0 — both turn the length assertion into a no-op
     // that would pass an arbitrarily-sized `.bin`. A real golden has a concrete,
     // non-empty extent in every dimension.
-    if manifest.shape.is_empty() || manifest.shape.iter().any(|&d| d == 0) {
+    if manifest.shape.is_empty() || manifest.shape.contains(&0) {
         return Err(GoldenError::DegenerateShape {
             shape: manifest.shape.clone(),
         });

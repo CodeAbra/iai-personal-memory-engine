@@ -174,9 +174,9 @@ pub fn permute_impl(hv: &[u8], shift: i64) -> Vec<u8> {
     // np.roll: out[i] = bits[(i - shift) mod n]
     let s = ((shift % n_i) + n_i) % n_i;
     let mut rolled = vec![0u8; n];
-    for i in 0..n {
+    for (i, dst) in rolled.iter_mut().enumerate() {
         let src = ((i as i64 - s) % n_i + n_i) % n_i;
-        rolled[i] = bits[src as usize];
+        *dst = bits[src as usize];
     }
     pack_bits_msb(&rolled)
 }

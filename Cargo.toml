@@ -32,3 +32,22 @@ pyo3-stub-gen  = "0.6"
 serde          = { version = "1", features = ["derive", "rc"] }
 serde_json     = "1"
 thiserror      = "2"
+
+# `import_exception!` in pyo3 0.22 expands to code gated on a `gil-refs`
+# feature that this build never enables, so rustc reports it as an unexpected
+# cfg value. Declaring it here tells rustc the value is known rather than
+# silencing the lint: any *other* unexpected cfg still warns. Removable once
+# the workspace moves off pyo3 0.22 — currently blocked, since pyo3 0.29 pulls
+# `time 0.3.54`, which requires rustc 1.88 against this repo's 1.87 pin.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gil-refs"))'] }
+
+# `#[pyfunction]` in pyo3 0.22 expands to an error conversion that is a no-op
+# when the error is already a PyErr, so clippy flags ~86 useless_conversion
+# hits whose spans point at generated code — there is nothing in this repo to
+# rewrite. Allowed rather than left as permanent noise, and deliberately scoped
+# to this one lint so everything else clippy finds still surfaces. Remove once
+# the workspace moves off pyo3 0.22; that is blocked today because pyo3 0.29
+# pulls `time 0.3.54`, which needs rustc 1.88 against this repo's 1.87 pin.
+[workspace.lints.clippy]
+useless_conversion = "allow"

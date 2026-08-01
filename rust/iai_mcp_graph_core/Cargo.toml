@@ -32,3 +32,6 @@ thiserror      = { workspace = true }
 [dev-dependencies]
 proptest = "1.5"
 approx   = "0.5"
+
+[lints]
+workspace = true
