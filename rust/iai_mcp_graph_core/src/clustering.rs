@@ -183,9 +183,8 @@ pub fn average_clustering(
     let indptr_owned: Vec<i64> = indptr_slice.to_vec();
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
-    let result = py.allow_threads(move || {
-        compute_average_clustering(&indptr_owned, &indices_owned, n_nodes)
-    });
+    let result = py
+        .allow_threads(move || compute_average_clustering(&indptr_owned, &indices_owned, n_nodes));
 
     Ok(result)
 }
@@ -258,10 +257,7 @@ mod tests {
     #[test]
     fn disjoint_k3_pair_averages_to_unity() {
         let n = 6;
-        let edges = [
-            (0, 1), (0, 2), (1, 2),
-            (3, 4), (3, 5), (4, 5),
-        ];
+        let edges = [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)];
         let (indptr, indices) = build_csr(n, &edges);
         let c = compute_average_clustering(&indptr, &indices, n);
         assert_eq!(c, 1.0);

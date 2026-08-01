@@ -55,7 +55,11 @@ pub fn pad_to_k(indices: &[u16], seed_a: &[u16], seed_b: &[u16]) -> Vec<u16> {
 
 fn sorted_unique(values: impl IntoIterator<Item = u16>) -> Vec<u16> {
     use std::collections::BTreeSet;
-    values.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
+    values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Union-bind two index lists, capped at K. Backfills if the union underflows.
@@ -110,10 +114,7 @@ pub fn permute_impl(hv: &[u16], shift: i64) -> Vec<u16> {
     // overflow the per-index `i + shift`. The result is unchanged for in-range
     // shifts.
     let s = ((shift % d) + d) % d;
-    let mut out: Vec<u16> = hv
-        .iter()
-        .map(|&i| ((i as i64 + s) % d) as u16)
-        .collect();
+    let mut out: Vec<u16> = hv.iter().map(|&i| ((i as i64 + s) % d) as u16).collect();
     out.sort_unstable();
     out
 }
@@ -145,11 +146,11 @@ pub fn bind(a: &Bound<'_, PyList>, b: &Bound<'_, PyList>) -> PyResult<Vec<u16>> 
 
 #[pyfunction]
 #[pyo3(name = "sparse_unbind")]
-pub fn unbind(
-    bound: &Bound<'_, PyList>,
-    key: &Bound<'_, PyList>,
-) -> PyResult<Vec<u16>> {
-    Ok(unbind_impl(&extract_indices(bound)?, &extract_indices(key)?))
+pub fn unbind(bound: &Bound<'_, PyList>, key: &Bound<'_, PyList>) -> PyResult<Vec<u16>> {
+    Ok(unbind_impl(
+        &extract_indices(bound)?,
+        &extract_indices(key)?,
+    ))
 }
 
 #[pyfunction]

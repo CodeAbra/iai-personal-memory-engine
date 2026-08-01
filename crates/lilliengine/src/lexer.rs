@@ -47,13 +47,61 @@ pub enum Token {
 
 /// The reserved keyword set, upper-cased.
 const KEYWORDS: &[&str] = &[
-    "SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "WHERE", "AND", "OR", "NOT",
-    "IS", "NULL", "IN", "LIKE", "LIMIT", "INTO", "VALUES", "SET", "ON",
-    "CONFLICT", "DO", "NOTHING", "EXCLUDED", "CREATE", "TABLE", "IF", "EXISTS",
-    "INDEX", "ALTER", "ADD", "COLUMN", "PRAGMA", "BEGIN", "COMMIT", "ROLLBACK",
-    "INTEGER", "TEXT", "REAL", "BLOB", "PRIMARY", "KEY", "AUTOINCREMENT",
-    "UNIQUE", "DEFAULT", "ORDER", "BY", "ASC", "DESC", "COUNT", "SUM", "MIN",
-    "MAX", "IGNORE", "REPLACE", "TRUE", "FALSE",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "IS",
+    "NULL",
+    "IN",
+    "LIKE",
+    "LIMIT",
+    "INTO",
+    "VALUES",
+    "SET",
+    "ON",
+    "CONFLICT",
+    "DO",
+    "NOTHING",
+    "EXCLUDED",
+    "CREATE",
+    "TABLE",
+    "IF",
+    "EXISTS",
+    "INDEX",
+    "ALTER",
+    "ADD",
+    "COLUMN",
+    "PRAGMA",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "INTEGER",
+    "TEXT",
+    "REAL",
+    "BLOB",
+    "PRIMARY",
+    "KEY",
+    "AUTOINCREMENT",
+    "UNIQUE",
+    "DEFAULT",
+    "ORDER",
+    "BY",
+    "ASC",
+    "DESC",
+    "COUNT",
+    "SUM",
+    "MIN",
+    "MAX",
+    "IGNORE",
+    "REPLACE",
+    "TRUE",
+    "FALSE",
 ];
 
 /// True when `word` (any case) is a reserved keyword.
@@ -143,18 +191,18 @@ pub fn tokenize(sql: &str) -> Result<Vec<Token>> {
                     k += 1;
                 }
                 let text: String = chars[i..k].iter().collect();
-                let f: f64 = text.parse().map_err(|_| {
-                    EngineError::parse(format!("invalid real literal: {text:?}"))
-                })?;
+                let f: f64 = text
+                    .parse()
+                    .map_err(|_| EngineError::parse(format!("invalid real literal: {text:?}")))?;
                 out.push(Token::Real(f));
                 i = k;
                 continue;
             }
             // Integer: [0-9]+
             let text: String = chars[i..j].iter().collect();
-            let v: i64 = text.parse().map_err(|_| {
-                EngineError::parse(format!("invalid integer literal: {text:?}"))
-            })?;
+            let v: i64 = text
+                .parse()
+                .map_err(|_| EngineError::parse(format!("invalid integer literal: {text:?}")))?;
             out.push(Token::Integer(v));
             i = j;
             continue;

@@ -25,8 +25,8 @@ pub fn encode_row(values: &[Value]) -> Vec<u8> {
 /// Fails when the payload is malformed (a truncated header or a body that runs
 /// past the buffer); the carried message is the storage layer's own text.
 pub fn decode_row(bytes: &[u8]) -> Result<Vec<Value>> {
-    let (values, _consumed) = decode_record(bytes, 0)
-        .map_err(|e| EngineError::parse(format!("row decode: {e}")))?;
+    let (values, _consumed) =
+        decode_record(bytes, 0).map_err(|e| EngineError::parse(format!("row decode: {e}")))?;
     Ok(values)
 }
 
@@ -124,7 +124,9 @@ mod tests {
         prop_oneof![
             Just(Value::Null),
             any::<i64>().prop_map(Value::Int),
-            any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(Value::Float),
+            any::<f64>()
+                .prop_filter("finite", |f| f.is_finite())
+                .prop_map(Value::Float),
             "\\PC*".prop_map(Value::Text),
             prop::collection::vec(any::<u8>(), 0..64).prop_map(Value::Blob),
         ]

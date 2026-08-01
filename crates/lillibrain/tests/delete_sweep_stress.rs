@@ -40,10 +40,8 @@ impl XorShift64 {
 
 /// ~100-byte payload like an edges row (two UUID strings + type + weight).
 fn edge_payload(key: i64) -> Vec<u8> {
-    let mut v = format!(
-        "{key:032x}-src-uuid-payload|{key:032x}-dst-uuid-payload|hebbian|1.0"
-    )
-    .into_bytes();
+    let mut v =
+        format!("{key:032x}-src-uuid-payload|{key:032x}-dst-uuid-payload|hebbian|1.0").into_bytes();
     v.truncate(100);
     v
 }

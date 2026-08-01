@@ -133,7 +133,11 @@ pub fn render_float_text(f: f64) -> String {
         return "0.0".to_string();
     }
     if f.is_infinite() {
-        return if f < 0.0 { "-Inf".to_string() } else { "Inf".to_string() };
+        return if f < 0.0 {
+            "-Inf".to_string()
+        } else {
+            "Inf".to_string()
+        };
     }
     let s = format!("{f}");
     if s.contains('.') {
@@ -248,10 +252,7 @@ impl Catalog {
     /// dflt_value, pk)` per column. `dflt_value` is the declared default
     /// rendered to its stored cell, or `Value::Null` when none was declared.
     #[allow(clippy::type_complexity)]
-    pub fn table_info(
-        &self,
-        table: &str,
-    ) -> Result<Vec<(i64, String, String, i64, Value, i64)>> {
+    pub fn table_info(&self, table: &str) -> Result<Vec<(i64, String, String, i64, Value, i64)>> {
         let cols = self.get(table)?;
         Ok(cols
             .iter()
@@ -486,7 +487,8 @@ impl Catalog {
             }
         }
 
-        self.ddl_sql.insert(table_name.clone(), raw.trim().to_string());
+        self.ddl_sql
+            .insert(table_name.clone(), raw.trim().to_string());
         self.register(table_name, columns);
         Ok(())
     }
@@ -653,8 +655,8 @@ impl Catalog {
         let tokens = tokenize(raw)?;
         let mut w = Walker::new(&tokens);
         w.advance(); // CREATE
-        // CREATE UNIQUE INDEX carries the UNIQUE keyword before INDEX; consume it
-        // so the index name is the actual name, not the keyword.
+                     // CREATE UNIQUE INDEX carries the UNIQUE keyword before INDEX; consume it
+                     // so the index name is the actual name, not the keyword.
         let is_unique = w.peek_upper() == "UNIQUE";
         if is_unique {
             w.advance(); // UNIQUE
@@ -978,7 +980,10 @@ mod tests {
     #[test]
     fn indexed_columns_partial_index() {
         let mut cat = Catalog::new();
-        apply_ddl_str(&mut cat, "CREATE TABLE t (id TEXT, embedding_pending INTEGER)");
+        apply_ddl_str(
+            &mut cat,
+            "CREATE TABLE t (id TEXT, embedding_pending INTEGER)",
+        );
         apply_ddl_str(
             &mut cat,
             "CREATE INDEX idx_t_pending ON t(embedding_pending) WHERE embedding_pending=1",
@@ -986,7 +991,8 @@ mod tests {
 
         let cols = cat.indexed_columns("t");
         assert!(
-            cols.iter().any(|(c, partial)| c == "embedding_pending" && *partial),
+            cols.iter()
+                .any(|(c, partial)| c == "embedding_pending" && *partial),
             "expected (\"embedding_pending\", true) for partial index; got {cols:?}"
         );
     }
@@ -1020,7 +1026,10 @@ mod tests {
     fn indexed_columns_unknown_table_returns_empty() {
         let cat = Catalog::new();
         let cols = cat.indexed_columns("no_such_table");
-        assert!(cols.is_empty(), "expected empty Vec for unknown table; got {cols:?}");
+        assert!(
+            cols.is_empty(),
+            "expected empty Vec for unknown table; got {cols:?}"
+        );
     }
 
     #[test]
@@ -1034,7 +1043,14 @@ mod tests {
         let cols = cat.indexed_columns("t");
         let entry = cols.iter().find(|(c, _)| c == "x");
         assert!(entry.is_some(), "expected \"x\" in indexed_columns");
-        assert!(!entry.unwrap().1, "non-partial index must win dedup; got is_partial=true");
-        assert_eq!(cols.iter().filter(|(c, _)| c == "x").count(), 1, "dedup: only one entry for x");
+        assert!(
+            !entry.unwrap().1,
+            "non-partial index must win dedup; got is_partial=true"
+        );
+        assert_eq!(
+            cols.iter().filter(|(c, _)| c == "x").count(),
+            1,
+            "dedup: only one entry for x"
+        );
     }
 }

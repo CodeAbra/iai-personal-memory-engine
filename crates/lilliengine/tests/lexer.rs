@@ -164,9 +164,7 @@ fn punctuation_tokens() {
     let toks = tokenize("(),;.*").unwrap();
     assert_eq!(
         kinds(&toks),
-        vec![
-            "PUNCT", "PUNCT", "PUNCT", "PUNCT", "PUNCT", "PUNCT", "EOF"
-        ]
+        vec!["PUNCT", "PUNCT", "PUNCT", "PUNCT", "PUNCT", "PUNCT", "EOF"]
     );
 }
 
@@ -174,10 +172,7 @@ fn punctuation_tokens() {
 fn unrecognized_char_fails_loud() {
     let err = tokenize("SELECT @ FROM t").unwrap_err();
     let msg = format!("{err}");
-    assert!(
-        msg.contains("unexpected token near:"),
-        "message was: {msg}"
-    );
+    assert!(msg.contains("unexpected token near:"), "message was: {msg}");
 }
 
 #[test]

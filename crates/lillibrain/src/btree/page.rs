@@ -27,8 +27,8 @@
 
 use crate::codec::{decode_varint, encode_varint};
 use crate::consts::{
-    INTERIOR_HEADER_SIZE, LEAF_HEADER_SIZE, PAGE_CRC_OFFSET, PAGE_INTERIOR_TABLE,
-    PAGE_LEAF_TABLE, PAGE_SIZE,
+    INTERIOR_HEADER_SIZE, LEAF_HEADER_SIZE, PAGE_CRC_OFFSET, PAGE_INTERIOR_TABLE, PAGE_LEAF_TABLE,
+    PAGE_SIZE,
 };
 use crate::error::{Result, StoreError};
 
@@ -77,11 +77,9 @@ fn read_u16(page: &[u8], at: usize) -> u16 {
 /// buffer. Reading through such an offset must surface a typed error rather than
 /// panic on an out-of-range slice.
 fn checked_u16(page: &[u8], at: usize) -> Result<u16> {
-    let bytes = page
-        .get(at..at + 2)
-        .ok_or_else(|| StoreError::Integrity {
-            detail: format!("page read of 2 bytes at {at} is out of bounds"),
-        })?;
+    let bytes = page.get(at..at + 2).ok_or_else(|| StoreError::Integrity {
+        detail: format!("page read of 2 bytes at {at} is out of bounds"),
+    })?;
     Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
 }
 
@@ -93,11 +91,9 @@ fn read_u32(page: &[u8], at: usize) -> u32 {
 /// malformed-but-CRC-valid page can point past the buffer; reading through it
 /// must surface a typed error rather than panic on an out-of-range slice.
 fn checked_u32(page: &[u8], at: usize) -> Result<u32> {
-    let bytes = page
-        .get(at..at + 4)
-        .ok_or_else(|| StoreError::Integrity {
-            detail: format!("page read of 4 bytes at {at} is out of bounds"),
-        })?;
+    let bytes = page.get(at..at + 4).ok_or_else(|| StoreError::Integrity {
+        detail: format!("page read of 4 bytes at {at} is out of bounds"),
+    })?;
     Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
 }
 
@@ -298,7 +294,11 @@ pub fn write_leaf_from_raw(cells: &[Vec<u8>], sibling: u32) -> Result<Vec<u8>> {
         page[LEAF_PTR_ARRAY_START + i * 2..LEAF_PTR_ARRAY_START + i * 2 + 2]
             .copy_from_slice(&(*p as u16).to_be_bytes());
     }
-    let ccs = if cells.is_empty() { USABLE_END } else { write_pos };
+    let ccs = if cells.is_empty() {
+        USABLE_END
+    } else {
+        write_pos
+    };
     write_leaf_header(&mut page, cells.len(), ccs);
     set_sibling(&mut page, sibling);
     Ok(page)
@@ -316,7 +316,11 @@ pub fn read_leaf_keys(page: &[u8], threshold: usize) -> Result<Vec<i64>> {
 
 /// On-page byte cost of a leaf cell given its key and declared payload length.
 pub fn on_page_cell_size(key: i64, declared_len: usize, threshold: usize) -> usize {
-    let payload_bytes = if declared_len > threshold { 4 } else { declared_len };
+    let payload_bytes = if declared_len > threshold {
+        4
+    } else {
+        declared_len
+    };
     encode_varint(key).len() + encode_varint(declared_len as i64).len() + payload_bytes
 }
 
@@ -403,7 +407,11 @@ pub fn write_interior_node(keys: &[i64], children: &[u32]) -> Result<Vec<u8>> {
         page[INTERIOR_PTR_ARRAY_START + i * 2..INTERIOR_PTR_ARRAY_START + i * 2 + 2]
             .copy_from_slice(&(*p as u16).to_be_bytes());
     }
-    let ccs = if keys.is_empty() { USABLE_END } else { write_pos };
+    let ccs = if keys.is_empty() {
+        USABLE_END
+    } else {
+        write_pos
+    };
     write_interior_header(&mut page, keys.len(), ccs, rightmost);
     Ok(page)
 }

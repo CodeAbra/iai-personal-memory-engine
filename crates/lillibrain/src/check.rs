@@ -245,8 +245,16 @@ fn walk_tree(
             for (i, &child) in node.children.iter().enumerate() {
                 // child[i] holds keys in [keys[i-1], keys[i]); the outermost
                 // children inherit the parent's own bounds.
-                let child_lower = if i == 0 { lower } else { Some(node.keys[i - 1]) };
-                let child_upper = if i == node.keys.len() { upper } else { Some(node.keys[i]) };
+                let child_lower = if i == 0 {
+                    lower
+                } else {
+                    Some(node.keys[i - 1])
+                };
+                let child_upper = if i == node.keys.len() {
+                    upper
+                } else {
+                    Some(node.keys[i])
+                };
                 if let Some(d) = walk_tree(
                     pager,
                     child,
@@ -460,7 +468,9 @@ pub fn check_integrity_with_reserved(
                 break;
             }
             if seen.contains(&current) {
-                errors.push(format!("leaf sibling chain cycle: page {current} visited twice"));
+                errors.push(format!(
+                    "leaf sibling chain cycle: page {current} visited twice"
+                ));
                 break;
             }
             seen.insert(current);

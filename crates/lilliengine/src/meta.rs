@@ -72,10 +72,7 @@ impl MetaTable {
 
     /// The next free integer key in the meta tree.
     fn next_key(&self, store: &Store) -> Result<i64> {
-        let max = store
-            .tree(META_TABLE_PAGE)
-            .max_key()
-            .map_err(store_err)?;
+        let max = store.tree(META_TABLE_PAGE).max_key().map_err(store_err)?;
         Ok(max.map_or(1, |k| k + 1))
     }
 
@@ -282,9 +279,7 @@ impl MetaTable {
                     }
                 }
                 Some("root") if values.len() >= 3 => {
-                    if let (Value::Text(table), Some(root)) =
-                        (&values[1], as_int(&values[2]))
-                    {
+                    if let (Value::Text(table), Some(root)) = (&values[1], as_int(&values[2])) {
                         root_rows.push((table.clone(), root as u32));
                     }
                 }
@@ -794,7 +789,8 @@ mod ddl_history_tests {
             TxnScope::Own,
         )
         .unwrap();
-        meta.record_ddl(&store, "DROP TABLE t", TxnScope::Own).unwrap();
+        meta.record_ddl(&store, "DROP TABLE t", TxnScope::Own)
+            .unwrap();
         meta.record_ddl(&store, "CREATE TABLE t (a TEXT)", TxnScope::Own)
             .unwrap();
 
@@ -832,15 +828,27 @@ mod ddl_history_tests {
         )
         .unwrap();
         for _ in 0..4 {
-            meta.record_ddl(&store, "CREATE INDEX IF NOT EXISTS ix_a ON t (a)", TxnScope::Own)
-                .unwrap();
-        }
-        meta.record_ddl(&store, "CREATE INDEX IF NOT EXISTS ix_b ON t (a)", TxnScope::Own)
+            meta.record_ddl(
+                &store,
+                "CREATE INDEX IF NOT EXISTS ix_a ON t (a)",
+                TxnScope::Own,
+            )
             .unwrap();
+        }
+        meta.record_ddl(
+            &store,
+            "CREATE INDEX IF NOT EXISTS ix_b ON t (a)",
+            TxnScope::Own,
+        )
+        .unwrap();
         meta.compact_ddl_history(&store).unwrap();
         // A new DDL after compaction must sort AFTER every surviving row.
-        meta.record_ddl(&store, "CREATE INDEX IF NOT EXISTS ix_c ON t (a)", TxnScope::Own)
-            .unwrap();
+        meta.record_ddl(
+            &store,
+            "CREATE INDEX IF NOT EXISTS ix_c ON t (a)",
+            TxnScope::Own,
+        )
+        .unwrap();
         let meta2 = MetaTable::open(&store).unwrap();
         let mut catalog2 = Catalog::default();
         let mut root_map2 = BTreeMap::new();
@@ -863,9 +871,7 @@ mod tests {
             ddl_has_if_not_exists("create table if not exists t ( id TEXT )").unwrap(),
             "the clause is case-insensitive"
         );
-        assert!(
-            ddl_has_if_not_exists("CREATE TEMP TABLE IF NOT EXISTS t ( id TEXT )").unwrap()
-        );
+        assert!(ddl_has_if_not_exists("CREATE TEMP TABLE IF NOT EXISTS t ( id TEXT )").unwrap());
         assert!(
             ddl_has_if_not_exists("CREATE TEMPORARY TABLE IF NOT EXISTS t ( id TEXT )").unwrap()
         );

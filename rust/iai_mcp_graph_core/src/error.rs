@@ -26,9 +26,7 @@ pub enum GraphError {
 impl From<GraphError> for pyo3::PyErr {
     fn from(err: GraphError) -> Self {
         match err {
-            GraphError::EmptyGraph => {
-                pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
-            }
+            GraphError::EmptyGraph => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
             GraphError::DisconnectedComponent { .. } => {
                 pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
             }

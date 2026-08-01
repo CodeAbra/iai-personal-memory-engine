@@ -49,7 +49,10 @@ fn page_leaf_cells_pack_and_decode_in_key_order() {
     let hdr = read_leaf_header(&page);
     assert_eq!(hdr.num_cells, 3);
     assert_eq!(get_sibling(&page), 7);
-    assert_eq!(read_leaf_keys(&page, OVERFLOW_THRESHOLD).unwrap(), vec![1, 5, 9]);
+    assert_eq!(
+        read_leaf_keys(&page, OVERFLOW_THRESHOLD).unwrap(),
+        vec![1, 5, 9]
+    );
 
     for (i, (k, v)) in cells.iter().enumerate() {
         let raw_cell = read_leaf_cell_raw(&page, i, OVERFLOW_THRESHOLD).unwrap();
@@ -103,7 +106,11 @@ fn overflow_chain_uses_freelist_and_frees_back() {
     // After freeing, the freed pages are reused (file does not grow again).
     let again = write_overflow_chain(&p, &payload).unwrap();
     assert!(first >= 1 && again >= 1);
-    assert_eq!(p.db_size().unwrap(), grown, "freed overflow pages must be reused");
+    assert_eq!(
+        p.db_size().unwrap(),
+        grown,
+        "freed overflow pages must be reused"
+    );
     let recovered = read_overflow_chain(&p, again, payload.len()).unwrap();
     assert_eq!(recovered, payload);
 }
@@ -162,7 +169,9 @@ fn cursor_random_order_insert_reads_back_sorted() {
     let mut order: Vec<i64> = (1..=n).collect();
     let mut state: u64 = 0x1234_5678_9abc_def0;
     for i in (1..order.len()).rev() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (state >> 33) as usize % (i + 1);
         order.swap(i, j);
     }
@@ -273,7 +282,9 @@ fn cursor_persists_across_reopen() {
 fn cursor_large_value_spills_and_roundtrips_through_tree() {
     let (_d, store, root) = open_tree();
     let t = store.tree(root);
-    let big: Vec<u8> = (0..(OVERFLOW_THRESHOLD + 5000)).map(|i| (i % 251) as u8).collect();
+    let big: Vec<u8> = (0..(OVERFLOW_THRESHOLD + 5000))
+        .map(|i| (i % 251) as u8)
+        .collect();
     t.insert(7, &big).unwrap();
     t.insert(8, b"small").unwrap();
     assert_eq!(t.get(7).unwrap().unwrap(), big);
@@ -314,7 +325,11 @@ fn split_by_bytes() {
         let v = vec![(k % 256) as u8; 200];
         t.insert(k, &v).unwrap();
     }
-    assert_eq!(t.root_page_no(), root, "root page number must be fixed for life");
+    assert_eq!(
+        t.root_page_no(),
+        root,
+        "root page number must be fixed for life"
+    );
     let keys: Vec<i64> = t.full_scan().unwrap().iter().map(|(k, _)| *k).collect();
     assert_eq!(keys, (1..=400).collect::<Vec<_>>());
     assert_eq!(t.max_key().unwrap(), Some(400));
@@ -376,7 +391,10 @@ fn delete_forces_rebalance_and_keeps_scan_complete() {
     let keys: Vec<i64> = scanned.iter().map(|(k, _)| *k).collect();
     // Ascending and complete: exactly the non-deleted keys remain.
     let want: Vec<i64> = (1..=n).filter(|k| !deleted.contains(k)).collect();
-    assert_eq!(keys, want, "scan after deletes is incomplete or out of order");
+    assert_eq!(
+        keys, want,
+        "scan after deletes is incomplete or out of order"
+    );
 
     // Every survivor still resolves by get.
     for &k in &want {
@@ -398,7 +416,11 @@ fn delete_all_then_reinsert_collapses_and_regrows() {
     }
     assert_eq!(t.full_scan().unwrap().len(), 0);
     assert_eq!(t.max_key().unwrap(), None);
-    assert_eq!(t.root_page_no(), root, "root collapses back but keeps its page number");
+    assert_eq!(
+        t.root_page_no(),
+        root,
+        "root collapses back but keeps its page number"
+    );
 
     // Regrow.
     for k in 1..=150 {
@@ -490,8 +512,11 @@ fn leaf_header_with_impossible_cell_count_errors_not_panics() {
     // Claim the maximum cell count.
     page[3..5].copy_from_slice(&u16::MAX.to_be_bytes());
     // Recover the one valid cell pointer the packer wrote.
-    let valid_ptr =
-        u16::from_be_bytes(page[LEAF_PTR_ARRAY_START..LEAF_PTR_ARRAY_START + 2].try_into().unwrap());
+    let valid_ptr = u16::from_be_bytes(
+        page[LEAF_PTR_ARRAY_START..LEAF_PTR_ARRAY_START + 2]
+            .try_into()
+            .unwrap(),
+    );
     // Fill the whole pointer-array region with that valid pointer so every low
     // index reads a decodable cell and the loop survives toward the page end.
     let mut at = LEAF_PTR_ARRAY_START;
@@ -668,7 +693,10 @@ fn get_many_sparse_over_fat_rows_falls_back_and_stays_correct() {
         .iter()
         .map(|&k| (k, t.get(k).unwrap().unwrap()))
         .collect();
-    assert_eq!(got, expected, "fallback must return every key, overflow included");
+    assert_eq!(
+        got, expected,
+        "fallback must return every key, overflow included"
+    );
     assert_eq!(
         got.last().unwrap().1.len(),
         OVERFLOW_THRESHOLD + 500,

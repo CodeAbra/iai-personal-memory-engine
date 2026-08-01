@@ -22,8 +22,10 @@ use crate::errors::HvError;
 /// filesystem dependency: the matrix ships inside the binary and can never fail
 /// to load. The bytes are self-checked against the locked sha256 and length on
 /// first use so a wrong embed fails loud.
-const FROZEN_P_BYTES: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/golden/hdc/projection.bin"));
+const FROZEN_P_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/golden/hdc/projection.bin"
+));
 
 /// Length in bytes of the frozen matrix: 384 * 10000 f32 values.
 const FROZEN_P_LEN: usize = EMBED_DIM * HV_DIM * 4;
@@ -36,8 +38,7 @@ pub const HV_DIM: usize = 10000;
 pub const HV_BYTES: usize = HV_DIM.div_ceil(8);
 
 /// The locked projection-matrix hash. Constitutional invariant — never rotates.
-pub const P_SHA256: &str =
-    "df97cc72a960567da17edbba16107881340349bd47b69f9b58d3091d96eb4e4e";
+pub const P_SHA256: &str = "df97cc72a960567da17edbba16107881340349bd47b69f9b58d3091d96eb4e4e";
 
 static P: OnceLock<Vec<f32>> = OnceLock::new();
 

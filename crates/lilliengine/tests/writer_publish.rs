@@ -5,8 +5,8 @@
 //! to publish and every reader refresh after every commit degrades every
 //! indexed read (and bare COUNT) to a leaf-chain walk.
 
-use lilliengine::conn::Connection;
 use lillibrain::Value;
+use lilliengine::conn::Connection;
 use tempfile::tempdir;
 
 fn setup_writer(path: &str) -> Connection {
@@ -107,7 +107,9 @@ fn adopted_reader_serves_bare_count_without_a_walk() {
     reader.refresh_read_view().unwrap();
 
     reader.reset_cells_visited_count();
-    let mut cur = reader.execute("SELECT COUNT(*) FROM records", vec![]).unwrap();
+    let mut cur = reader
+        .execute("SELECT COUNT(*) FROM records", vec![])
+        .unwrap();
     let rows = cur.fetchall();
     assert_eq!(rows[0].get_index(0), Some(&Value::Int(41)));
     assert_eq!(
@@ -191,7 +193,10 @@ fn non_indexed_update_keeps_reader_indexes() {
         )
         .unwrap();
     let rows = cur.fetchall();
-    assert_eq!(rows[0].get_index(0), Some(&Value::Text("reinforced".to_string())));
+    assert_eq!(
+        rows[0].get_index(0),
+        Some(&Value::Text("reinforced".to_string()))
+    );
 
     // An INDEXED-column UPDATE must still fence: generation moves, the
     // reader drops and re-adopts the republished pair.
@@ -213,7 +218,11 @@ fn non_indexed_update_keeps_reader_indexes() {
             vec![Value::Text("semantic".to_string())],
         )
         .unwrap();
-    assert_eq!(cur.fetchall().len(), 1, "indexed update must stay visible to indexed reads");
+    assert_eq!(
+        cur.fetchall().len(),
+        1,
+        "indexed update must stay visible to indexed reads"
+    );
 }
 
 #[test]

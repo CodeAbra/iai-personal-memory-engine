@@ -133,9 +133,7 @@ mod tests {
 
     #[test]
     fn programming_error_displays_carried_string() {
-        let e = EngineError::ProgrammingError(
-            "Incorrect number of bindings supplied.".to_string(),
-        );
+        let e = EngineError::ProgrammingError("Incorrect number of bindings supplied.".to_string());
         assert_eq!(format!("{e}"), "Incorrect number of bindings supplied.");
     }
 

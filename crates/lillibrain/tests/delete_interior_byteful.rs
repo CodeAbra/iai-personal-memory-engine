@@ -52,7 +52,11 @@ fn build_full_interior(pager: &Pager, counter: &mut i64, first_leaf_cells: usize
             }
             seps.push(key);
         }
-        let n_cells = if leaves.is_empty() { first_leaf_cells } else { 2 };
+        let n_cells = if leaves.is_empty() {
+            first_leaf_cells
+        } else {
+            2
+        };
         let cells: Vec<Vec<u8>> = (0..n_cells)
             .map(|j| encode_inline_cell(key + j as i64, b"v"))
             .collect();
@@ -109,7 +113,8 @@ fn leaf_merge_under_byteful_interior_completes_without_overflow() {
     all_leaves.extend_from_slice(&right.leaves);
     chain_leaves(&pager, &all_leaves);
 
-    let root_page = write_interior_node(&[right.first_key], &[left.page_no, right.page_no]).unwrap();
+    let root_page =
+        write_interior_node(&[right.first_key], &[left.page_no, right.page_no]).unwrap();
     pager.write_page(root, &root_page).unwrap();
 
     let census_before = page_census(&pager, root).unwrap();

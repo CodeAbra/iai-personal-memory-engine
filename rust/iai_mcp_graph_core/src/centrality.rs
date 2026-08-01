@@ -74,8 +74,7 @@ fn build_graph_from_csr(
         )));
     }
 
-    let mut g: UnGraph<(), ()> =
-        UnGraph::<(), ()>::with_capacity(n_nodes, indices.len() / 2);
+    let mut g: UnGraph<(), ()> = UnGraph::<(), ()>::with_capacity(n_nodes, indices.len() / 2);
     // Pre-allocate node identifiers so isolated nodes (rows with no
     // outgoing edges in the CSR) still appear in `node_count()` and
     // receive a `Some(0.0)` slot in the rustworkx-core output. Without
@@ -170,8 +169,7 @@ pub fn betweenness_centrality(
         // include_endpoints=false matches networkx's
         // `betweenness_centrality` default; the differential parity gate
         // compares against networkx with no `endpoints=` override.
-        let raw: Vec<Option<f64>> =
-            rwx_bc(&graph, false, normalized, PARALLEL_THRESHOLD);
+        let raw: Vec<Option<f64>> = rwx_bc(&graph, false, normalized, PARALLEL_THRESHOLD);
         // Unwrap `None` to `0.0`. networkx assigns `0.0` to isolated
         // nodes; rustworkx-core emits `None` for any node index that
         // exists in the bound but was never visited. The two semantics
@@ -189,8 +187,7 @@ pub fn betweenness_centrality(
     let node_indices_vec: Vec<i64> = (0..n_nodes as i64).collect();
 
     let centrality_py: Py<PyArray1<f64>> = centrality_vec.into_pyarray_bound(py).unbind();
-    let node_indices_py: Py<PyArray1<i64>> =
-        node_indices_vec.into_pyarray_bound(py).unbind();
+    let node_indices_py: Py<PyArray1<i64>> = node_indices_vec.into_pyarray_bound(py).unbind();
 
     Ok((centrality_py, node_indices_py))
 }

@@ -10,8 +10,8 @@
 use lillibrain::Value;
 
 use crate::ast::{
-    DdlStmt, DeleteStmt, Expr, GroupSelectItem, InsertStmt, OrderKey, SelectExpr,
-    SelectStmt, Stmt, UpdateStmt,
+    DdlStmt, DeleteStmt, Expr, GroupSelectItem, InsertStmt, OrderKey, SelectExpr, SelectStmt, Stmt,
+    UpdateStmt,
 };
 use crate::error::{EngineError, Result};
 use crate::lexer::{tokenize, Token};
@@ -55,7 +55,11 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0, depth: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     // -- token navigation ----------------------------------------------------
@@ -268,7 +272,9 @@ impl Parser {
                 items.push(self.parse_select_item()?);
             }
 
-            let has_count = items.iter().any(|(n, _)| matches!(n, SelectItem::CountStar));
+            let has_count = items
+                .iter()
+                .any(|(n, _)| matches!(n, SelectItem::CountStar));
             if has_count {
                 for (node, alias) in items {
                     match node {
@@ -297,7 +303,10 @@ impl Parser {
                         }
                     }
                 }
-            } else if items.iter().all(|(n, a)| matches!(n, SelectItem::Column(_)) && a.is_none()) {
+            } else if items
+                .iter()
+                .all(|(n, a)| matches!(n, SelectItem::Column(_)) && a.is_none())
+            {
                 s.columns = items
                     .into_iter()
                     .map(|(n, _)| match n {
@@ -316,11 +325,17 @@ impl Parser {
                             });
                         }
                         SelectItem::Expr(expr) => match alias {
-                            Some(a) => s.select_exprs.push(SelectExpr { expr, output_name: a }),
+                            Some(a) => s.select_exprs.push(SelectExpr {
+                                expr,
+                                output_name: a,
+                            }),
                             None => match &expr {
                                 Expr::Literal(v) => {
                                     let name = literal_output_name(v);
-                                    s.select_exprs.push(SelectExpr { expr, output_name: name });
+                                    s.select_exprs.push(SelectExpr {
+                                        expr,
+                                        output_name: name,
+                                    });
                                 }
                                 _ => {
                                     return Err(EngineError::parse(
@@ -365,7 +380,9 @@ impl Parser {
                 self.expect("*")?;
                 self.expect(")")?;
                 let op = match self.peek() {
-                    Token::Op(o) if matches!(o.as_str(), ">=" | ">" | "<=" | "<" | "=" | "!=" | "<>") => {
+                    Token::Op(o)
+                        if matches!(o.as_str(), ">=" | ">" | "<=" | "<" | "=" | "!=" | "<>") =>
+                    {
                         o.clone()
                     }
                     other => {
@@ -381,7 +398,9 @@ impl Parser {
                 s.having_value = Some(self.expect_integer()?);
             }
         } else if self.at_keyword(&["HAVING"]) {
-            return Err(EngineError::parse("HAVING without GROUP BY is not supported"));
+            return Err(EngineError::parse(
+                "HAVING without GROUP BY is not supported",
+            ));
         }
 
         // Optional ORDER BY <col> [ASC|DESC] [, <col> [ASC|DESC]] — up to two keys.
@@ -396,7 +415,11 @@ impl Parser {
             } else if self.at_keyword(&["ASC"]) {
                 self.advance();
             }
-            s.order_by = Some(OrderKey { col, desc, datetime: dt });
+            s.order_by = Some(OrderKey {
+                col,
+                desc,
+                datetime: dt,
+            });
             if self.at_punct(',') {
                 self.advance();
                 let (col2, dt2) = self.parse_order_by_key()?;
@@ -407,7 +430,11 @@ impl Parser {
                 } else if self.at_keyword(&["ASC"]) {
                     self.advance();
                 }
-                s.order_by2 = Some(OrderKey { col: col2, desc: desc2, datetime: dt2 });
+                s.order_by2 = Some(OrderKey {
+                    col: col2,
+                    desc: desc2,
+                    datetime: dt2,
+                });
             }
         }
 
@@ -531,7 +558,8 @@ impl Parser {
     }
 
     fn peek_next_is_open_paren(&self) -> bool {
-        self.peek_at(1).is_some_and(|t| matches!(t, Token::Punct('(')))
+        self.peek_at(1)
+            .is_some_and(|t| matches!(t, Token::Punct('(')))
     }
 
     /// True when COUNT(*) at the current position is the sole select item.
@@ -555,7 +583,8 @@ impl Parser {
         let nxt_upper = Self::token_value(&toks[after]).to_ascii_uppercase();
         if nxt_upper == "AS" && after + 1 < toks.len() {
             after += 2;
-        } else if matches!(toks[after], Token::Ident(_) | Token::Keyword(_)) && nxt_upper != "FROM" {
+        } else if matches!(toks[after], Token::Ident(_) | Token::Keyword(_)) && nxt_upper != "FROM"
+        {
             after += 1;
         }
         if after < toks.len() && matches!(toks[after], Token::Punct(',')) {
@@ -570,7 +599,8 @@ impl Parser {
             self.advance();
             return Ok(Some(self.expect_name()?));
         }
-        if matches!(self.peek(), Token::Ident(_) | Token::Keyword(_)) && !self.at_keyword(&["FROM"]) {
+        if matches!(self.peek(), Token::Ident(_) | Token::Keyword(_)) && !self.at_keyword(&["FROM"])
+        {
             return Ok(Some(Self::token_value(&self.advance())));
         }
         Ok(None)
@@ -659,7 +689,11 @@ impl Parser {
         self.expect("SET")?;
         let set_clauses = self.parse_set_clauses(false)?;
         let where_clause = self.parse_where()?;
-        Ok(UpdateStmt { table, set_clauses, where_clause })
+        Ok(UpdateStmt {
+            table,
+            set_clauses,
+            where_clause,
+        })
     }
 
     fn parse_delete(&mut self) -> Result<DeleteStmt> {
@@ -667,7 +701,10 @@ impl Parser {
         self.expect("FROM")?;
         let table = self.expect_name()?;
         let where_clause = self.parse_where()?;
-        Ok(DeleteStmt { table, where_clause })
+        Ok(DeleteStmt {
+            table,
+            where_clause,
+        })
     }
 
     // -- DDL / PRAGMA --------------------------------------------------------
@@ -683,8 +720,14 @@ impl Parser {
         let kind = match first.as_str() {
             "CREATE" => {
                 let words: Vec<&str> = raw.split(' ').collect();
-                let second = words.get(1).map(|w| w.to_ascii_uppercase()).unwrap_or_default();
-                let third = words.get(2).map(|w| w.to_ascii_uppercase()).unwrap_or_default();
+                let second = words
+                    .get(1)
+                    .map(|w| w.to_ascii_uppercase())
+                    .unwrap_or_default();
+                let third = words
+                    .get(2)
+                    .map(|w| w.to_ascii_uppercase())
+                    .unwrap_or_default();
                 if second == "INDEX" || (second == "UNIQUE" && third == "INDEX") {
                     "create_index"
                 } else {
@@ -705,7 +748,10 @@ impl Parser {
             _ => "pragma",
         };
 
-        DdlStmt { kind: kind.to_string(), raw }
+        DdlStmt {
+            kind: kind.to_string(),
+            raw,
+        }
     }
 
     // -- SET clause ----------------------------------------------------------
@@ -757,7 +803,11 @@ impl Parser {
         while self.at_keyword(&["OR"]) {
             self.advance();
             let right = self.parse_and()?;
-            left = Expr::BinOp { op: "OR".to_string(), left: Box::new(left), right: Box::new(right) };
+            left = Expr::BinOp {
+                op: "OR".to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -767,7 +817,11 @@ impl Parser {
         while self.at_keyword(&["AND"]) {
             self.advance();
             let right = self.parse_not()?;
-            left = Expr::BinOp { op: "AND".to_string(), left: Box::new(left), right: Box::new(right) };
+            left = Expr::BinOp {
+                op: "AND".to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -776,7 +830,10 @@ impl Parser {
         if self.at_keyword(&["NOT"]) {
             self.advance();
             let operand = self.parse_comparison()?;
-            return Ok(Expr::UnaryOp { op: "NOT".to_string(), operand: Box::new(operand) });
+            return Ok(Expr::UnaryOp {
+                op: "NOT".to_string(),
+                operand: Box::new(operand),
+            });
         }
         self.parse_comparison()
     }
@@ -799,7 +856,10 @@ impl Parser {
                 negated = true;
             }
             self.expect("NULL")?;
-            return Ok(Expr::IsNull { operand: Box::new(left), negated });
+            return Ok(Expr::IsNull {
+                operand: Box::new(left),
+                negated,
+            });
         }
 
         // IN (...)
@@ -813,7 +873,11 @@ impl Parser {
             }
             let items = self.parse_in_items()?;
             self.expect(")")?;
-            return Ok(Expr::InList { operand: Box::new(left), items, text_set: None });
+            return Ok(Expr::InList {
+                operand: Box::new(left),
+                items,
+                text_set: None,
+            });
         }
 
         // NOT IN (...)
@@ -834,7 +898,11 @@ impl Parser {
             self.expect(")")?;
             return Ok(Expr::UnaryOp {
                 op: "NOT".to_string(),
-                operand: Box::new(Expr::InList { operand: Box::new(left), items, text_set: None }),
+                operand: Box::new(Expr::InList {
+                    operand: Box::new(left),
+                    items,
+                    text_set: None,
+                }),
             });
         }
 
@@ -842,7 +910,11 @@ impl Parser {
         if self.at_keyword(&["LIKE"]) {
             self.advance();
             let right = self.parse_primary()?;
-            return Ok(Expr::BinOp { op: "LIKE".to_string(), left: Box::new(left), right: Box::new(right) });
+            return Ok(Expr::BinOp {
+                op: "LIKE".to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            });
         }
 
         // NOT LIKE
@@ -854,7 +926,11 @@ impl Parser {
             self.advance(); // NOT
             self.advance(); // LIKE
             let right = self.parse_primary()?;
-            return Ok(Expr::BinOp { op: "NOT LIKE".to_string(), left: Box::new(left), right: Box::new(right) });
+            return Ok(Expr::BinOp {
+                op: "NOT LIKE".to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            });
         }
 
         // Binary comparison operator
@@ -862,7 +938,11 @@ impl Parser {
             let op = op.clone();
             self.advance();
             let right = self.parse_primary()?;
-            return Ok(Expr::BinOp { op, left: Box::new(left), right: Box::new(right) });
+            return Ok(Expr::BinOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
         }
 
         Ok(left)
@@ -1015,12 +1095,17 @@ impl Parser {
                     "datetime() expects at least 1 argument, got 0".to_string(),
                 ));
             }
-            return Ok(Expr::FuncCall { name: "datetime".to_string(), args });
+            return Ok(Expr::FuncCall {
+                name: "datetime".to_string(),
+                args,
+            });
         }
 
         // EXCLUDED in expression context is invalid.
         if matches!(self.peek(), Token::Keyword(k) if k.eq_ignore_ascii_case("EXCLUDED")) {
-            return Err(EngineError::parse("unexpected keyword EXCLUDED in expression context"));
+            return Err(EngineError::parse(
+                "unexpected keyword EXCLUDED in expression context",
+            ));
         }
 
         // Identifier — column reference, possibly dotted.
@@ -1129,6 +1214,8 @@ fn hex_val(b: u8) -> Result<u8> {
         b'0'..=b'9' => Ok(b - b'0'),
         b'a'..=b'f' => Ok(b - b'a' + 10),
         b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err(EngineError::parse("non-hexadecimal number found in fromhex() arg")),
+        _ => Err(EngineError::parse(
+            "non-hexadecimal number found in fromhex() arg",
+        )),
     }
 }
