@@ -3,6 +3,7 @@ name: Extended checks
 # Non-blocking checks that track work in progress without gating every push:
 #   - Linux build/test (the native engine is code-complete on Linux but not yet
 #     validated end-to-end)
+#   - the Python dependency audit (pip-audit)
 #   - the Rust workspace gate (fmt / clippy / test / supply-chain policy)
 #   - the lint backlog
 # Runs weekly and on demand, so day-to-day pushes stay quiet.
@@ -38,6 +39,18 @@ jobs:
           pip install -e ".[dev]"
       - name: Correctness gate
         run: pytest -m "not perf and not slow and not live"
+      # Python's counterpart to `cargo deny` in the rust job below: until now
+      # only the Rust dependency graph had any vulnerability gate. Runs in this
+      # job to reuse the environment already installed above rather than paying
+      # the native build a second time, and `if: always()` so a red correctness
+      # gate (Linux is not yet validated end to end) cannot hide the audit.
+      # --skip-editable drops the local project itself, which has no PyPI
+      # release to audit against.
+      - name: Dependency audit
+        if: always()
+        run: |
+          python -m pip install pip-audit
+          pip-audit --skip-editable --progress-spinner off
 
   rust:
     name: rust workspace (fmt / clippy / test / deny)
