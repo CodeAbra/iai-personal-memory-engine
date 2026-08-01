@@ -134,6 +134,10 @@ fn build_graph_from_csr(
 /// `indices` by `MemoryGraph.to_csr_arrays()` is discarded at the
 /// PyO3-call boundary. Operator-visible behavioural change documented in
 /// the σ-assembly plan's CHANGELOG entry.
+/// `(scores, node_ids)` — per-node betweenness paired with the CSR row order
+/// it was computed in, so callers never have to assume the two line up.
+type BetweennessResult = (Py<PyArray1<f64>>, Py<PyArray1<i64>>);
+
 #[pyfunction]
 #[pyo3(signature = (indptr, indices, n_nodes, normalized=true))]
 pub fn betweenness_centrality(
@@ -142,7 +146,7 @@ pub fn betweenness_centrality(
     indices: PyReadonlyArray1<i64>,
     n_nodes: usize,
     normalized: bool,
-) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<i64>>)> {
+) -> PyResult<BetweennessResult> {
     let indptr_slice = indptr.as_slice()?;
     let indices_slice = indices.as_slice()?;
 

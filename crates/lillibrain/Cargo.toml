@@ -28,3 +28,6 @@ criterion = "0.8.2"
 [[bench]]
 name = "insert"
 harness = false
+
+[lints]
+workspace = true

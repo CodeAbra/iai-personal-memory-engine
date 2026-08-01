@@ -162,7 +162,7 @@ pub fn leaf_cell_ptr(page: &[u8], idx: usize) -> Result<usize> {
             detail: format!("leaf cell index {idx} pointer offset overflow"),
         })?;
     let ptr = checked_u16(page, at)? as usize;
-    if ptr < LEAF_PTR_ARRAY_START || ptr >= USABLE_END {
+    if !(LEAF_PTR_ARRAY_START..USABLE_END).contains(&ptr) {
         return Err(StoreError::Integrity {
             detail: format!("leaf cell {idx} pointer {ptr} outside usable area"),
         });

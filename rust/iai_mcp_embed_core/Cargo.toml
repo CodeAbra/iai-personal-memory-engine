@@ -32,3 +32,6 @@ rayon          = "1.10"
 [dev-dependencies]
 dirs = "5"
 sha2 = "0.10"
+
+[lints]
+workspace = true

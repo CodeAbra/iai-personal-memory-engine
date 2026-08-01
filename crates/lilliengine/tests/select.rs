@@ -1145,7 +1145,7 @@ fn sum_over_real_promotes_and_compensates_like_sqlite3() {
     assert_eq!(rs.rows[0][0].1, Value::Float(2.9));
     // SUM over an all-integer column stays an integer.
     let rs = run("SELECT SUM ( n ) FROM r");
-    assert_eq!(rs.rows[0][0].1, Value::Int(0 + 1 + 2 + 3 + 4));
+    assert_eq!(rs.rows[0][0].1, Value::Int(1 + 2 + 3 + 4));
 
     // SUM over an empty / all-NULL column is NULL (sqlite3 semantics), not 0.
     const DDL_E: &str = "CREATE TABLE e ( vec_label INTEGER PRIMARY KEY AUTOINCREMENT , \

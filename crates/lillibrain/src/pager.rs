@@ -541,7 +541,7 @@ impl Pager {
             h
         };
         self.with_file(|f| Ok(f.write_all_at(&header_bytes, 0)?))?;
-        self.with_file(|f| durable_fsync(f))?;
+        self.with_file(durable_fsync)?;
 
         let mut tx = self.tx.lock();
         tx.wal = Some(writer);
@@ -1113,7 +1113,7 @@ impl Pager {
             let offset = self.offset_of(*pno);
             self.with_file(|f| Ok(f.write_all_at(buf, offset)?))?;
         }
-        self.with_file(|f| durable_fsync(f))?;
+        self.with_file(durable_fsync)?;
 
         // Discard the journal — the commit point. The unlink and its directory
         // entry must be durable before commit reports success: a surviving

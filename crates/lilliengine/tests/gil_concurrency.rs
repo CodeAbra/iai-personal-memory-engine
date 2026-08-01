@@ -6,7 +6,6 @@
 /// The released-GIL closure captures only Send types; these assertions pin that
 /// contract at compile time so a future change that makes any of these types
 /// non-Send is a build error, not a runtime panic or data race.
-
 fn assert_send<T: Send>() {}
 
 #[test]

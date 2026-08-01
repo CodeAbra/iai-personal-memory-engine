@@ -12,7 +12,7 @@
 //! same.
 
 use std::fs::File;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 
 pub trait PosIo {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()>;

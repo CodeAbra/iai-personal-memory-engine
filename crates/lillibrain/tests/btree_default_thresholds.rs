@@ -187,8 +187,8 @@ fn default_thresholds_deep_tree_survives_bulk_delete_and_churn() {
     // Stage 2 — bulk-delete a contiguous 60% band: cascaded leaf merges drive
     // interior underflow handling on byte-full interior pages (the exact path
     // that used to die with "interior page overflow while packing cells").
-    let band_start = (N_KEYS / 5) as i64;
-    let band_end = band_start + (N_KEYS * 3 / 5) as i64;
+    let band_start = N_KEYS / 5;
+    let band_end = band_start + (N_KEYS * 3 / 5);
     for i in band_start..band_end {
         let key = WIDE_BASE + i * WIDE_STEP;
         apply(&store, root, &mut oracle, &Op::Delete(key));

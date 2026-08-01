@@ -101,7 +101,7 @@ impl Parser {
 
     fn expect(&mut self, value: &str) -> Result<Token> {
         let got = self.peek_value();
-        if got.to_ascii_uppercase() != value.to_ascii_uppercase() {
+        if !got.eq_ignore_ascii_case(value) {
             return Err(EngineError::parse(format!(
                 "expected '{value}', got '{got}' at position {}",
                 self.pos

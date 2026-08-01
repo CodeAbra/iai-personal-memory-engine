@@ -789,7 +789,7 @@ fn persisted_id_index_serves_warm_boot_without_scan() {
     {
         let mut warm = Connection::open(store_path.to_str().unwrap(), 0).unwrap();
         warm.reset_full_scan_count();
-        let mut cur = warm
+        let cur = warm
             .execute(
                 "UPDATE records SET labile_until = '2026-01-01' WHERE id = 'id-000123'",
                 vec![],
@@ -820,7 +820,7 @@ fn persisted_id_index_serves_warm_boot_without_scan() {
             !cold.id_index_ready("records"),
             "no sidecar — the cold open must start without a built id index"
         );
-        let mut cur = cold
+        let cur = cold
             .execute(
                 "UPDATE records SET labile_until = '2026-01-01' WHERE id = 'id-000123'",
                 vec![],

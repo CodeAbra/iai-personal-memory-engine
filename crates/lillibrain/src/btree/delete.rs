@@ -84,7 +84,7 @@ fn interior_byte_midpoint(keys: &[i64]) -> Result<usize> {
             continue;
         }
         let larger = interior_used_bytes(left).max(interior_used_bytes(right));
-        if best.map_or(true, |(_, b)| larger < b) {
+        if best.is_none_or(|(_, b)| larger < b) {
             best = Some((i, larger));
         }
     }

@@ -23,3 +23,6 @@ serde_json = "1"
 [[bench]]
 name = "hdc"
 harness = false
+
+[lints]
+workspace = true
