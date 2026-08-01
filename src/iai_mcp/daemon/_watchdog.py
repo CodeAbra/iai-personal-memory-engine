@@ -12,6 +12,10 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from iai_mcp.lifecycle_state import LifecycleStateRecord
 
 from iai_mcp.events import (
     DAEMON_MEMORY_PRESSURE_KILL,

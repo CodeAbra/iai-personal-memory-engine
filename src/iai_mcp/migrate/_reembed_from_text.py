@@ -31,6 +31,10 @@ import json
 import logging
 import os
 import tempfile
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from iai_mcp.store import MemoryStore
 
 from iai_mcp.events import write_event
 

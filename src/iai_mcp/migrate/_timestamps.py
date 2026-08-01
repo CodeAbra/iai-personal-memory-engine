@@ -8,6 +8,10 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from iai_mcp.events import write_event
 from iai_mcp.store import (

@@ -14,7 +14,10 @@ import weakref
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from iai_mcp.hippo._table import HippoTable, HippoTableList
 
 from iai_mcp.hippo import _vecindex
 import numpy as np

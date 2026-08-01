@@ -26,7 +26,10 @@ from iai_mcp import _sqlite_stdlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 # The six store tables, copied in this order.  ``_hippo_meta`` uses
