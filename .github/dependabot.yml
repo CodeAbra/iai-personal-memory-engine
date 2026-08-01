@@ -1,0 +1,67 @@
+version: 2
+
+# Dependency updates for every manifest in the repo. Grouped and capped on
+# purpose: this project's CI gate runs ~1h15m, so a flood of one-PR-per-bump
+# would cost more runner time than it is worth. Minor and patch bumps arrive as
+# a single grouped PR per ecosystem; majors stay separate because they are the
+# ones that need reading.
+updates:
+  # Python runtime + dev extras (pyproject.toml).
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # The Rust workspace: rust/* and crates/* all resolve through the root
+  # Cargo.lock, so one entry covers all eight member crates.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # The Tauri desktop app declares its own [workspace], so it is a separate
+  # dependency graph from the root one above and needs its own entry.
+  - package-ecosystem: cargo
+    directory: "/desktop/src-tauri"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      desktop-cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # The TypeScript MCP wrapper, built during the wheel build by setup.py.
+  - package-ecosystem: npm
+    directory: "/mcp-wrapper"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # Workflow actions. These pin to tags (actions/checkout@v4,
+  # dtolnay/rust-toolchain@1.87.0, …) and otherwise drift silently until
+  # something breaks — the Node 20 deprecation warnings already showing up in
+  # the logs are exactly this.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
