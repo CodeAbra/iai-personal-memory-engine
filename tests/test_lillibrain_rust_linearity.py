@@ -53,7 +53,23 @@ pytestmark = pytest.mark.skipif(
 # host-side gate is self-contained and reads the same numbers the engine asserts.
 
 INSERT_ROWS_PER_S_FLOOR = 1500.0
-DOUBLING_TIME_RATIO_MAX = 2.2
+# 2.4 is ideal-linear 2.0 plus 20% — the same tolerance THIRTY_K_RATIO_MAX below
+# already grants (3.6 against an ideal 3.0). At 2.2 this bound carried half the
+# slack of its sibling while being the noisier of the two, since it divides by
+# t(10k), the shortest and therefore most jitter-sensitive measurement.
+#
+# It went red on CI at 2.228 — a 1.3% overshoot — and missed both attempts of
+# @retry_once_on_assertion, which resamples per-attempt scheduler jitter but
+# cannot help when the whole runner is uniformly slow. Measured over 10 local
+# trials: the single-shot ratio has median 2.104 and stdev 0.234, exceeding 2.2
+# in 3 trials and 2.4 in 1. Sampling each batch twice and taking the min was
+# tried and rejected — it cut stdev by only 17% (3/10 to 2/10) for ~50% more
+# runtime on a suite already at 1h07m.
+#
+# This weakens only the wall-clock tripwire. The load-bearing regression check
+# is the walks == 0 assertion, which is deterministic and untouched: a
+# row-count-quadratic insert path is caught there regardless of machine speed.
+DOUBLING_TIME_RATIO_MAX = 2.4
 # The marshalling overhead of per-insert FFI calls widens the constant factor
 # relative to the in-Rust bench, so the host-side throughput floor carries the
 # same algorithmic floor (the linearity shape is marshalling-invariant).
@@ -98,7 +114,7 @@ def _insert_batch(s, root: int, lo: int, hi: int) -> float:
 
 @retry_once_on_assertion
 def test_insert_linear_and_throughput(tmp_path: Path) -> None:
-    """t(20k) <= 2.2x t(10k); 30k no super-linear blowup; >= 1500 rows/s; no walk."""
+    """t(20k) <= 2.4x t(10k); 30k no super-linear blowup; >= 1500 rows/s; no walk."""
     # Each size into a fresh tree so the measurement is the pure insert cost.
     s10, r10 = _new_store(tmp_path / "n10k.lilli")
     s10.reset_full_scan_count()
