@@ -336,10 +336,17 @@ fn crash_recovery_wal_recovery_is_idempotent() {
 fn crash_recovery_wal_double_replay_same_bytes() {
     let (_d, path) = temp_db();
     // Build a main file sized for pages 1..=5 and a sidecar with a committed run.
+    // truncate(true): this is a scratch main file built from nothing, so it must
+    // start empty before set_len sizes it to five zeroed pages. Stated
+    // explicitly because the rest of the crate always does — pager.rs and wal.rs
+    // open existing files with truncate(false), journal.rs starts fresh with
+    // truncate(true) — and leaving it implicit here was the one place the
+    // reader had to infer which of those two this was.
     let dbf = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&path)
         .unwrap();
     dbf.set_len((5 * PAGE_SIZE) as u64).unwrap();
