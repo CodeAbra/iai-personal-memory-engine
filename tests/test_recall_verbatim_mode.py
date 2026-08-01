@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
@@ -143,7 +143,7 @@ def _seed_5_verbatim_plus_10_hubs(tmp_path):
     store = MemoryStore(path=tmp_path / "lancedb")
     embedder = _ControlledEmbedder()
 
-    verbatim_ids_per_cue: dict[str, "uuid.UUID"] = {}
+    verbatim_ids_per_cue: dict[str, UUID] = {}
     for cue, text in zip(VERBATIM_CUES, VERBATIM_TEXTS):
         cue_vec = embedder.embed(cue)
         embedder.set_fixed(cue, cue_vec)

@@ -50,7 +50,14 @@ dev = [
   # multi-minute gates; without it a lane-wide --timeout kills them mid-run.
   "pytest-timeout>=2.3",
   "reportlab>=4.0",  # builds a 1-page PDF fixture on demand inside the ingestion test suite; never imported at runtime by the production package.
-  "ruff>=0.5.0",
+  # Exact pin, same reasoning as networkx below: unpinned, the lint lane's
+  # finding count moves on its own whenever ruff ships a release, because with
+  # no [tool.ruff] section the rule set was whatever that version defaulted to.
+  # Measured on this tree: bare `ruff check .` reported 4969 findings under
+  # 0.16.0 against 653 under the older default set. Bumps now arrive as a
+  # dependabot PR with a visible diff. Keep in step with .github/workflows/
+  # extended-checks.yml, which installs ruff standalone.
+  "ruff==0.16.0",
   # networkx is the σ-baseline oracle in tests/fixtures/sigma_baseline.json
   # (the locked SHA-pinned fixture was generated via networkx 3.3); it also
   # backs MemoryGraph's lazy-imported internal storage. Exact pin so the
@@ -96,6 +103,34 @@ iai_mcp = [
 # The iai_mcp_native Rust extension is declared in setup.py, not here:
 # its feature set is platform-conditional (Apple Accelerate BLAS on macOS),
 # and pyproject ext-modules entries are static.
+
+# Until now the repo carried no ruff configuration at all, so `ruff check .`
+# linted against whatever rule set the installed ruff happened to default to.
+# Declaring the set explicitly is what makes the lint lane's number mean
+# something from one run to the next.
+[tool.ruff]
+# The floor of requires-python, not the version CI happens to run. Left to
+# infer, ruff would still read >=3.11 from requires-python; stating it keeps
+# the two from silently diverging if the floor ever moves.
+target-version = "py311"
+
+[tool.ruff.lint]
+# Ruff's historic default set — the rules this lane has effectively been
+# reporting all along. Pinning it here means a ruff upgrade changes the count
+# only when a rule inside these prefixes changes, not because a new release
+# switched its defaults.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ files are this project's re-export surface: the imports are
+# the public API, unused by definition within the file itself, and several
+# packages import after a docstring or a setup block. 154 F401 and 37 E402 of
+# the backlog were this one deliberate pattern.
+"__init__.py" = ["E402", "F401"]
+# Bench and script entry points insert their own sys.path root before importing
+# anything from the project, so their imports cannot be at the top of the file.
+"bench/**" = ["E402"]
+"scripts/**" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

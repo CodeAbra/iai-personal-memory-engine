@@ -4,9 +4,13 @@ import json
 import platform
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+
+if TYPE_CHECKING:
+    from iai_mcp.types import MemoryRecord
 
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",

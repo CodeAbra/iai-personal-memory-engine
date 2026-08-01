@@ -12,7 +12,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from iai_mcp.lillibrain.sql.ast_nodes import Expr, Stmt
+    from iai_mcp.lillibrain.sql.ast_nodes import (
+        DDLStmt,
+        DeleteStmt,
+        Expr,
+        InsertStmt,
+        SelectStmt,
+        Stmt,
+        UpdateStmt,
+    )
     from iai_mcp.lillibrain.sql.catalog import Catalog
 
 

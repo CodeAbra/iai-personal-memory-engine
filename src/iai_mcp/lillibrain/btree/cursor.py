@@ -44,6 +44,8 @@ from iai_mcp.lillibrain.constants import (
 from iai_mcp.lillibrain.record import decode_record_views, decode_varint, encode_varint
 
 if TYPE_CHECKING:
+    import collections.abc
+
     from iai_mcp.lillibrain.pager import Pager
 
 logger = logging.getLogger(__name__)

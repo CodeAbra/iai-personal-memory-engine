@@ -4,6 +4,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from iai_mcp.hippo._db import HippoDB
 
 from iai_mcp import _sqlite_stdlib
 
