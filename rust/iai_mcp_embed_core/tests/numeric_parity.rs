@@ -71,7 +71,9 @@ fn baseline_loader_yields_expected_shape() {
 #[test]
 fn test_all_baseline_texts() {
     if !hf_cache_present() {
-        eprintln!("HF cache absent — skipping numeric parity (Wave 1 / Wave 3 will trigger download)");
+        eprintln!(
+            "HF cache absent — skipping numeric parity (Wave 1 / Wave 3 will trigger download)"
+        );
         return;
     }
 

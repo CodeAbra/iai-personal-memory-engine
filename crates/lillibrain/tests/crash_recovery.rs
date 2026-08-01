@@ -6,8 +6,8 @@
 //! the same path and must be consistent — committed transactions durable,
 //! uncommitted gone — with a clean integrity check.
 
-use std::fs::OpenOptions;
 use lillibrain::pos_io::PosIo;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -58,7 +58,10 @@ fn crash_recovery_rollback_restores_pre_transaction_state() {
     store.rollback().unwrap();
 
     let after = store.tree(root).full_scan().unwrap();
-    assert_eq!(after, baseline, "rollback must restore the pre-transaction state");
+    assert_eq!(
+        after, baseline,
+        "rollback must restore the pre-transaction state"
+    );
     assert!(store.check_integrity(root).unwrap().is_empty());
 }
 
@@ -187,7 +190,11 @@ fn crash_recovery_killpoint_before_commit_journal() {
     // An uncommitted journal may be on disk; reopen must discard it.
     let store = Store::open(&path).unwrap();
     let scan = store.tree(root).full_scan().unwrap();
-    assert_eq!(scan, vec![(1, b"committed".to_vec())], "uncommitted txn gone");
+    assert_eq!(
+        scan,
+        vec![(1, b"committed".to_vec())],
+        "uncommitted txn gone"
+    );
     assert!(store.check_integrity(root).unwrap().is_empty());
     assert!(!journal_path_for(&path).exists());
 }
@@ -240,7 +247,11 @@ fn crash_recovery_killpoint_committed_journal_replays() {
         j.sync().unwrap();
         // Now scribble an "after" image over the live root page (a partial,
         // crash-interrupted write).
-        let f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         f.write_all_at(&vec![0xEE; PAGE_SIZE], root_offset).unwrap();
         f.sync_all().unwrap();
     }
@@ -248,7 +259,10 @@ fn crash_recovery_killpoint_committed_journal_replays() {
     // Reopen routes through journal recovery and restores the before-image.
     let store = Store::open(&path).unwrap();
     let after = store.tree(root).full_scan().unwrap();
-    assert_eq!(after, pre, "committed journal before-image restored on reopen");
+    assert_eq!(
+        after, pre,
+        "committed journal before-image restored on reopen"
+    );
     assert!(store.check_integrity(root).unwrap().is_empty());
     assert!(!journal_path_for(&path).exists());
 }
@@ -280,7 +294,11 @@ fn crash_recovery_killpoint_torn_wal_frame() {
     // frame header truncated short of a full page.
     let wal_path = wal_path_for(&path);
     {
-        let f = OpenOptions::new().read(true).write(true).open(&wal_path).unwrap();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&wal_path)
+            .unwrap();
         let len = f.metadata().unwrap().len();
         // Write a partial trailing frame (just a few bytes) to torn the tail.
         f.write_all_at(&[0u8; 16], len).unwrap();
@@ -290,7 +308,11 @@ fn crash_recovery_killpoint_torn_wal_frame() {
     // Reopen: WAL recovery replays the committed run, stops at the torn tail.
     let store = Store::open(&path).unwrap();
     let scan = store.tree(root).full_scan().unwrap();
-    assert_eq!(scan.len(), 10, "committed frames replayed; torn tail ignored");
+    assert_eq!(
+        scan.len(),
+        10,
+        "committed frames replayed; torn tail ignored"
+    );
     assert!(store.check_integrity(root).unwrap().is_empty());
 }
 
@@ -372,7 +394,10 @@ fn crash_recovery_wal_double_replay_same_bytes() {
     recover_wal_on_open(&path, &wal_path, PAGE_SIZE).unwrap();
     let after_twice = std::fs::read(&path).unwrap();
 
-    assert_eq!(after_once, after_twice, "double replay writes identical bytes");
+    assert_eq!(
+        after_once, after_twice,
+        "double replay writes identical bytes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -521,12 +546,18 @@ fn ro_reader_returns_typed_error_when_checkpoint_advances_after_open() {
     // page that exists in its snapshot but is not yet cached. Page `root` is the
     // tree root; an interior/leaf page just past it is in-bounds and uncached.
     let snapshot_pages = reader.db_size().unwrap();
-    assert!(snapshot_pages > root, "the seeded tree must span several pages");
+    assert!(
+        snapshot_pages > root,
+        "the seeded tree must span several pages"
+    );
     // A page within the snapshot extent that the reader has not read yet (only
     // page 1 has been touched, by open). Use the root page: it is in-bounds and
     // not yet cached, so reading it falls back to the main file.
     let uncached_page = root;
-    assert!(!reader.pager().is_cached(uncached_page), "the chosen page must be uncached");
+    assert!(
+        !reader.pager().is_cached(uncached_page),
+        "the chosen page must be uncached"
+    );
 
     // The writer advances the checkpoint generation, rewriting main-file pages.
     for batch in 0..4 {

@@ -17,8 +17,8 @@
 //! or forged frame breaks the chain; recovery stops at the first mismatch. The
 //! salt pair guards against replaying a stale frame from a prior cycle.
 
-use std::fs::{File, OpenOptions};
 use crate::pos_io::PosIo;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::consts::{

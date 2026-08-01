@@ -2,9 +2,9 @@
 //! column constraints, ALTER/DROP/CREATE INDEX, and PRAGMA table_info shape,
 //! exercised against the six Hippo table DDLs.
 
+use lillibrain::Value;
 use lilliengine::catalog::{coerce_affinity, render_float_text, Catalog, ColumnMeta};
 use lilliengine::parser::parse;
-use lillibrain::Value;
 
 /// Parse one DDL string and apply it to the catalog.
 fn apply(cat: &mut Catalog, sql: &str) {
@@ -189,10 +189,7 @@ fn all_six_hippo_schemas_register() {
     }
     // budget_ledger has no PK.
     assert!(cat.primary_key_columns("budget_ledger").unwrap().is_empty());
-    assert_eq!(
-        col(&cat, "budget_ledger", "usd_spent").affinity,
-        "REAL"
-    );
+    assert_eq!(col(&cat, "budget_ledger", "usd_spent").affinity, "REAL");
     assert_eq!(
         col(&cat, "ratelimit_ledger", "status_code").affinity,
         "INTEGER"
@@ -293,8 +290,14 @@ fn create_unique_index_records_correct_metadata() {
         .into_iter()
         .find(|r| r.object_type == "index")
         .expect("the unique index is recorded in the catalog");
-    assert_eq!(idx_row.name, "ix", "index name is the actual name, not a keyword");
-    assert_eq!(idx_row.tbl_name, "records", "index table is records, not a keyword");
+    assert_eq!(
+        idx_row.name, "ix",
+        "index name is the actual name, not a keyword"
+    );
+    assert_eq!(
+        idx_row.tbl_name, "records",
+        "index table is records, not a keyword"
+    );
     assert_eq!(
         idx_row.sql,
         Value::Text("CREATE UNIQUE INDEX ix ON records (id)".to_string()),
@@ -360,11 +363,26 @@ fn coerce_real_into_text_keeps_decimal_point_like_sqlite3() {
     // trailing ".0" ("1.0" -> "1.0", not "1"); Rust's default {} formatting drops
     // it. The coercion must keep the decimal point so a TEXT-affinity column round
     // trips the same text sqlite3 produces.
-    assert_eq!(coerce_affinity(Value::Float(1.0), "TEXT"), Value::Text("1.0".into()));
-    assert_eq!(coerce_affinity(Value::Float(100.0), "TEXT"), Value::Text("100.0".into()));
-    assert_eq!(coerce_affinity(Value::Float(0.5), "TEXT"), Value::Text("0.5".into()));
-    assert_eq!(coerce_affinity(Value::Float(0.9), "TEXT"), Value::Text("0.9".into()));
-    assert_eq!(coerce_affinity(Value::Float(-1.5), "TEXT"), Value::Text("-1.5".into()));
+    assert_eq!(
+        coerce_affinity(Value::Float(1.0), "TEXT"),
+        Value::Text("1.0".into())
+    );
+    assert_eq!(
+        coerce_affinity(Value::Float(100.0), "TEXT"),
+        Value::Text("100.0".into())
+    );
+    assert_eq!(
+        coerce_affinity(Value::Float(0.5), "TEXT"),
+        Value::Text("0.5".into())
+    );
+    assert_eq!(
+        coerce_affinity(Value::Float(0.9), "TEXT"),
+        Value::Text("0.9".into())
+    );
+    assert_eq!(
+        coerce_affinity(Value::Float(-1.5), "TEXT"),
+        Value::Text("-1.5".into())
+    );
 }
 
 #[test]
@@ -430,15 +448,25 @@ fn sqlite_master_drop_removes_row() {
     apply(&mut cat, "CREATE TABLE records ( id TEXT )");
     apply(&mut cat, "CREATE TABLE edges ( src TEXT )");
     apply(&mut cat, "DROP TABLE records");
-    let names: Vec<String> = cat.sqlite_master_rows().into_iter().map(|r| r.name).collect();
+    let names: Vec<String> = cat
+        .sqlite_master_rows()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
     assert_eq!(names, vec!["edges".to_string()]);
 }
 
 #[test]
 fn sqlite_master_includes_index_rows() {
     let mut cat = Catalog::new();
-    apply(&mut cat, "CREATE TABLE records ( id TEXT , embedding_pending INTEGER )");
-    apply(&mut cat, "CREATE INDEX idx_records_pending ON records ( embedding_pending )");
+    apply(
+        &mut cat,
+        "CREATE TABLE records ( id TEXT , embedding_pending INTEGER )",
+    );
+    apply(
+        &mut cat,
+        "CREATE INDEX idx_records_pending ON records ( embedding_pending )",
+    );
     let rows = cat.sqlite_master_rows();
     let idx: Vec<_> = rows.iter().filter(|r| r.object_type == "index").collect();
     assert_eq!(idx.len(), 1);

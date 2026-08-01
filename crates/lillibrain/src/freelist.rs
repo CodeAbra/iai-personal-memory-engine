@@ -12,9 +12,7 @@
 //!   `[4:8]`  count of leaf page numbers stored here
 //!   `[8:]`   `count` leaf page numbers, 4 bytes each
 
-use crate::consts::{
-    HDR_FIRST_FREELIST_OFFSET, HDR_FREELIST_COUNT_OFFSET, PAGE_CRC_COVERED,
-};
+use crate::consts::{HDR_FIRST_FREELIST_OFFSET, HDR_FREELIST_COUNT_OFFSET, PAGE_CRC_COVERED};
 use crate::error::{Result, StoreError};
 use crate::pager::Pager;
 
@@ -300,12 +298,18 @@ mod tests {
 
         let mut reused = std::collections::HashSet::new();
         for _ in 0..n {
-            assert!(reused.insert(alloc_page(&p).unwrap()), "a page was handed out twice");
+            assert!(
+                reused.insert(alloc_page(&p).unwrap()),
+                "a page was handed out twice"
+            );
         }
         allocated.sort_unstable();
         let mut got: Vec<u32> = reused.into_iter().collect();
         got.sort_unstable();
-        assert_eq!(got, allocated, "every freed page must come back exactly once");
+        assert_eq!(
+            got, allocated,
+            "every freed page must come back exactly once"
+        );
         assert_eq!(p.db_size().unwrap(), stable, "reuse must not grow the file");
         assert_eq!(p.freelist_count().unwrap(), 0);
     }

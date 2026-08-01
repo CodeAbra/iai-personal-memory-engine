@@ -64,7 +64,11 @@ fn projection_embeds_the_frozen_matrix_with_no_filesystem_dependency() {
     // load_p decodes the embedded bytes (default path, no override set) into the
     // full f32 matrix, self-checking the same sha256 and length on the way.
     let p = lilli_hd::projection::load_p();
-    assert_eq!(p.len(), 384 * 10000, "embedded projection decodes to [384, 10000]");
+    assert_eq!(
+        p.len(),
+        384 * 10000,
+        "embedded projection decodes to [384, 10000]"
+    );
 }
 
 #[test]
@@ -100,7 +104,16 @@ fn bsc_bundle_rejects_a_short_hypervector() {
     // index out of bounds. d = 4096 expects 512-byte hvs; pass a 4-byte one.
     let short = vec![0u8; 4];
     let err = bsc::bundle_impl(&[short], 4096).expect_err("short hv must error");
-    assert!(matches!(err, HvError::Length { expected: 512, actual: 4 }), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            HvError::Length {
+                expected: 512,
+                actual: 4
+            }
+        ),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -121,7 +134,10 @@ fn fhrr_bundle_rejects_a_short_hypervector() {
     let short = vec![0u8; 4];
     let full = vec![0u8; fhrr::FHRR_DIM];
     let err = fhrr::bundle_impl(&[full, short]).expect_err("short hv must error");
-    assert!(matches!(err, HvError::Length { expected, actual: 4 } if expected == fhrr::FHRR_DIM), "got {err:?}");
+    assert!(
+        matches!(err, HvError::Length { expected, actual: 4 } if expected == fhrr::FHRR_DIM),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -161,8 +177,16 @@ fn bsc_role_hv_per_dim_identical() {
     let roles_10000 = load_rows("bsc_roles_10000", 18, 1250);
 
     for (idx, role) in BSC_ROLE_VOCABULARY.iter().enumerate() {
-        assert_eq!(bsc_role_hv(role, 4096).unwrap(), roles_4096[idx], "{role}@4096");
-        assert_eq!(bsc_role_hv(role, 10000).unwrap(), roles_10000[idx], "{role}@10000");
+        assert_eq!(
+            bsc_role_hv(role, 4096).unwrap(),
+            roles_4096[idx],
+            "{role}@4096"
+        );
+        assert_eq!(
+            bsc_role_hv(role, 10000).unwrap(),
+            roles_10000[idx],
+            "{role}@10000"
+        );
     }
 }
 
@@ -181,7 +205,11 @@ fn sparse_role_indices_identical() {
     let roles = load_rows("sparse_roles", 18, 40);
     for (idx, role) in BSC_ROLE_VOCABULARY.iter().enumerate() {
         let want = unpack_sparse(&roles[idx]);
-        assert_eq!(sparse_role_indices(role).unwrap(), want, "sparse role {role}");
+        assert_eq!(
+            sparse_role_indices(role).unwrap(),
+            want,
+            "sparse role {role}"
+        );
     }
 }
 
@@ -209,10 +237,18 @@ fn bsc_ops_byte_identical() {
         assert_eq!(binds[i], ops[i], "bsc bind row {i}");
     }
     for (k, &n) in [3usize, 7, 10].iter().enumerate() {
-        assert_eq!(bsc::bundle_impl(&binds[..n], 4096).unwrap(), ops[18 + k], "bsc bundle n={n}");
+        assert_eq!(
+            bsc::bundle_impl(&binds[..n], 4096).unwrap(),
+            ops[18 + k],
+            "bsc bundle n={n}"
+        );
     }
     for (k, &shift) in [1i64, 7, 33, 4095].iter().enumerate() {
-        assert_eq!(bsc::permute_impl(&binds[0], shift), ops[21 + k], "bsc permute {shift}");
+        assert_eq!(
+            bsc::permute_impl(&binds[0], shift),
+            ops[21 + k],
+            "bsc permute {shift}"
+        );
     }
 }
 
@@ -286,17 +322,33 @@ fn fhrr_ops_byte_identical() {
     // rows[10:20] = unbind(bound_i, role_i)
     for i in 0..10 {
         let role = fhrr_role_hv(BSC_ROLE_VOCABULARY[i]).unwrap();
-        assert_eq!(fhrr::unbind_impl(&bound[i], &role).unwrap(), ops[10 + i], "fhrr unbind {i}");
+        assert_eq!(
+            fhrr::unbind_impl(&bound[i], &role).unwrap(),
+            ops[10 + i],
+            "fhrr unbind {i}"
+        );
     }
     // row[20] = bundle([bound_0]) passthrough
-    assert_eq!(fhrr::bundle_impl(&bound[..1]).unwrap(), ops[20], "fhrr single passthrough");
+    assert_eq!(
+        fhrr::bundle_impl(&bound[..1]).unwrap(),
+        ops[20],
+        "fhrr single passthrough"
+    );
     // rows[21:24] = bundle(bound[:n]) for n in (2,3,5)
     for (k, &n) in [2usize, 3, 5].iter().enumerate() {
-        assert_eq!(fhrr::bundle_impl(&bound[..n]).unwrap(), ops[21 + k], "fhrr bundle n={n}");
+        assert_eq!(
+            fhrr::bundle_impl(&bound[..n]).unwrap(),
+            ops[21 + k],
+            "fhrr bundle n={n}"
+        );
     }
     // rows[24:27] = permute(bound_0, shift) for shift in (1,13,9999)
     for (k, &shift) in [1i64, 13, 9999].iter().enumerate() {
-        assert_eq!(fhrr::permute_impl(&bound[0], shift), ops[24 + k], "fhrr permute {shift}");
+        assert_eq!(
+            fhrr::permute_impl(&bound[0], shift),
+            ops[24 + k],
+            "fhrr permute {shift}"
+        );
     }
 }
 
@@ -319,7 +371,9 @@ fn fhrr_ops_sims_within_tolerance() {
 
 #[test]
 fn sparse_ops_byte_identical() {
-    use lilli_hd::codebook::{pack_sparse, sparse_role_indices, unpack_sparse, BSC_ROLE_VOCABULARY};
+    use lilli_hd::codebook::{
+        pack_sparse, sparse_role_indices, unpack_sparse, BSC_ROLE_VOCABULARY,
+    };
     use lilli_hd::sparse;
 
     let ops = load_rows("sparse_ops", 13, 40);

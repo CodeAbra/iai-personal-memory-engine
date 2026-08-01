@@ -148,8 +148,7 @@ impl Inner {
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
         let n = self.labels.len();
-        let mut payload: Vec<u8> =
-            Vec::with_capacity(24 + n * 9 + n * self.dim * 4);
+        let mut payload: Vec<u8> = Vec::with_capacity(24 + n * 9 + n * self.dim * 4);
         payload.extend_from_slice(&(self.dim as u64).to_le_bytes());
         payload.extend_from_slice(&(n as u64).to_le_bytes());
         for &l in &self.labels {
@@ -201,9 +200,9 @@ impl Inner {
         let mut inner = Inner::new(dim, capacity.max(n));
         let mut off = 16;
         for _ in 0..n {
-            inner
-                .labels
-                .push(i64::from_le_bytes(payload[off..off + 8].try_into().unwrap()));
+            inner.labels.push(i64::from_le_bytes(
+                payload[off..off + 8].try_into().unwrap(),
+            ));
             off += 8;
         }
         for i in 0..n {
@@ -212,9 +211,9 @@ impl Inner {
         off += n;
         inner.rows.reserve(n * dim);
         for _ in 0..(n * dim) {
-            inner
-                .rows
-                .push(f32::from_le_bytes(payload[off..off + 4].try_into().unwrap()));
+            inner.rows.push(f32::from_le_bytes(
+                payload[off..off + 4].try_into().unwrap(),
+            ));
             off += 4;
         }
         for (slot, &l) in inner.labels.iter().enumerate() {
@@ -273,8 +272,7 @@ impl ExactIndex {
 
     #[staticmethod]
     fn load(path: &str, max_elements: usize) -> PyResult<Self> {
-        let inner = Inner::load(Path::new(path), max_elements)
-            .map_err(PyRuntimeError::new_err)?;
+        let inner = Inner::load(Path::new(path), max_elements).map_err(PyRuntimeError::new_err)?;
         let dim = inner.dim;
         Ok(ExactIndex {
             inner: Mutex::new(inner),

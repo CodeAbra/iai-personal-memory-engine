@@ -108,9 +108,7 @@ pub fn plan_select(
     let is_virtual = VIRTUAL_TABLES
         .iter()
         .any(|v| v.eq_ignore_ascii_case(&table));
-    let is_schema = SCHEMA_TABLES
-        .iter()
-        .any(|v| v.eq_ignore_ascii_case(&table));
+    let is_schema = SCHEMA_TABLES.iter().any(|v| v.eq_ignore_ascii_case(&table));
 
     let scan_type = if is_virtual {
         ScanType::Constant

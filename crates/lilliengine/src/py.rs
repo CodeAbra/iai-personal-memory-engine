@@ -15,9 +15,9 @@
 use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration};
-use pyo3::{create_exception, import_exception};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule, PyTuple};
+use pyo3::{create_exception, import_exception};
 
 use lillibrain::Value;
 
@@ -192,12 +192,18 @@ pub struct Row {
 #[pymethods]
 impl Row {
     /// `row[i]` (positional) or `row["col"]` (by name).
-    fn __getitem__<'py>(&self, py: Python<'py>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        key: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             let len = self.inner.values.len() as isize;
             let idx = if i < 0 { len + i } else { i };
             if idx < 0 || idx >= len {
-                return Err(pyo3::exceptions::PyIndexError::new_err("row index out of range"));
+                return Err(pyo3::exceptions::PyIndexError::new_err(
+                    "row index out of range",
+                ));
             }
             return Ok(value_to_py(py, &self.inner.values[idx as usize]));
         }
@@ -219,8 +225,12 @@ impl Row {
 
     /// Iterate VALUES in column order (sqlite3.Row compatible).
     fn __iter__<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
-        let vals: Vec<Bound<'py, PyAny>> =
-            slf.inner.values.iter().map(|v| value_to_py(py, v)).collect();
+        let vals: Vec<Bound<'py, PyAny>> = slf
+            .inner
+            .values
+            .iter()
+            .map(|v| value_to_py(py, v))
+            .collect();
         let list = pyo3::types::PyList::new_bound(py, &vals);
         Ok(list.as_any().iter()?.into())
     }
@@ -427,9 +437,7 @@ impl RawConn {
                     EngineError::parse(conn::READONLY_WRITE_ERR.to_string()),
                 ));
             }
-            RawAction::Delegate(delegated) => {
-                run_execute(py, &conn, &delegated, params)?
-            }
+            RawAction::Delegate(delegated) => run_execute(py, &conn, &delegated, params)?,
         };
         Py::new(
             py,
@@ -998,6 +1006,9 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Row>()?;
     m.add_class::<RawConn>()?;
     m.add_class::<IndexSnapshot>()?;
-    m.add("SnapshotFenceError", m.py().get_type_bound::<SnapshotFenceError>())?;
+    m.add(
+        "SnapshotFenceError",
+        m.py().get_type_bound::<SnapshotFenceError>(),
+    )?;
     Ok(())
 }

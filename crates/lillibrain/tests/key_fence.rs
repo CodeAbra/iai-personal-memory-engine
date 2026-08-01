@@ -43,7 +43,10 @@ fn crate_source_has_no_crypto_symbol() {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_sources(&src, &mut files);
-    assert!(!files.is_empty(), "expected at least one source file under src/");
+    assert!(
+        !files.is_empty(),
+        "expected at least one source file under src/"
+    );
 
     let mut hits: Vec<String> = Vec::new();
     for file in &files {

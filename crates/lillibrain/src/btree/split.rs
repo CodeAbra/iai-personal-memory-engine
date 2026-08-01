@@ -219,7 +219,10 @@ fn balanced_nway_interior_split(
         // reach the count ceiling — the ceiling is honored symmetrically with
         // the leaf packer, so an injected small ceiling bounds interior nodes too.
         if !cur_keys.is_empty() && (!interior_fits(&probe) || cur_keys.len() >= leaf_max_cells()) {
-            nodes.push((std::mem::take(&mut cur_keys), std::mem::take(&mut cur_children)));
+            nodes.push((
+                std::mem::take(&mut cur_keys),
+                std::mem::take(&mut cur_children),
+            ));
             push_up_keys.push(*key);
             cur_children = vec![next_child];
         } else {

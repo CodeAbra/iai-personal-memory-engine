@@ -123,7 +123,10 @@ pub fn connected_components(
         let mut out: Vec<Vec<i64>> = components
             .into_iter()
             .map(|set| {
-                let mut ids: Vec<i64> = set.into_iter().map(|nid: NodeIndex| nid.index() as i64).collect();
+                let mut ids: Vec<i64> = set
+                    .into_iter()
+                    .map(|nid: NodeIndex| nid.index() as i64)
+                    .collect();
                 ids.sort_unstable();
                 ids
             })

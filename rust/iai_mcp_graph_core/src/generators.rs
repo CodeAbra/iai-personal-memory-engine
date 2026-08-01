@@ -65,9 +65,7 @@ pub(crate) fn gnm_random_graph_core(
     seed: u64,
 ) -> Result<(Vec<i64>, Vec<i64>), String> {
     if n == 0 {
-        return Err(
-            "n must be >= 1 (G(n, m) is undefined for n=0)".to_string(),
-        );
+        return Err("n must be >= 1 (G(n, m) is undefined for n=0)".to_string());
     }
     let max_edges = if n == 1 {
         0
@@ -105,8 +103,8 @@ pub(crate) fn gnm_random_graph_core(
     let mut rng = Pcg64::seed_from_u64(seed);
     // Uniform::new is fallible since rand 0.9; the bound is fixed and
     // known-valid (n >= 2 here because m > 0 requires n >= 2).
-    let between = Uniform::new(0, n)
-        .map_err(|e| format!("rand::distr::Uniform setup failed: {e}"))?;
+    let between =
+        Uniform::new(0, n).map_err(|e| format!("rand::distr::Uniform setup failed: {e}"))?;
 
     let mut seen: HashSet<(usize, usize)> = HashSet::with_capacity(m);
     while u_list.len() < m {

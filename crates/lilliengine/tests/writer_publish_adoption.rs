@@ -8,8 +8,8 @@
 //! successful untainted commit while demand is fresh, so the next reader at
 //! the new generation adopts instead of building.
 
-use lilliengine::conn::Connection;
 use lillibrain::Value;
+use lilliengine::conn::Connection;
 use tempfile::tempdir;
 
 fn setup_writer(path: &str) -> Connection {
@@ -36,7 +36,10 @@ fn setup_writer(path: &str) -> Connection {
         vec![Value::Text("s1".to_string())],
     )
     .unwrap();
-    assert!(conn.col_index_ready("edges"), "writer probe must build the index");
+    assert!(
+        conn.col_index_ready("edges"),
+        "writer probe must build the index"
+    );
     conn
 }
 
@@ -97,7 +100,11 @@ fn reader_adopts_writer_published_indexes_after_commit() {
 
     // Adopted index answers correctly, including the row from the very
     // commit that published it.
-    assert_eq!(count_src(&mut r2, "s1"), 7, "6 seeded s1 rows + the fresh one");
+    assert_eq!(
+        count_src(&mut r2, "s1"),
+        7,
+        "6 seeded s1 rows + the fresh one"
+    );
     assert_eq!(count_src(&mut r2, "s9"), 6);
 
     // The writer keeps mutating after publishing: copy-on-write must keep
@@ -119,6 +126,10 @@ fn reader_adopts_writer_published_indexes_after_commit() {
     // A fresh reader at the newest generation adopts the post-delete pair.
     let mut r3 = Connection::open_read_only(path, 0).unwrap();
     assert!(r3.col_index_ready("edges"));
-    assert_eq!(count_src(&mut r3, "s1"), 0, "post-delete adoption reflects the delete");
+    assert_eq!(
+        count_src(&mut r3, "s1"),
+        0,
+        "post-delete adoption reflects the delete"
+    );
     assert_eq!(count_src(&mut r3, "s9"), 6);
 }

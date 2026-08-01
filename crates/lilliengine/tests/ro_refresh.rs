@@ -3,8 +3,8 @@
 //! close + reopen (and its whole-table lazy index rebuild) the RO pool
 //! otherwise pays after every commit.
 
-use lilliengine::conn::Connection;
 use lillibrain::Value;
+use lilliengine::conn::Connection;
 use tempfile::tempdir;
 
 fn setup_writer(path: &str) -> Connection {
@@ -30,7 +30,10 @@ fn setup_writer(path: &str) -> Connection {
         vec![Value::Text("s1".to_string())],
     )
     .unwrap();
-    assert!(conn.col_index_ready("edges"), "writer probe must build the index");
+    assert!(
+        conn.col_index_ready("edges"),
+        "writer probe must build the index"
+    );
     conn
 }
 
@@ -74,7 +77,10 @@ fn refresh_moves_reader_to_newest_committed_snapshot() {
     // Snapshot isolation until refresh: the reader's view must not move.
     assert_eq!(count_src(&mut reader, "s1"), before);
 
-    assert!(reader.refresh_read_view().unwrap(), "snapshot must report moved");
+    assert!(
+        reader.refresh_read_view().unwrap(),
+        "snapshot must report moved"
+    );
     assert_eq!(count_src(&mut reader, "s1"), before + 1);
 }
 
@@ -87,7 +93,10 @@ fn refresh_without_new_commits_is_a_noop() {
 
     let mut reader = Connection::open_read_only(path, 0).unwrap();
     let before = count_src(&mut reader, "s1");
-    assert!(!reader.refresh_read_view().unwrap(), "no commit — no movement");
+    assert!(
+        !reader.refresh_read_view().unwrap(),
+        "no commit — no movement"
+    );
     assert_eq!(count_src(&mut reader, "s1"), before);
 }
 
@@ -124,9 +133,7 @@ fn refresh_sees_tables_created_after_open() {
     let mut writer = setup_writer(path);
 
     let mut reader = Connection::open_read_only(path, 0).unwrap();
-    assert!(reader
-        .execute("SELECT w FROM latecomer", vec![])
-        .is_err());
+    assert!(reader.execute("SELECT w FROM latecomer", vec![]).is_err());
 
     writer
         .execute("CREATE TABLE latecomer (w INTEGER)", vec![])

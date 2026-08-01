@@ -2,10 +2,10 @@
 //! reference AST shape for every supported statement and fail loud — with the
 //! reference's verbatim message text — on every shape outside the subset.
 
+use lillibrain::Value;
 use lilliengine::ast::{Expr, Stmt};
 use lilliengine::error::EngineError;
 use lilliengine::parser::parse;
-use lillibrain::Value;
 
 fn select(stmt: Stmt) -> lilliengine::ast::SelectStmt {
     match stmt {
@@ -65,9 +65,18 @@ fn drop_table_if_exists() {
 
 #[test]
 fn alter_rename_add_drop() {
-    assert_eq!(ddl(parse("ALTER TABLE r RENAME TO a").unwrap()).kind, "alter_rename_table");
-    assert_eq!(ddl(parse("ALTER TABLE r ADD COLUMN x INTEGER").unwrap()).kind, "alter_add_column");
-    assert_eq!(ddl(parse("ALTER TABLE r DROP COLUMN x").unwrap()).kind, "alter_drop_column");
+    assert_eq!(
+        ddl(parse("ALTER TABLE r RENAME TO a").unwrap()).kind,
+        "alter_rename_table"
+    );
+    assert_eq!(
+        ddl(parse("ALTER TABLE r ADD COLUMN x INTEGER").unwrap()).kind,
+        "alter_add_column"
+    );
+    assert_eq!(
+        ddl(parse("ALTER TABLE r DROP COLUMN x").unwrap()).kind,
+        "alter_drop_column"
+    );
 }
 
 #[test]
@@ -134,8 +143,18 @@ fn select_count_star_aliased() {
 
 #[test]
 fn select_sum_min_max() {
-    assert_eq!(select(parse("SELECT SUM(x) FROM t").unwrap()).aggregate.as_deref(), Some("sum"));
-    assert_eq!(select(parse("SELECT MIN(x) FROM t").unwrap()).aggregate.as_deref(), Some("min"));
+    assert_eq!(
+        select(parse("SELECT SUM(x) FROM t").unwrap())
+            .aggregate
+            .as_deref(),
+        Some("sum")
+    );
+    assert_eq!(
+        select(parse("SELECT MIN(x) FROM t").unwrap())
+            .aggregate
+            .as_deref(),
+        Some("min")
+    );
     let mx = select(parse("SELECT MAX(x) FROM t").unwrap());
     assert_eq!(mx.aggregate.as_deref(), Some("max"));
     assert_eq!(mx.aggregate_column.as_deref(), Some("x"));
@@ -260,7 +279,8 @@ fn insert_or_ignore() {
 
 #[test]
 fn insert_named_param_null_do_nothing() {
-    let i = insert(parse("INSERT INTO t (a,b) VALUES (:x, NULL) ON CONFLICT (a) DO NOTHING").unwrap());
+    let i =
+        insert(parse("INSERT INTO t (a,b) VALUES (:x, NULL) ON CONFLICT (a) DO NOTHING").unwrap());
     assert_eq!(i.values[0], Expr::NamedParam("x".to_string()));
     assert_eq!(i.values[1], Expr::Literal(Value::Null));
     assert_eq!(i.conflict_action.as_deref(), Some("nothing"));
@@ -279,8 +299,14 @@ fn update_set_where_id_eq() {
         Stmt::Update(u) => {
             assert_eq!(u.table, "t");
             assert_eq!(u.set_clauses.len(), 2);
-            assert_eq!(u.set_clauses[0], ("a".to_string(), Expr::Literal(Value::Int(1))));
-            assert_eq!(u.set_clauses[1], ("b".to_string(), Expr::NamedParam("y".to_string())));
+            assert_eq!(
+                u.set_clauses[0],
+                ("a".to_string(), Expr::Literal(Value::Int(1)))
+            );
+            assert_eq!(
+                u.set_clauses[1],
+                ("b".to_string(), Expr::NamedParam("y".to_string()))
+            );
             assert!(u.where_clause.is_some());
         }
         other => panic!("expected Update, got {other:?}"),

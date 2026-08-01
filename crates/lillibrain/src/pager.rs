@@ -12,9 +12,9 @@
 //! header, the B+tree root is reserved at page 2, and the meta page is reserved
 //! at page 3. Higher layers build on these reservations.
 
+use crate::pos_io::PosIo;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use crate::pos_io::PosIo;
 use std::path::{Path, PathBuf};
 
 use fs4::FileExt as Fs4FileExt;
@@ -56,7 +56,11 @@ fn stamp_crc(page: &mut [u8]) {
 
 /// Read the stored per-page checksum from the trailing slot of `page`.
 fn stored_crc(page: &[u8]) -> u32 {
-    u32::from_be_bytes(page[PAGE_CRC_OFFSET..PAGE_CRC_OFFSET + 4].try_into().unwrap())
+    u32::from_be_bytes(
+        page[PAGE_CRC_OFFSET..PAGE_CRC_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    )
 }
 
 /// A single cached page and its recency token.
@@ -170,7 +174,10 @@ impl Pager {
             .open(&path)?;
         // Advisory single-writer lock on the store file.
         Fs4FileExt::try_lock(&file).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("store is locked: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("store is locked: {e}"),
+            )
         })?;
 
         #[cfg(unix)]
@@ -620,7 +627,9 @@ impl Pager {
     fn read_header_u32(&self, offset: usize) -> Result<u32> {
         let mut inner = self.inner.lock();
         let buf = self.ensure_cached(&mut inner, 1)?;
-        Ok(u32::from_be_bytes(buf[offset..offset + 4].try_into().unwrap()))
+        Ok(u32::from_be_bytes(
+            buf[offset..offset + 4].try_into().unwrap(),
+        ))
     }
 
     /// Total page count from the header.
@@ -695,7 +704,9 @@ impl Pager {
         let mut inner = self.inner.lock();
         let header = self.ensure_cached(&mut inner, 1)?;
         let db_size = u32::from_be_bytes(
-            header[HDR_DB_SIZE_OFFSET..HDR_DB_SIZE_OFFSET + 4].try_into().unwrap(),
+            header[HDR_DB_SIZE_OFFSET..HDR_DB_SIZE_OFFSET + 4]
+                .try_into()
+                .unwrap(),
         );
         if page_no == 0 || page_no > db_size {
             return Err(StoreError::PageOutOfBounds { page_no, db_size });
@@ -872,8 +883,7 @@ impl Pager {
             let num_cells =
                 u16::from_be_bytes(buf[num_cells_off..num_cells_off + 2].try_into().unwrap())
                     as u64;
-            let sibling =
-                u32::from_be_bytes(buf[sibling_off..sibling_off + 4].try_into().unwrap());
+            let sibling = u32::from_be_bytes(buf[sibling_off..sibling_off + 4].try_into().unwrap());
             (num_cells, sibling)
         }
 
@@ -1295,7 +1305,11 @@ mod tests {
         let p = Pager::open(&path).unwrap();
         assert_eq!(p.db_size().unwrap(), 3);
         let hdr = p.read_page(1).unwrap();
-        let ps = u16::from_be_bytes(hdr[HDR_PAGE_SIZE_OFFSET..HDR_PAGE_SIZE_OFFSET + 2].try_into().unwrap());
+        let ps = u16::from_be_bytes(
+            hdr[HDR_PAGE_SIZE_OFFSET..HDR_PAGE_SIZE_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(ps as usize, PAGE_SIZE);
     }
 
@@ -1337,7 +1351,11 @@ mod tests {
         }
         // Corrupt one byte of the persisted page directly on disk.
         let offset = (pno as u64 - 1) * PAGE_SIZE as u64;
-        let f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         let mut one = [0u8; 1];
         f.read_exact_at(&mut one, offset + 10).unwrap();
         one[0] ^= 0xFF;

@@ -24,9 +24,7 @@ use crate::eval::{
     eval_predicate, eval_scalar, order_key, sort_value, sql_compare, DirectedKey, Row, SortKey,
 };
 use crate::meta::MetaTable;
-use crate::plan::{
-    too_few_bindings_error, too_many_bindings_error, ScanType, SelectPlan,
-};
+use crate::plan::{too_few_bindings_error, too_many_bindings_error, ScanType, SelectPlan};
 use crate::rowcodec::{decode_row, encode_row};
 
 /// The pseudo-column name for the row identifier in a query.
@@ -68,7 +66,13 @@ pub fn execute_select(
     ordered_index: Option<&mut OrderedColIndex>,
 ) -> Result<ResultSet> {
     let (rs, _) = execute_select_instrumented(
-        plan, store, catalog, root_map, id_index, col_index, ordered_index,
+        plan,
+        store,
+        catalog,
+        root_map,
+        id_index,
+        col_index,
+        ordered_index,
     )?;
     Ok(rs)
 }
@@ -85,10 +89,18 @@ pub fn execute_select_instrumented(
     mut ordered_index: Option<&mut OrderedColIndex>,
 ) -> Result<(ResultSet, ScanStats)> {
     if plan.scan_type == ScanType::Constant {
-        return Ok((execute_constant(plan, store)?, ScanStats { decoded_rows: false }));
+        return Ok((
+            execute_constant(plan, store)?,
+            ScanStats {
+                decoded_rows: false,
+            },
+        ));
     }
     if plan.scan_type == ScanType::SqliteMaster {
-        return Ok((execute_sqlite_master(plan, catalog)?, ScanStats { decoded_rows: true }));
+        return Ok((
+            execute_sqlite_master(plan, catalog)?,
+            ScanStats { decoded_rows: true },
+        ));
     }
 
     let table = &plan.table;
@@ -126,15 +138,30 @@ pub fn execute_select_instrumented(
             _ => None,
         };
         let rs = execute_select_exprs(
-            store, root, &col_names, &bound_select_exprs, &bound_where, effective_limit,
-            effective_offset, indexed_rows, plan,
+            store,
+            root,
+            &col_names,
+            &bound_select_exprs,
+            &bound_where,
+            effective_limit,
+            effective_offset,
+            indexed_rows,
+            plan,
         )?;
         return Ok((rs, ScanStats { decoded_rows: true }));
     }
 
     // GROUP BY path.
     if plan.group_by_col.is_some() {
-        let rs = execute_group_by(plan, store, root, &col_names, &bound_where, effective_limit, effective_offset)?;
+        let rs = execute_group_by(
+            plan,
+            store,
+            root,
+            &col_names,
+            &bound_where,
+            effective_limit,
+            effective_offset,
+        )?;
         return Ok((rs, ScanStats { decoded_rows: true }));
     }
 
@@ -145,7 +172,10 @@ pub fn execute_select_instrumented(
         && plan.group_by_col.is_none()
         && plan.order_by.is_none()
     {
-        let label = plan.count_alias.clone().unwrap_or_else(|| "COUNT(*)".to_string());
+        let label = plan
+            .count_alias
+            .clone()
+            .unwrap_or_else(|| "COUNT(*)".to_string());
         if bound_where.is_none() {
             let count = count_rows_no_decode(store, root)?;
             return Ok((
@@ -153,7 +183,9 @@ pub fn execute_select_instrumented(
                     rows: vec![vec![(label.clone(), Value::Int(count))]],
                     columns: vec![label],
                 },
-                ScanStats { decoded_rows: false },
+                ScanStats {
+                    decoded_rows: false,
+                },
             ));
         }
         let where_expr = bound_where.as_ref().unwrap();
@@ -170,11 +202,8 @@ pub fn execute_select_instrumented(
                 while vals.len() < col_names.len() {
                     vals.push(Value::Null);
                 }
-                let mut pairs: Vec<(String, Value)> = col_names
-                    .iter()
-                    .cloned()
-                    .zip(vals.into_iter())
-                    .collect();
+                let mut pairs: Vec<(String, Value)> =
+                    col_names.iter().cloned().zip(vals.into_iter()).collect();
                 pairs.push((ROWKEY.to_string(), Value::Int(key)));
                 let row = Row::from_pairs(pairs);
                 if eval_predicate(where_expr, &row) == Some(true) {
@@ -199,9 +228,10 @@ pub fn execute_select_instrumented(
     // the scan path.
     if let Some(agg) = plan.aggregate.as_deref() {
         if (agg == "min" || agg == "max") && plan.group_by_col.is_none() {
-            if let (Some(col), Some(oidx)) =
-                (plan.aggregate_column.as_deref(), ordered_index.as_deref_mut())
-            {
+            if let (Some(col), Some(oidx)) = (
+                plan.aggregate_column.as_deref(),
+                ordered_index.as_deref_mut(),
+            ) {
                 if col == oidx.column() {
                     let tree = store.tree(root);
                     oidx.ensure_built(&tree, &col_names)?;
@@ -281,7 +311,13 @@ pub fn execute_select_instrumented(
                 };
                 let out = project_rows(matched, &plan.columns, &col_names);
                 let cols = output_columns(&plan.columns, &col_names);
-                return Ok((ResultSet { rows: out, columns: cols }, ScanStats { decoded_rows: true }));
+                return Ok((
+                    ResultSet {
+                        rows: out,
+                        columns: cols,
+                    },
+                    ScanStats { decoded_rows: true },
+                ));
             }
         }
     }
@@ -322,9 +358,8 @@ pub fn execute_select_instrumented(
                     // The index pointed at a row that is gone (a consistency lapse):
                     // fall back to the safe per-id scan rather than dropping the row.
                     None => {
-                        let fallback = first_id_match_by_scan(
-                            store, root, &col_names, &id_val, where_expr,
-                        )?;
+                        let fallback =
+                            first_id_match_by_scan(store, root, &col_names, &id_val, where_expr)?;
                         rows.extend(fallback);
                     }
                 }
@@ -391,8 +426,7 @@ pub fn execute_select_instrumented(
             let tree = store.tree(root);
             oidx.ensure_built(&tree, &col_names)?;
             let limit_usize = spec.limit_hint;
-            let candidate_keys =
-                oidx.candidates_desc(limit_usize, spec.ge_bound.as_deref());
+            let candidate_keys = oidx.candidates_desc(limit_usize, spec.ge_bound.as_deref());
             let mut rows: Vec<Row> = Vec::with_capacity(candidate_keys.len());
             for key in candidate_keys {
                 if let Some(payload) = tree.get(key).map_err(store_err)? {
@@ -472,8 +506,13 @@ pub fn execute_select_instrumented(
     // aggregate still collapses to its single-row result below, unaffected.
     if effective_limit == Some(0) && plan.aggregate.is_none() {
         return Ok((
-            ResultSet { rows: Vec::new(), columns: output_columns(&plan.columns, &col_names) },
-            ScanStats { decoded_rows: false },
+            ResultSet {
+                rows: Vec::new(),
+                columns: output_columns(&plan.columns, &col_names),
+            },
+            ScanStats {
+                decoded_rows: false,
+            },
         ));
     }
 
@@ -484,9 +523,8 @@ pub fn execute_select_instrumented(
     // on a named column needs that column decoded regardless of the WHERE. The
     // filtered-COUNT fast path above already handles COUNT(*) before this
     // point, so aggregate != None here means MIN/MAX/SUM (always full decode).
-    let use_selective = !plan.columns.is_empty()
-        && plan.columns != ["*"]
-        && plan.aggregate.is_none();
+    let use_selective =
+        !plan.columns.is_empty() && plan.columns != ["*"] && plan.aggregate.is_none();
     let mut rows: Vec<Row> = if use_selective {
         let mut needed: std::collections::HashSet<String> = predicate_columns(bound_where.as_ref());
         // Add projected columns.
@@ -515,11 +553,8 @@ pub fn execute_select_instrumented(
                 while vals.len() < col_names.len() {
                     vals.push(Value::Null);
                 }
-                let mut pairs: Vec<(String, Value)> = col_names
-                    .iter()
-                    .cloned()
-                    .zip(vals.into_iter())
-                    .collect();
+                let mut pairs: Vec<(String, Value)> =
+                    col_names.iter().cloned().zip(vals.into_iter()).collect();
                 pairs.push((ROWKEY.to_string(), Value::Int(key)));
                 out.push(Row::from_pairs(pairs));
                 Ok(())
@@ -539,7 +574,13 @@ pub fn execute_select_instrumented(
 
     // Scalar aggregates collapse to a single row (ORDER BY is irrelevant).
     if let Some(agg) = plan.aggregate.as_deref() {
-        let rs = aggregate_scalar(agg, plan.aggregate_column.as_deref(), &rows, effective_limit, plan.count_alias.as_deref());
+        let rs = aggregate_scalar(
+            agg,
+            plan.aggregate_column.as_deref(),
+            &rows,
+            effective_limit,
+            plan.count_alias.as_deref(),
+        );
         return Ok((rs, ScanStats { decoded_rows: true }));
     }
 
@@ -559,7 +600,11 @@ pub fn execute_select_instrumented(
     if let Some(off) = effective_offset {
         if off > 0 {
             let off = off as usize;
-            rows = if off >= rows.len() { Vec::new() } else { rows.split_off(off) };
+            rows = if off >= rows.len() {
+                Vec::new()
+            } else {
+                rows.split_off(off)
+            };
         }
     }
     if let Some(lim) = effective_limit {
@@ -570,7 +615,13 @@ pub fn execute_select_instrumented(
 
     let out = project_rows(rows, &plan.columns, &col_names);
     let cols = output_columns(&plan.columns, &col_names);
-    Ok((ResultSet { rows: out, columns: cols }, ScanStats { decoded_rows: true }))
+    Ok((
+        ResultSet {
+            rows: out,
+            columns: cols,
+        },
+        ScanStats { decoded_rows: true },
+    ))
 }
 
 /// The shared tail of the plain-row SELECT pipeline: ORDER BY → (LIMIT 0) →
@@ -587,7 +638,10 @@ fn finish_row_pipeline(
         order_rows(&mut rows, plan, col_names);
     }
     if effective_limit == Some(0) {
-        return ResultSet { rows: Vec::new(), columns: output_columns(&plan.columns, col_names) };
+        return ResultSet {
+            rows: Vec::new(),
+            columns: output_columns(&plan.columns, col_names),
+        };
     }
     if plan.columns.iter().any(|c| c == ROWID) {
         for r in &mut rows {
@@ -597,7 +651,11 @@ fn finish_row_pipeline(
     if let Some(off) = effective_offset {
         if off > 0 {
             let off = off as usize;
-            rows = if off >= rows.len() { Vec::new() } else { rows.split_off(off) };
+            rows = if off >= rows.len() {
+                Vec::new()
+            } else {
+                rows.split_off(off)
+            };
         }
     }
     if let Some(lim) = effective_limit {
@@ -607,7 +665,10 @@ fn finish_row_pipeline(
     }
     let out = project_rows(rows, &plan.columns, col_names);
     let cols = output_columns(&plan.columns, col_names);
-    ResultSet { rows: out, columns: cols }
+    ResultSet {
+        rows: out,
+        columns: cols,
+    }
 }
 
 /// Spec produced by the ordered-index detector when the query shape is narrowable.
@@ -688,7 +749,10 @@ fn extract_ordered_topk(
         Some(w) => strict_ordered_lower_bound(w, oidx.column())?,
     };
 
-    Some(OrderedTopkSpec { limit_hint, ge_bound })
+    Some(OrderedTopkSpec {
+        limit_hint,
+        ge_bound,
+    })
 }
 
 /// Classify a WHERE expression that the ordered fast path can soundly narrow.
@@ -952,45 +1016,39 @@ fn scan_rows_two_phase(
     let mut rows: Vec<Row> = Vec::new();
     const EARLY_LIMIT_SENTINEL: &str = "__scan_early_limit__";
 
-    let scan_result: Result<()> = store
-        .tree(root)
-        .scan_cells_with(|key, payload| {
-            let mut vals = crate::rowcodec::decode_row_columns(&payload, &pred_mask)?;
-            while vals.len() < col_names.len() {
-                vals.push(Value::Null);
+    let scan_result: Result<()> = store.tree(root).scan_cells_with(|key, payload| {
+        let mut vals = crate::rowcodec::decode_row_columns(&payload, &pred_mask)?;
+        while vals.len() < col_names.len() {
+            vals.push(Value::Null);
+        }
+        let mut pairs: Vec<(String, Value)> = col_names.iter().cloned().zip(vals).collect();
+        pairs.push((ROWKEY.to_string(), Value::Int(key)));
+        let mut row = Row::from_pairs(pairs);
+        if let Some(w) = where_expr {
+            if eval_predicate(w, &row) != Some(true) {
+                return Ok(());
             }
-            let mut pairs: Vec<(String, Value)> = col_names
-                .iter()
-                .cloned()
-                .zip(vals)
-                .collect();
-            pairs.push((ROWKEY.to_string(), Value::Int(key)));
-            let mut row = Row::from_pairs(pairs);
-            if let Some(w) = where_expr {
-                if eval_predicate(w, &row) != Some(true) {
-                    return Ok(());
-                }
-            }
-            // Second pass: a survivor — decode the projection-only columns from the
-            // same payload and fill them in (the predicate columns are already present).
-            if need_phase2 {
-                let proj_vals = crate::rowcodec::decode_row_columns(&payload, &proj_mask)?;
-                for (i, name) in col_names.iter().enumerate() {
-                    if proj_mask.get(i).copied().unwrap_or(false) {
-                        if let Some(v) = proj_vals.get(i) {
-                            row.set(name.clone(), v.clone());
-                        }
+        }
+        // Second pass: a survivor — decode the projection-only columns from the
+        // same payload and fill them in (the predicate columns are already present).
+        if need_phase2 {
+            let proj_vals = crate::rowcodec::decode_row_columns(&payload, &proj_mask)?;
+            for (i, name) in col_names.iter().enumerate() {
+                if proj_mask.get(i).copied().unwrap_or(false) {
+                    if let Some(v) = proj_vals.get(i) {
+                        row.set(name.clone(), v.clone());
                     }
                 }
             }
-            rows.push(row);
-            if let Some(n) = early_limit {
-                if rows.len() >= n {
-                    return Err(EngineError::parse(EARLY_LIMIT_SENTINEL));
-                }
+        }
+        rows.push(row);
+        if let Some(n) = early_limit {
+            if rows.len() >= n {
+                return Err(EngineError::parse(EARLY_LIMIT_SENTINEL));
             }
-            Ok(())
-        });
+        }
+        Ok(())
+    });
 
     match scan_result {
         Ok(()) => {}
@@ -1004,21 +1062,15 @@ fn scan_rows_two_phase(
 /// stored record (one written before an ALTER TABLE ADD COLUMN) with NULL and
 /// threading the raw B-tree key for rowid fallback.
 fn scan_rows(store: &Store, root: u32, col_names: &[String]) -> Result<Vec<Row>> {
-    let raw = store
-        .tree(root)
-        .full_scan()
-        .map_err(store_err)?;
+    let raw = store.tree(root).full_scan().map_err(store_err)?;
     let mut rows = Vec::with_capacity(raw.len());
     for (key, payload) in raw {
         let mut vals = decode_row(&payload)?;
         while vals.len() < col_names.len() {
             vals.push(Value::Null);
         }
-        let mut pairs: Vec<(String, Value)> = col_names
-            .iter()
-            .cloned()
-            .zip(vals.into_iter())
-            .collect();
+        let mut pairs: Vec<(String, Value)> =
+            col_names.iter().cloned().zip(vals.into_iter()).collect();
         pairs.push((ROWKEY.to_string(), Value::Int(key)));
         rows.push(Row::from_pairs(pairs));
     }
@@ -1032,10 +1084,7 @@ fn scan_rows(store: &Store, root: u32, col_names: &[String]) -> Result<Vec<Row>>
 /// full-scan counter is not incremented. The count equals the number of rows
 /// a full scan would return for every tree shape including overflow cells.
 fn count_rows_no_decode(store: &Store, root: u32) -> Result<i64> {
-    let n = store
-        .tree(root)
-        .count_cells()
-        .map_err(store_err)?;
+    let n = store.tree(root).count_cells().map_err(store_err)?;
     Ok(n as i64)
 }
 
@@ -1058,7 +1107,10 @@ fn aggregate_scalar(
         _ => agg.to_string(),
     };
     if effective_limit == Some(0) {
-        return ResultSet { rows: Vec::new(), columns: vec![label] };
+        return ResultSet {
+            rows: Vec::new(),
+            columns: vec![label],
+        };
     }
     let value = match agg {
         "count" => Value::Int(rows.len() as i64),
@@ -1093,7 +1145,10 @@ fn aggregate_scalar(
         }
         _ => Value::Null,
     };
-    ResultSet { rows: vec![vec![(label.clone(), value)]], columns: vec![label] }
+    ResultSet {
+        rows: vec![vec![(label.clone(), value)]],
+        columns: vec![label],
+    }
 }
 
 /// SUM over a column, matching sqlite3's `sumStep` semantics:
@@ -1332,12 +1387,16 @@ fn extract_id_in(expr: &Expr) -> Option<Vec<String>> {
 fn extract_id_eq(expr: &Expr) -> Option<String> {
     if let Expr::BinOp { op, left, right } = expr {
         if op == "=" || op == "==" {
-            if let (Expr::Column(name), Expr::Literal(Value::Text(s))) = (left.as_ref(), right.as_ref()) {
+            if let (Expr::Column(name), Expr::Literal(Value::Text(s))) =
+                (left.as_ref(), right.as_ref())
+            {
                 if name == "id" {
                     return Some(s.clone());
                 }
             }
-            if let (Expr::Literal(Value::Text(s)), Expr::Column(name)) = (left.as_ref(), right.as_ref()) {
+            if let (Expr::Literal(Value::Text(s)), Expr::Column(name)) =
+                (left.as_ref(), right.as_ref())
+            {
                 if name == "id" {
                     return Some(s.clone());
                 }
@@ -1430,7 +1489,10 @@ fn execute_select_exprs(
             // sort keys must be decoded onto each row (they may name a column outside
             // the WHERE and the projection). Fold them into the first-pass decode set.
             if has_order_by {
-                for key in [plan.order_by.as_ref(), plan.order_by2.as_ref()].into_iter().flatten() {
+                for key in [plan.order_by.as_ref(), plan.order_by2.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
                     if key.col != ROWID {
                         pred_cols.insert(key.col.clone());
                     }
@@ -1455,8 +1517,13 @@ fn execute_select_exprs(
                 })
             };
             scan_rows_two_phase(
-                store, root, col_names, &pred_cols, &proj_cols,
-                bound_where.as_ref(), early_limit,
+                store,
+                root,
+                col_names,
+                &pred_cols,
+                &proj_cols,
+                bound_where.as_ref(),
+                early_limit,
             )?
         }
     };
@@ -1472,7 +1539,10 @@ fn execute_select_exprs(
     }
 
     if effective_limit == Some(0) {
-        return Ok(ResultSet { rows: Vec::new(), columns: aliases });
+        return Ok(ResultSet {
+            rows: Vec::new(),
+            columns: aliases,
+        });
     }
 
     let mut out: Vec<OutRow> = rows
@@ -1488,7 +1558,11 @@ fn execute_select_exprs(
     if let Some(off) = effective_offset {
         if off > 0 {
             let off = off as usize;
-            out = if off >= out.len() { Vec::new() } else { out.split_off(off) };
+            out = if off >= out.len() {
+                Vec::new()
+            } else {
+                out.split_off(off)
+            };
         }
     }
     if let Some(lim) = effective_limit {
@@ -1496,7 +1570,10 @@ fn execute_select_exprs(
             out.truncate(lim as usize);
         }
     }
-    Ok(ResultSet { rows: out, columns: aliases })
+    Ok(ResultSet {
+        rows: out,
+        columns: aliases,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,7 +1602,10 @@ fn execute_group_by(
             .map(|g| (g.kind.clone(), g.output_name.clone(), g.source_name.clone()))
             .collect()
     } else {
-        plan.columns.iter().map(|c| ("col".to_string(), c.clone(), c.clone())).collect()
+        plan.columns
+            .iter()
+            .map(|c| ("col".to_string(), c.clone(), c.clone()))
+            .collect()
     };
     let out_names: Vec<String> = projection.iter().map(|(_, o, _)| o.clone()).collect();
 
@@ -1576,24 +1656,41 @@ fn execute_group_by(
             let col2 = k2.col.clone();
             let (desc2, dt2) = (k2.desc, k2.datetime);
             out_rows.sort_by(|a, b| {
-                let ka = (sort_value(&out_get(a, &col1), desc1, dt1), sort_value(&out_get(a, &col2), desc2, dt2));
-                let kb = (sort_value(&out_get(b, &col1), desc1, dt1), sort_value(&out_get(b, &col2), desc2, dt2));
+                let ka = (
+                    sort_value(&out_get(a, &col1), desc1, dt1),
+                    sort_value(&out_get(a, &col2), desc2, dt2),
+                );
+                let kb = (
+                    sort_value(&out_get(b, &col1), desc1, dt1),
+                    sort_value(&out_get(b, &col2), desc2, dt2),
+                );
                 ka.cmp(&kb)
             });
         } else {
             out_rows.sort_by(|a, b| {
-                sort_value(&out_get(a, &col1), desc1, dt1).cmp(&sort_value(&out_get(b, &col1), desc1, dt1))
+                sort_value(&out_get(a, &col1), desc1, dt1).cmp(&sort_value(
+                    &out_get(b, &col1),
+                    desc1,
+                    dt1,
+                ))
             });
         }
     }
 
     if effective_limit == Some(0) {
-        return Ok(ResultSet { rows: Vec::new(), columns: out_names });
+        return Ok(ResultSet {
+            rows: Vec::new(),
+            columns: out_names,
+        });
     }
     if let Some(off) = effective_offset {
         if off > 0 {
             let off = off as usize;
-            out_rows = if off >= out_rows.len() { Vec::new() } else { out_rows.split_off(off) };
+            out_rows = if off >= out_rows.len() {
+                Vec::new()
+            } else {
+                out_rows.split_off(off)
+            };
         }
     }
     if let Some(lim) = effective_limit {
@@ -1601,12 +1698,18 @@ fn execute_group_by(
             out_rows.truncate(lim as usize);
         }
     }
-    Ok(ResultSet { rows: out_rows, columns: out_names })
+    Ok(ResultSet {
+        rows: out_rows,
+        columns: out_names,
+    })
 }
 
 /// Read a named value from an output row (the grouped rows are keyed by alias).
 fn out_get(row: &OutRow, name: &str) -> Value {
-    row.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap_or(Value::Null)
+    row.iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.clone())
+        .unwrap_or(Value::Null)
 }
 
 /// Integer comparison for HAVING COUNT(*).
@@ -1680,7 +1783,13 @@ fn execute_sqlite_master(plan: &SelectPlan, catalog: &Catalog) -> Result<ResultS
         ));
     }
 
-    Ok(finish_row_pipeline(rows, plan, &col_names, effective_limit, effective_offset))
+    Ok(finish_row_pipeline(
+        rows,
+        plan,
+        &col_names,
+        effective_limit,
+        effective_offset,
+    ))
 }
 
 fn execute_constant(plan: &SelectPlan, store: &Store) -> Result<ResultSet> {
@@ -1688,7 +1797,10 @@ fn execute_constant(plan: &SelectPlan, store: &Store) -> Result<ResultSet> {
     const PAGE_SIZE: i64 = 4096;
     let page_count = store.db_size().map(i64::from).unwrap_or(0);
     let estimate = page_count * PAGE_SIZE;
-    let col = plan.aggregate_column.clone().unwrap_or_else(|| "pgsize".to_string());
+    let col = plan
+        .aggregate_column
+        .clone()
+        .unwrap_or_else(|| "pgsize".to_string());
     Ok(ResultSet {
         rows: vec![vec![(col.clone(), Value::Int(estimate))]],
         columns: vec![col],
@@ -2030,7 +2142,11 @@ pub struct ColIndex {
 impl ColIndex {
     /// An empty index over `columns`. Unbuilt until [`ensure_built`].
     pub fn new(columns: Vec<String>) -> Self {
-        ColIndex { columns, map: std::sync::Arc::new(HashMap::new()), built: false }
+        ColIndex {
+            columns,
+            map: std::sync::Arc::new(HashMap::new()),
+            built: false,
+        }
     }
 
     /// True once the population scan has run.
@@ -2320,7 +2436,11 @@ pub struct OrderedColIndex {
 impl OrderedColIndex {
     /// An empty, unbuilt index over `column`.
     pub fn new(column: impl Into<String>) -> Self {
-        OrderedColIndex { column: column.into(), map: BTreeMap::new(), built: false }
+        OrderedColIndex {
+            column: column.into(),
+            map: BTreeMap::new(),
+            built: false,
+        }
     }
 
     /// The column this index covers.
@@ -2344,11 +2464,7 @@ impl OrderedColIndex {
     /// Row-keys accumulate in ascending scan order within each bucket,
     /// matching the full-scan traversal order so `order_rows` produces
     /// byte-identical tie order.
-    pub fn ensure_built(
-        &mut self,
-        tree: &lillibrain::Tree,
-        col_names: &[String],
-    ) -> Result<()> {
+    pub fn ensure_built(&mut self, tree: &lillibrain::Tree, col_names: &[String]) -> Result<()> {
         if self.built {
             return Ok(());
         }
@@ -2385,11 +2501,7 @@ impl OrderedColIndex {
     /// The returned vector is a SUPERSET of the true top-k.  The caller must
     /// decode each key, re-apply the full bound predicate, then run `order_rows`
     /// + truncate to produce the final byte-identical result.
-    pub fn candidates_desc(
-        &self,
-        limit: usize,
-        ge_bound: Option<&str>,
-    ) -> Vec<i64> {
+    pub fn candidates_desc(&self, limit: usize, ge_bound: Option<&str>) -> Vec<i64> {
         let mut out: Vec<i64> = Vec::new();
         let iter: Box<dyn Iterator<Item = (&OrderedTag, &Vec<i64>)>> = match ge_bound {
             Some(lo) => Box::new(self.map.range(order_key(&Value::Text(lo.to_string()))..)),
@@ -2465,7 +2577,11 @@ impl OrderedColIndex {
     /// walk it is the stop boundary.  The caller re-applies the full predicate
     /// to every candidate row, so the bound only narrows which buckets are
     /// visited, never what a visited row must satisfy.
-    fn walk_buckets(&self, desc: bool, lower: Option<&OrderedTag>) -> Vec<(&OrderedTag, &Vec<i64>)> {
+    fn walk_buckets(
+        &self,
+        desc: bool,
+        lower: Option<&OrderedTag>,
+    ) -> Vec<(&OrderedTag, &Vec<i64>)> {
         let iter: Box<dyn Iterator<Item = (&OrderedTag, &Vec<i64>)>> = match lower {
             Some(lo) => Box::new(self.map.range(lo.clone()..)),
             None => Box::new(self.map.iter()),
@@ -2661,8 +2777,9 @@ fn decode_to_row(payload: &[u8], col_names: &[String]) -> Result<Row> {
 /// True when `table`'s primary key is a single AUTOINCREMENT-style `vec_label`
 /// integer column — the records-shaped table whose INSERT injects the next HWM.
 fn has_autoincrement_vec_label(cols: &[ColumnMeta]) -> bool {
-    cols.iter()
-        .any(|c| c.name.eq_ignore_ascii_case("vec_label") && c.primary_key && c.affinity == "INTEGER")
+    cols.iter().any(|c| {
+        c.name.eq_ignore_ascii_case("vec_label") && c.primary_key && c.affinity == "INTEGER"
+    })
 }
 
 /// Build the catalog-ordered insert payload from a name→value map: unsupplied
@@ -2806,9 +2923,7 @@ pub fn execute_insert(
     }
 
     let conflict_keys = resolve_conflict_keys(stmt, &cols);
-    let needs_conflict_scan = (stmt.conflict_action.is_some()
-        || stmt.or_ignore
-        || stmt.or_replace)
+    let needs_conflict_scan = (stmt.conflict_action.is_some() || stmt.or_ignore || stmt.or_replace)
         && !conflict_keys.is_empty();
 
     // Resolve the conflicting row, if any. Two paths:
@@ -2882,9 +2997,7 @@ pub fn execute_insert(
                 let mut updated = row.clone();
                 for (set_col, set_expr) in &stmt.set_clauses {
                     let new_val = match set_expr {
-                        Expr::Excluded(col) => {
-                            value_map.get(col).cloned().unwrap_or(Value::Null)
-                        }
+                        Expr::Excluded(col) => value_map.get(col).cloned().unwrap_or(Value::Null),
                         other => eval_scalar(other, &row),
                     };
                     updated.set(set_col.clone(), new_val);
@@ -2923,7 +3036,8 @@ pub fn execute_insert(
                 // NOT NULL column. The guard rolls the transaction back on this
                 // early return so no open transaction leaks.
                 enforce_not_null(&cols, &payload_vals, table)?;
-                tree.insert(key, &encode_row(&payload_vals)).map_err(store_err)?;
+                tree.insert(key, &encode_row(&payload_vals))
+                    .map_err(store_err)?;
                 if has_col_index {
                     meta.bump_col_generation(store, table)?;
                 }
@@ -2947,11 +3061,16 @@ pub fn execute_insert(
                     _ => None,
                 };
                 let replacement = Row::from_pairs(
-                    col_names.iter().cloned().zip(payload_vals.iter().cloned()).collect(),
+                    col_names
+                        .iter()
+                        .cloned()
+                        .zip(payload_vals.iter().cloned())
+                        .collect(),
                 );
                 new_ckey = row_conflict_key(&conflict_keys, &replacement);
                 let guard = TxnGuard::begin(store, scope)?;
-                tree.insert(key, &encode_row(&payload_vals)).map_err(store_err)?;
+                tree.insert(key, &encode_row(&payload_vals))
+                    .map_err(store_err)?;
                 if has_col_index {
                     meta.bump_col_generation(store, table)?;
                 }
@@ -3003,14 +3122,18 @@ pub fn execute_insert(
             // The OR REPLACE / DO UPDATE may have changed the conflicting row in
             // place at `key`; the id-index and conflict-index already reconciled
             // above. DO NOTHING / OR IGNORE: skip silently. No row inserted.
-            return Ok(WriteOutcome { lastrowid, rowcount: 0 });
+            return Ok(WriteOutcome {
+                lastrowid,
+                rowcount: 0,
+            });
         }
         // No conflict found — fall through to the normal insert.
     }
 
     let payload_vals = build_payload(&cols, &value_map, table)?;
     let guard = TxnGuard::begin(store, scope)?;
-    tree.insert(next_key, &encode_row(&payload_vals)).map_err(store_err)?;
+    tree.insert(next_key, &encode_row(&payload_vals))
+        .map_err(store_err)?;
     if has_col_index {
         meta.bump_col_generation(store, table)?;
     }
@@ -3040,19 +3163,30 @@ pub fn execute_insert(
     // col-index was never built stays free.
     if let Some(cidx) = col_index {
         let inserted = Row::from_pairs(
-            col_names.iter().cloned().zip(payload_vals.iter().cloned()).collect(),
+            col_names
+                .iter()
+                .cloned()
+                .zip(payload_vals.iter().cloned())
+                .collect(),
         );
         cidx.insert_row(&inserted, next_key);
     }
     // Keep the ordered index current for the fresh row (same discipline as ColIndex).
     if let Some(oidx) = ordered_index {
         let inserted = Row::from_pairs(
-            col_names.iter().cloned().zip(payload_vals.iter().cloned()).collect(),
+            col_names
+                .iter()
+                .cloned()
+                .zip(payload_vals.iter().cloned())
+                .collect(),
         );
         oidx.insert_row(&inserted, next_key);
     }
 
-    Ok(WriteOutcome { lastrowid, rowcount: 1 })
+    Ok(WriteOutcome {
+        lastrowid,
+        rowcount: 1,
+    })
 }
 
 /// Resolve which existing row, if any, already owns a serialized conflict-key
@@ -3178,7 +3312,10 @@ pub fn execute_update(
                 }
             } else {
                 // id absent from the built index → the row does not exist; no scan.
-                return Ok(WriteOutcome { lastrowid: None, rowcount: 0 });
+                return Ok(WriteOutcome {
+                    lastrowid: None,
+                    rowcount: 0,
+                });
             }
         }
     }
@@ -3197,7 +3334,10 @@ pub fn execute_update(
     }
 
     if to_update.is_empty() {
-        return Ok(WriteOutcome { lastrowid: None, rowcount: 0 });
+        return Ok(WriteOutcome {
+            lastrowid: None,
+            rowcount: 0,
+        });
     }
 
     let cols = catalog.get(table)?.to_vec();
@@ -3225,9 +3365,9 @@ pub fn execute_update(
                 .unwrap_or("TEXT");
             updated.set(set_col.clone(), coerce_affinity(set_val.clone(), aff));
         }
-        let payload_vals: Vec<Value> =
-            col_names.iter().map(|cn| updated.get_or_null(cn)).collect();
-        tree.insert(*key, &encode_row(&payload_vals)).map_err(store_err)?;
+        let payload_vals: Vec<Value> = col_names.iter().map(|cn| updated.get_or_null(cn)).collect();
+        tree.insert(*key, &encode_row(&payload_vals))
+            .map_err(store_err)?;
         if touches_indexed_col {
             col_refile.push((row.clone(), updated, *key));
         }
@@ -3275,16 +3415,17 @@ pub fn execute_update(
     // stale, so drop it; the next `id = ?` point lookup rebuilds it from the tree.
     // The fast-path branch that did not touch `id` leaves the index valid (the row
     // stayed at the same key under the same id), so it is not invalidated there.
-    let touched_id = bound_set
-        .iter()
-        .any(|(c, _)| c.eq_ignore_ascii_case("id"));
+    let touched_id = bound_set.iter().any(|(c, _)| c.eq_ignore_ascii_case("id"));
     if let Some(idx) = id_index {
         if !used_fast_path || touched_id {
             idx.invalidate();
         }
     }
 
-    Ok(WriteOutcome { lastrowid: None, rowcount: to_update.len() as i64 })
+    Ok(WriteOutcome {
+        lastrowid: None,
+        rowcount: to_update.len() as i64,
+    })
 }
 
 /// Execute a DELETE: select matching keys (full scan + three-valued WHERE, or all
@@ -3321,10 +3462,7 @@ pub fn execute_delete(
 
     // Whether the col-index (when supplied and built) needs per-row maintenance:
     // capture the deleted rows so their indexed-column entries can be dropped.
-    let maintain_col = col_index
-        .as_ref()
-        .map(|cidx| cidx.built())
-        .unwrap_or(false);
+    let maintain_col = col_index.as_ref().map(|cidx| cidx.built()).unwrap_or(false);
     // See `execute_insert`'s `has_col_index`: gates the write-generation bump to
     // tables that actually carry a col-index.
     let has_col_index = col_index.is_some();
@@ -3350,7 +3488,10 @@ pub fn execute_delete(
     }
 
     if to_delete.is_empty() {
-        return Ok(WriteOutcome { lastrowid: None, rowcount: 0 });
+        return Ok(WriteOutcome {
+            lastrowid: None,
+            rowcount: 0,
+        });
     }
 
     let guard = TxnGuard::begin(store, scope)?;
@@ -3388,7 +3529,10 @@ pub fn execute_delete(
         cidx.invalidate();
     }
 
-    Ok(WriteOutcome { lastrowid: None, rowcount: to_delete.len() as i64 })
+    Ok(WriteOutcome {
+        lastrowid: None,
+        rowcount: to_delete.len() as i64,
+    })
 }
 
 /// Execute a batch of INSERTs over one parameter row each, atomically.
@@ -3415,7 +3559,10 @@ pub fn execute_insert_many(
     mut ordered_index: Option<&mut OrderedColIndex>,
 ) -> Result<WriteOutcome> {
     if seq_of_params.is_empty() {
-        return Ok(WriteOutcome { lastrowid: None, rowcount: 0 });
+        return Ok(WriteOutcome {
+            lastrowid: None,
+            rowcount: 0,
+        });
     }
 
     // Open one batch transaction; suppress every inner per-statement transaction
@@ -3477,5 +3624,8 @@ pub fn execute_insert_many(
     }
     store.commit().map_err(store_err)?;
 
-    Ok(WriteOutcome { lastrowid: last.lastrowid, rowcount: total })
+    Ok(WriteOutcome {
+        lastrowid: last.lastrowid,
+        rowcount: total,
+    })
 }

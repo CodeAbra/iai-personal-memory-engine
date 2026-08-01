@@ -38,7 +38,11 @@ pub fn write_overflow_chain(pager: &Pager, payload: &[u8]) -> Result<u32> {
     }
 
     for (i, &pno) in page_nos.iter().enumerate() {
-        let next = if i + 1 < page_count { page_nos[i + 1] } else { 0 };
+        let next = if i + 1 < page_count {
+            page_nos[i + 1]
+        } else {
+            0
+        };
         let start = i * OVERFLOW_USABLE;
         let chunk = &payload[start..(start + OVERFLOW_USABLE).min(payload.len())];
         let mut buf = vec![0u8; PAGE_SIZE];
@@ -80,7 +84,11 @@ pub fn read_overflow_chain(pager: &Pager, first_page: u32, total_len: usize) -> 
         );
         let remaining = total_len.saturating_sub(out.len());
         let avail = &page[OVERFLOW_DATA_OFFSET..USABLE_END];
-        let take = if next == 0 { remaining.min(avail.len()) } else { avail.len() };
+        let take = if next == 0 {
+            remaining.min(avail.len())
+        } else {
+            avail.len()
+        };
         // A non-last page that would carry the running total past total_len means
         // the chain is longer than the cell's declared payload length — a
         // structural mismatch. Fail loud instead of underflowing the subtraction

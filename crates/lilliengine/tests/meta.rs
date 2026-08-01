@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
+use lillibrain::Store;
 use lilliengine::catalog::Catalog;
 use lilliengine::meta::MetaTable;
-use lillibrain::Store;
 use tempfile::tempdir;
 
 const DDL_RECORDS: &str =
@@ -215,8 +215,13 @@ fn replay_tolerates_repeated_add_column_meta_row() {
         let meta = MetaTable::open(&store).unwrap();
         let mut cat = Catalog::new();
         let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-        meta.create_table(&store, &mut cat, &mut root_map, "CREATE TABLE t ( id TEXT )")
-            .unwrap();
+        meta.create_table(
+            &store,
+            &mut cat,
+            &mut root_map,
+            "CREATE TABLE t ( id TEXT )",
+        )
+        .unwrap();
         // A store written without the live duplicate guard can carry the same
         // ADD COLUMN meta row twice; reopen must stay available.
         meta.record_ddl(&store, "ALTER TABLE t ADD COLUMN role TEXT", TxnScope::Own)

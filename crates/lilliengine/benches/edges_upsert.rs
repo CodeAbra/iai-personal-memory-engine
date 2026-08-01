@@ -18,8 +18,8 @@
 
 use std::time::Instant;
 
-use lilliengine::conn::Connection;
 use lillibrain::Value;
+use lilliengine::conn::Connection;
 
 /// The edges DDL, byte-identical to the graph store's table shape.
 const EDGES_DDL: &str = "CREATE TABLE edges (\
@@ -67,7 +67,8 @@ fn measure_upsert(n: i64) -> (f64, u64) {
     let start = Instant::now();
     conn.execute("BEGIN", Vec::new()).expect("begin");
     for i in 0..n {
-        conn.execute(EDGES_UPSERT, upsert_params(i)).expect("upsert");
+        conn.execute(EDGES_UPSERT, upsert_params(i))
+            .expect("upsert");
     }
     conn.execute("COMMIT", Vec::new()).expect("commit");
     let elapsed = start.elapsed().as_secs_f64();
@@ -87,7 +88,10 @@ fn main() {
 
     println!();
     println!("edges UPSERT scaling gate (composite PK (src, dst, edge_type), DO UPDATE)");
-    println!("{:>8}  {:>10}  {:>12}  {:>13}", "rows", "secs", "rows/s", "full_scans");
+    println!(
+        "{:>8}  {:>10}  {:>12}  {:>13}",
+        "rows", "secs", "rows/s", "full_scans"
+    );
     for (i, &n) in sizes.iter().enumerate() {
         let (secs, fs) = measure_upsert(n);
         elapsed[i] = secs;

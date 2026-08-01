@@ -9,8 +9,7 @@ fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/golden")
 }
 
-const PROJECTION_SHA256: &str =
-    "df97cc72a960567da17edbba16107881340349bd47b69f9b58d3091d96eb4e4e";
+const PROJECTION_SHA256: &str = "df97cc72a960567da17edbba16107881340349bd47b69f9b58d3091d96eb4e4e";
 
 #[test]
 fn rails_round_trip_loads_and_verifies() {
@@ -26,8 +25,7 @@ fn rails_round_trip_loads_and_verifies() {
 #[test]
 fn projection_golden_matches_locked_hash() {
     let manifest = fixtures_root().join("hdc/projection.json");
-    let golden =
-        load_golden(&manifest).expect("projection golden loads (length + sha256 checked)");
+    let golden = load_golden(&manifest).expect("projection golden loads (length + sha256 checked)");
 
     assert_eq!(
         golden.bytes.len(),

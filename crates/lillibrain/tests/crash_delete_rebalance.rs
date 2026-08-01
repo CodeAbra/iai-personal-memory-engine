@@ -61,7 +61,10 @@ fn assert_consistent(store: &Store, root: u32, oracle: &BTreeMap<i64, Vec<u8>>) 
     let want: Vec<(i64, Vec<u8>)> = oracle.iter().map(|(k, v)| (*k, v.clone())).collect();
     assert_eq!(scan.len(), want.len(), "key count after recovery");
     assert_eq!(scan, want, "tree content after recovery");
-    assert!(store.check_integrity(root).unwrap().is_empty(), "integrity after recovery");
+    assert!(
+        store.check_integrity(root).unwrap().is_empty(),
+        "integrity after recovery"
+    );
 
     let census = page_census(store.pager(), root).unwrap();
     let db_size = store.db_size().unwrap();
@@ -73,10 +76,17 @@ fn assert_consistent(store: &Store, root: u32, oracle: &BTreeMap<i64, Vec<u8>>) 
     }
     for set in [&census.tree_nodes, &census.overflow_pages, &census.freelist] {
         for &p in set {
-            assert!(all.insert(p), "page {p} in more than one role after recovery");
+            assert!(
+                all.insert(p),
+                "page {p} in more than one role after recovery"
+            );
         }
     }
-    assert_eq!(all.len(), db_size as usize, "page conservation after recovery");
+    assert_eq!(
+        all.len(),
+        db_size as usize,
+        "page conservation after recovery"
+    );
 }
 
 fn churn(store: &Store, root: u32, oracle: &mut BTreeMap<i64, Vec<u8>>) {
@@ -172,7 +182,11 @@ fn crash_between_barriers_over_rebalanced_pages_restores_before_images() {
 
 fn scribble_with_journal(path: &Path, pages: &[u32]) {
     let mut j = Journal::create(path).unwrap();
-    let f = OpenOptions::new().read(true).write(true).open(path).unwrap();
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
     for &p in pages {
         let off = (p as u64 - 1) * PAGE_SIZE as u64;
         let mut before = vec![0u8; PAGE_SIZE];

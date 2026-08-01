@@ -12,9 +12,7 @@
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{embedding, layer_norm, linear, Embedding, LayerNorm, Linear, Module, VarBuilder};
 use hf_hub::{api::sync::ApiBuilder, Cache, Repo, RepoType};
-use tokenizers::{
-    TruncationDirection, TruncationParams, TruncationStrategy, Tokenizer,
-};
+use tokenizers::{Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
 
 use crate::error::EmbedError;
 
@@ -49,32 +47,22 @@ const REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
 ///
 /// If `IAI_MCP_EMBED_OFFLINE=1` is set, fails loudly when any file is missing
 /// rather than attempting a network download.
-fn resolve_model_files() -> Result<
-    (
-        std::path::PathBuf,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    ),
-    EmbedError,
-> {
-    let repo = Repo::with_revision(
-        MODEL_ID.to_string(),
-        RepoType::Model,
-        REVISION.to_string(),
-    );
+fn resolve_model_files(
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), EmbedError> {
+    let repo = Repo::with_revision(MODEL_ID.to_string(), RepoType::Model, REVISION.to_string());
     let offline = std::env::var("IAI_MCP_EMBED_OFFLINE").is_ok();
 
     if offline {
         let cache = Cache::from_env().repo(repo);
-        let weights = cache
-            .get("model.safetensors")
-            .ok_or_else(|| EmbedError::HfHub("model.safetensors not in HF cache (offline mode)".into()))?;
-        let tokenizer = cache
-            .get("tokenizer.json")
-            .ok_or_else(|| EmbedError::HfHub("tokenizer.json not in HF cache (offline mode)".into()))?;
-        let config = cache
-            .get("config.json")
-            .ok_or_else(|| EmbedError::HfHub("config.json not in HF cache (offline mode)".into()))?;
+        let weights = cache.get("model.safetensors").ok_or_else(|| {
+            EmbedError::HfHub("model.safetensors not in HF cache (offline mode)".into())
+        })?;
+        let tokenizer = cache.get("tokenizer.json").ok_or_else(|| {
+            EmbedError::HfHub("tokenizer.json not in HF cache (offline mode)".into())
+        })?;
+        let config = cache.get("config.json").ok_or_else(|| {
+            EmbedError::HfHub("config.json not in HF cache (offline mode)".into())
+        })?;
         Ok((weights, tokenizer, config))
     } else {
         let api = ApiBuilder::from_env()
@@ -110,23 +98,27 @@ impl BertEmbeddings {
         let vb_emb = vb.pp("embeddings");
         let word_emb = embedding(VOCAB_SIZE, HIDDEN_SIZE, vb_emb.pp("word_embeddings"))?;
         let pos_emb = embedding(MAX_POSITION, HIDDEN_SIZE, vb_emb.pp("position_embeddings"))?;
-        let type_emb = embedding(TYPE_VOCAB_SIZE, HIDDEN_SIZE, vb_emb.pp("token_type_embeddings"))?;
+        let type_emb = embedding(
+            TYPE_VOCAB_SIZE,
+            HIDDEN_SIZE,
+            vb_emb.pp("token_type_embeddings"),
+        )?;
         // Pitfall 3: must pass 1e-12 explicitly — candle default is 1e-5
         let layer_norm = layer_norm(HIDDEN_SIZE, LAYER_NORM_EPS, vb_emb.pp("LayerNorm"))?;
-        Ok(Self { word_emb, pos_emb, type_emb, layer_norm })
+        Ok(Self {
+            word_emb,
+            pos_emb,
+            type_emb,
+            layer_norm,
+        })
     }
 
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        token_type_ids: &Tensor,
-    ) -> Result<Tensor, EmbedError> {
+    fn forward(&self, input_ids: &Tensor, token_type_ids: &Tensor) -> Result<Tensor, EmbedError> {
         let seq_len = input_ids.dim(1)?;
         let device = input_ids.device();
 
         // Generate position ids at runtime (buffer in safetensors is ignored per Pattern 4)
-        let position_ids = Tensor::arange(0u32, seq_len as u32, device)?
-            .unsqueeze(0)?;
+        let position_ids = Tensor::arange(0u32, seq_len as u32, device)?.unsqueeze(0)?;
 
         let word_out = self.word_emb.forward(input_ids)?;
         let pos_out = self.pos_emb.forward(&position_ids)?;
@@ -156,11 +148,7 @@ impl BertSelfAttention {
         Ok(Self { query, key, value })
     }
 
-    fn forward(
-        &self,
-        hidden: &Tensor,
-        attention_mask: &Tensor,
-    ) -> Result<Tensor, EmbedError> {
+    fn forward(&self, hidden: &Tensor, attention_mask: &Tensor) -> Result<Tensor, EmbedError> {
         let (batch, seq_len, _hidden) = hidden.dims3()?;
 
         // Project Q, K, V
@@ -350,9 +338,8 @@ impl BertEmbedder {
         let device = Device::Cpu;
 
         // Pattern 4: unsafe scoped to mmap call; file integrity assumed via HF CDN + REVISION pin
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
-        }?;
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device) }?;
 
         let embeddings = BertEmbeddings::load(vb.clone())?;
         let encoder = BertEncoder::load(vb)?;
@@ -363,7 +350,13 @@ impl BertEmbedder {
             .build()
             .map_err(|e| EmbedError::Pool(e.to_string()))?;
 
-        Ok(Self { embeddings, encoder, tokenizer, device, pool })
+        Ok(Self {
+            embeddings,
+            encoder,
+            tokenizer,
+            device,
+            pool,
+        })
     }
 
     /// Encode a single text string to a 384-dim L2-normalized embedding.
@@ -392,8 +385,7 @@ impl BertEmbedder {
         let input_ids = Tensor::from_vec(ids, (1, seq_len), &self.device)?;
         let token_type_ids = Tensor::zeros((1, seq_len), DType::I64, &self.device)?;
         // Shape (1, 1, 1, seq_len) broadcasts over (batch, heads, seq_q, seq_k)
-        let attention_mask =
-            Tensor::from_vec(mask, (1, 1, 1, seq_len), &self.device)?;
+        let attention_mask = Tensor::from_vec(mask, (1, 1, 1, seq_len), &self.device)?;
 
         let embedded = self.embeddings.forward(&input_ids, &token_type_ids)?;
         let encoded = self.encoder.forward(&embedded, &attention_mask)?;
