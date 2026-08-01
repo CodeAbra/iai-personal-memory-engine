@@ -289,11 +289,11 @@ class TestLaunchSiteWiring:
         body_end = src.index("async def _boot_preload(")
         segment = src[body_start:body_end]
         assert "background_store_work(" in segment
-        assert "build_runtime_graph(store)" in segment
+        assert "build_runtime_graph_incremental(store)" in segment
         gate_idx = segment.index("background_store_work(")
-        call_idx = segment.index("build_runtime_graph(store)")
+        call_idx = segment.index("build_runtime_graph_incremental(store)")
         assert gate_idx < call_idx, (
-            "the gate must wrap build_runtime_graph, not merely appear "
+            "the gate must wrap the graph build, not merely appear "
             "somewhere in the same function"
         )
 

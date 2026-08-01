@@ -286,7 +286,7 @@ def test_5_concurrent_wrapper_cold_starts_yield_singleton(
         f"singleton invariant violated: {daemon_count} daemons bound to "
         f"{sock_path} after 5 concurrent wrapper cold-starts. "
         f"contract: launchd handles the spawn-once; all wrappers join "
-        f"the same daemon. Pre-Phase-7.1 baseline reproduces 2-5 daemons "
+        f"the same daemon. Without launchd spawn-once, 2-5 daemons reproduce "
         f"via TOCTOU race in bridge.ts spawn-fallback."
     )
     assert binder_count <= 1, (

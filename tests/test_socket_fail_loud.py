@@ -89,7 +89,7 @@ def test_kill_daemon_midcall_no_orphan_core_spawn(short_socket_paths, tmp_path):
         before_delta = before["core"] - baseline["core"]
         assert before_delta == 0, (
             f"our daemon spawned {before_delta} iai_mcp.core processes BEFORE kill "
-            f"(baseline={baseline}, before={before}) — post-Phase-7 singleton invariant violated"
+            f"(baseline={baseline}, before={before}) — socket-first singleton invariant violated"
         )
 
         proc.send_signal(signal.SIGKILL)
@@ -102,7 +102,7 @@ def test_kill_daemon_midcall_no_orphan_core_spawn(short_socket_paths, tmp_path):
         assert after_delta <= 0, (
             f"FAIL-LOUD VIOLATION: our daemon spawned {after_delta} new "
             f"iai_mcp.core processes after kill (baseline={baseline}, after={after}) "
-            "— R5 + A8 invariant: post-Phase-7 daemon must never spawn a core."
+            "— fail-loud invariant: the daemon must never spawn a core process."
         )
 
         s = sk.socket(sk.AF_UNIX, sk.SOCK_STREAM)

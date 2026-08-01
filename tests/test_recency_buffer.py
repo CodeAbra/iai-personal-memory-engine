@@ -1,12 +1,9 @@
 """Tests for the in-process recency buffer that serves recent role:user markers
 without decoding the full corpus on every recall.
 
-All tests in this file are RED on a clean tree: they import or exercise the
-buffer surface (RecencyBuffer, store._recency_buffer, store.warm_recency_buffer,
-store.db._recency_reconcile) that does not yet exist. They become GREEN when the
-buffer implementation is added in subsequent waves.
-
-No production code is modified by this file.
+Exercises the buffer surface (RecencyBuffer, store._recency_buffer,
+store.warm_recency_buffer, store.db._recency_reconcile) against the SQL
+golden. No production code is modified by this file.
 """
 
 from __future__ import annotations
@@ -104,26 +101,23 @@ def _make_role_user(text: str, created_at: datetime, seed: int = 0) -> MemoryRec
 
 
 # ---------------------------------------------------------------------------
-# SQL golden helper
-#
-# Wave 1 only: this captures the CURRENT SQL path result as the authority.
-# In Wave 3 the production `recent_pending_markers` is rewired to read the
-# buffer with SQL fallback — at that point this golden helper is still correct
-# because it always bypasses the buffer and calls the raw SQL path directly.
+# Golden helpers. `_sql_recent_pending_markers` calls the public
+# `recent_pending_markers`, which serves from the buffer with SQL fallback —
+# use it to observe production behavior. `_sql_recent_pending_markers_direct`
+# below is the true buffer bypass and is the authority the byte-identity
+# tests compare against.
 # ---------------------------------------------------------------------------
 
 def _sql_recent_pending_markers(store: MemoryStore, n: int) -> list[tuple]:
-    """Return the ordered list of marker tuples from the current SQL path.
+    """Return the ordered list of marker tuples from the public method.
 
     Returns: list of (str(id), literal_surface, created_at_iso, session_id)
     matching the fields the single pipeline consumer reads.
 
-    This is the GOLDEN reference: always goes through the SQL union regardless
-    of whether the buffer is wired in Wave 3. Tests compare buffer output
-    against this golden position-for-position.
+    This goes through `recent_pending_markers` — buffer-served with SQL
+    fallback. For the buffer-bypassing SQL golden, use
+    `_sql_recent_pending_markers_direct`.
     """
-    # Call the method. On HEAD this IS the SQL path; after Wave 3 we call the
-    # internal SQL methods directly to bypass the buffer.
     markers = store.recent_pending_markers(n=n)
     result = []
     for r in markers:
@@ -136,8 +130,8 @@ def _sql_recent_pending_markers(store: MemoryStore, n: int) -> list[tuple]:
 def _sql_recent_pending_markers_direct(store: MemoryStore, n: int) -> list[tuple]:
     """Call the raw SQL queries directly, bypassing any buffer layer.
 
-    Used in Wave 3+ tests that need the SQL golden even after the buffer is
-    wired into `recent_pending_markers`. Mirrors the internals of
+    Used by tests that need the SQL golden while the buffer is wired into
+    `recent_pending_markers`. Mirrors the internals of
     MemoryStore.recent_pending_markers without going through the buffer.
     """
     from iai_mcp.store._store import MemoryStore as _MS
@@ -330,12 +324,8 @@ def _build_created_at_tie_corpus(store: MemoryStore) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_recency_buffer_byte_identical(tmp_path, monkeypatch):
-    """Buffer-served recent_pending_markers matches the SQL golden on a mixed corpus.
-
-    RED reason: `store._recency_buffer` / `store.warm_recency_buffer()` do not
-    exist yet (Wave 2 adds them). On HEAD this test fails because it tries to
-    warm the buffer via the not-yet-existing attribute.
-    """
+    """Buffer-served recent_pending_markers matches the SQL golden on a
+    mixed corpus."""
     _monkeypatch_env(monkeypatch, tmp_path)
     store_path = tmp_path / "byte-id-store"
     store_path.mkdir(parents=True, exist_ok=True)
@@ -347,10 +337,9 @@ def test_recency_buffer_byte_identical(tmp_path, monkeypatch):
     # Capture the SQL golden BEFORE warming the buffer.
     sql_golden = _sql_recent_pending_markers_direct(store, n)
 
-    # Warm the buffer — this attribute does not exist yet → AttributeError (RED).
-    store.warm_recency_buffer()  # type: ignore[attr-defined]
+    store.warm_recency_buffer()
 
-    # After Wave 3: recent_pending_markers reads the buffer with SQL fallback.
+    # recent_pending_markers reads the buffer with SQL fallback.
     buf_result = _sql_recent_pending_markers(store, n)
 
     assert buf_result == sql_golden, (

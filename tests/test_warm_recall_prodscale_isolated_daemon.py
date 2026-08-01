@@ -9,11 +9,9 @@ of answering in the warm band. Fired CONCURRENTLY (the same shape a real
 cutover gate uses), the recalls previously serialized behind the boot
 fleet's shared lock and blew the SLA.
 
-WAVE-0 RED CONTRACT: on HEAD (before the warm-load-index + sleep-maintenance
-fixes land), the latency assertion in this module IS EXPECTED TO FAIL. This
-is a plain failing assertion, not an xfail -- the fix work that follows
-drives it to green by restoring instant, warm-loaded recall off the awake
-path and moving maintenance work into sleep.
+The latency assertion holds because recall is served warm-loaded off the
+awake path and maintenance work runs during sleep; regressing either turns
+this into a hard failure, deliberately not an xfail.
 
 Every store here is either a COPY of a preserved, non-live snapshot (never
 opened in place) or the driver's stdlib no-op control. The daemon under test

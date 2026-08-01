@@ -215,7 +215,7 @@ def test_edges_count_rows_does_not_block_during_vacuum_hold(tmp_path: Path) -> N
 @pytest.mark.xfail(
     reason="stdlib ro_conn() fallback yields the shared writer conn under "
     "_conn_lock -- count_rows() is expected to block during a held lock on "
-    "stdlib today; tracked separately from the lilli fix",
+    "stdlib today; tracked separately from the lilli fix in this phase",
     strict=False,
 )
 def test_stdlib_count_rows_blocks_during_vacuum_hold_baseline(

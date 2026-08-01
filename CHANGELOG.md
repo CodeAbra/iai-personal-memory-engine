@@ -5,6 +5,199 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] — 2026-07-31
+
+**Upgrading to this release is manual, once.** `iai-mcp self-update` ships *in*
+2.8.0, so it is not yet on the machine of anyone running an earlier version.
+Existing users take this one step by hand:
+
+```bash
+pip install -U iai-pme
+iai-mcp daemon restart
+```
+
+From 2.8.0 onward `iai-mcp self-update` does both in one command and verifies the
+restart by asking the running engine its version. Nothing ever installs itself:
+the engine checks for a release once a day and tells you, in a doctor row and one
+line at session start. `IAI_MCP_VERSION_CHECK=0` turns the check off.
+
+If you run iai-mcp as a Claude Code plugin, note that the plugin files refresh on
+their own while the Python package does not — upgrade the package too, or the
+hooks and the engine drift apart.
+
+### Added
+
+- The MCP surface now tells the model when to reach for memory. Server
+  `instructions` leads with routing prose — call `memory_recall` before a
+  repository search when the question is about a decision, a preference,
+  a past discussion, or rationale; keep file search for the current state
+  of the code (ordering, never substitution) — with the machine config
+  appended after a `config:` marker (the field is no longer a bare JSON
+  string). `memory_recall` and `memory_search` descriptions carry the
+  same routing standalone, so a host that ignores `instructions` still
+  sees it; recalled claims about code are framed as historical until
+  confirmed against the tree.
+- Ambient memory reaches four more hosts. `iai-mcp capture-hooks install
+  --target cursor|antigravity|hermes|openclaw` (and `all`) wires each
+  host the way it natively allows, while every host shares the same four
+  core hook scripts — per-host differences live in thin wrapper scripts
+  that translate the payload in and the envelope out, and degrade to
+  empty output on any failure like every other hook. Cursor gets session-start
+  recall plus full ambient capture (its `beforeSubmitPrompt` cannot
+  inject, so there is no per-turn slice there). Antigravity (the CLI)
+  gets per-invocation recall — durable on the first call, ephemeral
+  after — and Stop-time capture that reads the lossless
+  `transcript_full.jsonl`, never the truncated short transcript. Hermes
+  (>= 0.5.0) gets first-turn/per-turn recall through its `context`
+  envelope and end-of-session capture read from its message store — it
+  keeps no transcript file. OpenClaw has no shell hooks at all, so its
+  target registers the bundled MCP wrapper: memory tools on request,
+  ambient honestly marked as unavailable. The transcript parser now
+  understands Cursor and Antigravity line formats alongside Claude Code
+  and Codex. Installers refuse to rewrite configs they cannot merge
+  safely — an unmergeable Hermes `hooks:` block is printed for manual
+  merge, never overwritten.
+- Wheel installs learn about new releases and can upgrade in one move.
+  A notify-only version check (daily TTL, 3s timeout, silent offline,
+  `IAI_MCP_VERSION_CHECK=0` disables it entirely) is refreshed by the
+  daemon's tick and surfaced in two places: a new `(+) update available`
+  doctor row and a one-line notice in the session-start payload — the
+  session-start path reads only the cache, never the network. New
+  `iai-mcp self-update` closes the gap `pip install -U` leaves: it
+  upgrades the wheel AND restarts the daemon, so recall is never served
+  by an old engine under a new version number. It refuses editable
+  (source) checkouts, confirms before changing anything (`--yes` skips,
+  `--check` only reports), and on a pip failure leaves the running
+  daemon untouched. Nothing updates unattended — no timer ships.
+- `iai-mcp doctor` heals what it diagnoses. The repair planner grew from 4
+  to 11 actions: a parked engine (persisted HIBERNATION/SLEEP with no live
+  daemon — check (j) now calls this a failure instead of printing it as
+  information) gets a signal-first wake; a corrupt daemon-state file or
+  vector index is quarantine-renamed aside so the daemon regenerates it
+  (never deleted); stale wrapper heartbeats are swept; a sleep-cycle
+  quarantine stuck past 12h is cleared; permanent-failed captures drain
+  back into the store; collapsed timestamps and an oversized store map to
+  their existing repair commands behind the usual confirmation prompt.
+  New unattended mode `doctor --auto` runs ONLY the safe subset — no
+  prompts, no process kills, no store mutations — damped to once per 6
+  hours, and the MCP wrapper invokes it automatically when the daemon is
+  still unreachable ten seconds after a wake attempt: the memory now heals
+  itself at session start instead of waiting for someone to run a command.
+- `iai-mcp daemon restart` — stop (waits for the old pid to die) then
+  start, matching the restart control the brain view already had.
+
+### Changed
+
+- Curiosity questions come from real disagreements now. The miner
+  re-ranks each deferred cue against the current store before deciding
+  anything: a topic that gained records after the uncertainty snapshot
+  is being actively worked — no question, and any pending question on
+  that cue is resolved automatically (the conversation moved on). A
+  question mints only when the topic's top candidates are joined by a
+  live `contradicts` edge, and its text names both sides verbatim
+  ("Two memories disagree — which is current: …"). Dense knowledge —
+  many equally-strong memories with no contradiction — earns a silent
+  telemetry log, never a question. Pending questions also surface in
+  the next-turn pack when the current turn enters their topic (cosine
+  against the question's cue), once per repeat window — asked in
+  context, never as a cold list.
+- The daemon's boot graph preload uses the delta-only rebuild path,
+  falling back to the full rebuild internally whenever the cached
+  payload cannot support a safe delta.
+
+### Removed
+
+- The per-insert temporal hash and its module: nothing consumed the
+  hash since the time-cell readers were removed — temporal recall works
+  from timestamps. Insert no longer pays the computation.
+- The user model's `recent_projects` field and its aggregation: the
+  event kind it counted was never written anywhere, so the list was
+  empty for every user since the field shipped.
+
+- Dead machinery superseded by live paths, deleted rather than left
+  half-wired: GABA edge-weight annealing (nightly decay + pruning is the
+  homeostasis mechanism; the annealer was computed and logged but never
+  applied), time-cell neighbor search and sequence reconstruction
+  (temporal recall works from timestamps; the per-insert temporal hash
+  stays), the temporal-next linker, the degraded semantic recall variant
+  (`recall_semantic_warm` is the live path), the guarded-insert wrapper
+  (shield checks run inside the s5 identity-write and capture paths),
+  the subagent session serializer, the batch-results bank writer, the
+  synthetic M-metric placeholders, and the unused surprise/arousal
+  probes (`record_surprise`, `basta_check`).
+
+### Fixed
+
+- Brain view chrome no longer collides with itself. The canvas hint is
+  pointer-transparent and width-bounded — it used to silently swallow
+  clicks on the legend tier rows at common desktop window widths — and it
+  dismisses once a file is dropped. The memory panel got its side padding
+  back (a duplicate CSS declaration left text flush against the rounded
+  edge). Long filenames in the "studying …" pill are ellipsized so the
+  drop-zone stops growing into the text above it, the stats row yields to
+  the search field on very narrow windows, and the server-down banner no
+  longer sits on the menu buttons' hit area.
+- HIBERNATION is no longer a one-way door on macOS (issue #90). The state
+  machine only left HIBERNATION on a wake signal, and on macOS the MCP
+  wrapper returned right after a successful `launchctl kickstart` without
+  ever writing `wake.signal` — so a daemon that persisted HIBERNATION
+  overnight booted, found no signal, and exited after one tick, silently
+  forever (no sleep cycle, `daemon DOWN`, capture still queueing). Three
+  layers, each sufficient alone: the wrapper now writes `wake.signal`
+  unconditionally and BEFORE the kickstart, so the booting daemon always
+  finds it; a boot that restores HIBERNATION with a live wrapper session
+  attached (fresh heartbeat from a live pid) wakes immediately instead of
+  waiting to die; and the lifecycle tick checks for live demand — a fresh
+  external socket request since boot, or a live wrapper heartbeat — before
+  shutting down, waking the engine instead (`REQUEST_ARRIVED` is now
+  actually dispatched, not just accepted by the transition table). With no
+  live session the hibernation exit behaves exactly as before, so the CPU
+  economy of hibernation is unchanged.
+
+- The M3 trajectory metric (session-start token budget) reports real
+  numbers: it now reads the `session_started` events the serve path has
+  always written, instead of an event kind nothing ever emitted — M3 was
+  0.0 for every session since the metric shipped.
+- Curiosity generates questions again. Since the recall hot path was
+  slimmed down (May 16), ambiguous recalls only buffered
+  `deferred_curiosity_input` raw material and the promised background
+  processor never existed — `curiosity_pending` has answered from an
+  empty queue ever since. A new nightly CURIOSITY_MINE sleep step now
+  replays that raw material through the entropy tiering and mints
+  pending questions (watermarked, so re-runs never double-mint; capped
+  per session and per run; already-asked cues are not re-asked). The
+  recall path now records hit scores and the turn in the deferred
+  payload — entropy is computable at night without reconstructing the
+  ranker. Pending questions expire after 7 days instead of accumulating
+  forever, and the KNOB_TUNE monotropism nudge no longer fires on a
+  zero curiosity signal (a quiet generator is absence of evidence, not
+  low curiosity). Opt out with `IAI_MCP_CURIOSITY_MINE_OFF=true`.
+  The uncertainty measure is normalized to [0, 1] by log2 of the
+  candidate count, so the tier thresholds mean the same thing for a
+  two-way and a ten-way recall — raw Shannon entropy grows with
+  candidate count and would rate every multi-hit recall as maximally
+  uncertain.
+- Associative recall no longer starves under recency pressure. The
+  pending-recency freshness markers had unconditional right to evict
+  ranked hits from the token budget, so on any active day (dozens of
+  fresh turns) recall served only exact matches plus markers — the
+  graph lane (community gate → spread → rank) was fully crowded out,
+  and the curiosity payloads it feeds carried only zero scores. Markers
+  now claim at most 25% of the recall budget when ranked hits exist;
+  past that share a marker is dropped, never a ranked hit. The deferred
+  curiosity payload also excludes markers outright — they are recency
+  signal, not ranker output.
+- Overnight insights carry provenance. The nightly insight was the one
+  path where model-generated text entered the store with no evidence
+  trail: it minted into the semantic tier with zero source links, so a
+  hallucinated "insight" would have surfaced in recall indistinguishable
+  from grounded knowledge. The insight record now gets
+  `consolidated_from` edges to the verified records its prompt was built
+  from (pattern evidence + the surprise event's sources), and when no
+  verifiable sources exist the mint is skipped before the model is even
+  called. Every other generated-content path already required evidence
+  by construction; this closes the last one.
+
 ## [2.7.3] — 2026-07-29
 
 ### Added

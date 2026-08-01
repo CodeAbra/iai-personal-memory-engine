@@ -68,7 +68,7 @@ def _corpus() -> list[MemoryRecord]:
         _record(text="hello world"),
         # Verbatim torture: NUL, emoji, CJK, RTL.
         _record(text="line1\x00line2 \U0001f9e0 漢字 العربية mixed"),
-        # Pinned + never_merge (constitutional flags must round-trip).
+        # Pinned + never_merge (these flags must round-trip exactly).
         _record(text="pinned fact", pinned=True, never_merge=True),
         # Non-empty V5 structure_hv_payload on a non-bsc tier — the field the
         # projection must not silently zero.

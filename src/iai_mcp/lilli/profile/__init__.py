@@ -1,7 +1,7 @@
 """Autistic-cognition profile registry -- 11 sealed knobs (10 AUTIST + 1 wake_depth),
-Bayesian tuner, camouflaging + double_empathy invariants. Populated by Wave 3 migrations.
+Bayesian tuner, camouflaging + double_empathy invariants.
 
-Wave 9: retrieval-policy RL and trust refinement are exposed from lilli.profile.tuner.
+Retrieval-policy RL and trust refinement are exposed from lilli.profile.tuner.
 
 This package re-exports the public surface of ``lilli.profile.knobs`` so
 consumers can write ``from iai_mcp.lilli.profile import PROFILE_KNOBS`` (or
@@ -14,9 +14,8 @@ detail that may be reshaped in a future extraction.
 from iai_mcp.lilli.profile.knobs import (
     KnobSpec,
     PROFILE_KNOBS,
-    PHASE_1_LIVE,
-    PHASE_2_DEFERRED,
-    PHASE_3_DEFERRED,
+    LIVE_KNOB_NAMES,
+    DEFERRED_KNOB_NAMES,
     SIGNAL_WEIGHT,
     PROFILE_SENTINEL_UUID_STR,
     default_state,
@@ -29,9 +28,8 @@ from iai_mcp.lilli.profile.knobs import (
 __all__ = [
     "KnobSpec",
     "PROFILE_KNOBS",
-    "PHASE_1_LIVE",
-    "PHASE_2_DEFERRED",
-    "PHASE_3_DEFERRED",
+    "LIVE_KNOB_NAMES",
+    "DEFERRED_KNOB_NAMES",
     "SIGNAL_WEIGHT",
     "PROFILE_SENTINEL_UUID_STR",
     "default_state",

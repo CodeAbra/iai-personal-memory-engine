@@ -83,7 +83,7 @@ def test_m6_live_differs_from_synthetic_when_session_starts_repeat(tmp_path):
         f"M6 live ({live}) must differ from synthetic ({M6_SYNTHETIC_CONSTANT})"
     )
 
-def test_m1_m3_m5_remain_pre_phase3_live(tmp_path):
+def test_core_trajectory_metrics_remain_live(tmp_path):
     store = MemoryStore(path=tmp_path)
     sid = "smoke"
     write_event(
@@ -91,8 +91,8 @@ def test_m1_m3_m5_remain_pre_phase3_live(tmp_path):
         data={"text": "?"}, severity="info", session_id=sid,
     )
     write_event(
-        store, kind="session_start_tokens",
-        data={"tokens": 2500}, severity="info", session_id=sid,
+        store, kind="session_started",
+        data={"total_cached_tokens": 2500}, severity="info", session_id=sid,
     )
     write_event(
         store, kind="curiosity_silent_log",

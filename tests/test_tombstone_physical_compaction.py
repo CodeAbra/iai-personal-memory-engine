@@ -4,8 +4,8 @@ B-fix's closure of the grace-window live-scan-surface gap.
 The existing sleep step ``step_compact_hippo`` (``iai_mcp.lilli.cycle
 .sleep_pipeline._optimize``) already physically DELETEs tombstoned rows once
 they age past ``tombstone_ttl_sec`` (default 7 days) -- three gaps were
-tracked here (the C fix closes two of them; the third was already closed by
-the sibling B fix):
+tracked here (the finalize-compaction fix closes two of them; the third was
+already closed by the deletion-sweep fix):
 
 1. **Grace-window bloat -- CLOSED BY B, not C.** A record tombstoned but not
    yet past ``tombstone_ttl_sec`` stays PHYSICALLY present in the table
@@ -342,7 +342,7 @@ def test_aged_tombstone_drop_is_batched(
             f"({drop_calls}) -- HEAD issues exactly one unbounded "
             f"tbl.delete(drop_where) covering the entire aged set, risking a "
             f"B-tree pager rebalance storm on a large tombstoned set. "
-            f"Expected RED state on HEAD; the C fix must batch "
+            f"Expected RED state on HEAD; the C fix (179-03/04) must batch "
             f"this delete into bounded chunks."
         )
     finally:
@@ -418,13 +418,9 @@ def test_migrate_finalize_imports_full_tombstone_bloat(
     # THE RED MARKER: a compaction pass must run at migrate finalize so the
     # aged-past-TTL tombstoned rows are dropped rather than imported
     # verbatim -- dst_physical must be strictly LESS than src_physical (the
-    # aged rows gone). RED CONTRACT: on HEAD (before the C fix
-    # lands), this assertion IS EXPECTED TO FAIL -- migrate_sqlite_to_lilli
-    # has no compaction step, so dst_physical == src_physical (the full
-    # tombstone bloat, aged rows included, is imported verbatim). This is a
-    # plain failing assertion, not an xfail, matching this project's
-    # convention. The C fix drives it to a plain PASS by adding
-    # a compaction pass at finalize.
+    # aged rows gone). migrate_sqlite_to_lilli runs a compaction pass at
+    # finalize; without it the full tombstone bloat, aged rows included,
+    # would be imported verbatim and dst_physical == src_physical.
     assert dst_physical < src_physical, (
         f"expected a compaction pass to run at migrate finalize, dropping "
         f"the {n_aged} aged-past-TTL tombstoned rows so dst_physical < "
@@ -432,7 +428,7 @@ def test_migrate_finalize_imports_full_tombstone_bloat(
         f"({n_live} live + {n_aged} aged-past-TTL + {n_grace} grace-window), "
         f"dst_physical={dst_physical} (equal -- the full tombstone bloat "
         f"was imported verbatim, no finalize compaction ran). Expected RED "
-        f"state on HEAD; the C fix must add a compaction pass "
+        f"state on HEAD; the C fix (179-03/04) must add a compaction pass "
         f"at migrate finalize."
     )
     assert dst_physical >= n_live + n_grace, (

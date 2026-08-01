@@ -38,6 +38,21 @@ export {
   CONTEXT_EDITING_CONFIG,
   HOT_TOOLS,
 };
+
+export const SERVER_INSTRUCTIONS =
+  "Call memory_recall BEFORE searching the repository when the question " +
+  "is about a decision, a preference, a past discussion, or why " +
+  "something is the way it is — that answer lives in the conversation " +
+  "record, not in the tree, and a single budget-bounded recall displaces " +
+  "the multi-step search it would otherwise take. Keep using file search " +
+  "for the current state of the code: recall orders before search, it " +
+  "never replaces it. Records are timestamped and carry valid_from/valid_to; " +
+  "treat anything they say about code state as historical unless " +
+  "confirmed against the tree.\n\nconfig: " +
+  JSON.stringify({
+    context_editing: CONTEXT_EDITING_CONFIG,
+    hot_tools: HOT_TOOLS,
+  });
 export type { ContentBlock, SessionPayloadRaw };
 
 
@@ -67,10 +82,7 @@ export function buildServer(
     },
     {
       capabilities: { tools: {} },
-      instructions: JSON.stringify({
-        context_editing: CONTEXT_EDITING_CONFIG,
-        hot_tools: HOT_TOOLS,
-      }),
+      instructions: SERVER_INSTRUCTIONS,
     },
   );
 
@@ -132,6 +144,8 @@ async function main(): Promise<void> {
   await server.connect(transport);
 
   void lifecycle.ensureDaemonAlive().catch(() => null);
+
+  lifecycle.scheduleAutoHeal();
 
   void lifecycle.registerHeartbeat().catch(() => null);
 

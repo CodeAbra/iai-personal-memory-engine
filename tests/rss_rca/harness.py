@@ -19,7 +19,7 @@ Invocation::
     source .venv/bin/activate
     python tests/rss_rca/harness.py \\
         --n 22000 --cycles 3 \\
-        --out build/rss-rca/
+        --out /tmp/rss-rca-artifacts/
 
 The output directory contains ``RCA-FINDINGS.md`` (planner-consumed), plus
 ``rca-log.jsonl`` (sampler + per-cycle state) and ``vmmap-cycle-N.txt`` and

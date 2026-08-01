@@ -44,6 +44,10 @@ class RepairAction:
     description: str
     destructive: bool
     execute: Callable[[], tuple[bool, str, int]]
+    # Eligible for the unattended `doctor --auto` reflex. The auto subset
+    # must never kill a process, never mutate the store, and never lose
+    # data — quarantine-renames and derived-file heals only.
+    auto_safe: bool = False
 
 
 def _resolve_socket_path() -> Path:
@@ -261,7 +265,46 @@ def _apply_headless_downgrade(
     return results
 
 
-def run_diagnosis() -> list[CheckResult]:
+def check_plus_update_available(*, fetch: bool = True) -> CheckResult:
+    # Notify-only: never FAILs. Fetch respects the daily TTL and the env
+    # kill switch; offline keeps the last known answer silently. The
+    # unattended reflex passes fetch=False — a degraded-daemon heal must
+    # not wait on a PyPI lookup.
+    from iai_mcp.version_check import (
+        check_enabled,
+        installed_version,
+        is_editable_install,
+        pending_update,
+        refresh_cache,
+    )
+
+    name = "(+) update available"
+    if not check_enabled():
+        return CheckResult(name, True, "version check disabled", status="PASS")
+    if is_editable_install():
+        return CheckResult(
+            name, True, "source checkout — updates via git, not pip", status="PASS",
+        )
+    if fetch:
+        try:
+            refresh_cache()
+        except Exception as e:  # noqa: BLE001 — probe failure is advisory
+            logger.debug("check_plus: refresh failed: %s", e)
+    pair = pending_update()
+    if pair is not None:
+        current, latest = pair
+        return CheckResult(
+            name,
+            True,
+            f"iai-pme {latest} available (installed {current}) — "
+            f"run `iai-mcp self-update`",
+            status="WARN",
+        )
+    cur = installed_version() or "?"
+    return CheckResult(name, True, f"up to date ({cur}) or no version data", status="PASS")
+
+
+def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
     return [
         check_a_daemon_alive(),
         check_b_socket_fresh(),
@@ -289,6 +332,7 @@ def run_diagnosis() -> list[CheckResult]:
         check_x_no_collapsed_timestamps(),
         check_y_rss_24h_plateau(),
         check_z_avx2_support(),
+        check_plus_update_available(fetch=fetch_update),
     ]
 
 
@@ -490,9 +534,185 @@ def _kill_dup_binders() -> tuple[bool, str, int]:
     )
 
 
+def _store_root() -> Path:
+    env_path = os.environ.get("IAI_MCP_STORE")
+    return Path(env_path) if env_path else (Path.home() / ".iai-mcp")
+
+
+def _quarantine_rename(path: Path) -> tuple[bool, str, int]:
+    # Never delete: rename aside with a timestamp so the file stays
+    # recoverable and the consumer regenerates a fresh one.
+    from datetime import datetime, timezone
+
+    t0 = time.monotonic()
+    if not path.exists():
+        return True, f"{path} already absent", int((time.monotonic() - t0) * 1000)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = path.with_name(f"{path.name}.corrupt-{stamp}")
+    try:
+        path.rename(target)
+    except OSError as e:
+        return False, f"rename failed: {e}", int((time.monotonic() - t0) * 1000)
+    return True, f"quarantined to {target.name}", int((time.monotonic() - t0) * 1000)
+
+
+def _write_wake_signal() -> tuple[bool, str, int]:
+    from datetime import datetime, timezone
+
+    t0 = time.monotonic()
+    from iai_mcp.wake_handler import wake_signal_path
+
+    path = wake_signal_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".doctor.tmp")
+        tmp.write_text(json.dumps({
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "source": "doctor",
+        }), encoding="utf-8")
+        tmp.rename(path)
+    except OSError as e:
+        return False, f"wake.signal write failed: {e}", int((time.monotonic() - t0) * 1000)
+    return True, f"wake.signal written at {path}", int((time.monotonic() - t0) * 1000)
+
+
+#: Cold boot binds the socket late (index load); give the parked-engine
+#: wake more headroom than the plain respawn probe.
+_PARKED_WAKE_BIND_TIMEOUT_SEC = 20.0
+
+
+def _wake_parked_engine() -> tuple[bool, str, int]:
+    # Signal first, then start: a daemon booted before the signal lands
+    # would restore the parked state and exit again. The start must be an
+    # EXPLICIT one (cmd_daemon_start = launchctl bootstrap+kickstart /
+    # systemctl start / spawn): a hibernation exit is exit 0, so launchd's
+    # KeepAlive leaves the job down and trusting it is a no-op.
+    import argparse as _ap
+
+    t0 = time.monotonic()
+    ok_sig, msg_sig, _ = _write_wake_signal()
+    if not ok_sig:
+        return False, msg_sig, int((time.monotonic() - t0) * 1000)
+    try:
+        from iai_mcp.cli._daemon import cmd_daemon_start
+
+        rc = cmd_daemon_start(_ap.Namespace())
+    except Exception as e:  # noqa: BLE001 — start failure is a recovery error
+        return (
+            False,
+            f"{msg_sig}; daemon start failed: {type(e).__name__}: {e}",
+            int((time.monotonic() - t0) * 1000),
+        )
+    if rc != 0:
+        return (
+            False,
+            f"{msg_sig}; daemon start exited {rc}",
+            int((time.monotonic() - t0) * 1000),
+        )
+    socket_path = _resolve_socket_path()
+    deadline = time.monotonic() + _PARKED_WAKE_BIND_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        if socket_path.exists():
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            return True, f"{msg_sig}; daemon up (socket bound)", duration_ms
+        time.sleep(_RESPAWN_POLL_INTERVAL_SEC)
+    # A slow cold boot may still finish after this window — report honestly.
+    return (
+        False,
+        f"{msg_sig}; start requested but socket not bound in "
+        f"{_PARKED_WAKE_BIND_TIMEOUT_SEC:.0f}s",
+        int((time.monotonic() - t0) * 1000),
+    )
+
+
+def _cleanup_stale_heartbeats() -> tuple[bool, str, int]:
+    from iai_mcp.heartbeat_scanner import HeartbeatScanner
+
+    t0 = time.monotonic()
+    try:
+        deleted = HeartbeatScanner(_resolve_wrappers_dir()).cleanup_stale_orphans()
+    except OSError as e:
+        return False, f"cleanup failed: {e}", int((time.monotonic() - t0) * 1000)
+    return (
+        True,
+        f"removed {deleted} stale/orphan heartbeat file(s)",
+        int((time.monotonic() - t0) * 1000),
+    )
+
+
+def _quarantine_state_file() -> tuple[bool, str, int]:
+    from iai_mcp.daemon_state import daemon_state_path
+
+    return _quarantine_rename(daemon_state_path())
+
+
+def _quarantine_vec_index() -> tuple[bool, str, int]:
+    return _quarantine_rename(_resolve_hippo_db_path().parent / "records.hnsw")
+
+
+def _reset_sleep_quarantine() -> tuple[bool, str, int]:
+    t0 = time.monotonic()
+    try:
+        from iai_mcp.lifecycle_event_log import LifecycleEventLog
+        from iai_mcp.lifecycle_state import lifecycle_state_path
+        from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
+
+        # The quarantine reset path touches only the lifecycle state file
+        # and the event log — store=None is safe here. Paths MUST go through
+        # the env-honoring resolvers: the module constants are home-rooted
+        # and would clobber the production record under IAI_MCP_STORE.
+        pipeline = SleepPipeline(
+            store=None,
+            lifecycle_state_path=lifecycle_state_path(),
+            event_log=LifecycleEventLog(log_dir=_resolve_lifecycle_log_dir()),
+        )
+        pipeline.reset_quarantine()
+    except Exception as e:  # noqa: BLE001 — surface any reset failure
+        return False, f"quarantine reset failed: {e}", int((time.monotonic() - t0) * 1000)
+    return True, "sleep-cycle quarantine cleared", int((time.monotonic() - t0) * 1000)
+
+
+def _run_own_cli(argv: list[str], timeout_sec: float) -> tuple[bool, str, int]:
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "iai_mcp.cli", *argv],
+            capture_output=True, text=True, timeout=timeout_sec, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"{argv[0]} failed: {e}", int((time.monotonic() - t0) * 1000)
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:]
+    detail = tail[0][:160] if tail else ""
+    if proc.returncode != 0:
+        return False, f"exit {proc.returncode}: {detail}", duration_ms
+    return True, detail or "done", duration_ms
+
+
+def _drain_permanent_failed() -> tuple[bool, str, int]:
+    return _run_own_cli(["drain-permanent-failed"], timeout_sec=300.0)
+
+
+def _compact_hippo() -> tuple[bool, str, int]:
+    # Explicit --store-path: the maintenance verb's default is home-rooted
+    # and would target the wrong store under IAI_MCP_STORE.
+    return _run_own_cli(
+        [
+            "maintenance", "compact-hippo", "--apply", "--yes",
+            "--store-path", str(_store_root()),
+        ],
+        timeout_sec=1800.0,
+    )
+
+
+def _rederive_timestamps() -> tuple[bool, str, int]:
+    return _run_own_cli(["migrate", "--rederive-timestamps"], timeout_sec=1800.0)
+
+
 def _plan_repair_actions(results: list[CheckResult]) -> list[RepairAction]:
     actions: list[RepairAction] = []
     fail_names = {r.name for r in results if not r.passed}
+    by_name = {r.name: r for r in results}
 
     if "(b) socket file fresh" in fail_names:
         actions.append(
@@ -501,6 +721,10 @@ def _plan_repair_actions(results: list[CheckResult]) -> list[RepairAction]:
                 description="unlink stale ~/.iai-mcp/.daemon.sock",
                 destructive=True,
                 execute=_unlink_stale_socket,
+                # (b) alone fails on a 1s connect timeout — a daemon merely
+                # busy in consolidation. Unattended unlink is allowed only
+                # when the daemon process is provably gone too.
+                auto_safe="(a) daemon process alive" in fail_names,
             )
         )
 
@@ -524,13 +748,119 @@ def _plan_repair_actions(results: list[CheckResult]) -> list[RepairAction]:
             )
         )
 
-    if "(a) daemon process alive" in fail_names:
+    if "(j) lifecycle current state" in fail_names:
+        # Parked-engine deadlock: persisted HIBERNATION/SLEEP with no live
+        # daemon. Signal-first wake, then start — respawn alone would boot
+        # back into the parked state on an engine without the demand wake.
+        actions.append(
+            RepairAction(
+                label="wake_parked_engine",
+                description="write wake.signal, then start the daemon",
+                destructive=False,
+                execute=_wake_parked_engine,
+                auto_safe=True,
+            )
+        )
+
+    if "(a) daemon process alive" in fail_names and (
+        "(j) lifecycle current state" not in fail_names
+    ):
         actions.append(
             RepairAction(
                 label="respawn_daemon",
                 description="spawn `python -m iai_mcp.daemon` detached",
                 destructive=True,
                 execute=_respawn_daemon,
+                auto_safe=True,
+            )
+        )
+
+    _e = by_name.get("(e) daemon state file valid")
+    if _e is not None and not _e.passed and _e.detail.startswith("unreadable"):
+        # Only the unreadable/corrupt case — a merely-unknown fsm_state may
+        # be a version skew a newer daemon still parses.
+        actions.append(
+            RepairAction(
+                label="quarantine_state_file",
+                description=(
+                    "rename the corrupt daemon state file aside "
+                    "(daemon regenerates it on next boot)"
+                ),
+                destructive=False,
+                execute=_quarantine_state_file,
+                auto_safe=True,
+            )
+        )
+
+    _r = by_name.get("(r) hippo hnsw index")
+    if _r is not None and not _r.passed and "stat failed" not in _r.detail:
+        actions.append(
+            RepairAction(
+                label="quarantine_vec_index",
+                description=(
+                    "rename the corrupt vector index aside "
+                    "(rebuilds from SQLite on next daemon boot)"
+                ),
+                destructive=False,
+                execute=_quarantine_vec_index,
+                auto_safe=True,
+            )
+        )
+
+    _m = by_name.get("(m) heartbeat scanner")
+    if _m is not None and _m.passed and re.search(
+        r"\b[1-9]\d* (?:stale|orphan)", _m.detail
+    ):
+        actions.append(
+            RepairAction(
+                label="cleanup_stale_heartbeats",
+                description="delete stale/orphan wrapper heartbeat files",
+                destructive=False,
+                execute=_cleanup_stale_heartbeats,
+                auto_safe=True,
+            )
+        )
+
+    if "(l) sleep cycle quarantine" in fail_names:
+        actions.append(
+            RepairAction(
+                label="reset_sleep_quarantine",
+                description="clear the stuck (>=12h) sleep-cycle quarantine",
+                destructive=False,
+                execute=_reset_sleep_quarantine,
+                auto_safe=True,
+            )
+        )
+
+    _w = by_name.get("(w) no permanent-failed captures")
+    if _w is not None and _w.status == "WARN" and "permanent-failed capture" in _w.detail:
+        actions.append(
+            RepairAction(
+                label="drain_permanent_failed",
+                description="recover permanent-failed capture files into the store",
+                destructive=False,
+                execute=_drain_permanent_failed,
+            )
+        )
+
+    _x = by_name.get("(x) no collapsed-timestamp groups")
+    if _x is not None and _x.status == "WARN" and "group(s) with" in _x.detail:
+        actions.append(
+            RepairAction(
+                label="rederive_timestamps",
+                description="repair collapsed timestamps (store mutation)",
+                destructive=True,
+                execute=_rederive_timestamps,
+            )
+        )
+
+    if "(i) hippo db size" in fail_names:
+        actions.append(
+            RepairAction(
+                label="compact_hippo",
+                description="compact the oversized store (long-running)",
+                destructive=True,
+                execute=_compact_hippo,
             )
         )
 
@@ -545,7 +875,104 @@ def _prompt_action(action: RepairAction) -> bool:
     return response.strip().lower() == "y"
 
 
+#: Minimum spacing between unattended auto-heal runs. Damps heal loops: a
+#: fault the auto subset cannot fix must not be re-poked every session start.
+DOCTOR_AUTO_COOLDOWN_SEC: float = 6 * 3600.0
+
+
+def _auto_damper_path() -> Path:
+    return _store_root() / ".doctor-auto-last"
+
+
+def _auto_recently_ran(now: float | None = None) -> bool:
+    path = _auto_damper_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+    moment = now if now is not None else time.time()
+    return (moment - mtime) < DOCTOR_AUTO_COOLDOWN_SEC
+
+
+def _stamp_auto_run() -> None:
+    path = _auto_damper_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError as e:
+        logger.debug("auto damper stamp failed: %s", e)
+
+
+def _execute_action(action: RepairAction) -> tuple[bool, str, int]:
+    ok, msg, ms = action.execute()
+    try:
+        from iai_mcp.events import write_event
+        from iai_mcp.store import MemoryStore
+
+        with MemoryStore() as _audit_store:
+            write_event(
+                _audit_store,
+                kind="doctor_action",
+                data={
+                    "action": action.label,
+                    "target": action.description,
+                    "success": ok,
+                    "duration_ms": ms,
+                    "detail": msg,
+                },
+            )
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        logger.debug("doctor audit event write failed: %s", e)
+    return ok, msg, ms
+
+
+def cmd_doctor_auto() -> int:
+    """Unattended reflex: run only the auto-safe heal subset, no prompts.
+
+    Never kills a process, never mutates the store, never loses data —
+    quarantine-renames, signal writes, heartbeat cleanup, daemon starts.
+    """
+    if _auto_recently_ran():
+        print("doctor --auto: cooldown active, skipping.")
+        return 0
+    # Stamp IMMEDIATELY after passing the cooldown: every branch below —
+    # heals, no-auto-heal-available, even all-green — must be damped, or a
+    # persistent unfixable fault re-runs the full diagnosis on every session
+    # start forever. This also shrinks the concurrent-session window.
+    _stamp_auto_run()
+
+    # fetch_update=False: the heal reflex fires when the daemon is down,
+    # often together with a broken network — never wait on PyPI here.
+    results = run_diagnosis(fetch_update=False)
+    results = _apply_headless_downgrade(results, is_headless())
+    actions = [a for a in _plan_repair_actions(results) if a.auto_safe]
+    if not actions:
+        fails = [r.name for r in results if not r.passed]
+        if fails:
+            print(f"doctor --auto: no auto-safe heal for {fails}; run `iai-mcp doctor --apply`.")
+            return 1
+        print("doctor --auto: all checks green, nothing to heal.")
+        return 0
+
+    for action in actions:
+        ok, msg, ms = _execute_action(action)
+        tag = "[done]" if ok else "[FAIL]"
+        print(f"  {tag} {action.label}: {msg} ({ms} ms)")
+
+    final_results = _apply_headless_downgrade(
+        run_diagnosis(fetch_update=False), is_headless(),
+    )
+    final_fails = [r.name for r in final_results if not r.passed]
+    if not final_fails:
+        print("doctor --auto: healed, all checks pass.")
+        return 0
+    print(f"doctor --auto: still failing: {final_fails}; run `iai-mcp doctor --apply`.")
+    return 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if bool(getattr(args, "auto", False)):
+        return cmd_doctor_auto()
     apply = bool(getattr(args, "apply", False))
     yes = bool(getattr(args, "yes", False))
     if yes and not apply:
@@ -588,27 +1015,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if not _prompt_action(action):
                 print(f"  [skipped] {action.description}")
                 continue
-        ok, msg, ms = action.execute()
+        ok, msg, ms = _execute_action(action)
         tag = "[done]" if ok else "[FAIL]"
         print(f"  {tag} {action.label}: {msg} ({ms} ms)")
-        try:
-            from iai_mcp.events import write_event
-            from iai_mcp.store import MemoryStore
-
-            with MemoryStore() as _audit_store:
-                write_event(
-                    _audit_store,
-                    kind="doctor_action",
-                    data={
-                        "action": action.label,
-                        "target": action.description,
-                        "success": ok,
-                        "duration_ms": ms,
-                        "detail": msg,
-                    },
-                )
-        except Exception as e:
-            logger.debug("doctor audit event write failed: %s", e)
 
     print("\nRe-running checks ...")
     final_results = run_diagnosis()

@@ -154,15 +154,16 @@ fi
 rc=$?
 
 # THEN atomically rename the active-writer marker so the drain can claim the
-# fully-captured turn on its next pass. Target name uses `.live-${epoch}.jsonl`
-# so it never collides with the bulk-import output shape
-# `${session_id}-${epoch}-${pid}.jsonl` in the same second. The per-session
+# fully-captured turn on its next pass. Target name uses
+# `.live-${epoch}-${pid}.jsonl`: the `.live-` prefix keeps it clear of the
+# bulk-import output shape, and the pid keeps two capture events firing in
+# the same wall-clock second from overwriting each other. The per-session
 # offset state is deliberately left in place — it is line-count-relative to
 # the transcript, not to the live file, and stays valid across rotations.
 if [ -n "$session_id" ]; then
   live_file="$HOME/.iai-mcp/.deferred-captures/${session_id}.live.jsonl"
   if [ -f "$live_file" ]; then
-    mv "$live_file" "$HOME/.iai-mcp/.deferred-captures/${session_id}.live-$(date +%s).jsonl" 2>/dev/null || true
+    mv "$live_file" "$HOME/.iai-mcp/.deferred-captures/${session_id}.live-$(date +%s)-$$.jsonl" 2>/dev/null || true
   fi
 fi
 

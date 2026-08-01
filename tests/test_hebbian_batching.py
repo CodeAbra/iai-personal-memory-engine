@@ -201,7 +201,7 @@ def test_schema_bind_batches_into_two_versions(tmp_path):
         store.insert(r)
 
     candidate = SchemaCandidate(
-        pattern="phase74_test_pattern_unique",
+        pattern="hebbian_test_pattern_unique",
         confidence=0.7,
         evidence_ids=[r.id for r in evidence],
         evidence_count=5,

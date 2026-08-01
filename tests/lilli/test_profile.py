@@ -1,36 +1,30 @@
 from __future__ import annotations
 
 from iai_mcp.profile import (
-    PHASE_1_LIVE,
-    PHASE_2_DEFERRED,
-    PHASE_3_DEFERRED,
+    LIVE_KNOB_NAMES,
+    DEFERRED_KNOB_NAMES,
     PROFILE_KNOBS,
     default_state,
     profile_get,
     profile_set,
 )
 
-def test_profile_has_exactly_14_knobs():
+def test_profile_has_exactly_11_knobs():
     assert len(PROFILE_KNOBS) == 11
 
-def test_phase_1_live_has_exactly_fourteen():
-    assert len(PHASE_1_LIVE) == 11
-    assert "literal_preservation" in PHASE_1_LIVE
-    assert "masking_off" in PHASE_1_LIVE
-    assert "task_support" in PHASE_1_LIVE
-    assert "scene_construction_scaffold" in PHASE_1_LIVE
-    assert "monotropism_depth" in PHASE_1_LIVE
-    assert "dunn_quadrant" in PHASE_1_LIVE
-    assert "camouflaging_relaxation" in PHASE_1_LIVE
-    assert "wake_depth" in PHASE_1_LIVE
+def test_live_knob_names_cover_the_sealed_registry():
+    assert len(LIVE_KNOB_NAMES) == 11
+    assert "literal_preservation" in LIVE_KNOB_NAMES
+    assert "masking_off" in LIVE_KNOB_NAMES
+    assert "task_support" in LIVE_KNOB_NAMES
+    assert "scene_construction_scaffold" in LIVE_KNOB_NAMES
+    assert "monotropism_depth" in LIVE_KNOB_NAMES
+    assert "dunn_quadrant" in LIVE_KNOB_NAMES
+    assert "camouflaging_relaxation" in LIVE_KNOB_NAMES
+    assert "wake_depth" in LIVE_KNOB_NAMES
 
-def test_phase_2_deferred_is_empty():
-    assert PHASE_2_DEFERRED == frozenset()
-    assert len(PHASE_2_DEFERRED) == 0
-
-def test_phase_3_deferred_is_empty_after_autist13_flip():
-    assert PHASE_3_DEFERRED == frozenset()
-    assert len(PHASE_3_DEFERRED) == 0
+def test_deferred_knob_names_empty():
+    assert DEFERRED_KNOB_NAMES == frozenset()
 
 def test_every_knob_has_autist_requirement_id():
     for name, spec in PROFILE_KNOBS.items():
@@ -52,10 +46,10 @@ def test_live_knob_defaults_match_d11():
 
 def test_default_state_excludes_deferred_knobs():
     state = default_state()
-    assert set(state.keys()) == PHASE_1_LIVE
+    assert set(state.keys()) == LIVE_KNOB_NAMES
     assert len(state) == 11
 
-def test_profile_get_none_returns_total_14():
+def test_profile_get_none_returns_total_11():
     state = default_state()
     result = profile_get(None, state)
     assert result["total_knobs"] == 11

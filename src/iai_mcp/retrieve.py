@@ -30,7 +30,6 @@ _GRAPH_DECRYPT_WARN_LAST: dict[str, float] = {}
 _GRAPH_DECRYPT_WARN_INTERVAL_SEC = 300.0
 
 
-TEMPORAL_NEXT_WINDOW = timedelta(minutes=5)
 
 
 STALE_DOWNWEIGHT_FACTOR: float = 0.5
@@ -620,56 +619,6 @@ def apply_supersede_cap(
         if not changed:
             break
     return hits
-
-
-def link_temporal_next(
-    store: MemoryStore,
-    new_record: MemoryRecord,
-    session_id: str,
-) -> UUID | None:
-    now = datetime.now(timezone.utc)
-    prior_events = query_events(
-        store, kind="record_inserted",
-        since=now - TEMPORAL_NEXT_WINDOW, limit=20,
-    )
-    previous_id: UUID | None = None
-    for ev in prior_events:
-        if ev.get("session_id") != session_id:
-            continue
-        raw = ev["data"].get("record_id")
-        if not raw:
-            continue
-        try:
-            candidate = UUID(raw)
-        except (TypeError, ValueError):
-            continue
-        if candidate == new_record.id:
-            continue
-        previous_id = candidate
-        break
-
-    if previous_id is not None:
-        try:
-            store.boost_edges(
-                [(previous_id, new_record.id)],
-                edge_type="temporal_next",
-                delta=1.0,
-            )
-        except (OSError, ValueError, RuntimeError) as exc:
-            log.warning("temporal_next edge creation failed: %s", exc)
-
-    write_event(
-        store,
-        kind="record_inserted",
-        data={
-            "record_id": str(new_record.id),
-            "tier": new_record.tier,
-        },
-        severity="info",
-        session_id=session_id,
-        source_ids=[new_record.id],
-    )
-    return previous_id
 
 
 def _make_graph_sync_hook(graph):

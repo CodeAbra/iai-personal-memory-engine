@@ -1,5 +1,5 @@
 """Regression: RoConnPool.borrow() self-heals against the read-only-snapshot
-fence, closing the phase-177 defect (deferred-items.md item 3).
+fence.
 
 The engine's read-only-snapshot fence (crates/lillibrain/src/pager.rs:322-338)
 correctly RAISES when a WAL auto-checkpoint invalidates an already-open RO

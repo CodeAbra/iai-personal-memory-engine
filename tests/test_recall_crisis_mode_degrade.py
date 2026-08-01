@@ -296,7 +296,7 @@ def test_memory_recall_guards_against_load_state_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     """If daemon_state.load_state() itself raises, the guard must NOT crash
-    recall — it falls through to the warm path (the constitutional
+    recall — it falls through to the warm path (the
     always-available invariant: the guard cannot itself break recall)."""
     from iai_mcp.core import dispatch
 

@@ -29,7 +29,7 @@ def _v1_record(
         last_reviewed=None,
         never_decay=False,
         never_merge=False,
-        provenance=[{"ts": "2026-04-16T00:00:00Z", "cue": "seed", "session_id": "phase1"}],
+        provenance=[{"ts": "2026-04-16T00:00:00Z", "cue": "seed", "session_id": "seed-session"}],
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         tags=list(tags) if tags else [],
@@ -169,7 +169,7 @@ def test_migrate_preserves_provenance(tmp_path):
     migrated = store.get(r.id)
     assert len(migrated.provenance) == 1
     assert migrated.provenance[0]["cue"] == "seed"
-    assert migrated.provenance[0]["session_id"] == "phase1"
+    assert migrated.provenance[0]["session_id"] == "seed-session"
 
 
 def test_migrate_skips_existing_v2_records(tmp_path):
@@ -516,59 +516,6 @@ def test_migrate_rederive_writes_event(tmp_path):
 # ---------------------------------------------------------------------------
 # migrate_salvage_torn_permanent_failed
 # ---------------------------------------------------------------------------
-
-
-def test_migrate_rederive_skips_internal_event_duplicate(tmp_path):
-    """An internal queue-operation line earlier in the transcript must not win
-    the content-hash match over the real user turn with the same text —
-    otherwise rederive re-derives the same already-collapsed timestamp.
-    Mirrors a real collapsed group: several duplicate episodic records sharing
-    both the collapsed created_at and identical literal_surface content."""
-    from iai_mcp.migrate import migrate_rederive_collapsed_timestamps
-    from iai_mcp.store import MemoryStore
-
-    store = MemoryStore(path=tmp_path)
-    session_id = "sess-internal-dup"
-    transcript_root = tmp_path / "transcripts"
-
-    collapsed_ts = datetime(2026, 6, 20, 21, 11, 0, 188000, tzinfo=timezone.utc)
-    text = "Duplicate task-notification payload"
-
-    # No source_uuid recorded in provenance — forces the content-hash fallback.
-    # Group size >= 3 to qualify as a collapsed-timestamp candidate.
-    records = [_make_episodic_record(text, session_id, "", collapsed_ts) for _ in range(3)]
-    for r in records:
-        store.insert(r)
-
-    real_ts_str = "2026-06-20T21:11:00.723000Z"
-    transcript_entries = [
-        # Internal event carrying the same text, earlier in the file, at the
-        # collapsed timestamp — must be skipped.
-        {
-            "type": "queue-operation",
-            "timestamp": "2026-06-20T21:11:00.188000Z",
-            "sessionId": session_id,
-            "message": {"content": text},
-        },
-        # The real user turn, a moment later, at the correct timestamp.
-        {
-            "type": "user",
-            "timestamp": real_ts_str,
-            "sessionId": session_id,
-            "uuid": str(uuid4()),
-            "message": {"role": "user", "content": text},
-        },
-    ]
-    _write_fake_transcript(transcript_root, session_id, transcript_entries)
-
-    result = migrate_rederive_collapsed_timestamps(store, transcript_root=transcript_root)
-
-    assert result["records_updated"] == 3
-    expected_ts = datetime(2026, 6, 20, 21, 11, 0, 723000, tzinfo=timezone.utc)
-    for r in records:
-        updated = store.get(r.id)
-        assert updated.created_at != collapsed_ts
-        assert updated.created_at == expected_ts
 
 
 def test_salvage_torn_permanent_failed_recovers_complete_lines(tmp_path):

@@ -62,14 +62,17 @@ def compute_m3_token_budget(
     store: MemoryStore,
     session_id: str,
 ) -> float:
-    events = query_events(store, kind="session_start_tokens", limit=100)
+    # assemble_session_start stamps every live serve with session_started
+    # carrying total_cached_tokens — the instrument for the <=3000-token
+    # session-start budget.
+    events = query_events(store, kind="session_started", limit=100)
     session_events = [e for e in events if e.get("session_id") == session_id]
     if not session_events:
         return 0.0
     total = 0.0
     for e in session_events:
         try:
-            total += float(e["data"].get("tokens", 0))
+            total += float(e["data"].get("total_cached_tokens", 0))
         except (TypeError, ValueError):
             continue
     return total / len(session_events)
@@ -104,18 +107,6 @@ def compute_session_metrics_snapshot(
 M2_SYNTHETIC_CONSTANT: float = 0.0
 M4_SYNTHETIC_CONSTANT: float = 0.0
 M6_SYNTHETIC_CONSTANT: float = 0.0
-
-
-def m2_precision_at_5_synthetic() -> float:
-    return M2_SYNTHETIC_CONSTANT
-
-
-def m4_profile_variance_synthetic() -> float:
-    return M4_SYNTHETIC_CONSTANT
-
-
-def m6_context_repeat_rate_synthetic() -> float:
-    return M6_SYNTHETIC_CONSTANT
 
 
 def m2_precision_at_5_live(

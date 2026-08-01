@@ -39,7 +39,7 @@ def _isolated_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
 
 def _make_transcript(tmp_path: Path) -> Path:
     turns = [
-        {"type": "user", "message": {"role": "user", "content": "hello first user turn"}},
+        {"type": "user", "message": {"role": "user", "content": "hello from the transcript"}},
         {"type": "assistant", "message": {"role": "assistant", "content": "ack always defer"}},
         {"type": "user", "message": {"role": "user", "content": "third defer turn"}},
     ]
@@ -57,7 +57,7 @@ def _run_no_spawn(env: dict[str, str], transcript_path: Path) -> subprocess.Comp
             "capture-transcript",
             "--no-spawn",
             "--session-id",
-            "test-defer-session",
+            "test-session-defer",
             str(transcript_path),
         ],
         env=env,
@@ -115,7 +115,7 @@ def test_no_spawn_reachable_defers_not_inserts(tmp_path):
     assert len(files) == 1, f"expected 1 deferred file, got {files}"
     header = json.loads(files[0].read_text().splitlines()[0])
     assert header["version"] == 1
-    assert header["session_id"] == "test-defer-session"
+    assert header["session_id"] == "test-session-defer"
 
 
 def test_no_spawn_unreachable_still_defers(tmp_path):
@@ -147,7 +147,7 @@ def test_no_spawn_zero_embedder_imports_in_fresh_process(tmp_path):
         "from iai_mcp.cli import main\n"
         "rc = main([\n"
         "  'capture-transcript', '--no-spawn',\n"
-        "  '--session-id', 'test-defer-session-fresh',\n"
+        "  '--session-id', 'test-session-defer-fresh',\n"
         f"  {str(transcript)!r},\n"
         "])\n"
         "loaded = sorted(\n"
@@ -157,7 +157,7 @@ def test_no_spawn_zero_embedder_imports_in_fresh_process(tmp_path):
         "  or k == 'torch' or k.startswith('torch.')\n"
         "  or k == 'transformers' or k.startswith('transformers.')\n"
         ")\n"
-        "print('IAIMCP_DUMP=' + json.dumps({'rc': rc, 'loaded': loaded}))\n"
+        "print('IAIMCP75_DUMP=' + json.dumps({'rc': rc, 'loaded': loaded}))\n"
     )
 
     proc = subprocess.run(
@@ -170,9 +170,9 @@ def test_no_spawn_zero_embedder_imports_in_fresh_process(tmp_path):
 
     assert proc.returncode == 0, f"driver failed: stderr={proc.stderr!r}"
 
-    dump_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("IAIMCP_DUMP=")]
+    dump_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("IAIMCP75_DUMP=")]
     assert len(dump_lines) == 1, f"expected 1 dump line, got {dump_lines!r}"
-    dump = json.loads(dump_lines[0][len("IAIMCP_DUMP=") :])
+    dump = json.loads(dump_lines[0][len("IAIMCP75_DUMP=") :])
 
     assert dump["rc"] == 0, f"main() returned {dump['rc']}"
 

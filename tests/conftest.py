@@ -76,6 +76,9 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("HOME", str(base))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(fake_root / ".daemon.sock"))
+    # Hermetic tests never probe PyPI: the notify-only version check honors
+    # this kill switch everywhere (daemon tick, doctor, self-update).
+    monkeypatch.setenv("IAI_MCP_VERSION_CHECK", "0")
     import iai_mcp.hippo as _hippo
     import iai_mcp.store as _store
     import iai_mcp.concurrency as _conc
@@ -131,11 +134,6 @@ _GUARDED_ENV = (
     "IAI_MCP_CRYPTO_PASSPHRASE",
     "LILLI_FSYNC_MODE",
     "IAI_MCP_EMBED_MODEL",
-    "IAI_MCP_EMBED_PROVIDER",
-    "IAI_MCP_EMBED_URL",
-    "IAI_MCP_EMBED_DIM",
-    "IAI_MCP_EMBED_TIMEOUT_SEC",
-    "IAI_MCP_EMBED_MODEL_ID",
 )
 
 

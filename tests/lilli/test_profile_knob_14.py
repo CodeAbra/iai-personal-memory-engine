@@ -2,31 +2,26 @@ from __future__ import annotations
 
 
 from iai_mcp.profile import (
-    PHASE_1_LIVE,
-    PHASE_2_DEFERRED,
-    PHASE_3_DEFERRED,
+    LIVE_KNOB_NAMES,
+    DEFERRED_KNOB_NAMES,
     PROFILE_KNOBS,
     default_state,
     profile_get,
     profile_set,
 )
 
-def test_phase_1_live_is_14():
-    assert len(PHASE_1_LIVE) == 11
-    assert "camouflaging_relaxation" in PHASE_1_LIVE
+def test_camouflaging_relaxation_is_live():
+    assert len(LIVE_KNOB_NAMES) == 11
+    assert "camouflaging_relaxation" in LIVE_KNOB_NAMES
 
-def test_phase_3_deferred_is_empty():
-    assert len(PHASE_3_DEFERRED) == 0
-    assert "camouflaging_relaxation" not in PHASE_3_DEFERRED
+def test_deferred_knob_names_empty():
+    assert len(DEFERRED_KNOB_NAMES) == 0
+    assert "camouflaging_relaxation" not in DEFERRED_KNOB_NAMES
 
-def test_phase_2_deferred_is_empty():
-    assert len(PHASE_2_DEFERRED) == 0
-
-def test_knob_spec_phase_is_1():
+def test_knob_spec_is_live():
     spec = PROFILE_KNOBS["camouflaging_relaxation"]
     assert spec.phase == 1
     assert spec.requirement_id == "AUTIST-13"
-    assert "Phase 3" not in spec.description
 
 def test_core_import_succeeds_with_deferred_knobs_zero():
     import iai_mcp.core as core

@@ -4,7 +4,7 @@ The daemon-down degraded recall rail must derive the AES AAD identically to the
 write side (lowercased canonical id) so an encrypted literal_surface decrypts
 byte-exact. On a decrypt failure (corrupt/undecryptable ciphertext), the rail
 must SKIP the row — never return raw ciphertext as if it were user-facing
-content (constitutional: decrypt failure is fail-loud, never silent ciphertext).
+content — decrypt failure is fail-loud, never silent ciphertext.
 """
 from __future__ import annotations
 

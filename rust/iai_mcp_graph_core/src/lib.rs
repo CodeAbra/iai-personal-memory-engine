@@ -4,9 +4,9 @@
 //! accelerate, no tokenizers. The crate ships as a workspace `rlib` and is
 //! re-exported as a Python submodule by the `iai_mcp_native` wrapper crate.
 //!
-//! Wave-1 stub surface: a single `answer() -> i64` returning the literal
-//! `42`. The point of this skeleton is to validate the three-crate workspace
-//! topology + the PyO3 sub-module wiring before any algorithm work begins.
+//! Wiring-probe surface: a single `answer() -> i64` returning the literal
+//! `42` validates the three-crate workspace topology + the PyO3 sub-module
+//! wiring independently of the algorithms.
 
 pub mod centrality;
 pub mod clustering;
@@ -60,7 +60,7 @@ pub fn validate_csr(indptr: &[i64], indices: &[i64], n_nodes: usize) -> Result<(
     Ok(())
 }
 
-/// Wave-1 wiring probe. Returning the literal `42` lets a downstream Python
+/// Wiring probe. Returning the literal `42` lets a downstream Python
 /// smoke test prove that:
 ///   1. the wrapper crate exposes the `graph` sub-module successfully, and
 ///   2. the cross-crate `register(py, m)` indirection actually mounts a

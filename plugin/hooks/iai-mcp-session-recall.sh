@@ -42,7 +42,8 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "$ts session=$session_id source=$source_evt"
 } >> "$log" 2>/dev/null
 
-# Read the daemon-written cache whenever it is non-empty (no age cap).
+# Precache for the SessionStart hook:
+# read the daemon-written cache whenever it is non-empty (no age cap).
 # Each branch writes a contract log marker. Falls through to the live CLI path
 # on any miss.
 cache_path="$HOME/.iai-mcp/.session-start-payload.cached.md"

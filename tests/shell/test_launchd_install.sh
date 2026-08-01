@@ -2,8 +2,8 @@
 # macOS launchd install/uninstall idempotency.
 #
 # Verifies:
-#   - plist installed under ~/Library/LaunchAgents
-#   - silent install (--yes bypasses consent banner)
+#   - DAEMON-01: plist installed under ~/Library/LaunchAgents
+#   - DAEMON-10: silent install (--yes bypasses the consent banner)
 #   - uninstall removes plist + ~/.iai-mcp/.lock +
 #     ~/.iai-mcp/.daemon.sock + ~/.iai-mcp/.daemon-state.json
 #   - Idempotency: install twice / uninstall twice -> no error
@@ -97,7 +97,7 @@ if [[ ! -f "$PLIST" ]]; then
     echo "FAIL: plist not created at $PLIST"
     exit 1
 fi
-# Sanity: rendered plist has absolute python path, not /usr/local/bin/python3
+# Pitfall 5 sanity: rendered plist has absolute python path, not /usr/local/bin/python3
 if ! grep -q "$PY" "$PLIST"; then
     echo "FAIL: plist does not contain absolute sys.executable ($PY)"
     cat "$PLIST"
@@ -114,28 +114,28 @@ if [[ ! -f "$PLIST" ]]; then
     exit 1
 fi
 
-# Seed state files so we can verify cleanup actually removes them.
+# Seed state files so we can verify C4 cleanup actually removes them.
 mkdir -p "$STATE_DIR"
 touch "$LOCK" "$SOCK"
 echo "{}" > "$STATE"
 
-echo "[3/6] First uninstall (remove plist + 3 state files)..."
+echo "[3/6] First uninstall (C4: remove plist + 3 state files)..."
 "${CLI[@]}" daemon uninstall --yes
 if [[ -f "$PLIST" ]]; then
     echo "FAIL: plist not removed"
     exit 1
 fi
-# lock + sock + state file all gone
+# C4 invariant: lock + sock + state file all gone
 if [[ -f "$LOCK" ]]; then
-    echo "FAIL: lock file not removed (cleanup violation)"
+    echo "FAIL: lock file not removed (C4 violation)"
     exit 1
 fi
 if [[ -f "$SOCK" ]]; then
-    echo "FAIL: socket file not removed (cleanup violation)"
+    echo "FAIL: socket file not removed (C4 violation)"
     exit 1
 fi
 if [[ -f "$STATE" ]]; then
-    echo "FAIL: state file not removed (cleanup violation)"
+    echo "FAIL: state file not removed (C4 violation)"
     exit 1
 fi
 
@@ -158,5 +158,5 @@ if [[ -f "$PLIST" ]]; then
     exit 1
 fi
 
-echo "PASS: launchd install/uninstall idempotency"
+echo "PASS: launchd install/uninstall idempotency + C4 + Pitfall 5"
 exit 0

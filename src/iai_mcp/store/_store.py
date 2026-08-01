@@ -1030,16 +1030,6 @@ class MemoryStore:
             except ImportError:
                 pass
 
-        try:
-            from iai_mcp.time_cells import compute_temporal_hash
-            if record.created_at and not getattr(record, "_temporal_hash", None):
-                record._temporal_hash = compute_temporal_hash(
-                    session_id=getattr(record, "session_id", "-") or "-",
-                    timestamp=record.created_at,
-                )
-        except (ImportError, TypeError, ValueError):
-            pass
-
         from iai_mcp.daemon_config import _load_patsep_config
         from iai_mcp.events import TELEMETRY_EMBED_NONFINITE, write_event
         import numpy as _np_ins

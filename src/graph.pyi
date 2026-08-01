@@ -4,7 +4,7 @@
 
 def answer() -> int:
     r"""
-    Wave-1 wiring probe. Returning the literal `42` lets a downstream Python
+    Wiring probe. Returning the literal `42` lets a downstream Python
     smoke test prove that:
       1. the wrapper crate exposes the `graph` sub-module successfully, and
       2. the cross-crate `register(py, m)` indirection actually mounts a

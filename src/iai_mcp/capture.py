@@ -785,21 +785,10 @@ def capture_transcript(
                 log.debug("capture_transcript_json_parse_failed: %s", exc)
                 counts["errors"] += 1
                 continue
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-            role = obj.get("type") or msg.get("role", "")
-            if role not in {"user", "assistant"}:
+            parsed = _parse_transcript_obj(obj)
+            if parsed is None:
                 continue
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                text = "\n".join(text_parts).strip()
-            else:
-                text = str(content).strip()
-            if not text:
-                continue
+            role, text, src_uuid, ts = parsed
             result = capture_turn(
                 store,
                 cue=f"session {session_id} turn {seen}",
@@ -807,8 +796,8 @@ def capture_transcript(
                 tier="episodic",
                 session_id=session_id,
                 role=role,
-                ts=obj.get("timestamp"),
-                source_uuid=obj.get("uuid"),
+                ts=ts,
+                source_uuid=src_uuid,
             )
             status = result.get("status", "skipped")
             if status in counts:
@@ -846,6 +835,12 @@ def _parse_transcript_line(
         obj = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return None
+    return _parse_transcript_obj(obj)
+
+
+def _parse_transcript_obj(
+    obj: dict,
+) -> tuple[str, str, str | None, str | None] | None:
     if obj.get("type") == "response_item":
         # Codex rollout transcript: user messages also appear as event_msg
         # records, so ONLY response_item is consumed — anything else would
@@ -871,8 +866,24 @@ def _parse_transcript_line(
         if _is_noise(text):
             return None
         return role, text, payload.get("id") or obj.get("uuid"), obj.get("timestamp")
+    if "step_index" in obj and "source" in obj:
+        # Antigravity transcript_full lines: conversational turns only —
+        # tool views, history replays, and system steps are not dialogue.
+        src, typ = obj.get("source"), obj.get("type")
+        if src == "USER_EXPLICIT" and typ == "USER_INPUT":
+            role = "user"
+        elif src == "MODEL" and typ == "PLANNER_RESPONSE":
+            role = "assistant"
+        else:
+            return None
+        text = str(obj.get("content") or "").strip()
+        if not text or _is_noise(text):
+            return None
+        return role, text, None, obj.get("created_at")
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-    role = obj.get("type") or msg.get("role", "")
+    # Claude puts the role in top-level "type", Cursor in top-level "role"
+    # with the content nested under "message".
+    role = obj.get("type") or msg.get("role") or obj.get("role", "")
     if role not in {"user", "assistant"}:
         return None
     content = msg.get("content", "")
@@ -1216,30 +1227,17 @@ def write_deferred_captures(
                         obj = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
-                    msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-                    role = obj.get("type") or msg.get("role", "")
-                    if role not in {"user", "assistant"}:
+                    parsed = _parse_transcript_obj(obj)
+                    if parsed is None:
                         continue
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        text_parts = [
-                            b.get("text", "")
-                            for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        ]
-                        text = "\n".join(text_parts).strip()
-                    else:
-                        text = str(content).strip()
-                    if not text:
-                        continue
+                    role, text, src_uuid, ts = parsed
                     event = {
                         "text": text,
                         "cue": f"session {session_id} turn {seen}",
                         "tier": "episodic",
                         "role": role,
-                        "ts": obj.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                        "ts": ts or datetime.now(timezone.utc).isoformat(),
                     }
-                    src_uuid = obj.get("uuid")
                     if src_uuid:
                         event["source_uuid"] = src_uuid
                     fh.write(json.dumps(event, ensure_ascii=False) + "\n")

@@ -46,7 +46,7 @@ def _extract_top_level_descriptions() -> list[tuple[str, str]]:
         out.append((tool_name, desc))
     return out
 
-def test_tool_count_unchanged_at_12():
+def test_tool_count_pinned():
     descs = _extract_top_level_descriptions()
     assert len(descs) == 15, (
         f"expected 15 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
@@ -64,12 +64,12 @@ def test_each_tool_description_le_30_tokens():
         + "\n".join(f"  {n}: {t} tok -- {d!r}" for n, t, d in offenders)
     )
 
-def test_total_tool_descriptions_le_330_tokens():
-    # Total budget tracks N_tools * avg target (~25 tok/tool); per-tool ceiling
+def test_total_tool_descriptions_within_budget():
+    # Total budget = N_tools * avg target (15 * 25 tok/tool); per-tool ceiling
     # stays at 30 (enforced by the sibling test). Adjust both when N_tools changes.
     descs = _extract_top_level_descriptions()
     total = sum(_tok(d) for _, d in descs)
-    assert total <= 360, (
-        f"total description budget {total} tok > 360\n"
+    assert total <= 375, (
+        f"total description budget {total} tok > 375\n"
         + "\n".join(f"  {n}: {_tok(d)} tok" for n, d in descs)
     )

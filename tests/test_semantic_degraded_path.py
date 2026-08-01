@@ -83,36 +83,6 @@ def test_semantic_warm_embedder_returns_store_hits(
         "distinctive seeded turn not in warm semantic hits"
     )
 
-def test_semantic_no_embedder_degrades_not_empty(hermetic_store: Path) -> None:
-    from iai_mcp.store import MemoryStore, flush_record_buffer
-
-    from iai_mcp.semantic_recall import recall_semantic_degraded  # type: ignore[import]
-
-    store = MemoryStore(hermetic_store)
-    try:
-        rec = _make_normal_record("degraded store backed probe text store only", seed=20)
-        store.insert(rec)
-        flush_record_buffer(store)
-    finally:
-        store.close()
-
-    hits = recall_semantic_degraded(
-        store_root=hermetic_store,
-        cue="degraded store backed probe",
-        n=5,
-    )
-
-    assert hits is not None, "degraded recall must return a result, not None"
-    assert len(hits) > 0, (
-        "degraded recall must return a non-empty result "
-        "(recency/temporal direct from store), not empty"
-    )
-    surfaces = [h.get("literal_surface", "") or "" for h in hits]
-    assert any("degraded store backed probe" in s for s in surfaces), (
-        "degraded result must be STORE-backed "
-        "(bank cannot produce this turn — it was seeded only in the tmp store)"
-    )
-
 def test_pending_row_excluded_from_warm_semantic_until_reembed(
     hermetic_store: Path,
 ) -> None:
@@ -163,7 +133,7 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
         pending_uuid = _UUID(pending_id)
         graph_nodes = set(graph.nodes())
         assert pending_uuid not in graph_nodes, (
-            "pending row (embedding_pending=1) must NOT be a graph node; "
+            "C3-H2: pending row (embedding_pending=1) must NOT be a graph node; "
             "its zero-vector would pollute cosine/graph candidates"
         )
 
@@ -173,21 +143,21 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
         similar = store2.query_similar(cue_vec, n=10)
         similar_ids = {str(r.id) for r in similar}
         assert pending_id not in similar_ids, (
-            "pending row must not appear in query_similar results "
+            "C3-H2: pending row must not appear in query_similar results "
             "(zero-vector must be excluded from ANN candidates)"
         )
 
         turns = store2.all_records()
         all_ids = {str(r.id) for r in turns}
         assert pending_id in all_ids, (
-            "pending row must still be in all_records() — "
+            "CL4-H1: pending row must still be in all_records() — "
             "recency is embedding-independent; pending-inclusive"
         )
 
         recent = store2.recent_user_turns(n=20)
         recent_ids = {str(r.id) for r in recent}
         assert pending_id in recent_ids, (
-            "pending row must appear in recent_user_turns() — "
+            "CL4-H1: pending row must appear in recent_user_turns() — "
             "recency must not filter by embedding_pending"
         )
 
@@ -225,7 +195,7 @@ def test_pending_row_excluded_from_warm_semantic_until_reembed(
         graph_nodes3 = set(graph3.nodes())
         from uuid import UUID as _UUID2
         assert _UUID2(pending_id) in graph_nodes3, (
-            "after re-embed (embedding_pending=0), row must appear in "
+            "C3-H2: after re-embed (embedding_pending=0), row must appear in "
             "the runtime graph as a warm semantic candidate"
         )
     finally:

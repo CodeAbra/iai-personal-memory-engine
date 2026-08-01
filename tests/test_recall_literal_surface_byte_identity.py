@@ -1,22 +1,25 @@
-"""Guard: literal_surface byte-identity across a recall that fires
+"""SC-4 guard: literal_surface byte-identity across a recall that fires
 reinforce_record(is_retrieval=True).
 
 Every successful ``memory_recall`` dispatch calls ``store.queue_reinforce``
-on the returned hit ids, which — absent a background queue — synchronously
-calls ``reinforce_record(rid, is_retrieval=True)``. That call sets
+on the returned hit ids (``core/__init__.py:770-777``), which — absent a
+background queue — synchronously calls ``reinforce_record(rid,
+is_retrieval=True)`` (``_store.py:1304-1323``). That call sets
 ``labile_until`` (a datetime metadata column) and boosts an edge weight; it
-MUST NEVER touch ``literal_surface`` (verbatim/lossless invariant).
+MUST NEVER touch ``literal_surface`` (Mottron EPF / double_empathy passive
+invariant — verbatim/lossless recall is non-negotiable).
 
 This test locks that invariant by reading ``literal_surface`` via
 ``store.get()`` (the exact AES-GCM decrypt round-trip — no whitespace or
 unicode normalization anywhere on this path) before and after a recall that
 returns the record as a hit, and asserting byte equality.
 
-This closes a coverage gap: the retrieval-reconsolidation branch was not
-specifically exercised against a literal_surface byte-identity assertion.
+This closes a coverage gap the 182/183 test suites do not cover: neither
+phase exercised the retrieval-reconsolidation branch specifically against a
+literal_surface byte-identity assertion.
 
 Runs GREEN today — this is a regression lock, not a RED guard. Any future
-change touching the reconsolidation path must keep this test green.
+plan touching the reconsolidation path must keep this test green.
 
 Dual-driver: parametrizes ``LILLI_STORAGE_DRIVER`` since the assertion
 depends on a real store round-trip (insert, recall, re-fetch).

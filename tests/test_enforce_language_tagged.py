@@ -88,7 +88,7 @@ def test_enforce_english_raw_still_importable():
     assert callable(enforce_english_raw)
 
 
-def test_enforce_english_raw_with_language_tag_still_phase1_semantics():
+def test_enforce_english_raw_with_language_tag_keeps_raw_semantics():
     from iai_mcp.aaak import enforce_english_raw
 
     r = _rec("привет мир", language="ru")

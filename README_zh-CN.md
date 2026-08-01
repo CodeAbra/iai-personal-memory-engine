@@ -14,7 +14,7 @@
 <p align="center">每一项声明都附带可复现的基准测试脚本。你可以自己跑一遍验证。</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v2.7.3-1f6feb?style=flat-square" alt="Release v2.7.3">
+  <img src="https://img.shields.io/badge/release-v2.8.0-1f6feb?style=flat-square" alt="Release v2.8.0">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux">

@@ -165,7 +165,7 @@ def test_edge_types_registry_has_12_members():
     }
     assert EDGE_TYPES == frozenset(expected)
 
-def test_boost_edges_accepts_new_phase2_types(tmp_path):
+def test_boost_edges_accepts_extended_types(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
@@ -185,7 +185,7 @@ def test_boost_edges_accepts_new_phase2_types(tmp_path):
         w = store.boost_edges([(r1.id, r2.id)], edge_type=edge_type, delta=1.0)
         assert list(w.values())[0] == pytest.approx(1.0), f"edge_type={edge_type} weight wrong"
 
-def test_boost_edges_phase1_types_still_work(tmp_path):
+def test_boost_edges_original_types_still_work(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)

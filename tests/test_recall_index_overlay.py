@@ -571,7 +571,7 @@ def test_recall_index_rebuild_step_position():
     # must contain the summaries minted this cycle. Edges-only steps may
     # trail it (they never touch the vector index), and new steps append at
     # the tail so WAL-recovery positions stay frozen.
-    edges_only = {SleepStep.ENTITY_LINK}
+    edges_only = {SleepStep.ENTITY_LINK, SleepStep.CURIOSITY_MINE}
     trailing = set(step_order[idx_rebuild + 1:])
     assert trailing <= edges_only, (
         f"steps after RECALL_INDEX_REBUILD must be edges-only, got {trailing}"

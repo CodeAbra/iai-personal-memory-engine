@@ -1,6 +1,6 @@
 [project]
 name = "iai-pme"
-version = "2.7.3"
+version = "2.8.0"
 description = "MCP server giving Claude persistent autistic-style memory + learning"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -31,7 +31,7 @@ dependencies = [
   "zstandard>=0.22,<1.0", # python-zstandard codec inside the AES-GCM envelope on the 4 text/JSON content columns (literal_surface, provenance_json, profile_modulation_gain_json, events.data_json); critical synchronous at-rest path — NOT an optional extra.
   "pypdf>=4.0",           # pure-Python PDF text extraction for the `iai upload <file>.pdf` ingestion path; lazy-imported inside the .pdf branch of iai_mcp.ingest._parsers so .txt/.md/.csv uploads work without pypdf at runtime.
   "setproctitle==1.3.7",  # daemon process title (cosmetic, fail-soft)
-  # Removed in this milestone after the post-Phase-46 dep audit (2026-05-25):
+  # Removed after the 2026-05-25 dependency audit:
   #   - torch-hd: superseded by in-tree `iai_mcp.lilli` (BSC/FHRR/sparse VSA tiers)
   #   - pydantic: declared but zero imports anywhere in `src/`
   #   - structlog: declared but zero references anywhere (stdlib `logging` is the actual logger)
@@ -49,6 +49,9 @@ dev = [
   # Honors the per-test @pytest.mark.timeout overrides on the prod-scale
   # multi-minute gates; without it a lane-wide --timeout kills them mid-run.
   "pytest-timeout>=2.3",
+  # Fast-lane parallel runs (worksteal only — the load/loadfile schedulers
+  # lose a worker on this suite; the sequential run stays the release gate).
+  "pytest-xdist>=3.5",
   "reportlab>=4.0",  # builds a 1-page PDF fixture on demand inside the ingestion test suite; never imported at runtime by the production package.
   "ruff>=0.5.0",
   # networkx is the σ-baseline oracle in tests/fixtures/sigma_baseline.json

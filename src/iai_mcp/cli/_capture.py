@@ -532,11 +532,51 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     import stat
 
     target = getattr(args, "target", "claude")
+    # Under "all", a host whose config dir is absent is skipped — installing
+    # would fabricate ~/.cursor / ~/.gemini/config / ~/.hermes / ~/.openclaw
+    # on machines that never had the host. Explicit targets install anyway.
+    host_rcs: list[int] = []
     if target in ("codex", "all"):
         from iai_mcp.cli._codex_hooks import install_codex_hooks
-        codex_rc = install_codex_hooks()
+        rc = install_codex_hooks()
         if target == "codex":
-            return codex_rc
+            return rc
+        host_rcs.append(rc)
+    if target in ("cursor", "all"):
+        from iai_mcp.cli._cursor_hooks import _cursor_home, install_cursor_hooks
+        if target == "cursor":
+            return install_cursor_hooks()
+        if _cursor_home().exists():
+            host_rcs.append(install_cursor_hooks())
+        else:
+            print(f"cursor: {_cursor_home()} absent — skipped")
+    if target in ("antigravity", "all"):
+        from iai_mcp.cli._antigravity_hooks import (
+            _antigravity_config_dir,
+            install_antigravity_hooks,
+        )
+        if target == "antigravity":
+            return install_antigravity_hooks()
+        if _antigravity_config_dir().exists():
+            host_rcs.append(install_antigravity_hooks())
+        else:
+            print(f"antigravity: {_antigravity_config_dir()} absent — skipped")
+    if target in ("hermes", "all"):
+        from iai_mcp.cli._hermes_hooks import _hermes_home, install_hermes_hooks
+        if target == "hermes":
+            return install_hermes_hooks()
+        if _hermes_home().exists():
+            host_rcs.append(install_hermes_hooks())
+        else:
+            print(f"hermes: {_hermes_home()} absent — skipped")
+    if target in ("openclaw", "all"):
+        from iai_mcp.cli._openclaw_mcp import _openclaw_home, install_openclaw_mcp
+        if target == "openclaw":
+            return install_openclaw_mcp()
+        if _openclaw_home().exists():
+            host_rcs.append(install_openclaw_mcp())
+        else:
+            print(f"openclaw: {_openclaw_home()} absent — skipped")
 
     src, dst, settings = _capture_hook_paths()
     turn_src, turn_dst = _turn_hook_paths()
@@ -647,18 +687,44 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     print("\nNext: fully quit + relaunch Claude Code AND Claude Desktop")
     print("      so both pick up the registration (macOS: `killall Claude`).")
     print("Verify: iai-mcp capture-hooks status")
-    return 0
+    return max(host_rcs, default=0)
 
 
 def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
     import json as _json
 
     target = getattr(args, "target", "claude")
+    host_rcs: list[int] = []
     if target in ("codex", "all"):
         from iai_mcp.cli._codex_hooks import uninstall_codex_hooks
-        codex_rc = uninstall_codex_hooks()
+        rc = uninstall_codex_hooks()
         if target == "codex":
-            return codex_rc
+            return rc
+        host_rcs.append(rc)
+    if target in ("cursor", "all"):
+        from iai_mcp.cli._cursor_hooks import uninstall_cursor_hooks
+        rc = uninstall_cursor_hooks()
+        if target == "cursor":
+            return rc
+        host_rcs.append(rc)
+    if target in ("antigravity", "all"):
+        from iai_mcp.cli._antigravity_hooks import uninstall_antigravity_hooks
+        rc = uninstall_antigravity_hooks()
+        if target == "antigravity":
+            return rc
+        host_rcs.append(rc)
+    if target in ("hermes", "all"):
+        from iai_mcp.cli._hermes_hooks import uninstall_hermes_hooks
+        rc = uninstall_hermes_hooks()
+        if target == "hermes":
+            return rc
+        host_rcs.append(rc)
+    if target in ("openclaw", "all"):
+        from iai_mcp.cli._openclaw_mcp import uninstall_openclaw_mcp
+        rc = uninstall_openclaw_mcp()
+        if target == "openclaw":
+            return rc
+        host_rcs.append(rc)
 
     _, dst, settings = _capture_hook_paths()
     _, turn_dst = _turn_hook_paths()
@@ -737,7 +803,7 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
     desktop_msg = _patch_claude_desktop_config("uninstall")
     print(desktop_msg)
 
-    return 0
+    return max(host_rcs, default=0)
 
 
 def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
@@ -745,12 +811,52 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     import json as _json
 
     target = getattr(args, "target", "claude")
-    codex_rc = 0
+    # Under "all", a host whose config dir is absent is skipped — an
+    # uninstalled host is not a failure of this machine's wiring.
     if target in ("codex", "all"):
         from iai_mcp.cli._codex_hooks import status_codex_hooks
-        codex_rc = status_codex_hooks()
+        rc = status_codex_hooks()
         if target == "codex":
-            return codex_rc
+            return rc
+        print()
+    if target in ("cursor", "all"):
+        from iai_mcp.cli._cursor_hooks import _cursor_home, status_cursor_hooks
+        if target == "cursor":
+            return status_cursor_hooks()
+        if _cursor_home().exists():
+            status_cursor_hooks()
+        else:
+            print(f"cursor: {_cursor_home()} absent — skipped")
+        print()
+    if target in ("antigravity", "all"):
+        from iai_mcp.cli._antigravity_hooks import (
+            _antigravity_config_dir,
+            status_antigravity_hooks,
+        )
+        if target == "antigravity":
+            return status_antigravity_hooks()
+        if _antigravity_config_dir().exists():
+            status_antigravity_hooks()
+        else:
+            print(f"antigravity: {_antigravity_config_dir()} absent — skipped")
+        print()
+    if target in ("hermes", "all"):
+        from iai_mcp.cli._hermes_hooks import _hermes_home, status_hermes_hooks
+        if target == "hermes":
+            return status_hermes_hooks()
+        if _hermes_home().exists():
+            status_hermes_hooks()
+        else:
+            print(f"hermes: {_hermes_home()} absent — skipped")
+        print()
+    if target in ("openclaw", "all"):
+        from iai_mcp.cli._openclaw_mcp import _openclaw_home, status_openclaw_mcp
+        if target == "openclaw":
+            return status_openclaw_mcp()
+        if _openclaw_home().exists():
+            status_openclaw_mcp()
+        else:
+            print(f"openclaw: {_openclaw_home()} absent — skipped")
         print()
 
     src, dst, settings = _capture_hook_paths()

@@ -285,13 +285,13 @@ def test_row_t_hippo_compaction_stale_warn(tmp_path, monkeypatch):
 
 
 @_skip_on_lilli
-def test_doctor_total_count_22(tmp_path, monkeypatch):
+def test_doctor_total_row_count(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp.doctor import run_diagnosis
 
     results = run_diagnosis()
-    assert len(results) == 26, (
-        f"expected 26 rows; got {len(results)}: {[r.name for r in results]}"
+    assert len(results) == 27, (
+        f"expected 27 rows; got {len(results)}: {[r.name for r in results]}"
     )
 
 

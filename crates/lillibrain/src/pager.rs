@@ -1013,7 +1013,7 @@ impl Pager {
     /// When a transaction is open this is a no-op: durability is deferred to
     /// [`Pager::commit`], which routes through the WAL or the journal barrier.
     /// Outside a transaction it runs an implicit one-shot transaction so direct
-    /// callers (and the wave-2 tree mutations) still persist atomically.
+    /// callers (and the tree mutations) still persist atomically.
     pub fn flush(&self) -> Result<()> {
         if self.in_transaction() {
             return Ok(());

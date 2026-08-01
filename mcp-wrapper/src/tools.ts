@@ -44,7 +44,9 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
   memory_recall: {
     name: "memory_recall",
     description:
-      "Recall verbatim memories by cue. Returns hits + anti_hits with derived valid_from/valid_to. Read-only.",
+      "Recall verbatim memories by cue — decisions, preferences, prior " +
+      "discussion, rationale. Call before a repository search. Returns " +
+      "hits + anti_hits.",
     inputSchema: {
       type: "object",
       properties: {
@@ -52,7 +54,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           type: "string",
           description:
             "Natural-language query to match against stored memories. " +
-            "Embedded server-side by the configured provider unless " +
+            "Embedded server-side via bge-small-en-v1.5 (384d) unless " +
             "`cue_embedding` is supplied.",
         },
         budget_tokens: {
@@ -74,7 +76,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           items: { type: "number" },
           description:
             "Optional pre-computed embedding vector for the cue " +
-            "(its dimension must match the current store). " +
+            "(EMBED_DIM=384 floats; bge-small-en-v1.5). " +
             "When omitted, the daemon embeds the cue server-side. " +
             "Used by memory_contradict and tests that need byte-stable embeddings.",
         },
@@ -167,7 +169,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           items: { type: "number" },
           description:
             "Optional pre-computed embedding vector for the contradicting " +
-            "fact (its dimension must match the current store). When omitted, " +
+            "fact (EMBED_DIM=384 floats; bge-small-en-v1.5). When omitted, " +
             "the daemon embeds new_fact server-side.",
         },
       },
@@ -435,7 +437,8 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
   memory_search: {
     name: "memory_search",
     description:
-      "Use for code/doc search; returns hints to verify.",
+      "Use for code/doc search; returns hints to verify — never replaces " +
+      "a repository search.",
     inputSchema: {
       type: "object",
       properties: {

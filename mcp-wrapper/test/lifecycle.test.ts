@@ -48,36 +48,41 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
     const tmp = await makeTmp("kickstart");
     try {
       let kickstarts = 0;
-      let signalWritten = false;
+      let signalExistedAtKickstart = false;
+      const wakeSignalPath = join(tmp, "wake.signal");
       const lifecycle = new WrapperLifecycle({
         socketPath: join(tmp, "daemon.sock"),
-        wakeSignalPath: join(tmp, "wake.signal"),
+        wakeSignalPath,
         heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
         platform: "darwin",
         socketReachable: async () => false,
         spawnKickstart: async () => {
           kickstarts += 1;
+          try {
+            signalExistedAtKickstart = (await stat(wakeSignalPath)).isFile();
+          } catch {
+            signalExistedAtKickstart = false;
+          }
         },
       });
       await lifecycle.ensureDaemonAlive();
       assert.equal(kickstarts, 1, "kickstart must be invoked exactly once on darwin");
-      try {
-        await stat(join(tmp, "wake.signal"));
-        signalWritten = true;
-      } catch {
-        signalWritten = false;
-      }
+      const sigStat = await stat(wakeSignalPath);
+      assert.ok(
+        sigStat.isFile(),
+        "wake.signal must be written on darwin — kickstart alone never wakes the FSM out of HIBERNATION",
+      );
       assert.equal(
-        signalWritten,
-        false,
-        "wake.signal must NOT be written on successful kickstart",
+        signalExistedAtKickstart,
+        true,
+        "wake.signal must land BEFORE kickstart so the booting daemon finds it",
       );
     } finally {
       await cleanupTmp(tmp);
     }
   });
 
-  it("falls back to wake.signal when kickstart fails on darwin", async () => {
+  it("still writes wake.signal when kickstart fails on darwin", async () => {
     const tmp = await makeTmp("fallback");
     try {
       const lifecycle = new WrapperLifecycle({
@@ -121,6 +126,84 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
       assert.equal(kickstarts, 0, "subprocess must never be invoked on non-darwin");
       const sigStat = await stat(join(tmp, "wake.signal"));
       assert.ok(sigStat.isFile(), "wake.signal must exist on non-darwin path");
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+});
+
+
+describe("WrapperLifecycle.scheduleAutoHeal", () => {
+  it("spawns doctor --auto when the socket is still dead after the grace window", async () => {
+    const tmp = await makeTmp("heal-dead");
+    try {
+      let doctorSpawns = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => false,
+        spawnKickstart: async () => {},
+        spawnDoctorAuto: async () => {
+          doctorSpawns += 1;
+        },
+        doctorAutoGraceMs: 20,
+      });
+      lifecycle.scheduleAutoHeal();
+      await sleep(80);
+      assert.equal(doctorSpawns, 1, "doctor --auto must be spawned once when daemon stays dead");
+      await lifecycle.cleanupHeartbeat();
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
+  it("does NOT spawn doctor --auto when the socket recovered within the grace window", async () => {
+    const tmp = await makeTmp("heal-alive");
+    try {
+      let doctorSpawns = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => true,
+        spawnKickstart: async () => {},
+        spawnDoctorAuto: async () => {
+          doctorSpawns += 1;
+        },
+        doctorAutoGraceMs: 20,
+      });
+      lifecycle.scheduleAutoHeal();
+      await sleep(80);
+      assert.equal(doctorSpawns, 0, "a reachable daemon must not trigger the heal reflex");
+      await lifecycle.cleanupHeartbeat();
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
+  it("cleanupHeartbeat cancels a pending heal timer", async () => {
+    const tmp = await makeTmp("heal-cancel");
+    try {
+      let doctorSpawns = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => false,
+        spawnKickstart: async () => {},
+        spawnDoctorAuto: async () => {
+          doctorSpawns += 1;
+        },
+        doctorAutoGraceMs: 30,
+      });
+      lifecycle.scheduleAutoHeal();
+      await lifecycle.cleanupHeartbeat();
+      await sleep(80);
+      assert.equal(doctorSpawns, 0, "a cancelled heal timer must not fire");
     } finally {
       await cleanupTmp(tmp);
     }

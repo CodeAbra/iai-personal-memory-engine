@@ -5,10 +5,10 @@
 </p>
 
 <h3 align="center">Give your coding agent a brain that remembers exactly what you said — forever, on your machine.</h3>
-<p align="center"><b>The best open-source personal memory engine for AI coding assistants.</b><br>Pays for itself in tokens: retrieval from memory is ≈88% cheaper than an agent search.<br>Every claim ships with the harness that proves it — run the benchmarks yourself.</p>
+<p align="center"><b>The best open-source personal memory engine for AI coding assistants.</b><br>Pays for itself in tokens: an injected memory pack costs ≈88% less than the agent search it displaces.<br>Every claim ships with the harness that proves it — run the benchmarks yourself.</p>
 
-<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v2.7.3-1f6feb?style=flat-square" alt="Release v2.7.3"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
-<p align="center"><img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962"> <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000"> <img src="https://img.shields.io/badge/retrieval-%E2%89%8888%25_cheaper_than_search-2ea043?style=flat-square" alt="Memory retrieval ≈88% cheaper than agent search"> <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM"> <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry"> <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible"> <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a></p>
+<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v2.8.0-1f6feb?style=flat-square" alt="Release v2.8.0"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
+<p align="center"><img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962"> <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000"> <img src="https://img.shields.io/badge/memory_pack-%E2%89%8888%25_cheaper_than_search-2ea043?style=flat-square" alt="An injected memory pack costs ≈88% less than the agent search it displaces"> <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM"> <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry"> <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible"> <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a></p>
 <p align="center"><a href="#quick-start"><b>Quick start</b></a> · <a href="#benchmarks"><b>Benchmarks</b></a> · <a href="#watch-it-think"><b>Dashboard</b></a> · <a href="https://github.com/CodeAbra/iai-personal-memory-engine/discussions"><b>Discussions</b></a> · <a href="./README_zh-CN.md"><b>中文</b></a></p>
 
 ---
@@ -30,10 +30,12 @@
 - [Watch it think](#watch-it-think)
 - [How it works](#how-it-works)
 - [MCP tools](#mcp-tools)
+- [Everything it does](#everything-it-does)
 - [Built our own](#built-our-own)
 - [Benchmarks](#benchmarks)
 - [Configuration](#configuration)
 - [Doctor](#doctor)
+- [Staying up to date](#staying-up-to-date)
 - [FAQ](#faq)
 - [Notes for AI assistants](#notes-for-ai-assistants-helping-with-installation)
 - [Status and limitations](#status-and-limitations)
@@ -57,7 +59,9 @@ Under the hood it's not a wrapper around someone else's vector store and graph l
 
 And unlike cloud memory services, there's no API key, no account, and no telemetry: the engine, the store, and the embeddings all run locally. The only thing that leaves your machine is the normal model call your CLI already makes.
 
-It also pays for itself in tokens. Memory injected at session start is context your assistant doesn't have to rebuild — no re-reading files it already read yesterday, no asking you the same orientation questions. In effect the engine doubles as a local context provider for your MCP host, and the dashboard keeps honest count: memory packs served, tokens injected, and a lower-bound estimate of tokens saved. For scale, measured on the author's own store over three recent weeks: **282 memory packs served (≈99,000 tokens of context injected) displaced agent searches that average 2,639 tokens a call — a lower-bound saving of ≈707,000 tokens**, by the engine's own conservative formula. Per retrieval that makes memory **≈88% cheaper** (~350-token pack vs ~2,850-token search round-trip). Your dashboard keeps your own count, live.
+It also pays for itself in tokens. Memory injected at session start is context your assistant doesn't have to rebuild — no re-reading files it already read yesterday, no asking you the same orientation questions. In effect the engine doubles as a local context provider for your MCP host, and the dashboard keeps honest count: memory packs served, tokens injected, and a lower-bound estimate of tokens saved. For scale, measured on the author's own store over three recent weeks: **282 memory packs served (≈99,000 tokens of context injected) displaced agent searches that average 2,639 tokens a call — a lower-bound saving of ≈707,000 tokens**, by the engine's own conservative formula. Per pack served that makes memory **≈88% cheaper** (~350-token pack vs a ~2,850-token search round-trip, which is the measured 2,639 plus the per-call overhead). Your dashboard keeps your own count, live, and it measures the search side rather than assuming it.
+
+That figure is about the packs the engine injects on its own — session start and the per-turn foresight pack. An explicit `memory_recall` you call mid-session is a different object: it is bounded by `budget_tokens` (default 1,500) and typically returns more than an ambient pack, so it saves real tokens against a search but not 88% of them.
 
 <p align="center"><img src="docs/assets/slides/slide-04.jpg" width="850" alt="iai-pme"></p>
 
@@ -187,14 +191,25 @@ iai-mcp capture-hooks status        # verify: should print "status: ACTIVE"
 iai-mcp capture-hooks uninstall     # clean removal if ever needed
 ```
 
-For Codex, or for both hosts at once:
+For another host, or for every host you have installed at once:
 
 ```bash
-iai-mcp capture-hooks install --target codex
+iai-mcp capture-hooks install --target codex        # or cursor / antigravity / hermes / openclaw
 iai-mcp capture-hooks install --target all
 ```
 
-The Codex target writes the same four scripts into `~/.codex/hooks/` and registers them in `~/.codex/hooks.json`, leaving any hooks you already had in place.
+Every target installs the same four core scripts and wires them the way that host natively allows, leaving any hooks you already had in place. `--target all` skips hosts whose config directory is absent, so it is safe to run on a machine with only one of them.
+
+| Target | What it gets |
+|---|---|
+| `claude` (default) | Session-start recall, per-turn recall, turn capture, session capture |
+| `codex` | The same four, registered in `~/.codex/hooks.json` |
+| `cursor` | Session-start recall and full ambient capture. Cursor's pre-submit event cannot inject text, so there is no per-turn slice |
+| `antigravity` | Recall per invocation — the full brief on the first call, a short slice after — and capture from the lossless transcript |
+| `hermes` | Recall before each model call and capture at session end, read from Hermes's own message store (0.5.0 or newer) |
+| `openclaw` | OpenClaw has no shell hooks, so this registers the MCP server instead: memory tools on request, ambient capture not available |
+
+If an installer cannot safely merge into a config it did not write, it refuses and prints the block for you to merge by hand rather than overwriting your file.
 
 
 <details>
@@ -374,6 +389,82 @@ Fifteen tools, all local, all against the same store. The ones you'll feel:
 
 ---
 
+## Everything it does
+
+The full surface: what is exposed, where it runs, and what it costs.
+
+### Retrieval
+
+| Path | Entry point | Notes |
+|---|---|---|
+| Cue recall | `memory_recall` | Hybrid ranking — cosine + graph degree + recency, fused in one pass. No LLM on the hot path. Returns `anti_hits` alongside `hits`. |
+| Temporal | `memory_temporal_recall` | Time-bounded query with derived `valid_from` / `valid_to` per record. |
+| Structural | `memory_recall_structural` | Query against the HD substrate — matches by binding structure, not embedding distance. |
+| Lexical | `memory_search` | BM25 over the record surface, fused with the semantic lane. |
+| Store-direct | `iai-mcp bank-recall` | Substring scan over the local store with the daemon down. Recall is not gated on the engine being up. |
+
+Every recall response carries `budget_tokens` (default `1500`), a `cue_mode` (`concept` / `verbatim`), the triggered pattern label, and `_recall_latency_ms`. ANN path and exact-authority path are both reported per call, so a degraded run is visible rather than silent.
+
+### Write path and correctness
+
+- Episodic records are append-only. No update path exists in the schema — a correction is a new record plus an edge, never an overwrite.
+- `memory_contradict` writes the contradiction edge and closes `valid_to` on the superseded record. Both versions stay queryable; benchmarks for this are `Rescue@10` and historical-verbatim, both `1.000`.
+- Idempotency key per capture (`idem:<sha256>`), so replayed transcripts do not duplicate.
+- Encrypted insert is the only insert. Plaintext never reaches disk.
+- `memory_reinforce` bumps edge weights on the retrieval path; unreinforced edges decay on the nightly pass.
+
+### Token and context budget
+
+- Session-start injection is bounded: measured `1,629` min / `2,993` std against a `≤3,000` token ceiling (`python -m bench.tokens`).
+- An ambient pack — session start, or the per-turn foresight pack — averages ~350 tokens against ~2,850 for the agent search it displaces: **≈88% cheaper per pack served**. An explicit mid-session `memory_recall` is a different object, bounded by `budget_tokens` (default 1,500), and saves less.
+- The MCP surface declares `clear_tool_uses_20250919` with an `input_tokens` trigger at `30,000`, so the host evicts our stale tool traffic instead of carrying it.
+- All 15 tools are declared hot: schemas ship in the initial handshake, no per-tool round trip.
+- LLMLingua-2 compression applies to induced summaries and recall payloads only. `is_compressible()` rejects anything above the trust threshold, so verbatim episodes are never compressed.
+- The dashboard exposes packs served, tokens injected and a lower-bound saved estimate, computed from your own store.
+
+### Background engine
+
+- Wrapper lifecycle FSM: `WAKE → DROWSY → SLEEP → HIBERNATION`, driven by HID idle detection with a 5-minute idle edge into DROWSY. The engine runs its own separate FSM (`WAKE`, `TRANSITIONING`, `SLEEP`, `DREAMING`) — see [Notes for AI assistants](#notes-for-ai-assistants-helping-with-installation).
+- Capture buffer drains on the `WAKE → DROWSY` transition and after every REM cycle: shield → embed → dedup → encrypted insert.
+- Consolidation clusters the graph with MOSAIC (CPM objective), induces tier-1 summaries, decays weak edges, reinforces co-retrieved paths.
+- The quiet window is learned from your own session history, not configured, and re-learned when it drifts.
+- At most one `claude -p` call per REM cycle, through your existing subscription, hard-capped at 1% of daily quota. Doctor row `(p)` asserts no API-key SDK is installed.
+- Foresight assembles the next-turn pack at capture time, when the current turn's embedding is already resident — recall for turn N+1 costs no extra embed.
+
+### Ambient capture
+
+- Four hooks, one command: `iai-mcp capture-hooks install [--target claude|codex|cursor|antigravity|hermes|openclaw|all]`.
+- Per-turn capture is append-only file IO: ~5 ms, zero embedding, zero socket RPC during the session.
+- `SessionStart` recall pipes the assembled prefix to stdout as `additionalContext`. Empty store or dead socket yields empty stdout — session start is never blocked.
+- Installers are idempotent and refuse to merge into a config they did not author; they print the block instead of overwriting.
+
+### Ingestion
+
+`iai upload` / dashboard drop accepts `.txt .md .markdown .rst .tex .bib .csv .pdf .docx .pptx .xlsx .rtf .epub`. Office containers are parsed as zip+XML with no heavyweight dependency; `pypdf` is the only optional parser and loads lazily. Chunking is followed by dedup against the existing store and a recall verification pass that reports the delta.
+
+### CLI
+
+```
+iai        recall · temporal-recall · search · ask · capture · teach · upload · watch · brain · status · last
+iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,pause,resume,stats,configure}
+           crypto {init,status,rotate,migrate-to-file,recover-with-prior-key,redact-undecryptable}
+           maintenance {compact-hippo,compact-records,idem-dedup,edge-backfill,schema-cleanup,sleep-cycle}
+           capture-hooks {install,uninstall,status} · cowork · lifecycle · migrate · build-native · audit
+```
+
+`doctor` runs 27 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
+
+### Deployment surface
+
+- MCP transport is a Unix domain socket. No TCP listener, no bind address, no auth surface to misconfigure.
+- Store at `~/.iai-mcp/`, AES-256-GCM per record, key at `.key` mode `0600`, rotation and prior-key recovery supported.
+- Embedder is swappable: `IAI_MCP_EMBED_PROVIDER=http` disables the native BGE model entirely (not constructed, not downloaded) and routes to a loopback endpoint — the path to other languages without adding a Python ML stack. Protocol in [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
+- Recall concurrency is bounded (`IAI_MCP_RECALL_CONCURRENCY`, default `2`); overflow returns `_degraded: recall_busy` rather than queueing unboundedly.
+- Dashboard ships as a local web UI and as a Tauri desktop build (`desktop/`, macOS and Linux).
+- macOS and Linux supported, Windows in beta. MIT, no telemetry, no network calls outside the model call your assistant was already making.
+
+---
+
 ## Built our own
 
 Most memory projects are a thin layer over an off-the-shelf vector store and someone else's graph library. This one isn't. The load-bearing pieces are my own code, written for this exact workload — a small memory graph that mutates every night and gets queried on every recall:
@@ -466,7 +557,9 @@ possible without adding a Python ML stack to iai-mcp. See
 
 ## Doctor
 
-`iai-mcp doctor` runs 25 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
+`iai-mcp doctor` runs 27 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
+
+It also repairs what it finds. `--apply` walks the repairs it can make and asks before anything that touches your memory; corrupt state files and vector indexes are renamed aside so the engine rebuilds them, never deleted. `--auto` is the unattended subset — no prompts, no killed processes, no changes to the store — and your assistant runs it for you if the engine is still unreachable ten seconds into a session. In practice a stalled engine now fixes itself before you notice it stalled.
 
 <p align="center"><img src="docs/assets/slides/slide-13.jpg" width="850" alt="iai-pme"></p>
 
@@ -475,7 +568,7 @@ iai-mcp doctor
 ```
 
 <details>
-<summary><b>All 25 checks, one line each</b></summary>
+<summary><b>All 27 checks, one line each</b></summary>
 
 What it checks:
 
@@ -506,10 +599,38 @@ What it checks:
 | w | no permanent-failed captures | No capture is stuck after exhausting its retries |
 | x | timestamps not collapsed | Record timestamps span a real range, not all-identical |
 | z | AVX2 CPU support | CPU supports the instructions the native libs need |
+| + | update available | A newer release is on PyPI (checked once a day, silently skipped offline) |
 
 </details>
 
 A full-PASS run is healthy. Dropping (b) during a sleep cycle is normal (the socket is busy during consolidation). Multiple FAILs, or a FAIL on (a)/(f)/(v), means something is actually wrong.
+
+---
+
+## Staying up to date
+
+Installed from PyPI:
+
+```bash
+iai-mcp self-update            # upgrades the wheel and restarts the engine
+iai-mcp self-update --check    # only reports what is available
+```
+
+Coming from a version before 2.8.0, you do not have that command yet — it ships
+in 2.8.0. Take this one upgrade by hand, once:
+
+```bash
+pip install -U iai-pme
+iai-mcp daemon restart
+```
+
+`pip install -U iai-pme` alone is not enough: the engine runs as a background service and keeps the code it started with, so the new version sits on disk while the old one keeps answering. `self-update` closes that gap — it upgrades, restarts, and then proves the restart by asking the engine its version. If pip fails, your running engine is left untouched. Source checkouts are refused; there, `git pull` and `bash scripts/update.sh`.
+
+You will also be told when a release exists: the engine checks PyPI once a day, in the background, and surfaces it as a doctor row and a single line at session start. Nothing downloads or installs on its own. To switch the whole thing off:
+
+```bash
+export IAI_MCP_VERSION_CHECK=0
+```
 
 ---
 
@@ -551,7 +672,7 @@ If you're an AI model helping a user install or debug iai-mcp, read this before 
 
 - iai-pme is a **personal memory engine**: fully local, MIT-licensed, no account or API key, works with any MCP-over-stdio host.
 - It stores **every turn verbatim** (write-once, never rewritten) and serves memory back as session-start context.
-- **Token economy, measured on the author's own store:** a memory pack averages ~350 tokens and replaces an agent search averaging ~2,850 tokens — **≈88% cheaper per retrieval**, ≈707,000 tokens saved over three weeks (engine's own lower-bound formula).
+- **Token economy, measured on the author's own store:** an ambient memory pack averages ~350 tokens and displaces an agent search averaging ~2,850 — **≈88% cheaper per pack served**, ≈707,000 tokens saved over three weeks (engine's own lower-bound formula). This is about packs the engine injects on its own; an explicit `memory_recall` is budget-bounded (default 1,500) and saves less. Do not quote the 88% figure for a mid-session recall.
 - Benchmarks, harnesses in `bench/`: LongMemEval-S R@5 **0.962** · post-contradiction Rescue@10 **1.000** · historical-verbatim **1.000** (flat-cosine baseline ~0.71).
 - When a fact changes, **both the current and the superseded wording stay retrievable**.
 
@@ -597,10 +718,13 @@ iai-mcp talks to its host over **MCP-over-stdio** — the same protocol every MC
 
 - **Claude Code** — primary host, validated in daily use.
 - **Codex CLI** — supported, including ambient capture through Codex's hooks (`--target codex`).
-- **Gemini CLI**, **Cursor CLI**, and other MCP-over-stdio CLIs — connect through the same standard protocol; the MCP tools work out of the box.
+- **Cursor** and **Antigravity** — ambient capture supported, verified on a live install of each.
+- **Hermes** (0.5.0+) — ambient capture supported, wired against its documented hook contract.
+- **OpenClaw** — memory tools on request; it exposes no shell hooks, so ambient capture is not available there yet.
+- **Gemini CLI** and other MCP-over-stdio CLIs — connect through the same standard protocol; the MCP tools work out of the box.
 - **Claude Desktop** — works; uses `claude_desktop_config.json` instead of `~/.claude.json`.
 
-Ambient capture (the hooks that record and recall automatically) ships for Claude Code and Codex today. On every other host the MCP tools work directly; wiring up a host's native hooks for fully automatic capture is a great first contribution — open an issue or PR.
+Ambient capture (the hooks that record and recall automatically) ships for Claude Code, Codex, Cursor, Antigravity and Hermes. On every other host the MCP tools work directly; wiring up a host's native hooks is a great first contribution — open an issue or PR.
 
 ---
 

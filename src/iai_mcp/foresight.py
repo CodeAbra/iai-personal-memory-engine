@@ -275,6 +275,66 @@ def _blended_cue(
         return list(cue_embedding)
 
 
+#: A pending curiosity question rides the pack only when its cue is at least
+#: this close to the current turn's cue — questions surface inside the
+#: attention tunnel, never as a cold list.
+CURIOSITY_TUNNEL_MIN_COS: float = 0.60
+
+#: Per-process cache of question-cue embeddings; pending cues are stable
+#: strings, so each embeds once. Bounded: past the cap the cache resets
+#: (pending questions are few — the cap only guards a long-lived daemon).
+_QUESTION_CUE_VEC_CAP: int = 64
+_question_cue_vecs: "dict[str, list[float]]" = {}
+
+
+def _tunnel_question_line(
+    store: Any, cue_vec: "list[float]", blocked: "set[str]",
+) -> "tuple[str, str] | None":
+    """(line, question_id) for the best in-tunnel pending question, or None.
+
+    Reads the refresh-ahead curiosity cache, never the event log — this runs
+    on the per-turn capture path. A cold cache serves nothing this turn and
+    warms in the background.
+    """
+    try:
+        from iai_mcp.curiosity import get_pending_questions_cached
+        from iai_mcp.embed import embedder_for_store
+
+        questions = get_pending_questions_cached(store, limit=5)
+        if not questions:
+            return None
+        best: "tuple[float, dict] | None" = None
+        embedder = None
+        for q in questions:
+            q_cue = q.get("cue") or ""
+            q_id = q.get("id") or ""
+            if not q_cue or not q_id or f"q:{q_id}" in blocked:
+                continue
+            qv = _question_cue_vecs.get(q_cue)
+            if qv is None:
+                if embedder is None:
+                    embedder = embedder_for_store(store)
+                qv = list(embedder.embed(q_cue))
+                if len(_question_cue_vecs) >= _QUESTION_CUE_VEC_CAP:
+                    _question_cue_vecs.clear()
+                _question_cue_vecs[q_cue] = qv
+            num = sum(a * b for a, b in zip(cue_vec, qv))
+            den = (
+                sum(a * a for a in cue_vec) ** 0.5
+                * sum(b * b for b in qv) ** 0.5
+            )
+            cos = num / den if den > 0 else 0.0
+            if cos >= CURIOSITY_TUNNEL_MIN_COS and (best is None or cos > best[0]):
+                best = (cos, q)
+        if best is None:
+            return None
+        q = best[1]
+        return f"- ? open question (topic active now): {q['text']}", str(q["id"])
+    except Exception as exc:  # noqa: BLE001 -- the pack never fails because curiosity did
+        logger.debug("foresight tunnel question skipped: %s", exc)
+        return None
+
+
 def _exact_scores(store: Any, cue_vec: "list[float]", k: int) -> "dict[str, float]":
     """Lossless authority scores for the candidate window; empty = abstain
     (cold matrix builds in the background, this call never blocks capture)."""
@@ -449,6 +509,16 @@ def refresh_pack(
             report["packed"] += 1
             if superseded:
                 report["superseded"] += 1
+
+        # A pending curiosity question rides the pack when the current turn
+        # enters its topic — asked in the tunnel, once per TTL window.
+        _tq = _tunnel_question_line(store, cue_vec, blocked)
+        if _tq is not None:
+            _tq_line, _tq_qid = _tq
+            if used_chars + len(_tq_line) <= budget_chars:
+                lines.append(_tq_line)
+                used_chars += len(_tq_line)
+                packed_ids.append(f"q:{_tq_qid}")
 
         # Warm-but-unconfirmed traces never inject content, but they earn the
         # agent an explicit go-search pointer.

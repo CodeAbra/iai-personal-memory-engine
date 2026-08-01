@@ -116,6 +116,16 @@ def test_T2_call_on_demand_rereads_env_between_calls(
         ("IAI_MCP_STC_DRY_RUN", "banana"),
         ("IAI_MCP_STC_DRY_RUN", "maybe"),
     ],
+    # Explicit printable ids: the "  ,  " value would otherwise put raw
+    # spaces into the test id, which desyncs xdist's cross-process
+    # bookkeeping.
+    ids=[
+        "buffer-not-int", "buffer-zero", "buffer-negative", "buffer-1001",
+        "buffer-huge", "window-not-int", "window-zero", "window-negative",
+        "window-over-day", "types-empty", "types-lone-comma",
+        "types-double-comma", "types-blank-parts", "dryrun-banana",
+        "dryrun-maybe",
+    ],
 )
 def test_T2_R5_invalid_env_var_raises_ValueError_naming_the_var(
     monkeypatch: pytest.MonkeyPatch, env_var: str, bad_value: str,

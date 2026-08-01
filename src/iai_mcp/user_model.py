@@ -23,7 +23,6 @@ class UserModel:
     top_recent_topics: list[str] = field(default_factory=list)
     tool_usage_freq: dict[str, int] = field(default_factory=dict)
     time_of_day_pattern: dict[int, int] = field(default_factory=dict)
-    recent_projects: list[str] = field(default_factory=list)
     last_updated: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -68,7 +67,6 @@ def load() -> UserModel:
         top_recent_topics=list(data.get("top_recent_topics", []) or []),
         tool_usage_freq=dict(data.get("tool_usage_freq", {}) or {}),
         time_of_day_pattern=time_of_day_pattern,
-        recent_projects=list(data.get("recent_projects", []) or []),
         last_updated=last_updated,
         aggregation_window_days=int(
             data.get("aggregation_window_days", 30)
@@ -89,7 +87,6 @@ def save(model: UserModel) -> None:
             "top_recent_topics": list(model.top_recent_topics),
             "tool_usage_freq": dict(model.tool_usage_freq),
             "time_of_day_pattern": dict(model.time_of_day_pattern),
-            "recent_projects": list(model.recent_projects),
             "last_updated": model.last_updated.isoformat(),
             "aggregation_window_days": int(model.aggregation_window_days),
         }
@@ -207,24 +204,10 @@ class UserModelAggregator:
         tool_usage_freq = dict(tool_counter.most_common(20))
         time_of_day_pattern = dict(hour_counter)
 
-        project_events = query_events(
-            store,
-            kind="project_marker",
-            since=cutoff,
-            limit=1000,
-        )
-        projects: set[str] = set()
-        for ev in project_events:
-            p = (ev.get("data") or {}).get("project")
-            if isinstance(p, str) and p:
-                projects.add(p)
-        recent_projects = sorted(projects)
-
         return UserModel(
             top_recent_topics=top_recent_topics,
             tool_usage_freq=tool_usage_freq,
             time_of_day_pattern=time_of_day_pattern,
-            recent_projects=recent_projects,
             last_updated=now,
             aggregation_window_days=window_days,
         )
@@ -306,24 +289,3 @@ class UserModelPrefetcher:
 
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [rid for (_, _, rid) in scored[:top_k]]
-
-
-def record_surprise(
-    store,
-    predicted_topic: str,
-    actual_topic: str,
-) -> None:
-    from iai_mcp.daemon_config import _load_user_model_config
-    from iai_mcp.events import write_event
-
-    cfg = _load_user_model_config()
-    write_event(
-        store,
-        "user_model_surprise",
-        {
-            "predicted_topic": str(predicted_topic),
-            "actual_topic": str(actual_topic),
-            "dry_run_mode": bool(cfg.dry_run),
-        },
-        severity="info",
-    )

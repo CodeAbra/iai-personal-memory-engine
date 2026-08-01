@@ -180,10 +180,17 @@ COMMUNITY_BIAS_CONCEPT: float = 0.1
 
 _POST_RANK_MAX_HITS: int = 50
 
+#: Pending-recency markers may claim at most this share of the recall token
+#: budget when reclaiming space from ranked hits; past it a marker is dropped,
+#: never another ranked hit. Freshness must bias the response, not starve the
+#: associative lane (dozens of same-day markers would otherwise evict every
+#: ranked hit).
+_MARKER_BUDGET_SHARE: float = 0.25
 
-import os as _os_phase24  # noqa: E402 -- local alias to avoid os import collision
+
+import os as _os_local  # noqa: E402 -- local alias to avoid os import collision
 HISTORICAL_VERBATIM_DOWNWEIGHT: float = float(
-    _os_phase24.environ.get("IAI_MCP_HISTORICAL_VERBATIM_DOWNWEIGHT", "0.25"),
+    _os_local.environ.get("IAI_MCP_HISTORICAL_VERBATIM_DOWNWEIGHT", "0.25"),
 )
 
 
@@ -1599,15 +1606,24 @@ def _apply_post_rank_pipeline(
             except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
                 logger.debug("boost_edges_profile_modulates_failed: %s", exc)
 
-    if mode != "verbatim" and s4_scope_hits:
+    # Freshness markers carry score 0.0 by design — they are recency signal,
+    # not ranker output, and would collapse the nightly entropy to zero.
+    _curio_hits = [
+        h for h in s4_scope_hits if h.reason != "pending-recency"
+    ][:10]
+    if mode != "verbatim" and _curio_hits:
         try:
             write_event(
                 store,
                 kind="deferred_curiosity_input",
                 data={
-                    "hit_ids": [str(h.record_id) for h in s4_scope_hits[:10]],
+                    "hit_ids": [str(h.record_id) for h in _curio_hits],
+                    # Entropy is computed at night from these scores; the
+                    # ranker state cannot be reconstructed after the fact.
+                    "scores": [float(h.score) for h in _curio_hits],
                     "cue": cue[:200],
                     "session_id": session_id,
+                    "turn": int(turn),
                 },
                 severity="info",
                 session_id=session_id,
@@ -1783,18 +1799,26 @@ def recall_for_response(
 
     # Fold the pending-recency markers THROUGH the same token budget that
     # capped the regular hits above, instead of appending them past the cap.
-    # The freshness markers (score=0.0) are the lowest-priority surfaces, so a
-    # marker that would push past budget trims the lowest-priority *regular*
-    # hit to make room; only if no regular hit can be reclaimed does the marker
-    # get dropped. This keeps the markers represented while honouring the cap.
+    # The freshness markers (score=0.0) are the lowest-priority surfaces; a
+    # marker that would push past budget may trim the lowest-priority *regular*
+    # hit to make room, but the markers' total token cost is capped at
+    # _MARKER_BUDGET_SHARE of the budget — past that cap the marker is dropped,
+    # never another ranked hit.
     try:
         _pending_n = max(10, len(hits))
         _pending_markers = store.recent_pending_markers(n=_pending_n)
         _ranked_ids: set = {h.record_id for h in hits}
+        _marker_budget = int(budget_tokens * _MARKER_BUDGET_SHARE)
+        _marker_used = 0
+        # The share cap only protects ranked hits; with none packed, markers
+        # may fill the whole budget (degraded freshness-only serving).
+        _has_ranked = bool(hits)
         for _pm in _pending_markers:
             if _pm.id in _ranked_ids:
                 continue
             _pm_tokens = len(_pm.literal_surface or "") // 4
+            if _has_ranked and _marker_used + _pm_tokens > _marker_budget:
+                continue
             # Reclaim budget from the lowest-priority regular (non-marker) hit
             # when this marker would overflow. Regular hits keep score order
             # (highest first), so the last regular hit is the cheapest to drop.
@@ -1828,6 +1852,7 @@ def recall_for_response(
                 ),
             ))
             budget_used += _pm_tokens
+            _marker_used += _pm_tokens
     except Exception as _pm_exc:  # noqa: BLE001 -- recency union is additive; never crash recall
         logger.debug("pending_markers_union_failed: %s", _pm_exc)
 
@@ -1864,10 +1889,10 @@ def recall_for_response(
         # Final budget pack after the post-rank pipeline may have reordered the
         # list. Pack regular hits in their post-rank order up to budget, then
         # fold the recency markers back in within whatever budget remains,
-        # trimming the lowest-priority regular hit when a marker needs room.
-        # This guarantees the freshness markers survive the cap instead of
-        # being silently dropped when they sort last, while keeping the total
-        # emitted token cost at or under budget_tokens.
+        # trimming the lowest-priority regular hit when a marker needs room —
+        # but only within the markers' _MARKER_BUDGET_SHARE slice. Freshness
+        # markers survive the cap without starving the ranked hits; total
+        # emitted token cost stays at or under budget_tokens.
         _regular = [h for h in hits if h.reason != "pending-recency"]
         _markers = [h for h in hits if h.reason == "pending-recency"]
 
@@ -1880,8 +1905,16 @@ def recall_for_response(
             _final_hits.append(_fh)
             _final_budget += _fh_tokens
 
+        # Same share cap as the union fold above: markers reclaim ranked
+        # budget only within _MARKER_BUDGET_SHARE; with no ranked hits packed
+        # they may fill the whole budget.
+        _mk_budget = int(budget_tokens * _MARKER_BUDGET_SHARE)
+        _mk_used = 0
+        _has_ranked_final = bool(_final_hits)
         for _mk in _markers:
             _mk_tokens = len(_mk.literal_surface) // 4
+            if _has_ranked_final and _mk_used + _mk_tokens > _mk_budget:
+                continue
             while _final_budget + _mk_tokens > budget_tokens and _final_hits:
                 _regular_idx = next(
                     (
@@ -1899,6 +1932,7 @@ def recall_for_response(
                 continue
             _final_hits.append(_mk)
             _final_budget += _mk_tokens
+            _mk_used += _mk_tokens
 
         hits = _final_hits
         budget_used = _final_budget

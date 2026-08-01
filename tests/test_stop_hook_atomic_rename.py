@@ -84,7 +84,7 @@ def test_stop_hook_captures_incrementally_then_renames_live_file(tmp_path):
     assert result.returncode == 0, result.stderr
 
     after = list(deferred.iterdir())
-    renamed = [p for p in after if re.match(rf"^{re.escape(sid)}\.live-\d+\.jsonl$", p.name)]
+    renamed = [p for p in after if re.match(rf"^{re.escape(sid)}\.live-\d+-\d+\.jsonl$", p.name)]
     assert len(renamed) == 1, f"expected one renamed file, got {after}"
     assert not live.exists(), "original .live.jsonl must be gone after rename"
 
@@ -145,7 +145,7 @@ def test_rename_target_does_not_collide_with_safety_net_output(tmp_path):
 
     names = [p.name for p in deferred.iterdir()]
     collision_pattern = re.compile(rf"^{re.escape(sid)}-\d+\.jsonl$")
-    rename_pattern = re.compile(rf"^{re.escape(sid)}\.live-\d+\.jsonl$")
+    rename_pattern = re.compile(rf"^{re.escape(sid)}\.live-\d+-\d+\.jsonl$")
     assert any(rename_pattern.match(n) for n in names), names
     assert not any(collision_pattern.match(n) for n in names), \
         f"safety-net collision shape found in {names}"

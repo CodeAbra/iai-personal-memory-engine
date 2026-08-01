@@ -274,53 +274,6 @@ def _install_windows_task(*, dry_run: bool) -> int:
     return 0
 
 
-def _install_windows_task(*, dry_run: bool) -> int:
-    """Register the daemon as a per-user Task Scheduler task (logon trigger,
-    restart-on-failure) — the Windows counterpart of launchd/systemd install."""
-    from iai_mcp import cli as _cli
-
-    cmd_content = _render_windows_start_cmd()
-    xml_content = _render_windows_task_xml()
-
-    if dry_run:
-        print(f"# Would install start wrapper to: {_cli.WINDOWS_START_CMD}")
-        print(cmd_content)
-        print(f"# Would register task '{_cli.WINDOWS_TASK_NAME}' from: {_cli.WINDOWS_TASK_XML}")
-        print(xml_content)
-        return 0
-
-    _cli.WINDOWS_START_CMD.parent.mkdir(parents=True, exist_ok=True)
-    _cli.WINDOWS_START_CMD.write_text(cmd_content, encoding="utf-8")
-    # Task Scheduler expects its XML in UTF-16, matching its own export format.
-    _cli.WINDOWS_TASK_XML.write_text(xml_content, encoding="utf-16")
-
-    _cli._ensure_crypto_key_present()
-
-    result = _cli.subprocess.run(
-        [
-            "schtasks", "/Create",
-            "/TN", _cli.WINDOWS_TASK_NAME,
-            "/XML", str(_cli.WINDOWS_TASK_XML),
-            "/F",
-        ],
-        check=False, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(
-            f"schtasks /Create failed ({result.returncode}): "
-            f"{(result.stderr or result.stdout).strip()}",
-            file=sys.stderr,
-        )
-        return 1
-    _cli.subprocess.run(
-        ["schtasks", "/Run", "/TN", _cli.WINDOWS_TASK_NAME],
-        check=False, capture_output=True,
-    )
-
-    print(f"Installed scheduled task '{_cli.WINDOWS_TASK_NAME}' (start wrapper: {_cli.WINDOWS_START_CMD})")
-    return 0
-
-
 def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     yes = bool(getattr(args, "yes", False))
@@ -499,6 +452,161 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_daemon_restart(args: argparse.Namespace) -> int:
+    # stop waits through the SIGTERM window; the SIGKILL escalation returns
+    # without re-confirming death, so a start racing the dying process is
+    # possible — the O_CREAT|O_EXCL lifecycle lock degrades that to a failed
+    # start, never a double writer.
+    rc = cmd_daemon_stop(args)
+    if rc != 0:
+        return rc
+    rc = cmd_daemon_start(args)
+    if rc != 0:
+        return rc
+    print("Daemon restart requested (stop completed, start issued).")
+    return 0
+
+
+_SELF_UPDATE_PIP_TIMEOUT_SEC = 600.0
+_SELF_UPDATE_SOCKET_WAIT_SEC = 30.0
+
+
+def cmd_self_update(args: argparse.Namespace) -> int:
+    """Upgrade the wheel AND restart the daemon — the two halves that
+    `pip install -U` alone silently leaves apart: the wheel changes on
+    disk while the old engine keeps serving recall."""
+    import subprocess
+    import time as _time
+
+    from iai_mcp.version_check import (
+        PACKAGE_NAME,
+        fetch_latest_version,
+        installed_version,
+        is_editable_install,
+        is_newer,
+        refresh_cache,
+    )
+
+    check_only = bool(getattr(args, "check", False))
+    yes = bool(getattr(args, "yes", False))
+
+    current = installed_version()
+    if current is None:
+        print(
+            f"cannot determine the installed {PACKAGE_NAME} version — "
+            "is this a packaged install?",
+            file=sys.stderr,
+        )
+        return 1
+    if is_editable_install():
+        print(
+            "this is a source (editable) checkout — self-update would replace "
+            "it with the wheel. Update via git + your build script instead.",
+            file=sys.stderr,
+        )
+        return 1
+
+    latest = fetch_latest_version()
+    if latest is None:
+        print("PyPI is unreachable — try again when online.", file=sys.stderr)
+        return 1
+    if not is_newer(latest, current):
+        refresh_cache(force=True)
+        print(f"already up to date ({current}).")
+        return 0
+
+    print(f"{PACKAGE_NAME} {current} -> {latest}")
+    if check_only:
+        return 0
+    if not yes:
+        try:
+            answer = input("  [y/N] upgrade the package and restart the daemon: ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() != "y":
+            print("aborted — nothing changed.")
+            return 1
+
+    # Everything needed AFTER pip must be imported BEFORE pip: the upgrade
+    # rewrites this package on disk under the running interpreter, and a
+    # post-upgrade import could load new-layout modules into old code.
+    import asyncio as _asyncio
+
+    from iai_mcp import daemon_state as _preload_ds  # noqa: F401
+    from iai_mcp import lifecycle_lock as _preload_ll  # noqa: F401
+    from iai_mcp.doctor import _resolve_socket_path, _socket_status_probe
+
+    pip_cmd = [
+        sys.executable, "-m", "pip", "install", "--upgrade",
+        f"{PACKAGE_NAME}=={latest}",
+    ]
+    try:
+        proc = subprocess.run(
+            pip_cmd, capture_output=True, text=True,
+            timeout=_SELF_UPDATE_PIP_TIMEOUT_SEC, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"pip upgrade failed to run: {e}", file=sys.stderr)
+        print("daemon NOT restarted — the old engine keeps serving.", file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+        for line in tail:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            f"pip exited {proc.returncode}; daemon NOT restarted — "
+            "the old engine keeps serving.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"package upgraded to {latest}; restarting the daemon ...")
+
+    rc = cmd_daemon_restart(args)
+    if rc != 0:
+        print(
+            "daemon restart failed — start it manually: `iai-mcp daemon start`",
+            file=sys.stderr,
+        )
+        return 1
+
+    # "Is live" must be proven by a status round-trip reporting the NEW
+    # version — a SIGKILLed daemon leaves its socket file on disk, so a
+    # bare stat() would call a corpse alive.
+    socket_path = _resolve_socket_path()
+    served: str | None = None
+    deadline = _time.monotonic() + _SELF_UPDATE_SOCKET_WAIT_SEC
+    while _time.monotonic() < deadline:
+        try:
+            resp = _asyncio.run(_socket_status_probe(socket_path, timeout=2.0))
+        except Exception:  # noqa: BLE001 — probe failure = not up yet
+            resp = None
+        if isinstance(resp, dict) and resp.get("version"):
+            served = str(resp["version"])
+            if served == latest:
+                refresh_cache(force=True)
+                print(
+                    f"done — {PACKAGE_NAME} {latest} is live (status "
+                    "round-trip). Run `iai-mcp doctor` for a full checkup."
+                )
+                return 0
+        _time.sleep(1.0)
+    if served is not None:
+        print(
+            f"daemon is up but serves {served}, expected {latest} — the "
+            "restart may not have picked up the new code; check "
+            "`iai-mcp daemon status`.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"upgraded to {latest}, restart issued, but the daemon did not "
+            f"answer a status round-trip in {_SELF_UPDATE_SOCKET_WAIT_SEC:.0f}s "
+            "— check `iai-mcp daemon status` / `iai-mcp doctor --apply`.",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def _compute_p90_from_events(events: list[dict]) -> dict[str, int | None]:

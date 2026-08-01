@@ -37,7 +37,7 @@ def _monkeypatch_env(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("IAI_MCP_RECALL_SAMPLE_RATE", "1.0")
     monkeypatch.setenv(
         "IAI_MCP_CRYPTO_PASSPHRASE",
-        "iai-mcp-test-passphrase-not-secret",
+        "iai-mcp-test-passphrase",
     )
 
 
@@ -130,6 +130,77 @@ def test_recency_union_stays_within_budget_and_marker_survives(tmp_path, monkeyp
     assert marker_hit.literal_surface == pending_text, (
         "recency marker surface was mutated — verbatim invariant violated"
     )
+
+
+def test_many_markers_do_not_starve_ranked_hits(tmp_path, monkeypatch):
+    # Dozens of recency markers (an active day) must not evict every ranked
+    # hit: markers reclaim ranked budget only within their bounded share.
+    _monkeypatch_env(monkeypatch, tmp_path)
+
+    store_path = tmp_path / "marker-flood-store"
+    store_path.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(str(store_path))
+
+    long_body = "User long filler record content that is intentionally verbose " * 7
+    for i in range(12):
+        rec = _make(
+            text=f"{long_body} index {i}",
+            vec=_random_vec(7000 + i),
+        )
+        store.insert(rec)
+
+    now = datetime.now(timezone.utc)
+    for i in range(30):
+        store.db.insert_pending_row(
+            record_id=str(UUID(int=900_000 + i)),
+            tier="episodic",
+            literal_surface=f"User pending recency flood marker number {i}",
+            provenance_json="[]",
+            created_at=now.isoformat(),
+            updated_at=now.isoformat(),
+            tags_json="[]",
+        )
+
+    import iai_mcp.retrieve as _retrieve
+    import iai_mcp.runtime_graph_cache as _rgc
+
+    _graph, _assignment, _rc = _retrieve.build_runtime_graph(store)
+    _rgc.save(store, _assignment, _rc)
+
+    from iai_mcp.embed import Embedder
+    from iai_mcp.pipeline import _MARKER_BUDGET_SHARE, recall_for_response
+    import iai_mcp.pipeline as _pipeline_mod
+
+    _pipeline_mod._last_recall_latency_ms = 0.0
+    embedder = Embedder()
+
+    budget_tokens = 300
+
+    response = recall_for_response(
+        store=store,
+        graph=_graph,
+        assignment=_assignment,
+        rich_club=_rc,
+        embedder=embedder,
+        cue="User long filler record content verbose",
+        session_id="test-session",
+        budget_tokens=budget_tokens,
+        mode="concept",
+    )
+
+    ranked = [h for h in response.hits if h.reason != "pending-recency"]
+    markers = [h for h in response.hits if h.reason == "pending-recency"]
+    assert ranked, (
+        f"marker flood evicted every ranked hit; reasons="
+        f"{[h.reason for h in response.hits]}"
+    )
+    marker_tokens = sum(_token_cost(h.literal_surface) for h in markers)
+    assert marker_tokens <= int(budget_tokens * _MARKER_BUDGET_SHARE), (
+        f"markers consumed {marker_tokens} tokens, above their "
+        f"{_MARKER_BUDGET_SHARE:.0%} share of {budget_tokens}"
+    )
+    realized_tokens = sum(_token_cost(h.literal_surface) for h in response.hits)
+    assert realized_tokens <= budget_tokens
 
 
 def test_single_fat_marker_alone_within_budget(tmp_path, monkeypatch):

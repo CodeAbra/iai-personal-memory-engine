@@ -210,7 +210,7 @@ def test_foreground_recall_not_starved_during_boot_rebuild(tmp_path: Path) -> No
     """A foreground socket recall fired DURING the boot rebuild window must
     return within the warm SLA even while the whole-corpus rebuild runs.
 
-    Reuses the phase-178 isolated-daemon harness (a fresh-migrated prod-scale
+    Reuses the isolated-daemon harness (a fresh-migrated prod-scale
     lilli copy with a drift-mismatched stale cache) as a during-boot recall
     probe: the stale cache forces a cold whole-corpus rebuild at boot, and a
     foreground recall is fired while it runs.

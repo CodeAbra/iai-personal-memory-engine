@@ -5,7 +5,8 @@ Forbidden:
 - pinned records (includes L0 identity)
 - invariant_anchor records (s5_trust_score >= 0.9)
 - user-tagged raw: records (raw:en, raw:ru, ...)
-- normal episodic records (default reject; literal_surface is constitutional
+- normal episodic records (default reject; the stored literal surface is
+  preserved verbatim)
 
 Allowed:
 - records tagged cls_summary (CLS consolidation output)
@@ -47,14 +48,15 @@ def is_compressible(record) -> tuple[bool, str]:
     Reason is a short English diagnostic consumed only in tests / debug logs.
     """
     if getattr(record, "pinned", False):
-        return False, "pinned record (D-14 L0 / user-pinned)"
+        return False, "pinned record (identity core / user-pinned)"
 
     trust = getattr(record, "s5_trust_score", 0.5)
     try:
         if float(trust) >= INVARIANT_TRUST_THRESHOLD:
             return False, (
                 f"invariant anchor (trust={float(trust):.2f} >= "
-                f"{INVARIANT_TRUST_THRESHOLD}); D-22 forbids compression"
+                f"{INVARIANT_TRUST_THRESHOLD}); compression forbidden above "
+                "the trust threshold"
             )
     except (TypeError, ValueError):
         pass
@@ -70,7 +72,7 @@ def is_compressible(record) -> tuple[bool, str]:
         if tag in allow_tags:
             return True, ""
 
-    return False, "literal_surface constitutional (D-25 default deny)"
+    return False, "literal_surface preserved verbatim (default deny)"
 
 
 _LLMLINGUA_LOCK = threading.Lock()

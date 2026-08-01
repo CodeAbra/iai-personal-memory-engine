@@ -28,7 +28,6 @@ from iai_mcp.user_model import (
     UserModelPrefetcher,
     default,
     load,
-    record_surprise,
     save,
 )
 
@@ -116,21 +115,18 @@ def test_R1_persistence_roundtrip_chmod_default(
     assert fresh.top_recent_topics == []
     assert fresh.tool_usage_freq == {}
     assert fresh.time_of_day_pattern == {}
-    assert fresh.recent_projects == []
     assert fresh.aggregation_window_days == 30
 
     d = default()
     assert d.top_recent_topics == []
     assert d.tool_usage_freq == {}
     assert d.time_of_day_pattern == {}
-    assert d.recent_projects == []
     assert d.aggregation_window_days == 30
 
     model = UserModel(
         top_recent_topics=["python async", "torchhd hdc", "alice notes"],
         tool_usage_freq={"memory_recall": 42, "memory_capture": 7},
         time_of_day_pattern={9: 5, 14: 12, 22: 1},
-        recent_projects=["project-alpha"],
         last_updated=datetime(2026, 5, 16, 8, 42, 13, tzinfo=timezone.utc),
         aggregation_window_days=14,
     )
@@ -148,7 +144,6 @@ def test_R1_persistence_roundtrip_chmod_default(
     assert loaded.tool_usage_freq == {"memory_recall": 42, "memory_capture": 7}
     assert loaded.time_of_day_pattern == {9: 5, 14: 12, 22: 1}
     assert all(isinstance(k, int) for k in loaded.time_of_day_pattern.keys())
-    assert loaded.recent_projects == ["project-alpha"]
     assert loaded.aggregation_window_days == 14
     assert loaded.last_updated == datetime(
         2026, 5, 16, 8, 42, 13, tzinfo=timezone.utc,
@@ -260,7 +255,6 @@ def test_R4_prefetcher_returns_topic_matches(
         top_recent_topics=[label_match_1, label_match_2],
         tool_usage_freq={},
         time_of_day_pattern={},
-        recent_projects=[],
         last_updated=datetime.now(timezone.utc),
         aggregation_window_days=30,
     )
@@ -312,7 +306,6 @@ def test_R5_session_start_prefetch_integration_path(
         top_recent_topics=[label_alpha, label_beta],
         tool_usage_freq={"memory_recall": 5},
         time_of_day_pattern={datetime.now(timezone.utc).hour: 5},
-        recent_projects=[],
         last_updated=datetime.now(timezone.utc),
         aggregation_window_days=30,
     )
@@ -383,29 +376,12 @@ def test_R6_dry_run_skips_save_but_emits_event(
         "topics_count",
         "tools_count",
         "hours_count",
-        "projects_count",
         "window_days",
         "dry_run_mode",
     ):
         assert key in body, f"event body missing key {key!r}; body={body!r}"
     assert isinstance(body["topics_count"], int)
     assert isinstance(body["window_days"], int)
-
-def test_R6_record_surprise_emits_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = _make_store(tmp_path)
-    record_surprise(store, predicted_topic="alpha", actual_topic="beta")
-    events = query_events(store, kind="user_model_surprise", limit=10)
-    assert len(events) == 1, (
-        f"record_surprise must emit exactly one event, got {len(events)}"
-    )
-    body = events[0]["data"]
-    assert body["predicted_topic"] == "alpha"
-    assert body["actual_topic"] == "beta"
-    assert "dry_run_mode" in body
-    assert isinstance(body["dry_run_mode"], bool)
-    assert body["dry_run_mode"] is True
 
 @pytest.mark.parametrize(
     "env_var, bad_value",

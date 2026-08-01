@@ -1,4 +1,4 @@
-"""Wave-1 verification of lilli.core primitives: deterministic seeding, hypervector generation, constitutional projection matrix (SHA256-locked), and tier-agnostic similarity functions.
+"""Verification of lilli.core primitives: deterministic seeding, hypervector generation, the SHA256-locked projection matrix, and tier-agnostic similarity functions.
 """
 from __future__ import annotations
 

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 
 from iai_mcp.profile import (
-    PHASE_1_LIVE,
-    PHASE_2_DEFERRED,
-    PHASE_3_DEFERRED,
+    LIVE_KNOB_NAMES,
+    DEFERRED_KNOB_NAMES,
     PROFILE_KNOBS,
     default_state,
     profile_get,
@@ -12,21 +11,15 @@ from iai_mcp.profile import (
 )
 
 
-def test_phase_1_live_has_14_knobs():
-    assert len(PHASE_1_LIVE) == 11
+def test_live_knob_names_has_11_knobs():
+    assert len(LIVE_KNOB_NAMES) == 11
 
 
-def test_phase_3_deferred_now_empty_after_autist13_flip():
-    assert PHASE_3_DEFERRED == frozenset()
-    assert len(PHASE_3_DEFERRED) == 0
+def test_deferred_knob_names_empty():
+    assert DEFERRED_KNOB_NAMES == frozenset()
 
 
-def test_phase_2_deferred_empty():
-    assert PHASE_2_DEFERRED == frozenset()
-    assert len(PHASE_2_DEFERRED) == 0
-
-
-def test_all_14_requirement_ids_present():
+def test_all_requirement_ids_present():
     autist_specs = [
         s for s in PROFILE_KNOBS.values() if s.requirement_id.startswith("AUTIST-")
     ]

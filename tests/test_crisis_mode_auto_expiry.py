@@ -83,7 +83,7 @@ class TestPredicate:
         assert ctx3["expired_after_sec"] == THRESHOLD_SEC + 1
 
     def test_legacy_load_no_since_ts_returns_backfill(self):
-        # Alice's live wedge shape: crisis_mode=True, no since_ts. Predicate
+        # alice's live wedge shape: crisis_mode=True, no since_ts. Predicate
         # backfills since_ts to first-observation time and does NOT emit.
         state = _state_with_crisis(True, None)
         expired, ctx = daemon._check_crisis_mode_expiry(state, NOW)

@@ -8,7 +8,6 @@ from iai_mcp.lilli.cycle.sleep_pipeline import SleepStep
 
 logger = logging.getLogger(__name__)
 
-
 def step_user_model_update(
     self, interrupt_check: Callable[[], bool] | None,
 ) -> tuple[bool, dict[str, Any]]:
@@ -39,8 +38,7 @@ def step_user_model_update(
                     "topics_count": int(len(model.top_recent_topics)),
                     "tools_count": int(len(model.tool_usage_freq)),
                     "hours_count": int(len(model.time_of_day_pattern)),
-                    "projects_count": int(len(model.recent_projects)),
-                    "window_days": int(cfg.aggregation_window_days),
+                                        "window_days": int(cfg.aggregation_window_days),
                     "dry_run_mode": False,
                     "persist_error": str(exc)[:500],
                 },
@@ -59,8 +57,7 @@ def step_user_model_update(
             "topics_count": int(len(model.top_recent_topics)),
             "tools_count": int(len(model.tool_usage_freq)),
             "hours_count": int(len(model.time_of_day_pattern)),
-            "projects_count": int(len(model.recent_projects)),
-            "window_days": int(cfg.aggregation_window_days),
+                        "window_days": int(cfg.aggregation_window_days),
             "dry_run_mode": bool(cfg.dry_run),
         },
         severity="info",

@@ -332,8 +332,10 @@ from ._cowork import (
 from ._daemon import (
     cmd_daemon_install,
     cmd_daemon_uninstall,
+    cmd_daemon_restart,
     cmd_daemon_start,
     cmd_daemon_stop,
+    cmd_self_update,
     cmd_daemon_status,
     cmd_daemon_logs,
     cmd_daemon_force_rem,
@@ -687,13 +689,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ch = sub.add_parser(
         "capture-hooks",
-        help="install/uninstall/status the ambient-capture hooks (Claude Code, Codex)",
+        help=(
+            "install/uninstall/status the ambient-capture hooks "
+            "(Claude Code, Codex, Cursor, Antigravity, Hermes, OpenClaw)"
+        ),
     )
     ch_sub = ch.add_subparsers(dest="capture_hooks_cmd", required=True)
     _target_kwargs = {
-        "choices": ("claude", "codex", "all"),
+        "choices": (
+            "claude", "codex", "cursor", "antigravity", "hermes",
+            "openclaw", "all",
+        ),
         "default": "claude",
-        "help": "host to wire: claude (default), codex, or all",
+        "help": (
+            "host to wire: claude (default), codex, cursor, antigravity "
+            "(CLI), hermes (>= 0.5.0), openclaw (MCP tools only), or all"
+        ),
     }
     ch_install = ch_sub.add_parser(
         "install",
@@ -807,6 +818,29 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon_sub.add_parser(
         "stop", help="launchctl kill SIGTERM / systemctl --user stop",
     ).set_defaults(func=cmd_daemon_stop)
+
+    daemon_sub.add_parser(
+        "restart", help="stop (waits for the old pid to die) then start",
+    ).set_defaults(func=cmd_daemon_restart)
+
+    su = sub.add_parser(
+        "self-update",
+        help=(
+            "upgrade the iai-pme wheel from PyPI AND restart the daemon — "
+            "`pip install -U` alone leaves the old engine running. Refuses "
+            "editable/source checkouts. --check prints the pending version "
+            "without changing anything."
+        ),
+    )
+    su.add_argument(
+        "--check", action="store_true", default=False,
+        help="only report whether a newer version exists; change nothing",
+    )
+    su.add_argument(
+        "--yes", "-y", action="store_true", default=False,
+        help="skip the confirmation prompt",
+    )
+    su.set_defaults(func=cmd_self_update)
 
     daemon_sub.add_parser(
         "status",
@@ -1143,6 +1177,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="(use with --apply) skip confirmation prompts; equivalent to typing 'y' to all",
+    )
+    doc.add_argument(
+        "--auto",
+        action="store_true",
+        default=False,
+        help=(
+            "unattended reflex mode: run ONLY the auto-safe heal subset "
+            "(no prompts, no process kills, no store mutations), damped to "
+            "once per 6h. Spawned by the MCP wrapper when the daemon stays "
+            "unreachable after a wake attempt."
+        ),
     )
     doc.add_argument(
         "--headless",

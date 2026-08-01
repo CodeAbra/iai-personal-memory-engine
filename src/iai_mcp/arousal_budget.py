@@ -94,21 +94,3 @@ def compute_retrieval_params(arousal: ArousalState) -> RetrievalParams:
             rank_threshold=rank,
             mode="balanced",
         )
-
-
-def basta_check(
-    writes_last_minute: int,
-    total_records: int,
-    community_count: int,
-) -> bool:
-    if writes_last_minute > BASTA_WRITE_CAP_PER_MINUTE:
-        logger.info("Basta: write rate %d/min exceeds cap %d", writes_last_minute, BASTA_WRITE_CAP_PER_MINUTE)
-        return True
-
-    if community_count > 0:
-        ratio = total_records / community_count
-        if ratio > (1.0 / BASTA_CAPACITY_RATIO) * 100:
-            logger.info("Basta: records/community ratio %.1f exceeds capacity", ratio)
-            return True
-
-    return False

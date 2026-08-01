@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from iai_mcp.events import query_events, write_event
@@ -15,6 +16,15 @@ ENTROPY_LOW: float = 0.4
 ENTROPY_MID: float = 0.7
 ENTROPY_HIGH: float = 0.9
 COOLDOWN_TURNS: int = 3
+
+# The miner resolves a pending question when its topic gains records after
+# the question was minted (the conversation moved on); the TTL is the
+# backstop for questions whose topic simply went quiet.
+PENDING_TTL_DAYS: int = 7
+
+MINE_MAX_PER_SESSION: int = 2
+MINE_MAX_PER_RUN: int = 10
+MINE_SCAN_LIMIT: int = 500
 
 _log = logging.getLogger(__name__)
 
@@ -34,9 +44,14 @@ class CuriosityQuestion:
     entropy: float = 0.0
     tier: str = "question"
     resolved: bool = False
+    cue: str = ""
 
 
 def compute_entropy(scores: list[float]) -> float:
+    # Normalized to [0, 1] by log2(n): the tier thresholds (ENTROPY_LOW /
+    # silent / question) are calibrated on that scale — raw Shannon entropy
+    # grows with candidate count and would push every multi-hit recall past
+    # the top threshold.
     if not scores:
         return 0.0
     positive = [max(0.0, float(s)) for s in scores]
@@ -45,10 +60,14 @@ def compute_entropy(scores: list[float]) -> float:
         return 0.0
     probs = [p / total for p in positive]
     h = 0.0
+    n_pos = 0
     for p in probs:
         if p > 0:
+            n_pos += 1
             h -= p * math.log2(p)
-    return h
+    if n_pos <= 1:
+        return 0.0
+    return h / math.log2(n_pos)
 
 
 def _last_curiosity_turn(store: MemoryStore, session_id: str) -> int | None:
@@ -91,15 +110,33 @@ def fire_curiosity(
     if last is not None and (turn - last) < COOLDOWN_TURNS:
         return None
 
+    trigger_ids: list[UUID] = [h.record_id for h in hits[:5]]
+    return _mint_question(
+        store, trigger_ids, cue=cue, entropy=entropy,
+        session_id=session_id, turn=turn,
+    )
+
+
+def _mint_question(
+    store: MemoryStore,
+    trigger_ids: list[UUID],
+    *,
+    cue: str,
+    entropy: float,
+    session_id: str,
+    turn: int,
+    text: str | None = None,
+) -> CuriosityQuestion:
     q_id = uuid4()
-    if entropy < ENTROPY_HIGH:
+    if text is not None:
+        tier = "question"
+    elif entropy < ENTROPY_HIGH:
         tier = "inline"
         text = f"I'm not fully sure -- did you mean {cue!r}?"
     else:
         tier = "question"
         text = f"Could you clarify: {cue!r}?"
 
-    trigger_ids: list[UUID] = [h.record_id for h in hits[:5]]
     question = CuriosityQuestion(
         id=q_id,
         text=text,
@@ -128,6 +165,7 @@ def fire_curiosity(
             "tier": tier,
             "entropy": float(entropy),
             "turn": int(turn),
+            "cue": cue[:200],
             "triggered_by": [str(t) for t in trigger_ids],
         },
         severity="info",
@@ -135,6 +173,223 @@ def fire_curiosity(
         source_ids=trigger_ids,
     )
     return question
+
+
+def _fresh_topic_scan(
+    store: MemoryStore, cue: str,
+) -> "tuple[list[UUID], dict[UUID, object]]":
+    """Rank the cue against the CURRENT store: (top ids, id -> record).
+
+    Empty result on any failure — a question needs present-tense evidence,
+    so a failed scan means no question, never a stale one.
+    """
+    try:
+        from iai_mcp.embed import embedder_for_store
+
+        vec = list(embedder_for_store(store).embed(cue))
+        pairs = store.exact_top_k(vec, k=10)
+        ids = [rid for rid, _ in pairs[:5]]
+        if not ids:
+            return [], {}
+        recs = store.get_batch(ids)
+        return ids, recs
+    except Exception as exc:  # noqa: BLE001 -- nightly step must degrade, not crash
+        _log.debug("curiosity_fresh_scan_failed: %s", exc)
+        return [], {}
+
+
+def _contradiction_pair(
+    store: MemoryStore, top_ids: "list[UUID]", recs: dict,
+) -> "tuple[UUID, UUID] | None":
+    """First contradicts edge incident to the fresh top candidates."""
+    try:
+        edges = store.incident_edges(
+            top_ids, edge_types=["contradicts"], top_k=None,
+        )
+    except Exception as exc:  # noqa: BLE001 -- evidence probe must degrade
+        _log.debug("curiosity_contradiction_probe_failed: %s", exc)
+        return None
+    for src, lst in edges.items():
+        for item in lst:
+            try:
+                neighbor = item[0] if isinstance(item[0], UUID) else UUID(str(item[0]))
+            except (TypeError, ValueError):
+                continue
+            return src, neighbor
+    return None
+
+
+def _one_line(text: str, limit: int = 100) -> str:
+    return " ".join((text or "").split())[:limit]
+
+
+def process_deferred_inputs(
+    store: MemoryStore,
+    *,
+    scan_limit: int = MINE_SCAN_LIMIT,
+) -> dict:
+    """Replay buffered ``deferred_curiosity_input`` events and mint pending
+    questions from PRESENT contradictions.
+
+    The deferred event is only a pointer at a topic; every decision is made
+    against the current store. Per event: re-rank the cue now; if the topic
+    gained records after the snapshot it is being actively worked — skip,
+    and resolve any pending question on that cue (the conversation moved
+    on). A question mints only when the fresh top candidates carry a live
+    ``contradicts`` edge — the question then names both sides verbatim.
+    High-entropy topics without a contradiction are dense knowledge, not
+    confusion: they earn at most a silent log.
+
+    A ``curiosity_mine_run`` watermark event records the newest processed
+    timestamp, so re-running (including a WAL-recovery replay of the sleep
+    cycle) never double-mints. Events written before scores were added to
+    the payload carry no entropy signal and are skipped past by the
+    watermark.
+    """
+    since: datetime | None = None
+    runs = query_events(store, kind="curiosity_mine_run", limit=1)
+    if runs:
+        raw = runs[0]["data"].get("through_ts")
+        try:
+            since = datetime.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            since = None
+
+    events = query_events(
+        store,
+        kind="deferred_curiosity_input",
+        since=since,
+        since_exclusive=True,
+        limit=scan_limit,
+    )
+    events.reverse()
+
+    asked_cues: set[str] = set()
+    pending_by_cue: dict[str, str] = {}
+    for prior in query_events(store, kind="curiosity_question", limit=200):
+        prior_cue = prior["data"].get("cue")
+        if prior_cue:
+            asked_cues.add(prior_cue)
+    for q in pending_questions(store):
+        if q.cue:
+            pending_by_cue[q.cue] = str(q.id)
+
+    minted = 0
+    silent = 0
+    resolved = 0
+    skipped_active = 0
+    per_session: dict[str, int] = {}
+    through_ts: datetime | None = None
+    # The same cue recurs across a day's deferred events; embed + rank +
+    # edge-probe once per distinct cue, not once per event.
+    scan_memo: dict[str, tuple] = {}
+
+    for e in events:
+        through_ts = e["ts"]
+        data = e["data"]
+        cue = str(data.get("cue") or "")[:200]
+        scores_raw = data.get("scores")
+        if not cue or not isinstance(scores_raw, list) or not scores_raw:
+            continue
+        try:
+            scores = [float(s) for s in scores_raw]
+        except (TypeError, ValueError):
+            continue
+        entropy = compute_entropy(scores)
+        if entropy < ENTROPY_LOW:
+            continue
+        sid = e.get("session_id") or "-"
+
+        memo = scan_memo.get(cue)
+        if memo is None:
+            memo = _fresh_topic_scan(store, cue)
+            scan_memo[cue] = memo
+        top_ids, recs = memo
+
+        event_ts = e.get("ts")
+        topic_active = False
+        if isinstance(event_ts, datetime):
+            for rec in recs.values():
+                ca = getattr(rec, "created_at", None)
+                if ca is not None and ca > event_ts:
+                    topic_active = True
+                    break
+        if topic_active:
+            skipped_active += 1
+            qid = pending_by_cue.pop(cue, None)
+            if qid is not None:
+                write_event(
+                    store,
+                    kind="curiosity_resolved",
+                    data={"question_id": qid, "reason": "topic_active"},
+                    severity="info",
+                    session_id=sid,
+                )
+                resolved += 1
+            continue
+
+        pair = _contradiction_pair(store, top_ids, recs) if top_ids else None
+        if pair is None:
+            write_event(
+                store,
+                kind="curiosity_silent_log",
+                data={
+                    "cue": cue,
+                    "entropy": float(entropy),
+                    "source_ids": [str(x) for x in data.get("hit_ids", [])[:3]],
+                },
+                severity="info",
+                session_id=sid,
+            )
+            silent += 1
+            continue
+
+        if cue in asked_cues:
+            continue
+        if minted >= MINE_MAX_PER_RUN or per_session.get(sid, 0) >= MINE_MAX_PER_SESSION:
+            continue
+
+        a_id, b_id = pair
+        both = store.get_batch([a_id, b_id])
+        a_rec, b_rec = both.get(a_id), both.get(b_id)
+        if a_rec is None or b_rec is None:
+            continue
+        text = (
+            f"Two memories disagree — which is current: "
+            f"\"{_one_line(a_rec.literal_surface)}\" or "
+            f"\"{_one_line(b_rec.literal_surface)}\"?"
+        )
+        _mint_question(
+            store, [a_id, b_id], cue=cue, entropy=entropy,
+            session_id=sid, turn=int(data.get("turn", 0) or 0),
+            text=text,
+        )
+        asked_cues.add(cue)
+        per_session[sid] = per_session.get(sid, 0) + 1
+        minted += 1
+
+    if through_ts is not None:
+        write_event(
+            store,
+            kind="curiosity_mine_run",
+            data={
+                "through_ts": through_ts.isoformat(),
+                "scanned": len(events),
+                "scan_limit": int(scan_limit),
+                "minted": minted,
+                "silent": silent,
+                "skipped_active": skipped_active,
+                "resolved": resolved,
+            },
+            severity="info",
+        )
+
+    return {
+        "curiosity_scanned": len(events),
+        "curiosity_minted": minted,
+        "curiosity_silent": silent,
+        "curiosity_resolved": resolved,
+    }
 
 
 def pending_questions(
@@ -148,9 +403,13 @@ def pending_questions(
         for r in resolved_events
         if r["data"].get("question_id")
     }
+    ttl_floor = datetime.now(timezone.utc) - timedelta(days=PENDING_TTL_DAYS)
     out: list[CuriosityQuestion] = []
     for e in events:
         if session_id is not None and e.get("session_id") != session_id:
+            continue
+        ts = e.get("ts")
+        if isinstance(ts, datetime) and ts < ttl_floor:
             continue
         data = e["data"]
         qid_raw = data.get("question_id")
@@ -176,6 +435,7 @@ def pending_questions(
                 entropy=float(data.get("entropy", 0.0)),
                 tier=data.get("tier", "question"),
                 resolved=False,
+                cue=str(data.get("cue", "")),
             )
         )
     return out
@@ -184,7 +444,13 @@ def pending_questions(
 def get_pending_questions(store: MemoryStore, limit: int = 2) -> list[dict]:
     qs = pending_questions(store)
     return [
-        {"text": q.text, "entropy": q.entropy, "tier": q.tier}
+        {
+            "id": str(q.id),
+            "text": q.text,
+            "entropy": q.entropy,
+            "tier": q.tier,
+            "cue": q.cue,
+        }
         for q in qs[:limit]
     ]
 

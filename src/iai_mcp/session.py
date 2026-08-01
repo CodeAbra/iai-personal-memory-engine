@@ -499,6 +499,18 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
             "starting points, not current truth; the older an item, the more "
             "it deserves re-verification (memory_recall or any other tool)._"
         )
+    # Notify-only, cache-only: the session-start path never touches the
+    # network — the daemon's tick keeps this cache fresh. An empty payload
+    # stays empty: the notice rides real content, never travels alone.
+    if blocks:
+        try:
+            from iai_mcp.version_check import pending_update_line
+
+            _upd = pending_update_line()
+            if _upd:
+                blocks.append(f"_{_upd}_")
+        except Exception:  # noqa: BLE001 — an update notice must never break recall
+            pass
     return "\n\n".join(blocks)
 
 

@@ -1,4 +1,4 @@
-"""Scope (constitutional):
+"""Scope:
 - ALLOWED: L2 community descriptors, session summaries, cls_summary records.
 - FORBIDDEN: literal_surface of normal records, pinned, invariant_anchor,
   user-tagged 'raw' records.
@@ -100,7 +100,7 @@ def test_is_compressible_rejects_normal_record_by_default():
     r = _rec(tags=["project:iai-mcp"])
     ok, reason = is_compressible(r)
     assert ok is False
-    assert "literal_surface" in reason.lower() or "constitutional" in reason.lower()
+    assert "literal_surface" in reason.lower()
 
 
 def test_compress_llmlingua2_passes_through_when_pkg_absent(tmp_path, monkeypatch):

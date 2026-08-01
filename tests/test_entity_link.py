@@ -128,6 +128,6 @@ def test_sleep_step_registered_at_tail() -> None:
     from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline, SleepStep
 
     assert SleepStep.ENTITY_LINK.value == 14
-    assert SleepPipeline._STEP_ORDER[-1] is SleepStep.ENTITY_LINK
+    assert SleepPipeline._STEP_ORDER.index(SleepStep.ENTITY_LINK) == 13
     assert SleepPipeline._STEP_ORDER.index(SleepStep.RECALL_INDEX_REBUILD) == 12
     assert callable(SleepPipeline._step_entity_link)

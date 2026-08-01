@@ -120,7 +120,7 @@ def test_memory_recall_routed_over_socket(short_socket_paths):
     async def _runner(sock_path, store):
         return await _send_jsonrpc(
             sock_path, "memory_recall",
-            {"cue": "phase 7 done", "budget_tokens": 400},
+            {"cue": "migration done", "budget_tokens": 400},
             req_id=1,
         )
 

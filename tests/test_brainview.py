@@ -196,7 +196,7 @@ def test_forget_hint_feeds_decay_never_deletes(driver, tmp_path, monkeypatch):
 def test_forget_hint_refuses_pinned(driver, tmp_path, monkeypatch):
     _select_driver(driver, monkeypatch)
     store = MemoryStore(path=tmp_path)
-    rid = _seed(store, "A pinned constitutional fact.")
+    rid = _seed(store, "A pinned foundational fact.")
     from iai_mcp.store import RECORDS_TABLE
 
     store.db.open_table(RECORDS_TABLE).update(
@@ -1108,7 +1108,7 @@ def test_surface_returns_full_decrypted_text(driver, tmp_path, monkeypatch):
 
     _select_driver(driver, monkeypatch)
     store = MemoryStore(path=tmp_path)
-    long_text = "Verbatim recall is constitutional. " * 30
+    long_text = "Verbatim recall is guaranteed. " * 30
     rid = _seed(store, long_text.strip())
     view = BrainView(store)
     res = view.surface(rid)

@@ -79,8 +79,8 @@ def test_m3_token_budget_signal(tmp_path):
     store = MemoryStore(path=tmp_path)
     for toks in (1000, 2000, 3000):
         write_event(
-            store, kind="session_start_tokens",
-            data={"tokens": toks}, session_id="s-m3",
+            store, kind="session_started",
+            data={"total_cached_tokens": toks}, session_id="s-m3",
         )
     val = compute_m3_token_budget(store, "s-m3")
     assert val == 2000.0
@@ -90,6 +90,20 @@ def test_m3_token_budget_empty(tmp_path):
 
     store = MemoryStore(path=tmp_path)
     assert compute_m3_token_budget(store, "s-empty") == 0.0
+
+def test_m3_reads_what_session_start_writes(tmp_path):
+    """The live serve path and the M3 metric must share one event kind."""
+    from iai_mcp.community import CommunityAssignment
+    from iai_mcp.session import assemble_session_start
+    from iai_mcp.trajectory import compute_m3_token_budget
+
+    store = MemoryStore(path=tmp_path)
+    assignment = CommunityAssignment(
+        node_to_community={}, community_centroids={}, modularity=0.0,
+        backend="flat", top_communities=[], mid_regions={},
+    )
+    assemble_session_start(store, assignment, [], session_id="s-live")
+    assert compute_m3_token_budget(store, "s-live") > 0.0
 
 def test_session_exit_writes_trajectory_events(tmp_path, monkeypatch):
     from iai_mcp.core import dispatch

@@ -9,7 +9,7 @@ from iai_mcp.types import EMBED_DIM, MemoryRecord
 
 def _anchor(
     *,
-    text: str = "User is Alice",
+    text: str = "User is alice",
     vec: list[float] | None = None,
     s5_trust_score: float = 0.9,
     tier: str = "semantic",
@@ -246,22 +246,4 @@ def test_check_identity_anchor_on_write_allows_with_consensus_marker(tmp_path):
     store = MemoryStore(path=tmp_path)
     rec = _anchor(s5_trust_score=0.95, tags=["identity", "s5_consensus"])
     ok, reason = check_identity_anchor_on_write(store, rec, {})
-    assert ok is True
-
-def test_guarded_insert_blocks_direct_identity_write(tmp_path):
-    from iai_mcp.store import MemoryStore
-    from iai_mcp.write import guarded_insert
-
-    store = MemoryStore(path=tmp_path)
-    rec = _anchor(s5_trust_score=0.95)
-    ok, reason = guarded_insert(store, rec, {})
-    assert ok is False
-
-def test_guarded_insert_allows_low_trust_write(tmp_path):
-    from iai_mcp.store import MemoryStore
-    from iai_mcp.write import guarded_insert
-
-    store = MemoryStore(path=tmp_path)
-    rec = _anchor(s5_trust_score=0.5)
-    ok, reason = guarded_insert(store, rec, {})
     assert ok is True

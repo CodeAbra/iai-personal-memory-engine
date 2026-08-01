@@ -940,7 +940,7 @@ fn scan_rows_two_phase(
         proj_only.remove(c);
     }
     let proj_mask = mask_from_names(col_names, &proj_only);
-    let need_phase2 = proj_mask.iter().any(|&b| b);
+    let need_second_pass = proj_mask.iter().any(|&b| b);
 
     // Stream cells without pre-materialising the whole table and without
     // incrementing the full-scan counter; decode only the predicate columns per
@@ -973,7 +973,7 @@ fn scan_rows_two_phase(
             }
             // Second pass: a survivor — decode the projection-only columns from the
             // same payload and fill them in (the predicate columns are already present).
-            if need_phase2 {
+            if need_second_pass {
                 let proj_vals = crate::rowcodec::decode_row_columns(&payload, &proj_mask)?;
                 for (i, name) in col_names.iter().enumerate() {
                     if proj_mask.get(i).copied().unwrap_or(false) {

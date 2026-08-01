@@ -3,12 +3,11 @@
 //!
 //! Run: `cd rust && cargo nextest run -p iai_mcp_embed_core --test numeric_parity`
 //!
-//! Closes SPEC.md R2 (per-text cosine threshold) + R3 (tokenizer determinism)
-//! at the Rust forward-pass level. The Python-side PyO3 wrapper parity test
-//! lives in a later wave.
+//! Covers the per-text cosine threshold and tokenizer determinism at the
+//! Rust forward-pass level.
 //!
 //! This file is the strongest correctness gate for the BertEmbedder forward
-//! pass: if any of the three RESEARCH.md pitfalls (wrong pooling, wrong GELU,
+//! pass: if any of the three known pitfalls (wrong pooling, wrong GELU,
 //! wrong LayerNorm eps) regresses, cosine drops below 0.9999 and this test
 //! reports the failing indices.
 
@@ -43,7 +42,7 @@ fn hf_cache_present() -> bool {
 }
 
 #[test]
-fn baseline_sha256_matches_frozen_value() {
+fn baseline_sha256_matches_locked_value() {
     let path = baseline_dir().join("vectors.npy");
     // nosemgrep
     let bytes = std::fs::read(&path).expect("read vectors.npy");
@@ -52,8 +51,8 @@ fn baseline_sha256_matches_frozen_value() {
     let actual = format!("{:x}", hasher.finalize());
     // SHA256 of the full on-disk vectors.npy file (magic + NPY header + raw bytes).
     // Note: this differs from `hashlib.sha256(np_array.tobytes())` by ~80 bytes
-    // of NPY header. The capture script (bench/embedder_baseline.py) was patched
-    // post-49-03 to hash the file after np.save, not vectors.tobytes() before.
+    // of NPY header — the capture script (bench/embedder_baseline.py) hashes
+    // the file after np.save, not vectors.tobytes() before.
     let expected = "31cc9bb0643835b872dbd21e0553b898e3de79cc28aebcf8c27814363ec5432b";
     assert_eq!(
         actual, expected,
@@ -71,7 +70,7 @@ fn baseline_loader_yields_expected_shape() {
 #[test]
 fn test_all_baseline_texts() {
     if !hf_cache_present() {
-        eprintln!("HF cache absent — skipping numeric parity (Wave 1 / Wave 3 will trigger download)");
+        eprintln!("HF cache absent — skipping numeric parity (first embedder use triggers the lazy download)");
         return;
     }
 

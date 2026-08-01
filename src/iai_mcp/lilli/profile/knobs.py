@@ -112,25 +112,21 @@ PROFILE_KNOBS: dict[str, KnobSpec] = {
 }
 
 
-PHASE_1_LIVE: frozenset[str] = frozenset(
+LIVE_KNOB_NAMES: frozenset[str] = frozenset(
     {name for name, spec in PROFILE_KNOBS.items() if spec.phase == 1}
 )
-PHASE_2_DEFERRED: frozenset[str] = frozenset(
-    {name for name, spec in PROFILE_KNOBS.items() if spec.phase == 2}
-)
-PHASE_3_DEFERRED: frozenset[str] = frozenset(
-    {name for name, spec in PROFILE_KNOBS.items() if spec.phase == 3}
+DEFERRED_KNOB_NAMES: frozenset[str] = frozenset(
+    {name for name, spec in PROFILE_KNOBS.items() if spec.phase != 1}
 )
 
 
 assert len(PROFILE_KNOBS) == 11, (
     "10 autistic-kernel knobs + wake_depth = 11 sealed entries"
 )
-assert len(PHASE_1_LIVE) == 11, (
+assert len(LIVE_KNOB_NAMES) == 11, (
     "10 autistic-kernel knobs + MCP-12 wake_depth are live"
 )
-assert len(PHASE_2_DEFERRED) == 0, "PHASE_2_DEFERRED must be empty"
-assert len(PHASE_3_DEFERRED) == 0, "PHASE_3_DEFERRED must be empty"
+assert len(DEFERRED_KNOB_NAMES) == 0, "the sealed registry carries no deferred knobs"
 
 
 SIGNAL_WEIGHT: dict[str, float] = {
@@ -216,10 +212,10 @@ def profile_get(knob: str | None, state: dict[str, Any]) -> dict:
     if knob is None:
         live = {
             n: state.get(n, PROFILE_KNOBS[n].default)
-            for n in sorted(PHASE_1_LIVE)
+            for n in sorted(LIVE_KNOB_NAMES)
         }
         deferred = {}
-        for n in sorted(PHASE_2_DEFERRED | PHASE_3_DEFERRED):
+        for n in sorted(DEFERRED_KNOB_NAMES):
             spec = PROFILE_KNOBS[n]
             deferred[n] = {
                 "status": "not-yet-implemented",
@@ -229,7 +225,7 @@ def profile_get(knob: str | None, state: dict[str, Any]) -> dict:
             }
         return {"live": live, "deferred": deferred, "total_knobs": 11}
 
-    if knob in PHASE_1_LIVE:
+    if knob in LIVE_KNOB_NAMES:
         spec = PROFILE_KNOBS[knob]
         return {"knob": knob, "value": state.get(knob, spec.default)}
 
@@ -256,14 +252,7 @@ def profile_set(
         return {"status": "error", "reason": "unknown knob", "knob": knob}
 
     spec = PROFILE_KNOBS[knob]
-    if spec.phase == 2:
-        return {
-            "status": "error",
-            "reason": "not yet activated",
-            "knob": knob,
-            "requirement_id": spec.requirement_id,
-        }
-    if spec.phase == 3:
+    if spec.phase != 1:
         return {
             "status": "error",
             "reason": "not yet activated",

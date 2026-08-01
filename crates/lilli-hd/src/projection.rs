@@ -35,7 +35,8 @@ pub const HV_DIM: usize = 10000;
 /// Packed output size in bytes (HV_DIM / 8, rounded up).
 pub const HV_BYTES: usize = HV_DIM.div_ceil(8);
 
-/// The locked projection-matrix hash. Constitutional invariant — never rotates.
+/// The locked projection-matrix hash — never rotates; rotating it would
+/// silently orphan every stored hypervector.
 pub const P_SHA256: &str =
     "df97cc72a960567da17edbba16107881340349bd47b69f9b58d3091d96eb4e4e";
 

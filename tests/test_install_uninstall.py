@@ -108,7 +108,7 @@ def test_uninstall_dry_run_idempotent() -> None:
 @pytest.mark.skipif(not shutil.which("sed"), reason="sed unavailable")
 def test_install_renders_template_with_substitutions() -> None:
     if not PLIST_TEMPLATE.exists():
-        pytest.skip(f"{PLIST_TEMPLATE} missing — Wave 1 (07.1-01) not complete")
+        pytest.skip(f"{PLIST_TEMPLATE} missing")
 
     fake_python = "/fake/path/.venv/bin/python"
     fake_home = "/tmp/iai-fake-home-test-7-1-03"

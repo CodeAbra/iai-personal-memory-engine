@@ -321,13 +321,13 @@ class TestRunAccuracy:
 
 # ---------------------------------------------------------------------------
 # Gate: the graded (soft-gate) community bonus does not regress recall@k or
-# per-archetype miss counts vs. the pre-change baseline
-# (seed=42/n_filler=220/k=10). Not-worse-than, not strictly-better
-# — the strict-improvement bar belongs to a later change.
+# per-archetype miss counts vs. the pre-change baseline (184-BASELINE.md,
+# Tables 1-2, seed=42/n_filler=220/k=10). Not-worse-than, not strictly-better
+# — the strict-improvement bar belongs to a later plan in this phase.
 # ---------------------------------------------------------------------------
 
-# Baseline constants captured before this change (both drivers were
-# byte-identical at this corpus size).
+# Baseline constants, recorded verbatim at eval-set creation (both drivers
+# were byte-identical at this corpus size).
 BASELINE_RECALL_AT_K = 0.0
 BASELINE_MISS_COSINE_RANK = 1
 BASELINE_MISS_EDGE_LESS = 2
@@ -336,7 +336,7 @@ BASELINE_MISS_SPREAD_DISABLED = 0
 
 class TestGradedCommunityBonusRegression:
     """The graded community-gate bonus (soft gate) must not regress the
-    crafted-set baseline captured before this change."""
+    crafted-set baseline captured before this plan's change."""
 
     @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
     def test_recall_at_k_not_worse_than_baseline(self, tmp_path, monkeypatch, driver):

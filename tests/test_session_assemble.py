@@ -126,7 +126,7 @@ def test_minimal_payload_wake_depth_echoed(tmp_path):
     )
     assert payload.wake_depth == "minimal"
 
-def test_standard_payload_preserves_phase1_behavior(tmp_path, monkeypatch):
+def test_standard_payload_preserves_eager_behavior(tmp_path, monkeypatch):
     import json
 
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))

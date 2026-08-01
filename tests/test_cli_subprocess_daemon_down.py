@@ -52,7 +52,7 @@ def _seed_store_with_drained_turn(store_root: Path, text: str) -> None:
             last_reviewed=None,
             never_decay=False,
             never_merge=False,
-            provenance=[{"session_id": "mk3-session", "role": "user"}],
+            provenance=[{"session_id": "c3h1-session", "role": "user"}],
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
             tags=["role:user"],
@@ -70,7 +70,7 @@ def test_subprocess_iai_last_daemon_down_returns_drained_store_turn(
     tmp_home = tmp_path / "tmp_home"
     tmp_home.mkdir(parents=True, exist_ok=True)
 
-    drained_text = "mk3 last drained distinctive store turn text"
+    drained_text = "c3h1 last drained distinctive store turn text"
     _seed_store_with_drained_turn(hermetic_store, drained_text)
 
     env = _child_env(hermetic_store, tmp_home)
@@ -87,7 +87,7 @@ def test_subprocess_iai_last_daemon_down_returns_drained_store_turn(
         f"subprocess `iai last` failed (rc={result.returncode}):\n{result.stderr}"
     )
     assert drained_text in result.stdout, (
-        f"drained store turn not in `iai last` stdout;\n"
+        f"C3-H1: drained store turn not in `iai last` stdout;\n"
         f"stdout={result.stdout!r}\n"
         f"stderr={result.stderr!r}\n"
         "The live-layer fallback cannot produce this turn — must be store-backed."
@@ -100,7 +100,7 @@ def test_subprocess_iai_capture_daemon_down_writes_to_store(
     tmp_home = tmp_path / "tmp_home"
     tmp_home.mkdir(parents=True, exist_ok=True)
 
-    capture_text = "mk3 capture distinctive write probe text"
+    capture_text = "c3h1 capture distinctive write probe text"
     env = _child_env(hermetic_store, tmp_home)
 
     result = subprocess.run(
@@ -113,7 +113,7 @@ def test_subprocess_iai_capture_daemon_down_writes_to_store(
 
     assert result.returncode == 0, (
         f"subprocess `iai capture` failed (rc={result.returncode}):\n{result.stderr}\n"
-        "capture must succeed (exit 0) even with daemon down; "
+        "C3-H1: capture must succeed (exit 0) even with daemon down; "
         "the direct-write fallback is not yet wired."
     )
 
@@ -124,7 +124,7 @@ def test_subprocess_iai_capture_daemon_down_writes_to_store(
         records = store.all_records()
         surfaces = [r.literal_surface or "" for r in records]
         assert any(capture_text in s for s in surfaces), (
-            f"captured text not found in tmp Hippo store after subprocess capture;\n"
+            f"C3-H1: captured text not found in tmp Hippo store after subprocess capture;\n"
             f"surfaces={surfaces!r}"
         )
     finally:
@@ -137,13 +137,13 @@ def test_subprocess_iai_recall_daemon_down_returns_store_backed_degraded(
     tmp_home = tmp_path / "tmp_home"
     tmp_home.mkdir(parents=True, exist_ok=True)
 
-    drained_text = "mk3 recall store backed degraded distinctive probe text"
+    drained_text = "c3h1 recall store backed degraded distinctive probe text"
     _seed_store_with_drained_turn(hermetic_store, drained_text)
 
     env = _child_env(hermetic_store, tmp_home)
 
     result = subprocess.run(
-        [sys.executable, "-m", "iai_mcp.iai_cli", "recall", "mk3 recall store backed"],
+        [sys.executable, "-m", "iai_mcp.iai_cli", "recall", "c3h1 recall store backed"],
         env=env,
         capture_output=True,
         text=True,
@@ -154,7 +154,7 @@ def test_subprocess_iai_recall_daemon_down_returns_store_backed_degraded(
         f"subprocess `iai recall` failed (rc={result.returncode}):\n{result.stderr}"
     )
     assert drained_text in result.stdout, (
-        f"drained store turn not in `iai recall` stdout;\n"
+        f"C3-H1: drained store turn not in `iai recall` stdout;\n"
         f"stdout={result.stdout!r}\n"
         f"stderr={result.stderr!r}\n"
         "The bank-recall subprocess cannot produce this turn — must be store-backed."

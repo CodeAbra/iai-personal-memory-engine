@@ -29,7 +29,9 @@ def step_knob_tune(
         total_edges = tbl.count_rows()
         curiosity_count = tbl.count_rows("edge_type = 'curiosity_bridge'") if total_edges > 0 else 0
         curiosity_ratio = curiosity_count / max(total_edges, 1)
-        if curiosity_ratio > 0.1 or curiosity_ratio < 0.02:
+        # Zero bridges = no signal (generator quiet), not "low curiosity";
+        # a dead subsystem must never steer a live knob.
+        if curiosity_count > 0 and (curiosity_ratio > 0.1 or curiosity_ratio < 0.02):
             um = _load_um()
             if curiosity_ratio > 0.1:
                 um.soft_knobs["monotropism"] = 1.5
@@ -38,14 +40,5 @@ def step_knob_tune(
             _save_um(um)
     except (OSError, ValueError, RuntimeError, KeyError, StoreError) as exc:
         logger.debug("non-critical soft_knobs auto-write failed: %s", exc)
-
-    try:
-        from iai_mcp.gaba_annealing import compute_annealed_k, should_normalize
-        cycle_count = self._cycle_counter
-        annealed_k = compute_annealed_k(cycle_count)
-        if should_normalize(cycle_count):
-            logger.debug("GABA: k=%d at cycle %d, normalization due", annealed_k, cycle_count)
-    except (ImportError, AttributeError, TypeError) as exc:
-        logger.debug("GABA annealing skipped: %s", exc)
 
     return True, {"knobs_tuned": len(knob_names)}

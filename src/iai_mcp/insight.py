@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from iai_mcp.claude_cli import (
     BudgetTracker,
@@ -33,7 +33,7 @@ _SURPRISE_KINDS: frozenset[str] = frozenset({
 })
 
 
-def _gather_patterns(store) -> list[str]:
+def _gather_patterns(store) -> tuple[list[str], list[UUID]]:
     try:
         schemas = induce_schemas_tier0(store) or []
     except Exception:  # noqa: BLE001 -- pattern extraction must never crash insight
@@ -57,14 +57,29 @@ def _gather_patterns(store) -> list[str]:
                 return str(s[attr])
         return str(s)
 
+    def _evidence(s: Any) -> list[UUID]:
+        ids = getattr(s, "evidence_ids", None)
+        if ids is None and isinstance(s, dict):
+            ids = s.get("evidence_ids")
+        out: list[UUID] = []
+        for raw in ids or []:
+            try:
+                out.append(raw if isinstance(raw, UUID) else UUID(str(raw)))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return out
+
     schemas_sorted = sorted(schemas, key=_conf, reverse=True)
     top3 = schemas_sorted[:3]
     if not top3:
-        return ["[no patterns yet]"]
-    return [_text(s) for s in top3]
+        return ["[no patterns yet]"], []
+    sources: list[UUID] = []
+    for s in top3:
+        sources.extend(_evidence(s)[:5])
+    return [_text(s) for s in top3], sources
 
 
-def _gather_surprise(store) -> str:
+def _gather_surprise(store) -> tuple[str, list[UUID]]:
     try:
         since = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0,
@@ -76,8 +91,14 @@ def _gather_surprise(store) -> str:
     for event in candidates:
         if event.get("kind") in _SURPRISE_KINDS:
             data = event.get("data") or event
-            return str(data)[:500]
-    return "[no surprise yet]"
+            sources: list[UUID] = []
+            for raw in event.get("source_ids") or []:
+                try:
+                    sources.append(UUID(str(raw)))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            return str(data)[:500], sources
+    return "[no surprise yet]", []
 
 
 async def generate_overnight_insight(store, session_id: str) -> dict:
@@ -107,8 +128,27 @@ async def generate_overnight_insight(store, session_id: str) -> dict:
     if not tracker.can_spend(PROMPT_ESTIMATE_TOKENS):
         return {"ok": False, "reason": "budget_exceeded", "text": None}
 
-    patterns = _gather_patterns(store)
-    surprise = _gather_surprise(store)
+    patterns, pattern_sources = _gather_patterns(store)
+    surprise, surprise_sources = _gather_surprise(store)
+
+    # LLM output may only enter the store with a provenance ledger: verified
+    # consolidated_from edges to the records the prompt was built from. No
+    # verifiable sources -> nothing to ground an insight in -> no mint.
+    source_ids: list[UUID] = []
+    seen: set = set()
+    for sid in [*pattern_sources, *surprise_sources]:
+        if sid not in seen:
+            seen.add(sid)
+            source_ids.append(sid)
+    if source_ids:
+        try:
+            found = await asyncio.to_thread(store.get_batch, source_ids)
+            source_ids = [sid for sid in source_ids if sid in found]
+        except Exception:  # noqa: BLE001 -- verification failure means no ledger
+            source_ids = []
+    if not source_ids:
+        return {"ok": False, "reason": "no_evidence_sources", "text": None}
+
     prompt = INSIGHT_PROMPT_TEMPLATE.format(
         patterns="\n".join(f"- {p}" for p in patterns),
         surprise=surprise,
@@ -178,8 +218,18 @@ async def generate_overnight_insight(store, session_id: str) -> dict:
     except Exception:  # noqa: BLE001 -- attribute attach is best-effort
         pass
 
+    def _insert_with_ledger() -> None:
+        store.insert(record)
+        # insert may dedup-fold into an existing record, rewriting record.id
+        # to the survivor — edges must bind to the id that lives in the table.
+        pairs = [(record.id, sid) for sid in source_ids if sid != record.id]
+        if pairs:
+            store.boost_edges(pairs, edge_type="consolidated_from", delta=1.0)
+            from iai_mcp.store import flush_edge_buffer
+            flush_edge_buffer(store)
+
     try:
-        await asyncio.to_thread(store.insert, record)
+        await asyncio.to_thread(_insert_with_ledger)
     except Exception as exc:  # noqa: BLE001 -- store errors must not crash daemon
         try:
             write_event(
@@ -206,6 +256,7 @@ async def generate_overnight_insight(store, session_id: str) -> dict:
                 "text_len": len(insight_text),
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
+                "sources": len(source_ids),
             },
         )
     except Exception:  # noqa: BLE001 -- event emission failure is non-fatal

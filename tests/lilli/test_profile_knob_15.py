@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from iai_mcp.profile import (
-    PHASE_1_LIVE,
+    LIVE_KNOB_NAMES,
     PROFILE_KNOBS,
     default_state,
     profile_get,
     profile_set,
 )
 
-def test_registry_has_15_knobs():
+def test_registry_has_11_knobs():
     assert len(PROFILE_KNOBS) == 11
 
 def test_wake_depth_knob_exists():
@@ -21,8 +21,8 @@ def test_wake_depth_knob_shape():
     assert spec.phase == 1
     assert spec.requirement_id == "MCP-12"
 
-def test_wake_depth_in_phase_1_live():
-    assert "wake_depth" in PHASE_1_LIVE
+def test_wake_depth_is_live():
+    assert "wake_depth" in LIVE_KNOB_NAMES
 
 def test_wake_depth_default_applies():
     state = default_state()

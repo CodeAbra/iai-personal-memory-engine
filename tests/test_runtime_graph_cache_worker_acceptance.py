@@ -189,7 +189,7 @@ def _seed_planted_partition(
     intra-block edges in each block + `n_inter` inter-block edges. Yields
     a graph whose modularity is high enough that mosaic returns
     `leiden-custom` rather than collapsing to the flat branch — the
-    constitutional byte-identity guard tests the mosaic path, not the
+    byte-identity guard tests the mosaic path, not the
     fallback.
     """
     rng = np.random.default_rng(seed)
@@ -482,7 +482,7 @@ def test_worker_rebuild_byte_identical_to_in_process(store: MemoryStore):
     The fixture is a planted-partition graph above the MID_N_LEIDEN
     threshold so the mosaic path (NOT the flat fallback) is exercised. The
     test fails loudly if the reference assignment regresses to flat, so the
-    constitutional byte-identity guard cannot silently become vacuous.
+    byte-identity guard cannot silently become vacuous.
     """
     active_ids = _seed_planted_partition(
         store, n_total=800, K=4, n_intra_per_block=5000, n_inter=200, seed=11,
@@ -519,7 +519,7 @@ def test_worker_rebuild_byte_identical_to_in_process(store: MemoryStore):
     ref_rich_club = rich_club_nodes(ref_graph)
     ref_max_degree = max((d for _, d in ref_graph.degrees()), default=0)
 
-    # Constitutional guard: fixture MUST exercise mosaic, not the flat fallback.
+    # Guard: fixture MUST exercise mosaic, not the flat fallback.
     assert ref_assignment.backend != "flat", (
         f"fixture regressed to flat backend ({ref_assignment.backend!r}); "
         f"byte-identity guard is vacuous unless mosaic actually runs"

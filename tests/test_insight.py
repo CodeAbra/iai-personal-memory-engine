@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from test_store import _make
 
 
 def _fresh_store(tmp_path, monkeypatch):
@@ -11,6 +16,35 @@ def _fresh_store(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
     from iai_mcp.store import MemoryStore
     return MemoryStore()
+
+
+def _seed_evidence(store, monkeypatch, n_patterns: int = 3):
+    """Insert real records and route them through tier0 as pattern evidence.
+
+    The insight mint requires verified consolidated_from sources; every test
+    that expects a mint seeds them here.
+    """
+    from iai_mcp.schema import SchemaCandidate
+
+    recs = []
+    for i in range(max(1, n_patterns)):
+        rec = _make(text=f"evidence record {i}")
+        store.insert(rec)
+        recs.append(rec)
+    candidates = [
+        SchemaCandidate(
+            pattern=f"pattern-{i}",
+            confidence=0.1 * (i + 1),
+            evidence_count=3 + i,
+            evidence_ids=[recs[min(i, len(recs) - 1)].id],
+        )
+        for i in range(n_patterns)
+    ]
+    monkeypatch.setattr(
+        "iai_mcp.insight.induce_schemas_tier0",
+        lambda _store: candidates,
+    )
+    return recs
 
 
 @pytest.fixture
@@ -50,6 +84,7 @@ def mock_claude_ok(monkeypatch, creds_ok, isolated_state):
 def test_one_call_per_night(tmp_path, monkeypatch, mock_claude_ok):
     from iai_mcp.insight import generate_overnight_insight
     store = _fresh_store(tmp_path, monkeypatch)
+    _seed_evidence(store, monkeypatch)
 
     result = asyncio.run(generate_overnight_insight(store, "sess-A"))
     assert result["ok"] is True
@@ -62,6 +97,7 @@ def test_one_call_per_night(tmp_path, monkeypatch, mock_claude_ok):
 def test_prompt_template(tmp_path, monkeypatch, mock_claude_ok):
     from iai_mcp.insight import generate_overnight_insight
     store = _fresh_store(tmp_path, monkeypatch)
+    _seed_evidence(store, monkeypatch)
     asyncio.run(generate_overnight_insight(store, "sess-A"))
 
     prompt = mock_claude_ok[0]["prompt"]
@@ -74,22 +110,9 @@ def test_prompt_template(tmp_path, monkeypatch, mock_claude_ok):
 
 def test_patterns_from_schemas(tmp_path, monkeypatch, mock_claude_ok):
     from iai_mcp.insight import generate_overnight_insight
-    from iai_mcp.schema import SchemaCandidate
 
     store = _fresh_store(tmp_path, monkeypatch)
-
-    fake_candidates = [
-        SchemaCandidate(
-            pattern=f"pattern-{i}",
-            confidence=0.1 * (i + 1),
-            evidence_count=3 + i,
-        )
-        for i in range(5)
-    ]
-    monkeypatch.setattr(
-        "iai_mcp.insight.induce_schemas_tier0",
-        lambda _store: fake_candidates,
-    )
+    _seed_evidence(store, monkeypatch, n_patterns=5)
 
     asyncio.run(generate_overnight_insight(store, "sess-A"))
     prompt = mock_claude_ok[0]["prompt"]
@@ -103,10 +126,14 @@ def test_surprise_from_events(tmp_path, monkeypatch, mock_claude_ok):
     from iai_mcp.insight import generate_overnight_insight
 
     store = _fresh_store(tmp_path, monkeypatch)
+    rec = _make(text="surprise source record")
+    store.insert(rec)
 
+    monkeypatch.setattr("iai_mcp.insight.induce_schemas_tier0", lambda _s: [])
     fake_events = [
         {"kind": "art_gate_high_novelty",
-         "data": {"summary": "UNEXPECTED-MARKER-ALPHA"}, "ts": "x"},
+         "data": {"summary": "UNEXPECTED-MARKER-ALPHA"},
+         "source_ids": [str(rec.id)], "ts": "x"},
         {"kind": "routine_event", "data": {"summary": "boring"}, "ts": "y"},
     ]
     monkeypatch.setattr(
@@ -123,6 +150,7 @@ def test_record_tag(tmp_path, monkeypatch, mock_claude_ok):
     from iai_mcp.insight import generate_overnight_insight
 
     store = _fresh_store(tmp_path, monkeypatch)
+    _seed_evidence(store, monkeypatch)
     inserted: list = []
 
     real_insert = store.insert
@@ -135,11 +163,85 @@ def test_record_tag(tmp_path, monkeypatch, mock_claude_ok):
 
     result = asyncio.run(generate_overnight_insight(store, "sess-A"))
     assert result["ok"] is True
-    assert len(inserted) == 1
-    rec = inserted[0]
+    minted = [
+        r for r in inserted
+        if "overnight_insight" in (getattr(r, "tags", []) or [])
+    ]
+    assert len(minted) == 1
+    rec = minted[0]
     assert rec.tier == "semantic"
-    assert rec.tag == "overnight_insight" or "overnight_insight" in (rec.tags or [])
     assert rec.literal_surface == "unifying insight text"
+
+
+def test_insight_mint_carries_evidence_edges(tmp_path, monkeypatch, mock_claude_ok):
+    from iai_mcp.insight import generate_overnight_insight
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    sources = _seed_evidence(store, monkeypatch)
+    inserted: list = []
+    real_insert = store.insert
+    monkeypatch.setattr(
+        store, "insert", lambda r: inserted.append(r) or real_insert(r),
+    )
+
+    result = asyncio.run(generate_overnight_insight(store, "sess-A"))
+    assert result["ok"] is True
+    minted = [
+        r for r in inserted
+        if "overnight_insight" in (getattr(r, "tags", []) or [])
+    ]
+    insight_id = minted[0].id
+
+    edges = store.incident_edges(
+        [insight_id], edge_types=["consolidated_from"], top_k=None,
+    )
+    neighbors = {str(t[0]) for lst in edges.values() for t in lst}
+    source_strs = {str(s.id) for s in sources}
+    assert neighbors & source_strs, (
+        f"insight minted without consolidated_from edges to its sources; "
+        f"edges={edges}"
+    )
+
+
+def test_no_evidence_sources_skips_mint(tmp_path, monkeypatch, mock_claude_ok):
+    from iai_mcp.insight import generate_overnight_insight
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr("iai_mcp.insight.induce_schemas_tier0", lambda _s: [])
+    monkeypatch.setattr(
+        "iai_mcp.insight.query_events",
+        lambda _s, *, since=None, limit=1000: [],
+    )
+
+    result = asyncio.run(generate_overnight_insight(store, "sess-A"))
+    assert result["ok"] is False
+    assert result["reason"] == "no_evidence_sources"
+    assert len(mock_claude_ok) == 0, "grounding gate must fire before the LLM call"
+
+
+def test_nonexistent_sources_do_not_count(tmp_path, monkeypatch, mock_claude_ok):
+    from uuid import uuid4 as _uuid4
+
+    from iai_mcp.insight import generate_overnight_insight
+    from iai_mcp.schema import SchemaCandidate
+
+    store = _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "iai_mcp.insight.induce_schemas_tier0",
+        lambda _s: [SchemaCandidate(
+            pattern="ghost", confidence=0.9, evidence_count=5,
+            evidence_ids=[_uuid4(), _uuid4()],
+        )],
+    )
+    monkeypatch.setattr(
+        "iai_mcp.insight.query_events",
+        lambda _s, *, since=None, limit=1000: [],
+    )
+
+    result = asyncio.run(generate_overnight_insight(store, "sess-A"))
+    assert result["ok"] is False
+    assert result["reason"] == "no_evidence_sources"
+    assert len(mock_claude_ok) == 0
 
 
 def test_budget_gate_blocks(tmp_path, monkeypatch, creds_ok, isolated_state):
@@ -228,6 +330,7 @@ def test_budget_recorded(tmp_path, monkeypatch, mock_claude_ok, isolated_state):
     from iai_mcp.insight import generate_overnight_insight
 
     store = _fresh_store(tmp_path, monkeypatch)
+    _seed_evidence(store, monkeypatch)
     asyncio.run(generate_overnight_insight(store, "sess-A"))
 
     state = load_state()
@@ -238,6 +341,7 @@ def test_api_billing_detected_no_store(tmp_path, monkeypatch, creds_ok, isolated
     from iai_mcp.insight import generate_overnight_insight
 
     store = _fresh_store(tmp_path, monkeypatch)
+    _seed_evidence(store, monkeypatch)
     inserted: list = []
     real_insert = store.insert
     monkeypatch.setattr(store, "insert", lambda r: inserted.append(r) or real_insert(r))
@@ -264,31 +368,15 @@ def test_api_billing_detected_no_store(tmp_path, monkeypatch, creds_ok, isolated
     )
 
 
-def test_empty_store_still_calls(tmp_path, monkeypatch, mock_claude_ok):
-    from iai_mcp.insight import generate_overnight_insight
-
-    store = _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr("iai_mcp.insight.induce_schemas_tier0", lambda _s: [])
-    monkeypatch.setattr(
-        "iai_mcp.insight.query_events",
-        lambda _s, *, since=None, limit=1000: [],
-    )
-
-    result = asyncio.run(generate_overnight_insight(store, "sess-A"))
-    assert result["ok"] is True
-    assert len(mock_claude_ok) == 1
-    prompt = mock_claude_ok[0]["prompt"]
-    assert "[no patterns yet]" in prompt
-    assert "[no surprise yet]" in prompt
-
-
 def test_event_emitted(tmp_path, monkeypatch, mock_claude_ok):
     from iai_mcp.events import query_events
     from iai_mcp.insight import generate_overnight_insight
 
     store = _fresh_store(tmp_path, monkeypatch)
+    _seed_evidence(store, monkeypatch)
     asyncio.run(generate_overnight_insight(store, "sess-A"))
 
     events = query_events(store, kind="overnight_insight_generated", limit=10)
     assert len(events) >= 1
     assert events[0]["data"].get("session_id") == "sess-A"
+    assert events[0]["data"].get("sources", 0) >= 1

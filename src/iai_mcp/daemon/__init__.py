@@ -200,6 +200,36 @@ def _sleep_pipeline_gate(daemon_state: dict | None) -> bool:
     return not bool(ds.get("scheduler_paused"))
 
 
+#: A live external request this recent counts as demand to leave
+#: HIBERNATION: wide enough to bridge two lifecycle ticks, narrow enough
+#: that a long-gone client does not keep resurrecting the engine.
+HIBERNATION_DEMAND_WINDOW_SEC: float = 90.0
+
+
+def _hibernation_demand_reason(
+    wrapper_heartbeat_active: bool,
+    socket_last_activity_mono: float,
+    boot_activity_mono: float,
+    now_mono: float,
+    window_sec: float = HIBERNATION_DEMAND_WINDOW_SEC,
+) -> str | None:
+    # Module-level so it is directly unit-testable without assembling the
+    # daemon. A booted process that finds persisted HIBERNATION must not
+    # shut down while a live session demands the engine — the wake-signal
+    # file is not the only admissible evidence of demand.
+    # last_activity_ts initializes to construction time, so a bare recency
+    # check would read every boot as demand: demand requires an external op
+    # strictly after boot.
+    if (
+        socket_last_activity_mono > boot_activity_mono
+        and (now_mono - socket_last_activity_mono) < window_sec
+    ):
+        return "wake_on_socket_request_in_hibernation"
+    if wrapper_heartbeat_active:
+        return "wake_on_live_wrapper_heartbeat"
+    return None
+
+
 def _sleep_backoff_active(
     daemon_state: dict | None, backoff_until: float, now: float
 ) -> bool:
@@ -1367,6 +1397,11 @@ async def main() -> int:
             log.debug("pre-bind dispatch surface warm-up failed", exc_info=True)
 
         mcp_socket = SocketServer(store, state=state)
+        # Demand baseline for the HIBERNATION exit check: captured BEFORE
+        # serve() is scheduled — last_activity_ts starts at construction
+        # time, and a snapshot taken any later would swallow real requests
+        # served during the boot window.
+        _boot_socket_activity_mono: list[float] = [mcp_socket.last_activity_ts]
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
         await asyncio.sleep(0.05)
 
@@ -1396,7 +1431,9 @@ async def main() -> int:
                 for _ in range(20):
                     with _retrieve_preload.background_store_work("boot_preload") as _gate_ok:
                         if _gate_ok:
-                            _retrieve_preload.build_runtime_graph(store)
+                            # Delta-only when the cached payload allows it;
+                            # falls back to the full rebuild internally.
+                            _retrieve_preload.build_runtime_graph_incremental(store)
                             return
                     _time.sleep(15)
                 log.warning(
@@ -1525,11 +1562,27 @@ async def main() -> int:
             coordinator=_s2_coord,
         )
 
+        _boot_wake_event = _LifecycleEvent.WAKE_SIGNAL
+        _boot_wake_reason: str | None = None
         if _wake_was_pending:
+            _boot_wake_reason = "wake_on_signal_consumed"
+        else:
+            # A boot that finds persisted HIBERNATION with a live wrapper
+            # session attached is demand, signal file or not — without this
+            # the daemon exits after one tick and every restart repeats it.
+            try:
+                if _state_machine.current_state is _LifecycleState.HIBERNATION and (
+                    await asyncio.to_thread(_heartbeat_scanner.is_active)
+                ):
+                    _boot_wake_event = _LifecycleEvent.REQUEST_ARRIVED
+                    _boot_wake_reason = "wake_on_live_wrapper_heartbeat"
+            except Exception:  # noqa: BLE001 -- boot MUST NOT block on the demand probe
+                log.debug("hibernation demand probe failed", exc_info=True)
+        if _boot_wake_reason is not None:
             try:
                 await _state_machine.dispatch(
-                    _LifecycleEvent.WAKE_SIGNAL,
-                    reason="wake_on_signal_consumed",
+                    _boot_wake_event,
+                    reason=_boot_wake_reason,
                 )
             except (S2OscillationConflict, S2OscillationBlocked):
                 pass
@@ -1583,6 +1636,11 @@ async def main() -> int:
         )
 
         _last_active_monotonic: list[float] = [time.monotonic()]
+        # Below the 6h probe threshold at boot: the first version check
+        # happens on the first tick, then every 6h.
+        _last_version_probe_mono: list[float] = [
+            time.monotonic() - 7 * 3600.0
+        ]
         _prev_lifecycle_state: list = [_LifecycleState.WAKE]
         _lock_downgraded_to_shared: list[bool] = [False]
         # A failing pipeline must not re-escalate to EX every tick — that
@@ -1679,6 +1737,23 @@ async def main() -> int:
                         "lifecycle_tick crisis_mode expiry check failed",
                         exc_info=True,
                     )
+
+                # Notify-only version probe, throttled tick-side to every 6h
+                # (refresh_cache adds its own 24h TTL on the actual fetch).
+                # wait_for bounds the tick's exposure: urlopen's timeout does
+                # not cover a black-holed DNS resolve, and the tick must not
+                # stall idle detection behind a PyPI lookup.
+                if time.monotonic() - _last_version_probe_mono[0] > 6 * 3600.0:
+                    _last_version_probe_mono[0] = time.monotonic()
+                    try:
+                        from iai_mcp.version_check import check_enabled, refresh_cache
+
+                        if check_enabled():
+                            await asyncio.wait_for(
+                                asyncio.to_thread(refresh_cache), timeout=5.0,
+                            )
+                    except Exception:  # noqa: BLE001 — version probe must never crash the tick
+                        log.debug("version check refresh failed", exc_info=True)
 
                 try:
                     scanner_active = await asyncio.to_thread(
@@ -2092,20 +2167,67 @@ async def main() -> int:
                         current is _LifecycleState.HIBERNATION
                         and not _state_machine.shadow_run
                     ):
+                        # Re-scan at the decision point: the tick-start
+                        # snapshot is stale after a multi-minute pipeline
+                        # run and can contradict the still_idle value that
+                        # just entered HIBERNATION.
                         try:
-                            write_event(
-                                store,
-                                "lifecycle_hibernation_exit",
-                                {
-                                    "reason": "lifecycle_tick_hibernation",
-                                    "shadow_run": False,
-                                },
-                                severity="info",
+                            _hb_active_now = await asyncio.to_thread(
+                                _heartbeat_scanner.is_active,
                             )
-                        except (OSError, RuntimeError) as exc:
-                            log.debug("lifecycle_hibernation_exit event write failed: %s", exc)
-                        shutdown.set()
-                        return
+                        except Exception:  # noqa: BLE001 -- probe failure is not demand
+                            _hb_active_now = False
+                        _demand_reason = _hibernation_demand_reason(
+                            _hb_active_now,
+                            mcp_socket.last_activity_ts,
+                            _boot_socket_activity_mono[0],
+                            time.monotonic(),
+                        )
+                        if _demand_reason is not None:
+                            # Live demand: wake instead of exiting. On a
+                            # blocked dispatch the state stays HIBERNATION
+                            # and the next tick retries — never shut down
+                            # while a live session is attached.
+                            _last_active_monotonic[0] = time.monotonic()
+                            try:
+                                write_event(
+                                    store,
+                                    "lifecycle_hibernation_demand_wake",
+                                    {"reason": _demand_reason},
+                                    severity="info",
+                                )
+                            except (OSError, RuntimeError) as exc:
+                                log.debug(
+                                    "hibernation demand-wake event write failed: %s",
+                                    exc,
+                                )
+                            try:
+                                await _state_machine.dispatch(
+                                    _LifecycleEvent.REQUEST_ARRIVED,
+                                    reason=_demand_reason,
+                                )
+                            except (S2OscillationConflict, S2OscillationBlocked):
+                                pass
+                            except Exception:  # noqa: BLE001 -- demand wake must not crash the tick
+                                log.debug(
+                                    "hibernation demand wake dispatch failed",
+                                    exc_info=True,
+                                )
+                        else:
+                            try:
+                                write_event(
+                                    store,
+                                    "lifecycle_hibernation_exit",
+                                    {
+                                        "reason": "lifecycle_tick_hibernation",
+                                        "shadow_run": False,
+                                    },
+                                    severity="info",
+                                )
+                            except (OSError, RuntimeError) as exc:
+                                log.debug("lifecycle_hibernation_exit event write failed: %s", exc)
+                            shutdown.set()
+                            return
                 except Exception:  # noqa: BLE001 -- lifecycle tick must NEVER crash
                     log.warning("lifecycle tick iteration failed", exc_info=True)
 

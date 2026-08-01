@@ -84,9 +84,7 @@ _topology_state_lock: threading.Lock = threading.Lock()
 _topology_inflight: threading.Lock = threading.Lock()
 
 LIVE_KNOBS: dict[str, Any] = _profile_state
-DEFERRED_KNOBS: frozenset[str] = frozenset(
-    profile.PHASE_2_DEFERRED | profile.PHASE_3_DEFERRED
-)
+DEFERRED_KNOBS: frozenset[str] = frozenset(profile.DEFERRED_KNOB_NAMES)
 assert len(DEFERRED_KNOBS) == 0, "all 10 autistic-kernel knobs live"
 
 

@@ -459,7 +459,7 @@ def test_compressed_aead_envelope_survives_store_round_trip_byte_identical(
     store byte-for-byte.
 
     The store holds the ciphertext as an opaque value; it must never truncate
-    or alter the zstd frame. This is the constitutional verbatim/lossless
+    or alter the zstd frame. This is the verbatim/lossless
     invariant for the compressed-AEAD envelope: the exact wire bytes written are
     the exact wire bytes read back, and they still decrypt+decompress to the
     original plaintext. A highly compressible, multi-kilobyte plaintext is used

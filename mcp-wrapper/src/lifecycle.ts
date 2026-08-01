@@ -11,6 +11,8 @@ const execFileAsync = promisify(execFile);
 
 export const HEARTBEAT_REFRESH_INTERVAL_MS = 30_000;
 
+export const DOCTOR_AUTO_GRACE_MS = 10_000;
+
 export const HEARTBEAT_SCHEMA_VERSION = 1;
 
 export const WRAPPER_VERSION = "1.0.0";
@@ -54,7 +56,9 @@ export interface WrapperLifecycleOptions {
   platform?: NodeJS.Platform;
   socketReachable?: () => Promise<boolean>;
   spawnKickstart?: () => Promise<void>;
+  spawnDoctorAuto?: () => Promise<void>;
   refreshIntervalMs?: number;
+  doctorAutoGraceMs?: number;
 }
 
 export class WrapperLifecycle {
@@ -66,10 +70,13 @@ export class WrapperLifecycle {
   private readonly platform: NodeJS.Platform;
   private readonly socketReachable: () => Promise<boolean>;
   private readonly spawnKickstart: () => Promise<void>;
+  private readonly spawnDoctorAuto: () => Promise<void>;
   private readonly refreshIntervalMs: number;
+  private readonly doctorAutoGraceMs: number;
 
   private readonly startedAt: string;
   private timer: NodeJS.Timeout | null = null;
+  private healTimer: NodeJS.Timeout | null = null;
 
   constructor(opts: WrapperLifecycleOptions = {}) {
     this.pid = opts.pid ?? process.pid;
@@ -81,8 +88,38 @@ export class WrapperLifecycle {
     this.platform = opts.platform ?? process.platform;
     this.socketReachable = opts.socketReachable ?? defaultSocketReachable(this.socketPath);
     this.spawnKickstart = opts.spawnKickstart ?? defaultSpawnKickstart();
+    this.spawnDoctorAuto = opts.spawnDoctorAuto ?? defaultSpawnDoctorAuto();
     this.refreshIntervalMs = opts.refreshIntervalMs ?? HEARTBEAT_REFRESH_INTERVAL_MS;
+    this.doctorAutoGraceMs = opts.doctorAutoGraceMs ?? DOCTOR_AUTO_GRACE_MS;
     this.startedAt = isoNow();
+  }
+
+  scheduleAutoHeal(): void {
+    // Reflex arc: if the daemon is still unreachable after the wake
+    // attempt has had its grace window, hand off to `doctor --auto` —
+    // the safe unattended heal subset, damped on the doctor side.
+    if (this.healTimer !== null) {
+      clearTimeout(this.healTimer);
+    }
+    const timer = setTimeout(() => {
+      void (async () => {
+        let alive = false;
+        try {
+          alive = await this.socketReachable();
+        } catch {
+          alive = false;
+        }
+        if (alive) {
+          return;
+        }
+        try {
+          await this.spawnDoctorAuto();
+        } catch {
+        }
+      })();
+    }, this.doctorAutoGraceMs);
+    timer.unref();
+    this.healTimer = timer;
   }
 
   async ensureDaemonAlive(): Promise<void> {
@@ -95,16 +132,19 @@ export class WrapperLifecycle {
     if (alive) {
       return;
     }
-    if (this.platform === "darwin") {
-      try {
-        await this.spawnKickstart();
-        return;
-      } catch {
-      }
-    }
+    // Signal first, then kickstart: the wake signal is what lets the FSM
+    // leave persisted HIBERNATION, and a daemon kickstarted before the file
+    // lands would boot, find nothing, and exit after one tick. Kickstart
+    // alone never wakes the FSM.
     try {
       await this.writeWakeSignal();
     } catch {
+    }
+    if (this.platform === "darwin") {
+      try {
+        await this.spawnKickstart();
+      } catch {
+      }
     }
   }
 
@@ -125,6 +165,10 @@ export class WrapperLifecycle {
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.healTimer !== null) {
+      clearTimeout(this.healTimer);
+      this.healTimer = null;
     }
     try {
       await unlink(this.heartbeatPath);
@@ -198,5 +242,21 @@ function defaultSpawnKickstart(): () => Promise<void> {
     await execFileAsync(LAUNCHCTL_BIN, args, {
       timeout: KICKSTART_TIMEOUT_MS,
     });
+  };
+}
+
+function defaultSpawnDoctorAuto(): () => Promise<void> {
+  return async () => {
+    const { spawn } = await import("node:child_process");
+    // Fire-and-forget: the reflex must never hold the MCP session open or
+    // surface heal noise into it. `iai-mcp` resolves from PATH; a missing
+    // binary is swallowed by the caller's catch.
+    const child = spawn("iai-mcp", ["doctor", "--auto"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.on("error", () => {
+    });
+    child.unref();
   };
 }

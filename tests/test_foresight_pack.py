@@ -408,3 +408,58 @@ def test_pack_dedupes_identical_historical_records(driver, tmp_path, monkeypatch
     body = pack.read_text(encoding="utf-8")
     hits = body.count("hippocampus consolidates")
     assert hits == 1, f"[{driver}] duplicate content packed {hits}x:\n{body}"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_pending_question_rides_pack_only_in_tunnel(driver, tmp_path, monkeypatch):
+    from iai_mcp.events import write_event
+
+    _select_driver(driver, monkeypatch)
+    store = MemoryStore(path=tmp_path)
+    _turn(store, "The hippocampus consolidates memories during sleep.", "yesterday")
+
+    q_cue = "how does sleep consolidation strengthen hippocampal memory"
+    write_event(
+        store,
+        kind="curiosity_question",
+        data={
+            "question_id": "11111111-1111-1111-1111-111111111111",
+            "text": 'Two memories disagree — which is current: "nightly" or "weekly"?',
+            "tier": "question",
+            "entropy": 0.95,
+            "turn": 1,
+            "cue": q_cue,
+            "triggered_by": [],
+        },
+        severity="info",
+        session_id="yesterday",
+    )
+
+    # The tunnel reads the refresh-ahead cache; warm it synchronously so the
+    # test does not race the background refresh thread.
+    from iai_mcp import curiosity as _curiosity
+
+    _curiosity._cache_for(store)._refresh_once(store)
+
+    # Off-tunnel turn: the question must NOT surface.
+    _turn(store, "Grocery list: oat milk, rye bread, and tomatoes.", "today")
+    pack = foresight.pack_path(store)
+    off_body = pack.read_text(encoding="utf-8") if pack.is_file() else ""
+    assert "open question" not in off_body, (
+        f"[{driver}] question surfaced outside its topic tunnel: {off_body}"
+    )
+
+    # In-tunnel turn: the question rides the pack.
+    _turn(store, "How does sleep consolidation strengthen hippocampal memory?", "today")
+    assert pack.is_file()
+    body = pack.read_text(encoding="utf-8")
+    assert "open question" in body and "disagree" in body, (
+        f"[{driver}] in-tunnel turn must surface the pending question: {body}"
+    )
+
+    # Served once: the same turn again inside the TTL must not re-nag.
+    _turn(store, "How does sleep consolidation strengthen hippocampal memory?", "today")
+    body2 = pack.read_text(encoding="utf-8") if pack.is_file() else ""
+    assert "open question" not in body2, (
+        f"[{driver}] question re-served within the repeat TTL: {body2}"
+    )

@@ -36,7 +36,7 @@ def test_returns_n_most_recent_user_turns_time_desc(tmp_path):
         res = capture_turn(
             store,
             cue=f"user turn alpha{i}",
-            text=f"user turn alpha{i} mk59 episodic content for recency test",
+            text=f"user turn alpha{i} turnmark59 episodic content for recency test",
             tier="episodic",
             session_id="sess-recency-test",
             role="user",
@@ -64,7 +64,7 @@ def test_session_id_filter(tmp_path):
         capture_turn(
             store,
             cue=f"x turn {i}",
-            text=f"session x turn {i} distinctive content mk59 xfilter test",
+            text=f"session x turn {i} distinctive content turnmark59 xfilter test",
             tier="episodic",
             session_id="session-X-filter",
             role="user",
@@ -133,7 +133,7 @@ def test_negative_n_clamp_returns_empty(tmp_path):
     capture_turn(
         store,
         cue="clamp test",
-        text="clamp test content mk59 negative n guard",
+        text="clamp test content turnmark59 negative n guard",
         tier="episodic",
         session_id="sess-clamp",
         role="user",
@@ -164,7 +164,7 @@ def test_no_double_count_after_drain(iai_home_60):
     store = make_tmp_store(iai_home_60)
 
     session = "dedup-session-60a"
-    text = "dedup test turn content that is long enough for capture mk60 test"
+    text = "dedup test turn content that is long enough for capture turnmark60 test"
     src_uuid = "uuid-dedup-a001"
     ts_str = "2026-05-31T10:00:00.000000+00:00"
 
@@ -191,7 +191,7 @@ def test_no_double_count_after_drain(iai_home_60):
 
 def test_dedup_pending_vs_pending(iai_home_60):
     session = "dedup-pend-session-60b"
-    text = "pending dedup test turn text long enough for mk60 pending dedup"
+    text = "pending dedup test turn text long enough for turnmark60 pending dedup"
     src_uuid = "uuid-pend-dedup-b002"
     ts_str = "2026-05-31T11:00:00.000000+00:00"
 
@@ -211,8 +211,8 @@ def test_dedup_pending_vs_pending(iai_home_60):
 
 def test_live_turn_sorts_before_older_stored(iai_home_60):
     session = "sort-live-session-60c"
-    text_old = "older stored turn for recency sort test mk60 content here"
-    text_new = "newer pending live turn sort test mk60 content here brand new"
+    text_old = "older stored turn for recency sort test turnmark60 content here"
+    text_new = "newer pending live turn sort test turnmark60 content here brand new"
 
     ts_old = "2026-05-31T08:00:00.000000+00:00"
     ts_new = "2026-05-31T09:00:00.000000+00:00"
@@ -244,7 +244,7 @@ def test_live_turn_sorts_before_older_stored(iai_home_60):
 
 def test_distinct_uuid_same_text_both_appear(iai_home_60):
     session = "distinct-uuid-session-60d"
-    text = "identical text turn for distinct uuid test content mk60 here"
+    text = "identical text turn for distinct uuid test content turnmark60 here"
     ts1 = "2026-05-31T12:00:00.000000+00:00"
     ts2 = "2026-05-31T12:01:00.000000+00:00"
 
@@ -311,7 +311,7 @@ def test_pending_malformed_role_dropped(iai_home_60):
 def test_pending_record_id_not_literal_none(iai_home_60):
     session_with_uuid = "pending-rid-session-60g1"
     session_no_uuid = "pending-rid-session-60g2"
-    text = "pending record id test content long enough for mk60 test here"
+    text = "pending record id test content long enough for turnmark60 test here"
     src_uuid = "uuid-rid-test-g001"
 
     store = make_tmp_store(iai_home_60)
@@ -594,7 +594,7 @@ def test_recent_user_turns_dedup_not_o_corpus(driver, tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # Result/order equivalence anchor (GREEN on HEAD): pins what recent_user_turns
-# returns today so the query rewrite cannot silently change it.
+# returns today so a query rewrite cannot silently change it.
 # ---------------------------------------------------------------------------
 
 def _make_episodic_record(
@@ -635,7 +635,7 @@ def _make_episodic_record(
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_recent_user_turns_equivalence(driver, tmp_path, monkeypatch):
-    """Golden id-set + descending-created_at order anchor for the query rewrite.
+    """Golden id-set + descending-created_at order anchor for the recent_user_turns path.
 
     Pins EXACTLY what recent_user_turns returns today (both the plain call
     and the pending_live_events call) for a fixed, deterministic seed corpus

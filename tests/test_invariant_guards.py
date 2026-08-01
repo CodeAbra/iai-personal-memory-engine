@@ -1,17 +1,17 @@
-"""Static guards for the invariants that define this product.
+"""Grep-based static guards for the runtime's non-negotiable invariants.
 
-Each test greps the shipped source for a pattern that must never appear.
-They are cheap, they run on every suite, and they fail loudly the moment a
-refactor reintroduces something the design forbids:
-
-- no paid-API key, Anthropic SDK import, or client construction anywhere
-  under src/iai_mcp/ — recall and consolidation are local by construction.
-- no assignment to `.literal_surface` in daemon-side modules — stored text
-  is write-once; consolidation may add records, never rewrite one.
-- no `fcntl.lockf` — it releases on any fd close in the process.
-- no hardcoded clock-time in quiet_window.py — the window is learned.
-- the profile-knob registry stays sealed at its declared size.
-- identity_audit.py stays independent of the daemon lock.
+Catalog:
+- No paid API: ANTHROPIC_API_KEY and the Anthropic SDK must not appear in
+  runtime code — the only LLM channel is the `claude -p` subprocess billed
+  to the user's subscription.
+- No fcntl.lockf (close-fd trap) anywhere in src/iai_mcp/.
+- Verbatim preservation: no assignment to `.literal_surface` in daemon-side
+  modules.
+- No hardcoded Western clock-time in quiet_window.py — the quiet window is
+  learned from event history.
+- Sealed registry: PROFILE_KNOBS has exactly 11 entries (daemon does NOT
+  add knobs).
+- identity_audit.py does NOT import ProcessLock / concurrency module.
 """
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "iai_mcp"
 
-# Daemon-side modules. Some (bedtime, claude_cli) may not exist yet (future
-# plans). We scan whichever ones exist today.
+# Daemon-side modules; the list tolerates absent entries so it can be
+# declared ahead of the module. We scan whichever ones exist today.
 DAEMON_MODULES: tuple[str, ...] = (
     "daemon/__init__.py",
     "daemon/__main__.py",
@@ -61,45 +61,45 @@ def test_daemon_files_are_actually_scanned():
 # ---------------------------------------------------------------------------
 
 def test_no_api_key_in_daemon():
-    """Zero paid-API cost. ANTHROPIC_API_KEY must not
-    appear in ANY daemon-side module. Insight module uses `claude -p`
-    subprocess with the user's subscription instead."""
+    """Zero paid-API cost. ANTHROPIC_API_KEY must not appear in ANY
+    daemon-side module. Insight module uses `claude -p` subprocess with the
+    user's subscription instead."""
     offenders: list[str] = []
     for f in _existing_daemon_files():
         text = f.read_text()
         if "ANTHROPIC_API_KEY" in text:
             offenders.append(f.name)
-    assert not offenders, f"ANTHROPIC_API_KEY found in {offenders}"
+    assert not offenders, f"paid-API violation: ANTHROPIC_API_KEY found in {offenders}"
 
 
 # ---------------------------------------------------------------------------
-# Wide scan: the rule holds for every file under src/iai_mcp/, not a whitelist.
+# Wide-scan guards over ALL of src/iai_mcp/**/*.py — a module whitelist can
+# silently miss new files, so the paid-API guards below glob everything.
+# ---------------------------------------------------------------------------
 
 
 def _all_iai_mcp_files() -> list[Path]:
-    """All Python source files under src/iai_mcp/, recursive. The legacy
-    DAEMON_MODULES whitelist is replaced by a glob so new files do not need
-    explicit allow-listing — every src module is scanned by default."""
+    """All Python source files under src/iai_mcp/, recursive — every src
+    module is scanned by default, no explicit allow-listing."""
     return sorted(SRC.rglob("*.py"))
 
 
 def test_no_api_key_anywhere_in_src():
-    """ANTHROPIC_API_KEY must not appear in any file under src/iai_mcp/."""
+    """ANTHROPIC_API_KEY must not appear in ANY file under src/iai_mcp/."""
     offenders: list[str] = []
     for f in _all_iai_mcp_files():
         text = f.read_text()
         if "ANTHROPIC_API_KEY" in text:
             offenders.append(str(f.relative_to(SRC.parent.parent)))
     assert not offenders, (
-        f"ANTHROPIC_API_KEY found in {offenders}. "
-        "All paid-API surface is removed — claude_cli.invoke_claude_sync "
-        "via subscription is the only LLM channel."
+        f"paid-API violation: ANTHROPIC_API_KEY found in {offenders}. "
+        "claude_cli.invoke_claude_sync via subscription is the only LLM channel."
     )
 
 
 def test_no_anthropic_sdk_import_anywhere_in_src():
-    """`import anthropic` and `from anthropic` are forbidden anywhere
-    under src/iai_mcp/. The SDK must not return as a runtime dependency.
+    """`import anthropic` and `from anthropic` are forbidden anywhere under
+    src/iai_mcp/ — the SDK is not a runtime dependency.
 
     `claude_cli.py` may legitimately reference the string "anthropic" inside
     its env-deny-list (built from fragments, never as a literal import) and
@@ -113,14 +113,14 @@ def test_no_anthropic_sdk_import_anywhere_in_src():
         if matches:
             offenders.append((str(f.relative_to(SRC.parent.parent)), matches))
     assert not offenders, (
-        f"`import anthropic` / `from anthropic` in "
-        f"{offenders}. The SDK is no longer a runtime dependency (pyproject "
-        "dependency)."
+        f"paid-API violation: `import anthropic` / `from anthropic` in "
+        f"{offenders}. The SDK is not a runtime dependency."
     )
 
 
 def test_no_anthropic_client_construction_anywhere_in_src():
-    """`anthropic.Anthropic(...)` client construction is forbidden."""
+    """`anthropic.Anthropic(...)` client construction is forbidden — an SDK
+    client exists only to make paid-API calls."""
     offenders: list[tuple[str, str]] = []
     for f in _all_iai_mcp_files():
         text = f.read_text()
@@ -132,23 +132,23 @@ def test_no_anthropic_client_construction_anywhere_in_src():
                         (str(f.relative_to(SRC.parent.parent)), line.strip()),
                     )
     assert not offenders, (
-        f"anthropic.Anthropic() construction in {offenders}"
+        f"paid-API violation: anthropic.Anthropic() construction in {offenders}"
     )
 
 
 def test_no_anthropic_messages_sdk_calls_anywhere_in_src():
-    """Anthropic SDK method patterns are forbidden. batches.create / .retrieve / .results`) is deleted;
-    create(model="claude-haiku-...")` per-record loop
-    is replaced by the batched subscription path in
-    `reconsolidation_critic.evaluate_batch_reconsolidation`.
+    """Anthropic SDK method patterns are forbidden — nightly evaluation goes
+    through the batched subscription path in
+    `reconsolidation_critic.evaluate_batch_reconsolidation`, never through
+    the SDK batch/messages surface.
     """
     forbidden_patterns = (
         "messages.batches.create",
         "messages.batches.retrieve",
         "messages.batches.results",
-        # The per-record critic loop used messages.create directly; flag any
-        # re-emergence. Note: this matches the SDK method, NOT the local
-        # claude_cli subprocess (which uses subprocess.run / asyncio).
+        # A per-record critic loop over messages.create would be a paid-API
+        # runaway; flag any emergence. Note: this matches the SDK method, NOT
+        # the local claude_cli subprocess (which uses subprocess.run / asyncio).
         ".messages.create(",
     )
     offenders: list[tuple[str, str]] = []
@@ -162,13 +162,13 @@ def test_no_anthropic_messages_sdk_calls_anywhere_in_src():
                             (str(f.relative_to(SRC.parent.parent)), line.strip()),
                         )
     assert not offenders, (
-        f"Anthropic SDK call pattern in {offenders}"
+        f"paid-API violation: Anthropic SDK call pattern in {offenders}"
     )
 
 
 def test_reconsolidation_critic_does_not_modify_literal_surface():
-    """Verbatim integrity (Mottron's enhanced perceptual functioning): the
-    Tier-1 critic must never paraphrase, smooth, or otherwise rewrite the
+    """Cognitive integrity (Mottron EPF verbatim invariant): the Tier-1
+    critic must never paraphrase, smooth, or otherwise rewrite the
     `literal_surface` of a memory record. It is permitted to ANNOTATE via
     `prediction_error` (a separate float field) and via
     `append_provenance({"prediction_error": ...})`, but must not assign to
@@ -192,38 +192,37 @@ def test_reconsolidation_critic_does_not_modify_literal_surface():
         if pat.search(text):
             offenders.append(pat.pattern)
     assert not offenders, (
-        f"verbatim-integrity violation in reconsolidation_critic.py: "
+        f"cognitive-integrity violation in reconsolidation_critic.py: "
         f"forbidden write patterns {offenders}"
     )
 
 
 def test_reconsolidation_critic_cap_constant_present():
-    """`MAX_RECORDS_PER_CALL` cap is the load-bearing safety knob
-    that turns the batched critic from a runaway per-record loop into the
-    design invariant. Guard against accidental removal."""
+    """`MAX_RECORDS_PER_CALL` cap is the load-bearing safety knob that turns
+    the batched critic from a runaway per-record loop into the '1 call/night'
+    invariant. Guard against accidental removal."""
     from iai_mcp.reconsolidation_critic import MAX_RECORDS_PER_CALL
 
     assert isinstance(MAX_RECORDS_PER_CALL, int)
     assert 1 <= MAX_RECORDS_PER_CALL <= 200, (
-        f"MAX_RECORDS_PER_CALL={MAX_RECORDS_PER_CALL}. "
-        "Tunable but must stay bounded — runaway loops are exactly what the "
-        ""
+        f"cap drifted: MAX_RECORDS_PER_CALL={MAX_RECORDS_PER_CALL}. "
+        "Tunable but must stay bounded — a runaway per-record loop is exactly "
+        "what the cap exists to prevent."
     )
 
 
 def test_no_anthropic_dependency_in_pyproject():
     """`anthropic` must not appear as a runtime dependency in
-    pyproject.toml. this guard prevents accidental
-    re-pin."""
+    pyproject.toml; this guard prevents accidental re-pin."""
     pyproject = SRC.parent.parent / "pyproject.toml"
     assert pyproject.exists(), "pyproject.toml missing"
     text = pyproject.read_text()
     # Block actual dependency lines like `"anthropic>=0.40.0",`, but allow
-    # comments that merely mention the SDK by name.
+    # comments mentioning the SDK.
     dep_pattern = re.compile(r'^\s*"anthropic[>=<~!]', re.MULTILINE)
     offenders = dep_pattern.findall(text)
     assert not offenders, (
-        f"anthropic dependency re-pinned in pyproject.toml: "
+        f"paid-API violation: anthropic dependency re-pinned in pyproject.toml: "
         f"{offenders}"
     )
 
@@ -233,24 +232,24 @@ def test_no_anthropic_dependency_in_pyproject():
 # ---------------------------------------------------------------------------
 
 def test_no_lockf_anywhere():
-    """POSIX fcntl.lockf is released when ANY fd
-    referring to the same file is closed. We must use BSD fcntl.flock which
-    is bound to the open file description. Scan ALL iai_mcp/*.py, not just
-    daemon modules -- mixing the two is also a bug."""
+    """POSIX fcntl.lockf is released when ANY fd referring to the same file
+    is closed (apenwarr 2010). We must use BSD fcntl.flock which is bound to
+    the open file description. Scan ALL iai_mcp/*.py, not just daemon
+    modules -- mixing the two is also a bug."""
     offenders: list[str] = []
     for f in SRC.glob("*.py"):
         text = f.read_text()
         if "fcntl.lockf" in text:
             offenders.append(f.name)
-    assert not offenders, f"fcntl.lockf in {offenders}"
+    assert not offenders, f"close-fd-trap violation: fcntl.lockf in {offenders}"
 
 
 # ---------------------------------------------------------------------------
-# daemon must NEVER assign to record.literal_surface
+# Daemon must NEVER assign to record.literal_surface
 # ---------------------------------------------------------------------------
 
 def test_no_literal_surface_mutation_in_daemon():
-    """literal preservation. Daemon-side modules must not contain
+    """Literal preservation. Daemon-side modules must not contain
     `.literal_surface =` assignment syntax. Reading `.literal_surface` is
     allowed; writing is forbidden."""
     pattern = re.compile(r"\.literal_surface\s*=")
@@ -260,15 +259,15 @@ def test_no_literal_surface_mutation_in_daemon():
         matches = pattern.findall(text)
         if matches:
             offenders.append((f.name, matches))
-    assert not offenders, f"{offenders}"
+    assert not offenders, f"verbatim-preservation violation: {offenders}"
 
 
 # ---------------------------------------------------------------------------
-# no hardcoded Western 9-5 / clock-time in quiet_window.py
+# No hardcoded Western 9-5 / clock-time in quiet_window.py
 # ---------------------------------------------------------------------------
 
 def test_no_hardcoded_clock_time_in_quiet_window():
-    """quiet window must be LEARNED from event
+    """Global-product mandate: quiet window must be LEARNED from event
     history, never hardcoded. Flag obvious clock-time literals."""
     f = SRC / "quiet_window.py"
     if not f.exists():
@@ -286,20 +285,20 @@ def test_no_hardcoded_clock_time_in_quiet_window():
         if re.search(pat, text):
             offenders.append(pat)
     assert not offenders, (
-        f"hardcoded clock-time patterns in quiet_window.py: {offenders}"
+        f"learned-quiet-window violation: hardcoded clock-time patterns in "
+        f"quiet_window.py: {offenders}"
     )
 
 
 # ---------------------------------------------------------------------------
-# The profile-knob registry is sealed at exactly 11 entries
-# (10 autistic-kernel + 1 operator wake_depth MCP-12; AUTIST-02/08/11/12 removed)
+# Sealed registry: PROFILE_KNOBS has exactly 11 entries
+# (10 autistic-kernel + 1 operator wake_depth MCP-12)
 # ---------------------------------------------------------------------------
 
 def test_profile_knobs_still_sealed():
-    """11-knob registry is sealed .
-    Daemon must not add new knobs. Transient state (hebbian-rate boost during
-    developmental sigma, etc.) belongs in events or .daemon-state.json,
-    never in PROFILE_KNOBS."""
+    """11-knob registry is sealed. Daemon must not add new knobs. Transient
+    state (hebbian-rate boost during developmental sigma, etc.) belongs in
+    events or .daemon-state.json, never in PROFILE_KNOBS."""
     from iai_mcp import profile
     assert len(profile.PROFILE_KNOBS) == 11, (
         f"PROFILE_KNOBS unseal: expected 11, got {len(profile.PROFILE_KNOBS)}"
@@ -307,26 +306,27 @@ def test_profile_knobs_still_sealed():
 
 
 # ---------------------------------------------------------------------------
-# session-start payload at any wake_depth. Knobs are applied server-side via
+# Profile knob names must NEVER appear in the session-start payload at any
+# wake_depth. Knobs are applied server-side via
 # response_decorator.apply_profile; their names must not cross the MCP wire.
 # ---------------------------------------------------------------------------
 
 
 def test_no_profile_knob_in_session_start_payload(tmp_path):
-    """Knob names must not leak into the NEW pointer fields at
+    """Knob names must not leak into the lazy pointer fields at
     wake_depth=minimal (<=30 raw tok design budget).
 
     The legacy L0 identity kernel (`_seed_l0_identity`) historically recites
     a handful of autistic-kernel defaults inline in the literal_surface
     ('literal_preservation=strong, masking_off=true, ...'). That predates
-    the pointer contract and lives inside the user's identity record itself, not a
+    this guard and lives inside the user's identity record itself, not a
     decorator output — so it's scoped into the standard/deep l0 segment and
     explicitly exempt from this grep guard.
 
     The invariant this guard DEFENDS is: the lazy minimal payload
     (identity_pointer / brain_handle / topic_cluster_hint) MUST NOT contain
-    knob names. Knobs are applied server-side by response_decorator
-    knob names must never reach the MCP wire.
+    knob names. Knobs are applied server-side by response_decorator; knob
+    names must never reach the MCP wire.
     """
     from iai_mcp import profile
     from iai_mcp.community import CommunityAssignment
@@ -344,8 +344,8 @@ def test_no_profile_knob_in_session_start_payload(tmp_path):
         payload = assemble_session_start(
             store, assignment, [], profile_state=state,
         )
-        # Only scan the NEW lazy fields. Legacy l0 / l1 / l2 / rich_club
-        # carry user-authored identity content and remain exempt per design.
+        # Only scan the lazy fields. Legacy l0 / l1 / l2 / rich_club carry
+        # user-authored identity content and remain exempt per design.
         lazy_text = " ".join(
             [
                 payload.identity_pointer,
@@ -358,23 +358,23 @@ def test_no_profile_knob_in_session_start_payload(tmp_path):
             # payload field `wake_depth` is a meta-attribute, not inline
             # knob text in the lazy pointers.
             assert knob_name not in lazy_text, (
-                f"knob name '{knob_name}' found in "
+                f"knob-leak violation: knob name '{knob_name}' found in "
                 f"lazy session-start payload at wake_depth={mode} "
                 f"(identity_pointer/brain_handle/topic_cluster_hint)"
             )
 
 
 # ---------------------------------------------------------------------------
-# Anthropic Sonnet 4.6 cache minimum (2048 tok). Adding cache_control in
-# session.py would be silently ignored — wastes a breakpoint slot. Guard
-# against accidental regression.
+# wake_depth=minimal payload (<=30 raw tok) is below the Anthropic prompt-
+# cache minimum (2048 tok). Adding cache_control in session.py would be
+# silently ignored — wastes a breakpoint slot. Guard against regression.
 # ---------------------------------------------------------------------------
 
 
 def test_no_cache_control_in_session_assembler():
-    """session.py must not set cache_control (minimal prefix
-    cannot be cached on Sonnet 4.6 / Opus 4.7; standard+deep caching lives
-    in the TS wrapper, not the Python assembler).
+    """session.py must not set cache_control (the minimal prefix cannot be
+    cached; standard+deep caching lives in the TS wrapper, not the Python
+    assembler).
     """
     f = SRC / "session.py"
     assert f.exists(), "session.py missing"
@@ -385,13 +385,14 @@ def test_no_cache_control_in_session_assembler():
     pattern = re.compile(r"cache_control\s*[:=]")
     offenders = pattern.findall(text)
     assert not offenders, (
-        f"cache_control assignment/kwarg in session.py: "
-        f"{offenders}"
+        f"cache-minimum violation: cache_control assignment/kwarg in "
+        f"session.py: {offenders}"
     )
 
 
 # ---------------------------------------------------------------------------
-# SDK import, no ANTHROPIC_API_KEY read, no paid-API coupling.
+# response_decorator must be pure-local. No Anthropic SDK import, no
+# ANTHROPIC_API_KEY read, no paid-API coupling.
 # ---------------------------------------------------------------------------
 
 
@@ -402,13 +403,13 @@ def test_no_api_key_in_response_decorator():
     text = f.read_text()
     lower = text.lower()
     assert "anthropic" not in lower, (
-        "response_decorator references 'anthropic'"
+        "paid-API violation: response_decorator references 'anthropic'"
     )
     assert "ANTHROPIC_API_KEY" not in text, (
-        "response_decorator references ANTHROPIC_API_KEY"
+        "paid-API violation: response_decorator references ANTHROPIC_API_KEY"
     )
     assert "import anthropic" not in lower, (
-        "response_decorator imports anthropic SDK"
+        "paid-API violation: response_decorator imports anthropic SDK"
     )
 
 
@@ -417,7 +418,7 @@ def test_no_api_key_in_response_decorator():
 # ---------------------------------------------------------------------------
 
 def test_identity_audit_has_no_lock_import():
-    """continuous audit runs even when daemon is paused. To make that
+    """Continuous audit runs even when the daemon is paused. To make that
     invariant mechanical, identity_audit.py must NOT import the concurrency
     module -- the only way to accidentally take a lock is to import it."""
     f = SRC / "identity_audit.py"
@@ -426,14 +427,14 @@ def test_identity_audit_has_no_lock_import():
     text = f.read_text()
     # No import of iai_mcp.concurrency, no `ProcessLock` symbol reference.
     assert "iai_mcp.concurrency" not in text, (
-        "identity_audit.py imports iai_mcp.concurrency"
+        "lock-free-audit violation: identity_audit.py imports iai_mcp.concurrency"
     )
     assert "ProcessLock" not in text, (
-        "identity_audit.py references ProcessLock"
+        "lock-free-audit violation: identity_audit.py references ProcessLock"
     )
     # Also: no `fcntl.` calls (belt-and-braces).
     assert "fcntl." not in text, (
-        "identity_audit.py uses fcntl directly"
+        "lock-free-audit violation: identity_audit.py uses fcntl directly"
     )
 
 
@@ -442,25 +443,25 @@ def test_identity_audit_has_no_lock_import():
 # ---------------------------------------------------------------------------
 
 def test_no_api_key_in_hippea_cascade():
-    """HIPPEA cascade is pure-local. ANTHROPIC_API_KEY and
-    `anthropic` SDK imports are forbidden in hippea_cascade.py."""
+    """HIPPEA cascade is pure-local. ANTHROPIC_API_KEY and `anthropic` SDK
+    imports are forbidden in hippea_cascade.py."""
     f = SRC / "hippea_cascade.py"
     if not f.exists():
         return  # module not yet created
     text = f.read_text()
     assert "ANTHROPIC_API_KEY" not in text, (
-        "ANTHROPIC_API_KEY in hippea_cascade.py"
+        "paid-API violation: ANTHROPIC_API_KEY in hippea_cascade.py"
     )
     assert "import anthropic" not in text, (
-        "`import anthropic` in hippea_cascade.py"
+        "paid-API violation: `import anthropic` in hippea_cascade.py"
     )
     assert "from anthropic" not in text, (
-        "`from anthropic` in hippea_cascade.py"
+        "paid-API violation: `from anthropic` in hippea_cascade.py"
     )
 
 
 def test_hippea_cascade_is_read_only_against_store():
-    """cascade prefetch never mutates the store.
+    """Cascade prefetch never mutates the store.
 
     Grep for store-mutating call patterns (with trailing open-paren so the
     module's own enumerated-forbidden list in the docstring does not trip
@@ -480,5 +481,5 @@ def test_hippea_cascade_is_read_only_against_store():
     ]
     offenders = [p for p in forbidden_calls if p in text]
     assert not offenders, (
-        f"hippea_cascade.py contains store mutators: {offenders}"
+        f"read-only violation: hippea_cascade.py contains store mutators: {offenders}"
     )

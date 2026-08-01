@@ -25,7 +25,7 @@ def test_crypto_roundtrip_basic() -> None:
 def test_crypto_roundtrip_cyrillic() -> None:
     from iai_mcp.crypto import encrypt_field, decrypt_field
     key = b"\x01" * 32
-    plaintext = "こんにちは世界！これは暗号化のテストです。"
+    plaintext = "Привет, мир! Это тест шифрования."
     ciphertext = encrypt_field(plaintext, key)
     recovered = decrypt_field(ciphertext, key)
     assert recovered == plaintext
@@ -246,7 +246,7 @@ def test_envelope_legacy_0x00_decrypts_to_identity() -> None:
 
 
 def test_envelope_unknown_first_byte_is_treated_as_pre_envelope_legacy() -> None:
-    """Pre-Phase-97 records were written without a version byte — the entire
+    """Legacy pre-envelope records were written without a version byte — the entire
     AEAD plaintext was the raw utf-8 payload. The decrypt path must accept
     these or every legacy row on disk raises HippoIntegrityError and crashes
     the daemon (the regression that surfaced this contract). Any byte other
@@ -289,7 +289,7 @@ def test_envelope_byte_identity_roundtrip() -> None:
         "ok",
         "the quick brown fox jumps over the lazy dog " * 50,
         '[{"a":1,"b":2,"c":[1,2,3,4,5]}]',
-        "こんにちは世界 — CJK mix",
+        "Привет, мир! — Cyrillic mix",
         "",
         # Adversarial: new-write round-trip must survive leading control bytes
         # that collide with envelope version tags (these are the exact bytes
@@ -326,7 +326,7 @@ def test_decrypt_field_handles_pre_envelope_legacy_payload() -> None:
     aesgcm = AESGCM(key)
     aad = b"legacy-record-id"
     # Encrypt the raw payload directly — no envelope version byte. This
-    # mirrors how pre-Phase-97 records were written to disk.
+    # mirrors how legacy pre-envelope records were written to disk.
     ct = aesgcm.encrypt(nonce, raw_payload, aad)
     wire = CIPHERTEXT_PREFIX + base64.b64encode(nonce + ct).decode("ascii")
 

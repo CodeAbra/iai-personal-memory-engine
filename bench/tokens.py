@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="bench.tokens",
         description=(
             "Session-start token bench. Also included: "
-            "--wake-depth for measuring the lazy <=30-tok payload vs lazy "
+            "--wake-depth for measuring the lazy <=30-tok payload vs the "
             "eager dump vs the deep variant."
         ),
     )

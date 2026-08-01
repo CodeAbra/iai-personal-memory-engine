@@ -189,9 +189,10 @@ def test_recall_reads_never_block_on_held_writer_lock(tmp_path: Path) -> None:
 
         # query_similar's ANN candidate fetch (_ann_knn_fetch_core's routed
         # vec_label IN fetch) must not block on the writer lock. query_similar
-        # itself first calls tbl.count_rows(), a separate call site that is not
-        # routed and still takes _conn_lock -- so this test exercises
-        # _ann_knn_fetch_core directly to isolate the routed site.
+        # itself first calls tbl.count_rows() (a separate, NOT-routed call
+        # site, outside the routed five-site scope) which still legitimately takes
+        # _conn_lock -- so this test exercises _ann_knn_fetch_core directly
+        # to isolate the routed site's behavior from that unrelated gate.
         tbl = store.db.open_table("records")
         q = tbl.search(list(_norm_vec(0))).distance_type("cosine").limit(5)
         t0 = time.monotonic()

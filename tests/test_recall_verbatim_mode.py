@@ -335,7 +335,7 @@ def test_verbatim_mode_overrides_loose_knob_setting(tmp_path):
             f"hub {h.record_id} leaked into hits despite verbatim mode override of loose knob"
         )
 
-def test_concept_mode_default_preserves_phase_5_baseline(tmp_path):
+def test_concept_mode_default_preserves_locked_baseline(tmp_path):
     from iai_mcp.pipeline import recall_for_response
 
     (store, embedder, graph, assignment, rich_club,

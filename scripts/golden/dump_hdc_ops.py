@@ -48,7 +48,7 @@ SAMPLES_PATH = OUT_DIR / "sample_strings.json"
 EMBED_DIM = 384
 HV_BYTES = 10000 // 8  # 1250 — packbits of 10000 projected bits
 N_PROJ = 100
-PROJ_DUMP_SEED = 0  # fixed dump-time RNG seed for the 100 input embeddings (not constitutional)
+PROJ_DUMP_SEED = 0  # fixed dump-time RNG seed for the 100 input embeddings (dump-time only, not the locked projection)
 
 BSC_D = 4096
 ROLES = bsc.BSC_ROLE_VOCABULARY

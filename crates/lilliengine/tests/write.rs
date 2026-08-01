@@ -29,7 +29,7 @@ const DDL_RECORDS: &str = "CREATE TABLE IF NOT EXISTS records ( \
     vec_label INTEGER PRIMARY KEY AUTOINCREMENT , id TEXT NOT NULL UNIQUE , \
     n INTEGER , label TEXT )";
 
-// An edges-shaped table with a composite primary key, the primary-key UPSERT
+// An edges-shaped table with a composite primary key, the canonical UPSERT
 // target (HippoMergeInsert drives ON CONFLICT against this shape).
 const DDL_EDGES: &str = "CREATE TABLE IF NOT EXISTS edges ( \
     src TEXT , dst TEXT , edge_type TEXT , weight REAL , updated_at TEXT , \

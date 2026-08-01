@@ -359,7 +359,7 @@ def test_start_succeeds_with_warm_daemon_no_extra_spawn(built_wrapper, tmp_path)
             assert "result" in init_resp, f"initialize failed: {init_resp}"
 
             elapsed, recall_resp = _call_memory_recall(
-                wrapper_proc, cue="phase 7.1 warm-daemon test",
+                wrapper_proc, cue="warm-daemon test",
                 rpc_id=2, timeout_sec=10.0,
             )
             assert "result" in recall_resp or "error" in recall_resp, recall_resp

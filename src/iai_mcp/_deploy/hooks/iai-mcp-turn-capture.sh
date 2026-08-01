@@ -140,8 +140,23 @@ def parse_line(raw):
         obj = json.loads(raw)
     except Exception:
         return None
+    if "step_index" in obj and "source" in obj:
+        # Antigravity transcript_full lines: conversational turns only.
+        src, typ = obj.get("source"), obj.get("type")
+        if src == "USER_EXPLICIT" and typ == "USER_INPUT":
+            agy_role = "user"
+        elif src == "MODEL" and typ == "PLANNER_RESPONSE":
+            agy_role = "assistant"
+        else:
+            return None
+        agy_text = str(obj.get("content") or "").strip()
+        if not agy_text or _is_noise(agy_text):
+            return None
+        return agy_role, agy_text, None, obj.get("created_at")
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-    role = obj.get("type") or msg.get("role", "")
+    # Claude puts the role in top-level "type", Cursor in top-level "role"
+    # with the content nested under "message".
+    role = obj.get("type") or msg.get("role") or obj.get("role", "")
     if role not in {"user", "assistant"}:
         return None
     content = msg.get("content", "")
@@ -231,6 +246,12 @@ os.replace(tmp, offset)
 # Sidecar and watermark reads are HOME-based regardless of IAI_MCP_STORE,
 # matching the behavior of the manual cmd_session_refresh_if_stale command in
 # cli.py. Only the socket RPC is store-guarded.
+#
+# Hosts whose submit event cannot inject context set
+# IAI_MCP_TURN_INJECT_DISABLED — the gate (and its socket RPC) is skipped;
+# the capture above already completed.
+if os.environ.get("IAI_MCP_TURN_INJECT_DISABLED"):
+    sys.exit(0)
 try:
     # --- Helper functions (all HOME-based, no IAI_MCP_STORE awareness) ---
 

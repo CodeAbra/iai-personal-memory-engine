@@ -386,14 +386,3 @@ def _fetch_records_by_labels(
                 db.close()
             except Exception:  # noqa: BLE001
                 pass
-
-
-def recall_semantic_degraded(
-    store_root: "str | Path",
-    cue: str,
-    n: int = 10,
-    *,
-    session_id: "str | None" = None,
-) -> "list[dict]":
-    from iai_mcp.hippo import degraded_semantic_recall as _degrade
-    return _degrade(store_root, cue, limit=n, session_id=session_id)

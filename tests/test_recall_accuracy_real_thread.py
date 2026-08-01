@@ -1,4 +1,4 @@
-"""Witness gate: real-thread-following recall accuracy.
+"""RACC-EVAL-01 SC-1 witness gate: real-thread-following recall accuracy.
 
 Locks the CONTRACT for the labelled real-corpus eval set before any
 downstream code exists (fixture schema, harness wiring through
@@ -40,13 +40,13 @@ def _fixture_absent_reason() -> str:
     return (
         "Local labelled real-thread fixture not found at "
         f"{_fixture_path()}. This fixture is LOCAL-ONLY (never committed). "
-        "Build it by running: python scripts/label_real_thread_cues.py."
+        "Build it by running: python scripts/label_real_thread_cues.py"
     )
 
 
 def _harness_absent_reason() -> str:
     return (
-        f"Harness module not found at {_HARNESS_PATH}. It has not landed yet."
+        f"Harness module not found at {_HARNESS_PATH}."
     )
 
 
@@ -80,7 +80,7 @@ def driver(request, monkeypatch):
 
 
 def test_fixture_schema_valid_when_present(driver):
-    """The labelled fixture, once built, must satisfy the fixture schema:
+    """The labelled fixture, once built, must satisfy the RACC-EVAL-01 schema:
     30-50 cues, each with a non-empty cue_text and non-empty relevant_record_ids."""
     if not _fixture_path().exists():
         pytest.skip(_fixture_absent_reason())
@@ -90,7 +90,7 @@ def test_fixture_schema_valid_when_present(driver):
     cues = data.get("cues")
     assert isinstance(cues, list), "fixture 'cues' field must be a list"
     assert 30 <= len(cues) <= 50, (
-        f"expected 30-50 labelled cues, got {len(cues)}"
+        f"expected 30-50 labelled cues per RACC-EVAL-01, got {len(cues)}"
     )
     for entry in cues:
         assert isinstance(entry.get("cue_id"), str) and entry["cue_id"], (
@@ -111,7 +111,8 @@ def test_fixture_schema_valid_when_present(driver):
 
 def test_harness_uses_core_dispatch(driver):
     """Static wiring gate: the harness must dispatch through core.dispatch,
-    never call recall_for_response directly."""
+    never call recall_for_response directly — the exact 184-04-SUMMARY.md
+    escalation mistake this phase must not repeat."""
     if not _HARNESS_PATH.exists():
         pytest.skip(_harness_absent_reason())
 
@@ -122,8 +123,7 @@ def test_harness_uses_core_dispatch(driver):
     )
     assert "from iai_mcp.pipeline import recall_for_response" not in src, (
         "harness must not import recall_for_response directly — this bypasses "
-        "the authority-merge step (merge_authority_hits), which lives "
-        "exclusively in core/__init__.py"
+        "D-A (merge_authority_hits), which lives exclusively in core/__init__.py"
     )
     assert "recall_for_response(" not in src, (
         "harness must not call recall_for_response directly — route through "
@@ -182,17 +182,30 @@ def test_verbatim_literal_surface_preserved(driver):
     cue = data["cues"][0]
 
     with open_eval_copy_store(driver=driver) as store:
-        before = {
-            rid: store.get(rid).literal_surface
-            for rid in cue["relevant_record_ids"]
-        }
+        # The fixture labels outlive the store's lifecycle: erasure sweeps
+        # legitimately delete long-tombstoned records, so resolve the label
+        # set against the live copy and prove the invariant on the survivors.
+        before = {}
+        for rid in cue["relevant_record_ids"]:
+            rec = store.get(rid)
+            if rec is not None:
+                before[rid] = rec.literal_surface
+        if not before:
+            pytest.skip(
+                "every labelled record for this cue has been erased from the "
+                "real store — relabel the fixture"
+            )
 
         dispatch_cue_traced(cue, driver=driver, store=store)
 
-        after = {
-            rid: store.get(rid).literal_surface
-            for rid in cue["relevant_record_ids"]
-        }
+        after = {}
+        for rid in before:
+            rec = store.get(rid)
+            assert rec is not None, (
+                f"record {rid} vanished during a read-path dispatch — recall "
+                f"must never delete stored records"
+            )
+            after[rid] = rec.literal_surface
 
     assert after == before, (
         "literal_surface changed after dispatching a real cue — verbatim/"
@@ -201,7 +214,7 @@ def test_verbatim_literal_surface_preserved(driver):
 
 
 def test_after_184_strictly_better_than_baseline(driver):
-    """The witness: after_184 false_negative_rate must be STRICTLY
+    """The SC-1 witness: after-184 false_negative_rate must be STRICTLY
     lower than the baseline (all mechanisms disabled) on the same real
     labelled corpus. Opt-in — requires the real Rust embedder against a
     copy of the owner's actual Hippo store."""
@@ -211,7 +224,7 @@ def test_after_184_strictly_better_than_baseline(driver):
         pytest.skip(_harness_absent_reason())
     if os.environ.get("IAI_MCP_DRYRUN_REAL_STORE") != "1":
         pytest.skip(
-            "real-corpus witness is opt-in: set IAI_MCP_DRYRUN_REAL_STORE=1 "
+            "real-corpus SC-1 witness is opt-in: set IAI_MCP_DRYRUN_REAL_STORE=1 "
             "and have a labelled fixture present"
         )
 

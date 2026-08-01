@@ -21,7 +21,7 @@ from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
 
-_TEST_PASSPHRASE = "iai-mcp-test-passphrase-2026-04-30-phase-07.10"
+_TEST_PASSPHRASE = "iai-mcp-test-passphrase"
 _HOLDER_BARRIER_TIMEOUT_S = 60.0
 
 

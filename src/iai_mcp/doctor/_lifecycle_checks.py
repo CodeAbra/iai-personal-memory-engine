@@ -177,8 +177,7 @@ def check_b_socket_fresh() -> CheckResult:
 
 def check_c_lock_healthy() -> CheckResult:
     import errno as _errno
-
-    from iai_mcp import _flock as _fcntl  # flock seam: fcntl on POSIX, msvcrt region lock on Windows
+    import fcntl as _fcntl
 
     lock_path = _resolve_hippo_db_path().parent / ".lock"
     if not lock_path.exists():
@@ -383,6 +382,17 @@ def check_m_heartbeat_scanner() -> CheckResult:
     )
 
 
+def _daemon_process_alive() -> bool:
+    from iai_mcp.daemon_state import load_state as _load_ds
+    from iai_mcp.lifecycle_lock import _is_pid_alive
+
+    try:
+        pid = (_load_ds() or {}).get("daemon_pid")
+        return isinstance(pid, int) and pid > 0 and _is_pid_alive(pid)
+    except Exception:  # noqa: BLE001 — unreadable state reads as not-alive
+        return False
+
+
 def check_j_lifecycle_current_state() -> CheckResult:
     from iai_mcp.lifecycle_state import load_state
 
@@ -394,6 +404,20 @@ def check_j_lifecycle_current_state() -> CheckResult:
     shadow_run = record.get("shadow_run", True)
 
     detail = f"{current} since {elapsed} (shadow_run={'true' if shadow_run else 'false'})"
+
+    # A parked engine (persisted HIBERNATION, or SLEEP after a mid-cycle
+    # death) with no live daemon cannot wake itself on engines that need
+    # the wake-signal file — someone running doctor IS the demand.
+    if current in ("HIBERNATION", "SLEEP", "SLEEPING") and not _daemon_process_alive():
+        return CheckResult(
+            name="(j) lifecycle current state",
+            passed=False,
+            detail=(
+                f"{detail}; engine parked in {current} with no live daemon "
+                "— --apply/--auto writes wake.signal and starts it"
+            ),
+            status="FAIL",
+        )
     return CheckResult(
         name="(j) lifecycle current state",
         passed=True,

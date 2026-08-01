@@ -27,6 +27,8 @@
     background: rgba(255,107,125,.14); color: #ffd0d6; text-align: center;
     padding: 7px; font-size: 12px; letter-spacing: .04em;
     border-bottom: 1px solid rgba(255,107,125,.3); }
+  /* the down-banner must not sit on the burgers' hit area */
+  body:has(#reach-banner) .burger { top: 62px; }
   body.resting #vitals, body.resting #economy { opacity: .55;
     transition: opacity .4s; }
   body.resting #vitals::after { content: " · resting"; }
@@ -79,7 +81,7 @@
 
   #rail { position: fixed; right: 34px; top: 118px; z-index: 15; width: 218px;
     display: flex; flex-direction: column; gap: 26px; text-align: right;
-    max-height: calc(100vh - 290px); overflow-y: auto; overflow-x: hidden;
+    max-height: calc(100vh - 330px); overflow-y: auto; overflow-x: hidden;
     scrollbar-width: thin; scrollbar-color: rgba(120, 140, 170, .25) transparent; }
   #rail::-webkit-scrollbar { width: 3px; background: transparent; }
   #rail::-webkit-scrollbar-track { background: transparent; }
@@ -149,7 +151,7 @@
   #panel { position: fixed; left: 84px; top: 108px; z-index: 21; width: 350px;
     background: rgba(9, 7, 18, .93); backdrop-filter: blur(7px);
     border-radius: 10px; padding: 16px 18px; box-shadow: 0 10px 50px rgba(0,0,0,.55);
-    display: none; padding: 4px 0 0; }
+    display: none; }
   #panel::before { content: ""; position: absolute; left: -18px; top: 0; bottom: 0;
     width: 1px; background: linear-gradient(180deg, var(--epi), transparent); }
   #panel .tier { font-size: 9px; letter-spacing: .4em; text-transform: uppercase; color: var(--sem); }
@@ -174,7 +176,8 @@
 
   #dropzone { position: fixed; left: 50%; transform: translateX(-50%); bottom: 26px; z-index: 20;
     padding: 12px 34px; text-align: center; cursor: pointer; border-radius: 999px;
-    border: 1px dashed rgba(186,220,240,.30); transition: all .25s; }
+    border: 1px dashed rgba(186,220,240,.30); transition: all .25s;
+    max-width: min(86vw, 560px); }
   #dropzone:hover, #dropzone.drag { border-color: var(--epi);
     box-shadow: 0 0 40px rgba(143,231,255,.14); }
   #dropzone .big { font-size: 13px; letter-spacing: .05em; color: var(--dim); }
@@ -224,9 +227,12 @@
   #tip .t-tier { font-size: 8.5px; letter-spacing: .3em; text-transform: uppercase;
     color: var(--sem); display: block; margin-bottom: 2px; }
   #tip .t-hint { color: var(--pin); font-size: 10px; display: block; margin-top: 3px; }
+  /* pointer-events none + bounded width: the hint is narration, and it must
+     never intercept a click or reach under the legend/eeg chrome. */
   #hint { position: fixed; left: 50%; transform: translateX(-50%); bottom: 88px; z-index: 19;
     color: var(--faint); font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
-    transition: opacity .6s; }
+    transition: opacity .6s; pointer-events: none;
+    max-width: min(76vw, 720px); text-align: center; }
   /* responsive: keep the frameless chrome from colliding on small viewports */
   /* Tiered narrow layout: whatever stops fitting folds behind a burger and
      slides out as a drawer — nothing ever overlaps. */
@@ -270,6 +276,11 @@
     #dropzone { bottom: 16px; padding: 9px 18px; }
     #hint { font-size: 9px; padding: 0 14px; text-align: center; }
     #vitals .stat:nth-child(n+3) { display: none; }
+  }
+  /* below this the findbox (70px + 40vw) reaches the stats column — the
+     search field wins, the counters yield entirely */
+  @media (max-width: 560px) {
+    #vitals { display: none; }
   }
   @media (max-height: 700px) {
     #eegbox { display: none; }
@@ -1492,9 +1503,11 @@ async function teach(file) {
   // affordance aborts the request (the studying itself is idempotent).
   const t0 = performance.now();
   teachAbort = new AbortController();
+  dismissHint(true);
+  const shortName = file.name.length > 40 ? file.name.slice(0, 37) + "…" : file.name;
   const tick = setInterval(() => {
     const secs = ((performance.now() - t0) / 1000).toFixed(0);
-    big.textContent = "studying " + file.name + " — " + secs + "s";
+    big.textContent = "studying " + shortName + " — " + secs + "s";
     sub.innerHTML = "weaving into memory · <a href=\"#\" id=\"teach-cancel\">cancel</a>";
     const cx = document.getElementById("teach-cancel");
     if (cx) cx.onclick = (e) => { e.preventDefault(); if (teachAbort) teachAbort.abort(); };
@@ -1536,6 +1549,7 @@ async function teach(file) {
   }
 }
 function showReport(r) {
+  dismissHint(true);
   const el = document.getElementById("report");
   el.innerHTML =
     `<span class="chip"><b>${r.inserted}</b>new</span>` +

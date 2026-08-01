@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/idle_cpu_regression_fence.sh — idle-CPU regression fence.
 #
-# SPEC A7: 30-min `python -m iai_mcp.daemon` run with first_turn_pending = 1
+# Contract: 30-min `python -m iai_mcp.daemon` run with first_turn_pending = 1
 # shows process CPU < 5% sampled every 30s.
 #
 # Usage:

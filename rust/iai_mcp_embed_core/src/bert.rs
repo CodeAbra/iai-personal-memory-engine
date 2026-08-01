@@ -3,7 +3,7 @@
 //! Implements the full BERT inference pipeline:
 //!   tokenize → BertEmbeddings → 12× BertLayer → CLS pool → L2 normalize → Vec<f32>
 //!
-//! Constitutional constraints honored:
+//! Numeric-parity constraints honored (each one a silent-drift bug if broken):
 //!   - gelu_erf() (exact erf formula, not tanh approximation)
 //!   - LayerNorm eps = 1e-12 (BERT config, not candle default 1e-5)
 //!   - Raw CLS pooling: last_hidden[:, 0, :] — NOT BertPooler dense+tanh
@@ -19,21 +19,115 @@ use tokenizers::{
 use crate::error::EmbedError;
 
 // ---------------------------------------------------------------------------
-// Architecture constants — bge-small-en-v1.5 config.json
+// Model spec + geometry
 // ---------------------------------------------------------------------------
-
-const VOCAB_SIZE: usize = 30522;
-const HIDDEN_SIZE: usize = 384;
-const NUM_HIDDEN_LAYERS: usize = 12;
-const NUM_ATTENTION_HEADS: usize = 12;
-const INTERMEDIATE_SIZE: usize = 1536;
-const MAX_POSITION: usize = 512;
-const TYPE_VOCAB_SIZE: usize = 2;
-const LAYER_NORM_EPS: f64 = 1e-12;
-const HEAD_DIM: usize = HIDDEN_SIZE / NUM_ATTENTION_HEADS; // = 32
 
 const MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
 const REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
+
+// The default model's exact architecture, asserted against its config.json
+// at load: the P[384, 10000] projection is SHA-locked to 384-d input, so a
+// silent geometry drift in the default snapshot must fail loud, never
+// re-derive.
+const DEFAULT_GEOMETRY: Geometry = Geometry {
+    vocab_size: 30522,
+    hidden_size: 384,
+    num_hidden_layers: 12,
+    num_attention_heads: 12,
+    intermediate_size: 1536,
+    max_position: 512,
+    type_vocab_size: 2,
+    layer_norm_eps: 1e-12,
+};
+
+/// Which model snapshot to load. The default is the pinned
+/// bge-small-en-v1.5 revision; `IAI_MCP_EMBED_MODEL_ID` selects another
+/// BERT-architecture model (with `IAI_MCP_EMBED_REVISION`, default `main`).
+fn model_spec() -> (String, String) {
+    match std::env::var("IAI_MCP_EMBED_MODEL_ID") {
+        Ok(id) if !id.trim().is_empty() => {
+            let rev = std::env::var("IAI_MCP_EMBED_REVISION")
+                .ok()
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| "main".to_string());
+            (id, rev)
+        }
+        _ => (MODEL_ID.to_string(), REVISION.to_string()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Geometry {
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub intermediate_size: usize,
+    pub max_position: usize,
+    pub type_vocab_size: usize,
+    pub layer_norm_eps: f64,
+}
+
+impl Geometry {
+    fn head_dim(&self) -> usize {
+        self.hidden_size / self.num_attention_heads
+    }
+
+    /// Parse the model's own config.json. The forward pass implemented here
+    /// is plain BERT, so any other `model_type` fails loud; hidden size must
+    /// stay 384 — the SHA-locked SimHash projection maps exactly 384-d input.
+    fn from_config_file(path: &std::path::Path, model_id: &str) -> Result<Self, EmbedError> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| EmbedError::HfHub(format!("config.json read failed: {e}")))?;
+        let cfg: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| EmbedError::HfHub(format!("config.json parse failed: {e}")))?;
+        let model_type = cfg
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if model_type != "bert" {
+            return Err(EmbedError::HfHub(format!(
+                "{model_id}: model_type {model_type:?} is not \"bert\" — this \
+                 embedder implements the plain BERT forward pass only"
+            )));
+        }
+        let field = |name: &str| -> Result<usize, EmbedError> {
+            cfg.get(name)
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .ok_or_else(|| {
+                    EmbedError::HfHub(format!("{model_id}: config.json missing {name}"))
+                })
+        };
+        let geometry = Geometry {
+            vocab_size: field("vocab_size")?,
+            hidden_size: field("hidden_size")?,
+            num_hidden_layers: field("num_hidden_layers")?,
+            num_attention_heads: field("num_attention_heads")?,
+            intermediate_size: field("intermediate_size")?,
+            max_position: field("max_position_embeddings")?,
+            type_vocab_size: field("type_vocab_size")?,
+            layer_norm_eps: cfg
+                .get("layer_norm_eps")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1e-12),
+        };
+        if geometry.hidden_size != DEFAULT_GEOMETRY.hidden_size {
+            return Err(EmbedError::HfHub(format!(
+                "{model_id}: hidden_size {} != 384 — the locked SimHash \
+                 projection maps exactly 384-d embeddings",
+                geometry.hidden_size
+            )));
+        }
+        if geometry.hidden_size % geometry.num_attention_heads != 0 {
+            return Err(EmbedError::HfHub(format!(
+                "{model_id}: hidden_size {} not divisible by attention heads {}",
+                geometry.hidden_size, geometry.num_attention_heads
+            )));
+        }
+        Ok(geometry)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // HF cache resolver
@@ -57,11 +151,8 @@ fn resolve_model_files() -> Result<
     ),
     EmbedError,
 > {
-    let repo = Repo::with_revision(
-        MODEL_ID.to_string(),
-        RepoType::Model,
-        REVISION.to_string(),
-    );
+    let (model_id, revision) = model_spec();
+    let repo = Repo::with_revision(model_id, RepoType::Model, revision);
     let offline = std::env::var("IAI_MCP_EMBED_OFFLINE").is_ok();
 
     if offline {
@@ -106,13 +197,13 @@ struct BertEmbeddings {
 }
 
 impl BertEmbeddings {
-    fn load(vb: VarBuilder) -> Result<Self, EmbedError> {
+    fn load(vb: VarBuilder, g: &Geometry) -> Result<Self, EmbedError> {
         let vb_emb = vb.pp("embeddings");
-        let word_emb = embedding(VOCAB_SIZE, HIDDEN_SIZE, vb_emb.pp("word_embeddings"))?;
-        let pos_emb = embedding(MAX_POSITION, HIDDEN_SIZE, vb_emb.pp("position_embeddings"))?;
-        let type_emb = embedding(TYPE_VOCAB_SIZE, HIDDEN_SIZE, vb_emb.pp("token_type_embeddings"))?;
-        // Pitfall 3: must pass 1e-12 explicitly — candle default is 1e-5
-        let layer_norm = layer_norm(HIDDEN_SIZE, LAYER_NORM_EPS, vb_emb.pp("LayerNorm"))?;
+        let word_emb = embedding(g.vocab_size, g.hidden_size, vb_emb.pp("word_embeddings"))?;
+        let pos_emb = embedding(g.max_position, g.hidden_size, vb_emb.pp("position_embeddings"))?;
+        let type_emb = embedding(g.type_vocab_size, g.hidden_size, vb_emb.pp("token_type_embeddings"))?;
+        // Pitfall 3: must pass the config eps explicitly — candle default is 1e-5
+        let layer_norm = layer_norm(g.hidden_size, g.layer_norm_eps, vb_emb.pp("LayerNorm"))?;
         Ok(Self { word_emb, pos_emb, type_emb, layer_norm })
     }
 
@@ -145,15 +236,25 @@ struct BertSelfAttention {
     query: Linear,
     key: Linear,
     value: Linear,
+    num_heads: usize,
+    head_dim: usize,
+    hidden_size: usize,
 }
 
 impl BertSelfAttention {
-    fn load(vb: VarBuilder) -> Result<Self, EmbedError> {
+    fn load(vb: VarBuilder, g: &Geometry) -> Result<Self, EmbedError> {
         let vb_self = vb.pp("attention").pp("self");
-        let query = linear(HIDDEN_SIZE, HIDDEN_SIZE, vb_self.pp("query"))?;
-        let key = linear(HIDDEN_SIZE, HIDDEN_SIZE, vb_self.pp("key"))?;
-        let value = linear(HIDDEN_SIZE, HIDDEN_SIZE, vb_self.pp("value"))?;
-        Ok(Self { query, key, value })
+        let query = linear(g.hidden_size, g.hidden_size, vb_self.pp("query"))?;
+        let key = linear(g.hidden_size, g.hidden_size, vb_self.pp("key"))?;
+        let value = linear(g.hidden_size, g.hidden_size, vb_self.pp("value"))?;
+        Ok(Self {
+            query,
+            key,
+            value,
+            num_heads: g.num_attention_heads,
+            head_dim: g.head_dim(),
+            hidden_size: g.hidden_size,
+        })
     }
 
     fn forward(
@@ -171,20 +272,20 @@ impl BertSelfAttention {
         // Reshape to (batch, seq_len, num_heads, head_dim) then transpose
         // → (batch, num_heads, seq_len, head_dim)
         let q = q
-            .reshape((batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM))?
+            .reshape((batch, seq_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
         let k = k
-            .reshape((batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM))?
+            .reshape((batch, seq_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
         let v = v
-            .reshape((batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM))?
+            .reshape((batch, seq_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
 
         // Scaled dot-product: Q @ K^T / sqrt(head_dim)
-        let scale = (HEAD_DIM as f64).sqrt();
+        let scale = (self.head_dim as f64).sqrt();
         let scores = q.matmul(&k.transpose(2, 3)?)?.affine(1.0 / scale, 0.0)?;
 
         // Additive mask: attention_mask is (1,1,1,seq_len), broadcast over (batch,heads,seq,seq)
@@ -200,7 +301,7 @@ impl BertSelfAttention {
         Ok(context
             .transpose(1, 2)?
             .contiguous()?
-            .reshape((batch, seq_len, HIDDEN_SIZE))?)
+            .reshape((batch, seq_len, self.hidden_size))?)
     }
 }
 
@@ -218,36 +319,36 @@ struct BertLayer {
 }
 
 impl BertLayer {
-    fn load(vb: VarBuilder, layer_idx: usize) -> Result<Self, EmbedError> {
+    fn load(vb: VarBuilder, layer_idx: usize, g: &Geometry) -> Result<Self, EmbedError> {
         let vb_layer = vb.pp("encoder").pp("layer").pp(layer_idx.to_string());
 
-        let attention = BertSelfAttention::load(vb_layer.clone())?;
+        let attention = BertSelfAttention::load(vb_layer.clone(), g)?;
 
         let attn_output_dense = linear(
-            HIDDEN_SIZE,
-            HIDDEN_SIZE,
+            g.hidden_size,
+            g.hidden_size,
             vb_layer.pp("attention").pp("output").pp("dense"),
         )?;
         let attn_output_ln = layer_norm(
-            HIDDEN_SIZE,
-            LAYER_NORM_EPS,
+            g.hidden_size,
+            g.layer_norm_eps,
             vb_layer.pp("attention").pp("output").pp("LayerNorm"),
         )?;
 
-        // FFN: 384 → 1536 (intermediate) then 1536 → 384 (output)
+        // FFN: hidden → intermediate then intermediate → hidden
         let ffn_intermediate = linear(
-            HIDDEN_SIZE,
-            INTERMEDIATE_SIZE,
+            g.hidden_size,
+            g.intermediate_size,
             vb_layer.pp("intermediate").pp("dense"),
         )?;
         let ffn_output = linear(
-            INTERMEDIATE_SIZE,
-            HIDDEN_SIZE,
+            g.intermediate_size,
+            g.hidden_size,
             vb_layer.pp("output").pp("dense"),
         )?;
         let output_ln = layer_norm(
-            HIDDEN_SIZE,
-            LAYER_NORM_EPS,
+            g.hidden_size,
+            g.layer_norm_eps,
             vb_layer.pp("output").pp("LayerNorm"),
         )?;
 
@@ -286,9 +387,9 @@ struct BertEncoder {
 }
 
 impl BertEncoder {
-    fn load(vb: VarBuilder) -> Result<Self, EmbedError> {
-        let layers = (0..NUM_HIDDEN_LAYERS)
-            .map(|i| BertLayer::load(vb.clone(), i))
+    fn load(vb: VarBuilder, g: &Geometry) -> Result<Self, EmbedError> {
+        let layers = (0..g.num_hidden_layers)
+            .map(|i| BertLayer::load(vb.clone(), i, g))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { layers })
     }
@@ -321,6 +422,7 @@ pub struct BertEmbedder {
     // forever (callers park on a LockLatch while global workers idle).
     // install() scopes all kernel parallelism to this private pool.
     pool: rayon::ThreadPool,
+    text_prefix: String,
 }
 
 impl BertEmbedder {
@@ -329,15 +431,26 @@ impl BertEmbedder {
     /// Triggers a lazy download from HF Hub if the snapshot is absent
     /// (unless `IAI_MCP_EMBED_OFFLINE=1` is set, in which case this fails loudly).
     pub fn load() -> Result<Self, EmbedError> {
-        let (weights_path, tokenizer_path, _config_path) = resolve_model_files()?;
+        let (weights_path, tokenizer_path, config_path) = resolve_model_files()?;
+        let (model_id, _revision) = model_spec();
+
+        // Geometry comes from the model's own config.json. For the pinned
+        // default model any drift from the historical architecture fails
+        // loud — the SHA-locked SimHash projection depends on it.
+        let geometry = Geometry::from_config_file(&config_path, &model_id)?;
+        if model_id == MODEL_ID && geometry != DEFAULT_GEOMETRY {
+            return Err(EmbedError::HfHub(format!(
+                "{MODEL_ID}: config.json geometry drifted from the pinned                  architecture: {geometry:?}"
+            )));
+        }
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| EmbedError::Tokenizer(e.to_string()))?;
 
-        // Pitfall 7: must configure truncation to 512; encode() alone does NOT truncate
+        // Pitfall 7: must configure truncation; encode() alone does NOT truncate
         tokenizer
             .with_truncation(Some(TruncationParams {
-                max_length: MAX_POSITION,
+                max_length: geometry.max_position,
                 strategy: TruncationStrategy::LongestFirst,
                 stride: 0,
                 direction: TruncationDirection::Right,
@@ -349,13 +462,13 @@ impl BertEmbedder {
         #[cfg(not(feature = "metal"))]
         let device = Device::Cpu;
 
-        // Pattern 4: unsafe scoped to mmap call; file integrity assumed via HF CDN + REVISION pin
+        // Pattern 4: unsafe scoped to mmap call; file integrity assumed via HF CDN + revision pin
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
         }?;
 
-        let embeddings = BertEmbeddings::load(vb.clone())?;
-        let encoder = BertEncoder::load(vb)?;
+        let embeddings = BertEmbeddings::load(vb.clone(), &geometry)?;
+        let encoder = BertEncoder::load(vb, &geometry)?;
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(4)
@@ -363,7 +476,11 @@ impl BertEmbedder {
             .build()
             .map_err(|e| EmbedError::Pool(e.to_string()))?;
 
-        Ok(Self { embeddings, encoder, tokenizer, device, pool })
+        // Some retrieval models expect an instruction prefix on every input
+        // (e.g. the E5 family). Empty default = byte-identical behavior.
+        let text_prefix = std::env::var("IAI_MCP_EMBED_TEXT_PREFIX").unwrap_or_default();
+
+        Ok(Self { embeddings, encoder, tokenizer, device, pool, text_prefix })
     }
 
     /// Encode a single text string to a 384-dim L2-normalized embedding.
@@ -374,6 +491,13 @@ impl BertEmbedder {
     }
 
     fn encode_inner(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        let prefixed;
+        let text = if self.text_prefix.is_empty() {
+            text
+        } else {
+            prefixed = format!("{}{}", self.text_prefix, text);
+            prefixed.as_str()
+        };
         let encoding = self
             .tokenizer
             .encode(text, true)
@@ -418,11 +542,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn constants_unchanged() {
-        assert_eq!(HIDDEN_SIZE, 384);
-        assert_eq!(NUM_HIDDEN_LAYERS, 12);
-        assert_eq!(HEAD_DIM, HIDDEN_SIZE / NUM_ATTENTION_HEADS);
-        assert_eq!(LAYER_NORM_EPS, 1e-12_f64);
+    fn default_geometry_unchanged() {
+        assert_eq!(DEFAULT_GEOMETRY.hidden_size, 384);
+        assert_eq!(DEFAULT_GEOMETRY.num_hidden_layers, 12);
+        assert_eq!(
+            DEFAULT_GEOMETRY.head_dim(),
+            DEFAULT_GEOMETRY.hidden_size / DEFAULT_GEOMETRY.num_attention_heads
+        );
+        assert_eq!(DEFAULT_GEOMETRY.layer_norm_eps, 1e-12_f64);
+    }
+
+    #[test]
+    fn geometry_parses_and_gates_config() {
+        let dir = std::env::temp_dir().join("iai-embed-geom-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"model_type":"bert","vocab_size":30522,"hidden_size":384,
+                "num_hidden_layers":12,"num_attention_heads":12,
+                "intermediate_size":1536,"max_position_embeddings":512,
+                "type_vocab_size":2,"layer_norm_eps":1e-12}"#,
+        )
+        .unwrap();
+        let g = Geometry::from_config_file(&path, "test/model").unwrap();
+        assert_eq!(g, DEFAULT_GEOMETRY);
+
+        std::fs::write(
+            &path,
+            r#"{"model_type":"xlm-roberta","vocab_size":250002,"hidden_size":384,
+                "num_hidden_layers":12,"num_attention_heads":12,
+                "intermediate_size":1536,"max_position_embeddings":512,
+                "type_vocab_size":1}"#,
+        )
+        .unwrap();
+        assert!(Geometry::from_config_file(&path, "test/model").is_err());
+
+        std::fs::write(
+            &path,
+            r#"{"model_type":"bert","vocab_size":30522,"hidden_size":768,
+                "num_hidden_layers":12,"num_attention_heads":12,
+                "intermediate_size":3072,"max_position_embeddings":512,
+                "type_vocab_size":2}"#,
+        )
+        .unwrap();
+        assert!(Geometry::from_config_file(&path, "test/model").is_err());
     }
 
     fn cache_present() -> bool {

@@ -36,7 +36,7 @@ def _decrypt_degraded_surface(
 
     Returns the plaintext on success, or None when decryption fails — in which
     case the caller MUST skip the row. A decrypt failure NEVER surfaces raw
-    ciphertext as user-facing content: a decrypt failure is fail-loud, never
+    ciphertext as user-facing content — decrypt failure is fail-loud, never
     silent ciphertext-as-content.
     """
     try:

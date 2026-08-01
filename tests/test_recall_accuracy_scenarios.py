@@ -1,24 +1,25 @@
-"""Composite recall gate: one command composing the success criteria into
-runnable assertions.
+"""RACC-01 phase-gate: one command composing SC-1..SC-5 into runnable assertions.
 
 This file does not duplicate the per-plan test suites (tests/test_recall_accuracy_gate.py,
 tests/test_recall_trace_accuracy_marks.py, tests/test_confidence_escalation_gate.py,
 tests/test_recall_literal_surface_byte_identity.py, tests/test_multi_seed_recall.py,
 tests/test_cleanup_attractor_recall.py, tests/test_working_tier.py). It composes one
 end-to-end low-confidence recall and a high-confidence control recall, then asserts
-every criterion against the resulting trace, hits, and literal_surface snapshot in a
-single pytest command.
+every SC against the resulting trace, hits, and literal_surface snapshot in a single
+pytest command.
 
-Accuracy witness (locked, owner-approved): the crafted bench/recall_accuracy.py eval
-set (seed=42, n_filler=220, three archetypes) IS the accuracy witness. A real-session
-labelled eval is a queued follow-up, NOT introduced here.
+Witness (locked, owner-approved): the crafted bench/recall_accuracy.py eval set
+(seed=42, n_filler=220, three archetypes) is the accuracy witness. Baseline
+numbers are recorded verbatim below. A real-session labelled eval is a queued
+follow-up, NOT introduced here.
 
-Honest finding: the strict-improvement bar is NOT reached on this crafted eval set by
-the four shipped mechanisms + the authority-merge step alone — the harness's own
-dense-filler construction keeps the aggregate confidence signal permanently HIGH on all
-three cues, so conf_escalate/multi_seed never fire on it, and the harness never
-exercises the authority-merge step or sets structural_weight>0. The non-regression
-(<=) bound holds; the strict (<) bound is xfailed here.
+Honest finding: the strict-improvement bar is NOT reached on this crafted eval
+set by the four shipped mechanisms + associative fallback alone — the
+harness's own dense-filler construction keeps the aggregate confidence signal
+permanently HIGH on all three cues, so conf_escalate/multi_seed never fire on
+it, and the harness never exercises the fallback or sets structural_weight>0.
+The non-regression (<=) bound holds; the strict (<) bound is xfailed here,
+pointing at the real-thread labelled eval.
 
 No src/ edits. No working_tier import or consult anywhere in this file.
 """
@@ -42,14 +43,15 @@ from iai_mcp.types import MemoryRecord
 
 _DIM = 16  # small synthetic dim; avoids loading the Rust embedder
 
-# Baseline constants (both drivers byte-identical at this corpus size).
+# Baseline constants, recorded verbatim at eval-set creation (both drivers
+# byte-identical at this corpus size).
 BASELINE_RECALL_AT_K = 0.0
 BASELINE_MISS_COSINE_RANK = 1
 BASELINE_MISS_EDGE_LESS = 2
 BASELINE_MISS_SPREAD_DISABLED = 0
 
-# Reference-only p95 latency figure — not re-measured hermetically in this
-# file (see the latency criterion below).
+# Reference-only p95 latency figure carried from 184-BASELINE.md Table 3 /
+# 172-VERIFICATION.md — not re-measured hermetically in this file (see SC-5).
 PRE_184_P95_MS_AT_37K = 256.0
 P95_TOLERANCE_FACTOR = 1.15
 
@@ -163,7 +165,7 @@ def _dispatch_traced_recall(store: MemoryStore, cue_vec: list[float], *, session
     store._build_exact_index_sync()
     _pm._last_recall_latency_ms = 0.0
     return _core.dispatch(store, "memory_recall", {
-        "cue": "composite recall cue, embedder is stubbed",
+        "cue": "phase-gate composite recall cue, embedder is stubbed",
         "session_id": session_id,
         "budget_tokens": 2000,
         "cue_embedding": cue_vec,
@@ -200,7 +202,7 @@ def _seed_low_confidence_corpus(store: MemoryStore, cue_vec: list[float]) -> lis
 
 def _seed_high_confidence_corpus(store: MemoryStore, cue_vec: list[float]) -> None:
     """A dense near-duplicate cluster around the cue — high confidence, used
-    as the high-confidence control case (escalation must NOT fire)."""
+    as the SC-3 control case (escalation must NOT fire)."""
     target_id = uuid4()
     target = _make_rec(target_id, "the associative target record", cue_vec)
     store.insert(target)
@@ -218,12 +220,13 @@ def _read_module_source(module_path: str) -> str:
 
 # ---------------------------------------------------------------------------
 # recall_at_k / miss_counts on the crafted archetype eval set.
-# Non-regression (<=) holds; strict improvement (<) is xfailed.
+# Non-regression (<=) holds; strict improvement (<) is xfailed, pointing at
+# the owner-authorized real-thread labelled eval.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_sc1_non_regression_holds_on_crafted_eval_set(tmp_path, monkeypatch, driver):
-    """Non-regression: recall_at_k >= baseline and miss_counts <= baseline
+    """SC-1 non-regression: recall_at_k >= baseline and miss_counts <= baseline
     on the crafted archetype eval set (seed=42, n_filler=220), both drivers."""
     _select_driver(driver, monkeypatch)
 
@@ -234,21 +237,21 @@ def test_sc1_non_regression_holds_on_crafted_eval_set(tmp_path, monkeypatch, dri
         result = run_accuracy(store, graph, assignment, rich_club, embedder, cases, k=10)
 
         assert result["recall_at_k"] >= BASELINE_RECALL_AT_K - 0.001, (
-            f"recall_at_k regressed vs. baseline: got {result['recall_at_k']}, "
+            f"[SC-1] recall_at_k regressed vs. baseline: got {result['recall_at_k']}, "
             f"baseline {BASELINE_RECALL_AT_K}"
         )
         miss_counts = result["miss_counts_by_archetype"]
         assert miss_counts.get(Archetype.COSINE_RANK_BEYOND_CUTOFF, 0) <= BASELINE_MISS_COSINE_RANK, (
-            f"COSINE_RANK_BEYOND_CUTOFF miss_count regressed: {miss_counts}"
+            f"[SC-1] COSINE_RANK_BEYOND_CUTOFF miss_count regressed: {miss_counts}"
         )
         assert miss_counts.get(Archetype.EDGE_LESS_ISLAND, 0) <= BASELINE_MISS_EDGE_LESS, (
-            f"EDGE_LESS_ISLAND miss_count regressed: {miss_counts}"
+            f"[SC-1] EDGE_LESS_ISLAND miss_count regressed: {miss_counts}"
         )
         assert miss_counts.get(Archetype.SPREAD_DISABLED_BY_PRIOR_LATENCY, 0) == BASELINE_MISS_SPREAD_DISABLED, (
-            f"SPREAD_DISABLED_BY_PRIOR_LATENCY must stay at baseline 0: {miss_counts}"
+            f"[SC-1] SPREAD_DISABLED_BY_PRIOR_LATENCY must stay at baseline 0: {miss_counts}"
         )
         assert result["unattributed"] == 0, (
-            f"unattributed misses found, attribution incomplete: {result['unattributed']}"
+            f"[SC-1] unattributed misses found, attribution incomplete: {result['unattributed']}"
         )
     finally:
         store.close()
@@ -256,24 +259,26 @@ def test_sc1_non_regression_holds_on_crafted_eval_set(tmp_path, monkeypatch, dri
 
 @pytest.mark.xfail(
     reason=(
-        "strict-improvement bar NOT reached on the crafted archetype eval set "
+        "[SC-1] strict-improvement bar NOT reached on the crafted archetype eval set "
         "by the four shipped mechanisms (soft_gate/conf_escalate/multi_seed/cleanup_attractor) "
-        "+ the authority-merge step alone: the harness's own dense-filler "
+        "+ D-A alone — root-caused in 184-04-SUMMARY.md: the harness's own dense-filler "
         "construction (cosine 0.3-0.99 spread, required to push the target beyond "
         "K_CANDIDATES=200) keeps the aggregate confidence signal (compute_spread_depth) "
         "permanently HIGH on all three cues, so conf_escalate/multi_seed structurally never "
-        "fire on this harness; the harness also never routes through core.dispatch "
-        "(merge_authority_hits is never exercised) and never sets structural_weight>0 "
+        "fire on this harness; the harness also never routes through core.dispatch (D-A's "
+        "merge_authority_hits is never exercised) and never sets structural_weight>0 "
         "(cleanup-attractor's snap is a no-op by design). Non-regression holds (see the "
-        "sibling test above); strict improvement is deferred to a labelled real-thread "
-        "eval routed through core.dispatch that exercises all five mechanisms."
+        "sibling test above); strict improvement is deferred to the owner-authorized "
+        "labelled real-thread eval routed through "
+        "core.dispatch that exercises all five mechanisms."
     ),
     strict=True,
 )
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
-def test_sc1_strict_improvement_deferred_to_phase_186(tmp_path, monkeypatch, driver):
+def test_strict_improvement_deferred_to_real_thread_eval(tmp_path, monkeypatch, driver):
     """Strict improvement: recall_at_k > baseline (or a miss_count strictly
-    decreased) on the crafted eval set. Documented xfail."""
+    decreased) on the crafted eval set. Documented xfail — the real-thread
+    labelled eval carries the strict bar."""
     _select_driver(driver, monkeypatch)
 
     store, graph, assignment, rich_club, embedder, cases = build_eval_set(
@@ -289,7 +294,7 @@ def test_sc1_strict_improvement_deferred_to_phase_186(tmp_path, monkeypatch, dri
             or miss_counts.get(Archetype.EDGE_LESS_ISLAND, 0) < BASELINE_MISS_EDGE_LESS
         )
         assert strictly_improved, (
-            f"strict improvement not reached: recall_at_k={result['recall_at_k']}, "
+            f"[SC-1] strict improvement not reached: recall_at_k={result['recall_at_k']}, "
             f"miss_counts={miss_counts}, baseline_recall_at_k={BASELINE_RECALL_AT_K}"
         )
     finally:
@@ -297,37 +302,37 @@ def test_sc1_strict_improvement_deferred_to_phase_186(tmp_path, monkeypatch, dri
 
 
 # ---------------------------------------------------------------------------
-# all four new trace marks present on a low-confidence cue.
-# No working_tier_bias mark asserted anywhere.
+# SC-2: all four new trace marks present on a low-confidence cue.
+# No working_tier_bias mark asserted anywhere (D-C).
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_sc2_all_four_trace_marks_present_on_low_confidence_cue(tmp_path, _make_store, monkeypatch, driver):
     """One low-confidence recall's trace MUST contain all of {soft_gate,
     conf_escalate, multi_seed, cleanup_attractor}. No working_tier_bias mark
-    exists or is asserted."""
+    exists or is asserted (D-C)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _make_store(driver)
     cue_vec = _seeded_vec(2)
     _seed_low_confidence_corpus(store, cue_vec)
     _stub_embedder_for_store(monkeypatch, cue_vec)
 
-    resp = _dispatch_traced_recall(store, cue_vec, session_id=f"recall-gate-2-{driver}")
+    resp = _dispatch_traced_recall(store, cue_vec, session_id=f"phase-gate-sc2-{driver}")
 
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     expected_marks = {"soft_gate", "conf_escalate", "multi_seed", "cleanup_attractor"}
     missing = expected_marks - marks
     assert not missing, (
-        f"missing trace marks {sorted(missing)}, got marks={sorted(marks)}"
+        f"[SC-2] missing trace marks {sorted(missing)}, got marks={sorted(marks)}"
     )
     assert "working_tier_bias" not in marks, (
-        "a working_tier_bias mark was found in the trace — this mark must "
+        "[SC-2/D-C] a working_tier_bias mark was found in the trace — this mark must "
         "never exist (working-tier bias was intentionally dropped from the recall path)"
     )
 
 
 # ---------------------------------------------------------------------------
-# escalate_recall_candidates fires once on low-confidence, never on
+# SC-3: escalate_recall_candidates fires once on low-confidence, never on
 # high-confidence.
 # ---------------------------------------------------------------------------
 
@@ -348,10 +353,10 @@ def test_sc3_escalation_spy_fires_only_on_low_confidence_cue(tmp_path, _make_sto
     low_spy = MagicMock(wraps=escalate_recall_candidates)
     monkeypatch.setattr("iai_mcp.pipeline.escalate_recall_candidates", low_spy)
 
-    _dispatch_traced_recall(low_store, low_cue, session_id=f"recall-gate-3-low-{driver}")
+    _dispatch_traced_recall(low_store, low_cue, session_id=f"phase-gate-sc3-low-{driver}")
 
     assert low_spy.call_count == 1, (
-        f"expected escalate_recall_candidates to fire exactly once on a "
+        f"[SC-3] expected escalate_recall_candidates to fire exactly once on a "
         f"low-confidence cue, got call_count={low_spy.call_count}"
     )
     low_store.close()
@@ -371,17 +376,17 @@ def test_sc3_escalation_spy_fires_only_on_low_confidence_cue(tmp_path, _make_sto
     high_spy = MagicMock(wraps=escalate_recall_candidates)
     monkeypatch.setattr("iai_mcp.pipeline.escalate_recall_candidates", high_spy)
 
-    _dispatch_traced_recall(high_store, high_cue, session_id=f"recall-gate-3-high-{driver}")
+    _dispatch_traced_recall(high_store, high_cue, session_id=f"phase-gate-sc3-high-{driver}")
 
     assert high_spy.call_count == 0, (
-        f"expected escalate_recall_candidates to NEVER fire on a "
+        f"[SC-3] expected escalate_recall_candidates to NEVER fire on a "
         f"high-confidence cue, got call_count={high_spy.call_count}"
     )
     high_store.close()
 
 
 # ---------------------------------------------------------------------------
-# literal_surface byte-identity for every record touched by a recall
+# SC-4: literal_surface byte-identity for every record touched by a recall
 # that fires the four shipped plug-ins + retrieval-reconsolidation.
 # ---------------------------------------------------------------------------
 
@@ -408,37 +413,37 @@ def test_sc4_literal_surface_byte_identity_after_plugin_recall(tmp_path, _make_s
         store.insert(_make_rec(rid, surface, vec))
         record_ids.append(rid)
     # low-confidence filler so soft_gate/conf_escalate/multi_seed/cleanup_attractor
-    # all have a branch to fire on, same construction as the low-confidence fixture.
+    # all have a branch to fire on, same construction as the SC-2 fixture.
     for i in range(4):
         store.insert(_make_rec(uuid4(), f"unrelated filler {i}", _orthogonal_vec(131 + i)))
     flush_record_buffer(store)
 
     before = {rid: store.get(rid).literal_surface for rid in record_ids}
     for rid, surface in zip(record_ids, _VERBATIM_SURFACES):
-        assert before[rid] == surface, "pre-recall literal_surface already diverges from input"
+        assert before[rid] == surface, "[SC-4] pre-recall literal_surface already diverges from input"
 
     _stub_embedder_for_store(monkeypatch, cue_vec)
-    resp = _dispatch_traced_recall(store, cue_vec, session_id=f"recall-gate-4-{driver}")
-    assert resp.get("hits"), "recall returned no hits — cannot exercise the reinforce path"
+    resp = _dispatch_traced_recall(store, cue_vec, session_id=f"phase-gate-sc4-{driver}")
+    assert resp.get("hits"), "[SC-4] recall returned no hits — cannot exercise the reinforce path"
 
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     assert {"soft_gate", "conf_escalate", "multi_seed", "cleanup_attractor"} <= marks, (
-        f"expected the four plug-ins to all fire on this fixture, got marks={sorted(marks)}"
+        f"[SC-4] expected the four plug-ins to all fire on this fixture, got marks={sorted(marks)}"
     )
 
     after = {rid: store.get(rid).literal_surface for rid in record_ids}
     for rid, surface in zip(record_ids, _VERBATIM_SURFACES):
         assert after[rid] == surface, (
-            f"literal_surface changed after a reinforcing recall for record {rid}: "
+            f"[SC-4] literal_surface changed after a reinforcing recall for record {rid}: "
             f"before={before[rid]!r} after={after[rid]!r}"
         )
         assert after[rid] == before[rid], (
-            f"literal_surface diverged from its pre-recall value for record {rid}"
+            f"[SC-4] literal_surface diverged from its pre-recall value for record {rid}"
         )
 
 
 # ---------------------------------------------------------------------------
-# no O(corpus) reads on the recall path; both drivers; no p95 latency
+# SC-5: no O(corpus) reads on the recall path; both drivers; no p95 latency
 # regression.
 # ---------------------------------------------------------------------------
 
@@ -459,46 +464,48 @@ def test_sc5_no_o_corpus_reads_on_recall_path(tmp_path, _make_store, monkeypatch
     _stub_embedder_for_store(monkeypatch, cue_vec)
 
     def _raise_all_records(*_a, **_k):
-        raise AssertionError("store.all_records() called on the recall path")
+        raise AssertionError("[SC-5] store.all_records() called on the recall path")
     monkeypatch.setattr(store, "all_records", _raise_all_records)
 
     if hasattr(store, "_exact_scan_full_corpus"):
         def _raise_exact_scan(*_a, **_k):
-            raise AssertionError("store._exact_scan_full_corpus() called on the recall path")
+            raise AssertionError("[SC-5] store._exact_scan_full_corpus() called on the recall path")
         monkeypatch.setattr(store, "_exact_scan_full_corpus", _raise_exact_scan)
 
     _orig_query_similar = store.query_similar
 
     def _bounded_query_similar(vec, k=10, *args, **kwargs):
         if k > ADAPTIVE_ESCALATION_CAP + 100:
-            raise AssertionError(f"query_similar called with unbounded k={k} on the recall path")
+            raise AssertionError(f"[SC-5] query_similar called with unbounded k={k} on the recall path")
         return _orig_query_similar(vec, k, *args, **kwargs)
     monkeypatch.setattr(store, "query_similar", _bounded_query_similar)
 
-    _dispatch_traced_recall(store, cue_vec, session_id=f"recall-gate-5-{driver}")
+    _dispatch_traced_recall(store, cue_vec, session_id=f"phase-gate-sc5-{driver}")
 
 
 def test_sc5_p95_latency_no_regression():
-    """p95 latency: bench/full_recall_latency_probe.py requires a real
-    @37k-record store built out-of-band; it cannot be run hermetically inside
-    this unit test. This sub-assert is skipped here — the p95 comparison
-    against the reference snapshot (256ms @37k) is recorded out-of-band
-    instead."""
+    """SC-5 p95 latency: bench/full_recall_latency_probe.py requires a real
+    @37k-record store built out-of-band (see 172-VERIFICATION.md); it cannot
+    be run hermetically inside this unit test. Per 184-05-PLAN.md's own
+    fallback instruction, this sub-assert is skipped here — the p95
+    comparison against the pre-184 snapshot (256ms @37k, 184-BASELINE.md
+    Table 3 / 172-VERIFICATION.md Observable Truth 5) is recorded directly
+    in 184-VERIFICATION.md instead."""
     pytest.skip(
-        "p95 measured out-of-band via bench/full_recall_latency_probe.py at "
-        "verification (reference baseline "
+        "p95 measured out-of-band via bench/full_recall_latency_probe.py at phase "
+        "verification; comparison recorded in 184-VERIFICATION.md (pre-184 baseline "
         f"{PRE_184_P95_MS_AT_37K}ms @37k, tolerance factor {P95_TOLERANCE_FACTOR})"
     )
 
 
 # ---------------------------------------------------------------------------
-# working-tier structural lock: the shipped byte-identity guard still passes
-# both drivers, plus an inlined source-grep check immune to future refactors.
+# Structural lock: the shipped no-working-tier guard still passes both
+# drivers, plus an inlined source-grep check immune to future refactors.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_dc_recall_path_stays_working_tier_free(tmp_path, monkeypatch, driver):
-    """Structural lock: dispatching memory_recall never touches
+    """D-C structural lock: dispatching memory_recall never touches
     iai_mcp.working_tier (monkeypatch-raise guard), and the source files on
     the awake recall path contain zero references to working_tier at the
     grep level — immune to future refactors that might route the import
@@ -511,7 +518,7 @@ def test_dc_recall_path_stays_working_tier_free(tmp_path, monkeypatch, driver):
     from iai_mcp import working_tier as wt
 
     def _boom(*args, **kwargs):
-        raise AssertionError("working-tier function called during memory_recall dispatch")
+        raise AssertionError("[D-C] working-tier function called during memory_recall dispatch")
 
     monkeypatch.setattr(wt, "read_task", _boom)
     monkeypatch.setattr(wt, "update_from_record", _boom)
@@ -520,11 +527,11 @@ def test_dc_recall_path_stays_working_tier_free(tmp_path, monkeypatch, driver):
     store = MemoryStore(path=tmp_path / f"dc-store-{driver}")
     try:
         cue_vec = _seeded_vec(51)
-        store.insert(_make_rec(uuid4(), "reference content for working-tier recall no-op probe", cue_vec))
+        store.insert(_make_rec(uuid4(), "reference content for D-C recall no-op probe", cue_vec))
         flush_record_buffer(store)
 
-        resp = _dispatch_traced_recall(store, cue_vec, session_id=f"recall-gate-wt-{driver}")
-        assert "error" not in resp, f"recall dispatch errored: {resp.get('error')}"
+        resp = _dispatch_traced_recall(store, cue_vec, session_id=f"phase-gate-dc-{driver}")
+        assert "error" not in resp, f"[D-C] recall dispatch errored: {resp.get('error')}"
     finally:
         store.close()
 
@@ -535,10 +542,10 @@ def test_dc_recall_path_stays_working_tier_free(tmp_path, monkeypatch, driver):
     core_source = _read_module_source(_core_mod.__file__.replace("__init__.pyc", "__init__.py"))
 
     assert "working_tier" not in pipeline_source, (
-        "found a 'working_tier' reference in src/iai_mcp/pipeline.py — "
+        "[D-C] found a 'working_tier' reference in src/iai_mcp/pipeline.py — "
         "the recall path must stay working-tier-import-free"
     )
     assert "working_tier" not in core_source, (
-        "found a 'working_tier' reference in src/iai_mcp/core/__init__.py — "
+        "[D-C] found a 'working_tier' reference in src/iai_mcp/core/__init__.py — "
         "the recall path must stay working-tier-import-free"
     )
