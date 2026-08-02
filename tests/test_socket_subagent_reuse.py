@@ -12,6 +12,8 @@ from pathlib import Path
 import psutil
 import pytest
 
+from tests.conftest_shared import pids_bound_to_unix_socket
+
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "mcp-wrapper"
 
@@ -49,21 +51,7 @@ def _daemon_pids_on_socket(sock_path: Path) -> set[int]:
     A daemon spawned by the sub-agent path would bind THIS socket, so the count
     still detects a real singleton violation.
     """
-    target = str(sock_path)
-    res = subprocess.run(
-        ["lsof", "-U", "-F", "pn"],
-        capture_output=True, text=True, check=False,
-    )
-    current: int | None = None
-    pids: set[int] = set()
-    for line in res.stdout.splitlines():
-        if line.startswith("p"):
-            try:
-                current = int(line[1:])
-            except ValueError:
-                current = None
-        elif line.startswith("n") and current is not None and line[1:] == target:
-            pids.add(current)
+    pids = pids_bound_to_unix_socket(sock_path)
     daemon_pids: set[int] = set()
     for pid in pids:
         try:
@@ -74,22 +62,7 @@ def _daemon_pids_on_socket(sock_path: Path) -> set[int]:
     return daemon_pids
 
 def _kill_test_daemons(sock_path: Path) -> None:
-    target = str(sock_path)
-    res = subprocess.run(
-        ["lsof", "-U", "-F", "pn"],
-        capture_output=True, text=True, check=False,
-    )
-    current: int | None = None
-    pids: set[int] = set()
-    for line in res.stdout.splitlines():
-        if line.startswith("p"):
-            try:
-                current = int(line[1:])
-            except ValueError:
-                current = None
-        elif line.startswith("n") and current is not None and line[1:] == target:
-            pids.add(current)
-    for pid in pids:
+    for pid in pids_bound_to_unix_socket(sock_path):
         try:
             cl = " ".join(psutil.Process(pid).cmdline())
             if "iai_mcp.daemon" in cl:

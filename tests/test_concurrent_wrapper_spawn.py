@@ -13,6 +13,8 @@ from pathlib import Path
 import psutil
 import pytest
 
+from tests.conftest_shared import lsof_name_is_socket
+
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "mcp-wrapper"
 
@@ -135,7 +137,7 @@ def test_launchagent(tmp_path):
                     current = int(line[1:])
                 except ValueError:
                     current = None
-            elif line.startswith("n") and current is not None and line[1:] == target:
+            elif line.startswith("n") and current is not None and lsof_name_is_socket(line[1:], target):
                 term_pids.add(current)
         for pid in list(term_pids):
             try:
@@ -243,7 +245,7 @@ def _count_binders(sock_path: Path) -> int:
                 current = int(line[1:])
             except ValueError:
                 current = None
-        elif line.startswith("n") and current is not None and line[1:] == target:
+        elif line.startswith("n") and current is not None and lsof_name_is_socket(line[1:], target):
             pids.add(current)
     return len(pids)
 

@@ -115,3 +115,99 @@ def retry_once_on_assertion(test_fn):
         raise last  # unreachable; keeps type-checkers honest
 
     return wrapper
+
+
+def lsof_name_is_socket(name: str, target: str) -> bool:
+    """Return True when an `lsof -F n` NAME field refers to the target socket.
+
+    The NAME field is not portable. macOS emits the bare path:
+
+        n/tmp/iai-x/d.sock
+
+    Linux appends the socket type to the same field:
+
+        n/tmp/iai-x/d.sock type=STREAM
+
+    An `== target` comparison therefore matches nothing at all on Linux, and
+    because every caller feeds the result into a PID set, the failure is silent:
+    the set comes back empty and reads as "no daemon is bound" rather than as a
+    parse error. Matching the path plus a space boundary accepts both platforms
+    and still refuses a longer path — "/a/b.sock2 type=STREAM" does not start
+    with "/a/b.sock ", so the sibling-path false positive the exact comparison
+    was protecting against stays excluded.
+    """
+    return name == target or name.startswith(target + " ")
+
+
+def _pids_bound_via_proc(target: str) -> set[int]:
+    """Linux: resolve unix-socket binders through /proc, the way `ss -lxp` does.
+
+    /proc/net/unix lists every bound unix socket with its inode but no owning
+    pid; /proc/<pid>/fd/* symlinks read back as "socket:[<inode>]". Joining the
+    two recovers the binder set without shelling out to `ss` (absent from some
+    minimal images) or `lsof`.
+    """
+    import os as _os
+
+    inodes: set[str] = set()
+    try:
+        for line in Path("/proc/net/unix").read_text().splitlines()[1:]:
+            parts = line.split()
+            # Num RefCount Protocol Flags Type St Inode Path
+            if len(parts) >= 8 and parts[7] == target:
+                inodes.add(parts[6])
+    except OSError:
+        return set()
+    if not inodes:
+        return set()
+
+    wanted = {f"socket:[{ino}]" for ino in inodes}
+    pids: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in (entry / "fd").iterdir():
+                if _os.readlink(fd) in wanted:
+                    pids.add(int(entry.name))
+                    break
+        except OSError:
+            continue  # process exited, or another uid's fds
+    return pids
+
+
+def pids_bound_to_unix_socket(sock_path) -> set[int]:
+    """Return the pids holding the unix socket at ``sock_path``.
+
+    Written because `lsof -U` does not reliably report unix-socket paths on
+    Linux: measured in-container, a live daemon's socket appears in
+    /proc/net/unix while `lsof -U` omits it entirely, so an lsof-only lookup
+    returns an empty set and reads as "nothing is bound". That is what made
+    test_socket_subagent_reuse fail on both Linux interpreters while staying
+    green on the macOS gate. iai_mcp.doctor already compensates by falling back
+    to `ss -lxp`; the test helpers had no such fallback.
+
+    Linux goes through /proc directly (authoritative, and no dependency on `ss`,
+    which some minimal images omit). macOS has no /proc, so it keeps lsof.
+    """
+    import platform as _platform
+    import subprocess as _subprocess
+
+    target = str(sock_path)
+    if _platform.system() == "Linux":
+        return _pids_bound_via_proc(target)
+
+    res = _subprocess.run(
+        ["lsof", "-U", "-F", "pn"], capture_output=True, text=True, check=False,
+    )
+    current: int | None = None
+    pids: set[int] = set()
+    for line in res.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                current = int(line[1:])
+            except ValueError:
+                current = None
+        elif line.startswith("n") and current is not None and lsof_name_is_socket(line[1:], target):
+            pids.add(current)
+    return pids

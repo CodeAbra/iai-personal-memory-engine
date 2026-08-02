@@ -143,7 +143,15 @@ def _extract_binder_pids(lsof_output: str, target_socket: Path) -> set[int]:
                 current_pid = None
         elif line.startswith("n") and current_pid is not None:
             name = line[1:]
-            if name == target:
+            # lsof's NAME field is not portable: macOS emits the bare socket
+            # path, Linux appends the type ("<path> type=STREAM"). Comparing
+            # for equality alone matched nothing on Linux, which this check
+            # survived only because a zero result falls through to the `ss`
+            # path below — a fallback added for the non-root /proc case, not
+            # for this. Accepting a space-delimited suffix removes the hidden
+            # dependency while still rejecting a longer sibling path, since
+            # "/a/b.sock2 type=STREAM" does not start with "/a/b.sock ".
+            if name == target or name.startswith(target + " "):
                 pids.add(current_pid)
     return pids
 
