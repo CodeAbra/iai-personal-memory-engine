@@ -15,8 +15,8 @@
 //!   [16:]    page_count records of: u32 page_no + PAGE_SIZE page bytes
 //! ```
 
-use std::fs::{File, OpenOptions};
 use crate::pos_io::PosIo;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::consts::PAGE_SIZE;
@@ -152,7 +152,9 @@ impl Journal {
         }
         let trailer = journal_checksum(
             self.page_count(),
-            self.pending.iter().map(|(pno, data)| (*pno, data.as_slice())),
+            self.pending
+                .iter()
+                .map(|(pno, data)| (*pno, data.as_slice())),
         );
         buf[off..off + JOURNAL_TRAILER_SIZE].copy_from_slice(&trailer);
         self.file.write_all_at(&buf, JOURNAL_HEADER_SIZE as u64)?;
@@ -231,9 +233,7 @@ pub fn recover_journal_on_open(db_path: &Path, journal_path: &Path) -> Result<()
         pos += PAGE_SIZE;
         if page_no == 0 || page_no > db_pages {
             return Err(StoreError::Integrity {
-                detail: format!(
-                    "journal page {page_no} out of bounds (db_pages={db_pages})"
-                ),
+                detail: format!("journal page {page_no} out of bounds (db_pages={db_pages})"),
             });
         }
         records.push((page_no, page_data));

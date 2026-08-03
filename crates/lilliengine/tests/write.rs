@@ -11,17 +11,17 @@
 
 use std::collections::BTreeMap;
 
+use lillibrain::{Store, Value};
+use lilliengine::ast::Stmt;
 use lilliengine::catalog::Catalog;
 use lilliengine::exec::{
     execute_delete, execute_insert, execute_insert_many, execute_select, execute_update,
     ConflictIndex, IdIndex, TxnScope, WriteOutcome,
 };
-use lilliengine::EngineError;
 use lilliengine::meta::MetaTable;
 use lilliengine::parser::parse;
 use lilliengine::plan::plan_select;
-use lilliengine::ast::Stmt;
-use lillibrain::{Store, Value};
+use lilliengine::EngineError;
 use tempfile::tempdir;
 
 // A records-shaped table: integer AUTOINCREMENT vec_label PK + a UNIQUE text id.
@@ -57,7 +57,13 @@ impl Fixture {
             meta.create_table(&store, &mut catalog, &mut root_map, ddl)
                 .unwrap();
         }
-        Fixture { _dir: dir, store, meta, catalog, root_map }
+        Fixture {
+            _dir: dir,
+            store,
+            meta,
+            catalog,
+            root_map,
+        }
     }
 
     /// Parse + execute an INSERT, returning the lastrowid (if injected).
@@ -90,12 +96,7 @@ impl Fixture {
 
     /// Parse + execute an INSERT routed through a caller-owned conflict index
     /// (the bulk UPSERT fast path), returning the lastrowid (if injected).
-    fn insert_cidx(
-        &self,
-        sql: &str,
-        params: Vec<Value>,
-        cidx: &mut ConflictIndex,
-    ) -> Option<i64> {
+    fn insert_cidx(&self, sql: &str, params: Vec<Value>, cidx: &mut ConflictIndex) -> Option<i64> {
         let stmt = match parse(sql).unwrap() {
             Stmt::Insert(i) => i,
             _ => panic!("not an insert"),
@@ -200,7 +201,16 @@ impl Fixture {
             _ => panic!("not a select"),
         };
         let plan = plan_select(&select, &self.catalog, vec![], None).unwrap();
-        let rs = execute_select(&plan, &self.store, &self.catalog, &self.root_map, None, None, None).unwrap();
+        let rs = execute_select(
+            &plan,
+            &self.store,
+            &self.catalog,
+            &self.root_map,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         rs.rows
     }
 
@@ -210,12 +220,16 @@ impl Fixture {
         let root = *self.root_map.get(table).unwrap();
         let col_names = self.catalog.column_names(table).unwrap();
         let mut idx = IdIndex::new();
-        idx.ensure_built(&self.store.tree(root), &col_names).unwrap();
+        idx.ensure_built(&self.store.tree(root), &col_names)
+            .unwrap();
         idx
     }
 
     fn cell(row: &[(String, Value)], col: &str) -> Value {
-        row.iter().find(|(c, _)| c == col).map(|(_, v)| v.clone()).unwrap_or(Value::Null)
+        row.iter()
+            .find(|(c, _)| c == col)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Null)
     }
 }
 
@@ -230,8 +244,14 @@ fn t(s: &str) -> Value {
 #[test]
 fn insert_injects_and_exposes_vec_label() {
     let f = Fixture::new(&[DDL_RECORDS]);
-    let id1 = f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(10)]);
-    let id2 = f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("b"), Value::Int(20)]);
+    let id1 = f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(10)],
+    );
+    let id2 = f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("b"), Value::Int(20)],
+    );
     // The injected vec_label is the monotonic HWM exposed as lastrowid.
     assert_eq!(id1, Some(1));
     assert_eq!(id2, Some(2));
@@ -277,7 +297,10 @@ fn insert_next_key_via_max_key_no_full_scan_per_row() {
     // And the rows really landed with monotonic keys.
     let rows = f.rows("records");
     assert_eq!(rows.len(), 2000);
-    assert_eq!(Fixture::cell(rows.last().unwrap(), "vec_label"), Value::Int(2000));
+    assert_eq!(
+        Fixture::cell(rows.last().unwrap(), "vec_label"),
+        Value::Int(2000)
+    );
 }
 
 #[test]
@@ -396,9 +419,18 @@ fn upsert_inserts_then_updates_in_place() {
 #[test]
 fn upsert_distinct_keys_each_insert() {
     let f = Fixture::new(&[DDL_EDGES]);
-    f.insert(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")]);
-    f.insert(UPSERT, vec![t("a"), t("b"), t("other"), Value::Float(2.0), t("t1")]);
-    f.insert(UPSERT, vec![t("x"), t("y"), t("rel"), Value::Float(3.0), t("t1")]);
+    f.insert(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")],
+    );
+    f.insert(
+        UPSERT,
+        vec![t("a"), t("b"), t("other"), Value::Float(2.0), t("t1")],
+    );
+    f.insert(
+        UPSERT,
+        vec![t("x"), t("y"), t("rel"), Value::Float(3.0), t("t1")],
+    );
     assert_eq!(f.rows("edges").len(), 3);
 }
 
@@ -406,10 +438,8 @@ fn upsert_distinct_keys_each_insert() {
 fn upsert_do_nothing_keeps_existing() {
     // An all-columns-are-keys table (DO NOTHING form) skips the duplicate but
     // keeps the rest of the batch.
-    const DDL_TAGS: &str =
-        "CREATE TABLE tags ( a TEXT , b TEXT , PRIMARY KEY ( a , b ) )";
-    const DO_NOTHING: &str =
-        "INSERT INTO tags (a, b) VALUES (?, ?) ON CONFLICT (a, b) DO NOTHING";
+    const DDL_TAGS: &str = "CREATE TABLE tags ( a TEXT , b TEXT , PRIMARY KEY ( a , b ) )";
+    const DO_NOTHING: &str = "INSERT INTO tags (a, b) VALUES (?, ?) ON CONFLICT (a, b) DO NOTHING";
     let f = Fixture::new(&[DDL_TAGS]);
     f.insert(DO_NOTHING, vec![t("x"), t("y")]);
     f.insert(DO_NOTHING, vec![t("x"), t("y")]); // duplicate → skipped
@@ -429,9 +459,19 @@ fn upsert_null_conflict_key_never_conflicts() {
         VALUES (?, ?, ?, ?) ON CONFLICT (src, dst, edge_type) \
         DO UPDATE SET weight = excluded.weight";
     let f = Fixture::new(&[DDL_LINKS]);
-    f.insert(UPSERT_LINKS, vec![t("a"), t("b"), Value::Null, Value::Float(1.0)]);
-    f.insert(UPSERT_LINKS, vec![t("a"), t("b"), Value::Null, Value::Float(2.0)]);
-    assert_eq!(f.rows("links").len(), 2, "a NULL conflict key always inserts");
+    f.insert(
+        UPSERT_LINKS,
+        vec![t("a"), t("b"), Value::Null, Value::Float(1.0)],
+    );
+    f.insert(
+        UPSERT_LINKS,
+        vec![t("a"), t("b"), Value::Null, Value::Float(2.0)],
+    );
+    assert_eq!(
+        f.rows("links").len(),
+        2,
+        "a NULL conflict key always inserts"
+    );
 }
 
 #[test]
@@ -463,15 +503,35 @@ fn indexed_upsert_matches_unindexed_result() {
     // composite key, same final row set.
     let f = Fixture::new(&[DDL_EDGES]);
     let mut cidx = ConflictIndex::default();
-    f.insert_cidx(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")], &mut cidx);
+    f.insert_cidx(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")],
+        &mut cidx,
+    );
     // Same key → update weight/updated_at in place via the O(1) index probe.
-    f.insert_cidx(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(9.0), t("t2")], &mut cidx);
+    f.insert_cidx(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(9.0), t("t2")],
+        &mut cidx,
+    );
     // Distinct keys → fresh inserts.
-    f.insert_cidx(UPSERT, vec![t("a"), t("b"), t("other"), Value::Float(2.0), t("t1")], &mut cidx);
-    f.insert_cidx(UPSERT, vec![t("x"), t("y"), t("rel"), Value::Float(3.0), t("t1")], &mut cidx);
+    f.insert_cidx(
+        UPSERT,
+        vec![t("a"), t("b"), t("other"), Value::Float(2.0), t("t1")],
+        &mut cidx,
+    );
+    f.insert_cidx(
+        UPSERT,
+        vec![t("x"), t("y"), t("rel"), Value::Float(3.0), t("t1")],
+        &mut cidx,
+    );
 
     let rows = f.rows("edges");
-    assert_eq!(rows.len(), 3, "the composite key must not duplicate under the index");
+    assert_eq!(
+        rows.len(),
+        3,
+        "the composite key must not duplicate under the index"
+    );
     let rel = rows
         .iter()
         .find(|r| Fixture::cell(r, "src") == t("a") && Fixture::cell(r, "edge_type") == t("rel"))
@@ -489,7 +549,11 @@ fn indexed_bulk_upsert_does_not_full_scan_per_row() {
     let f = Fixture::new(&[DDL_EDGES]);
     let mut cidx = ConflictIndex::default();
     // Seed one row so the lazy build has something to scan.
-    f.insert_cidx(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(0.0), t("t0")], &mut cidx);
+    f.insert_cidx(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(0.0), t("t0")],
+        &mut cidx,
+    );
 
     f.store.reset_full_scan_count();
     // 500 UPSERTs: a fan of repeated keys (updates) and fresh keys (inserts).
@@ -524,9 +588,21 @@ fn indexed_upsert_null_conflict_key_still_inserts() {
         DO UPDATE SET weight = excluded.weight";
     let f = Fixture::new(&[DDL_LINKS]);
     let mut cidx = ConflictIndex::default();
-    f.insert_cidx(UPSERT_LINKS, vec![t("a"), t("b"), Value::Null, Value::Float(1.0)], &mut cidx);
-    f.insert_cidx(UPSERT_LINKS, vec![t("a"), t("b"), Value::Null, Value::Float(2.0)], &mut cidx);
-    assert_eq!(f.rows("links").len(), 2, "a NULL conflict key always inserts under the index");
+    f.insert_cidx(
+        UPSERT_LINKS,
+        vec![t("a"), t("b"), Value::Null, Value::Float(1.0)],
+        &mut cidx,
+    );
+    f.insert_cidx(
+        UPSERT_LINKS,
+        vec![t("a"), t("b"), Value::Null, Value::Float(2.0)],
+        &mut cidx,
+    );
+    assert_eq!(
+        f.rows("links").len(),
+        2,
+        "a NULL conflict key always inserts under the index"
+    );
 }
 
 #[test]
@@ -536,7 +612,11 @@ fn indexed_upsert_after_delete_reinserts() {
     // the delete-invalidation keeps the index consistent with the tree.
     let f = Fixture::new(&[DDL_EDGES]);
     let mut cidx = ConflictIndex::default();
-    f.insert_cidx(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")], &mut cidx);
+    f.insert_cidx(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")],
+        &mut cidx,
+    );
     // Delete the row through the same conflict cache (invalidates it).
     {
         let stmt = match parse("DELETE FROM edges WHERE src = 'a'").unwrap() {
@@ -544,16 +624,34 @@ fn indexed_upsert_after_delete_reinserts() {
             _ => unreachable!(),
         };
         execute_delete(
-            &stmt, &f.store, &f.meta, &f.catalog, &f.root_map, vec![], None, TxnScope::Own, None,
-            Some(&mut cidx), None, None,
+            &stmt,
+            &f.store,
+            &f.meta,
+            &f.catalog,
+            &f.root_map,
+            vec![],
+            None,
+            TxnScope::Own,
+            None,
+            Some(&mut cidx),
+            None,
+            None,
         )
         .unwrap();
     }
     assert_eq!(f.rows("edges").len(), 0);
     // Re-UPSERT the same key: must insert fresh, leaving exactly one row.
-    f.insert_cidx(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(5.0), t("t2")], &mut cidx);
+    f.insert_cidx(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(5.0), t("t2")],
+        &mut cidx,
+    );
     let rows = f.rows("edges");
-    assert_eq!(rows.len(), 1, "the re-UPSERT after delete must insert, not vanish");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the re-UPSERT after delete must insert, not vanish"
+    );
     assert_eq!(Fixture::cell(&rows[0], "weight"), Value::Float(5.0));
 }
 
@@ -564,10 +662,23 @@ fn indexed_upsert_after_delete_reinserts() {
 #[test]
 fn update_full_scan_where() {
     let f = Fixture::new(&[DDL_RECORDS]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("b"), Value::Int(1)]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("c"), Value::Int(5)]);
-    let n = f.update("UPDATE records SET label = ? WHERE n = ?", vec![t("hit"), Value::Int(1)], None);
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+    );
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("b"), Value::Int(1)],
+    );
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("c"), Value::Int(5)],
+    );
+    let n = f.update(
+        "UPDATE records SET label = ? WHERE n = ?",
+        vec![t("hit"), Value::Int(1)],
+        None,
+    );
     assert_eq!(n, 2);
     let rows = f.rows("records");
     assert_eq!(Fixture::cell(&rows[0], "label"), t("hit"));
@@ -581,14 +692,28 @@ fn update_id_literal_fast_path_no_full_scan() {
     // the merge_insert provenance UPDATE path. Once the index is built, the
     // store's full-scan counter stays at zero for the UPDATE.
     let f = Fixture::new(&[DDL_RECORDS]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("b"), Value::Int(2)]);
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+    );
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("b"), Value::Int(2)],
+    );
     let mut idx = f.build_id_index("records");
 
     f.store.reset_full_scan_count();
-    let n = f.update("UPDATE records SET n = ? WHERE id = 'b'", vec![Value::Int(99)], Some(&mut idx));
+    let n = f.update(
+        "UPDATE records SET n = ? WHERE id = 'b'",
+        vec![Value::Int(99)],
+        Some(&mut idx),
+    );
     assert_eq!(n, 1);
-    assert_eq!(f.store.full_scan_count(), 0, "id='lit' UPDATE must be a point lookup");
+    assert_eq!(
+        f.store.full_scan_count(),
+        0,
+        "id='lit' UPDATE must be a point lookup"
+    );
     let rows = f.rows("records");
     assert_eq!(Fixture::cell(&rows[1], "n"), Value::Int(99));
 }
@@ -596,20 +721,40 @@ fn update_id_literal_fast_path_no_full_scan() {
 #[test]
 fn update_id_literal_absent_skips_scan() {
     let f = Fixture::new(&[DDL_RECORDS]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)]);
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+    );
     let mut idx = f.build_id_index("records");
     f.store.reset_full_scan_count();
-    let n = f.update("UPDATE records SET n = ? WHERE id = 'missing'", vec![Value::Int(99)], Some(&mut idx));
+    let n = f.update(
+        "UPDATE records SET n = ? WHERE id = 'missing'",
+        vec![Value::Int(99)],
+        Some(&mut idx),
+    );
     assert_eq!(n, 0);
-    assert_eq!(f.store.full_scan_count(), 0, "an absent id skips the scan entirely");
+    assert_eq!(
+        f.store.full_scan_count(),
+        0,
+        "an absent id skips the scan entirely"
+    );
 }
 
 #[test]
 fn delete_where_and_clear_all() {
     let f = Fixture::new(&[DDL_RECORDS]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("b"), Value::Int(2)]);
-    f.insert("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("c"), Value::Int(3)]);
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+    );
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("b"), Value::Int(2)],
+    );
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("c"), Value::Int(3)],
+    );
     // WHERE deletes the matching row.
     let n = f.delete("DELETE FROM records WHERE n = ?", vec![Value::Int(2)]);
     assert_eq!(n, 1);
@@ -637,7 +782,16 @@ fn executemany_is_atomic_and_suppresses_inner_txn() {
         vec![t("c"), Value::Int(3)],
     ];
     let outcome = execute_insert_many(
-        &stmt, &f.store, &f.meta, &f.catalog, &f.root_map, seq, None, None, None, None,
+        &stmt,
+        &f.store,
+        &f.meta,
+        &f.catalog,
+        &f.root_map,
+        seq,
+        None,
+        None,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(outcome.rowcount, 3);
@@ -662,11 +816,24 @@ fn executemany_mid_batch_error_rolls_back_whole_batch() {
         vec![t("c"), Value::Int(3)],
     ];
     let err = execute_insert_many(
-        &stmt, &f.store, &f.meta, &f.catalog, &f.root_map, seq, None, None, None, None,
+        &stmt,
+        &f.store,
+        &f.meta,
+        &f.catalog,
+        &f.root_map,
+        seq,
+        None,
+        None,
+        None,
+        None,
     )
     .unwrap_err();
     assert!(format!("{err}").contains("NOT NULL constraint failed"));
-    assert_eq!(f.rows("records").len(), 0, "a partial batch must not survive");
+    assert_eq!(
+        f.rows("records").len(),
+        0,
+        "a partial batch must not survive"
+    );
 }
 
 #[test]
@@ -690,9 +857,18 @@ fn conflict_update_rewriting_id_keeps_id_index_current() {
             _ => unreachable!(),
         };
         execute_insert(
-            &stmt, &f.store, &f.meta, &f.catalog, &f.root_map,
+            &stmt,
+            &f.store,
+            &f.meta,
+            &f.catalog,
+            &f.root_map,
             vec![Value::Int(7), t("old"), Value::Int(1)],
-            None, TxnScope::Own, Some(&mut idx), Some(&mut cidx), None, None,
+            None,
+            TxnScope::Own,
+            Some(&mut idx),
+            Some(&mut cidx),
+            None,
+            None,
         )
         .unwrap();
     }
@@ -711,16 +887,32 @@ fn conflict_update_rewriting_id_keeps_id_index_current() {
             _ => unreachable!(),
         };
         execute_insert(
-            &stmt, &f.store, &f.meta, &f.catalog, &f.root_map,
+            &stmt,
+            &f.store,
+            &f.meta,
+            &f.catalog,
+            &f.root_map,
             vec![Value::Int(7), t("new"), Value::Int(2)],
-            None, TxnScope::Own, Some(&mut idx), Some(&mut cidx), None, None,
+            None,
+            TxnScope::Own,
+            Some(&mut idx),
+            Some(&mut cidx),
+            None,
+            None,
         )
         .unwrap();
     }
 
     // The id-index dropped the stale 'old' and recorded 'new' at the same key.
-    assert!(idx.lookup("old").is_none(), "the stale id must be removed from the index");
-    assert_eq!(idx.lookup("new"), Some(row_key), "the new id must map to the same row-key");
+    assert!(
+        idx.lookup("old").is_none(),
+        "the stale id must be removed from the index"
+    );
+    assert_eq!(
+        idx.lookup("new"),
+        Some(row_key),
+        "the new id must map to the same row-key"
+    );
 
     // The row was updated in place (no duplicate) with the new id and n.
     let rows = f.rows("records");
@@ -788,12 +980,20 @@ fn conflict_index_reconciled_on_key_change() {
         &mut cidx,
     );
     let rows = f.rows("records");
-    assert_eq!(rows.len(), 2, "the new conflict key must update in place, not insert");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the new conflict key must update in place, not insert"
+    );
     let updated = rows
         .iter()
         .find(|r| Fixture::cell(r, "vec_label") == Value::Int(2))
         .expect("the row at vec_label 2");
-    assert_eq!(Fixture::cell(updated, "n"), Value::Int(99), "the new key conflicted and updated");
+    assert_eq!(
+        Fixture::cell(updated, "n"),
+        Value::Int(99),
+        "the new key conflicted and updated"
+    );
 }
 
 #[test]
@@ -838,19 +1038,31 @@ fn do_update_onto_third_row_key_raises_unique() {
 
     // Both original rows survive unchanged — no duplicate key was created.
     let rows = f.rows("records");
-    assert_eq!(rows.len(), 2, "the rejected rewrite must leave both rows intact");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the rejected rewrite must leave both rows intact"
+    );
     let r1 = rows
         .iter()
         .find(|r| Fixture::cell(r, "vec_label") == Value::Int(1))
         .expect("the row at vec_label 1 still exists");
     assert_eq!(Fixture::cell(r1, "id"), t("a"));
-    assert_eq!(Fixture::cell(r1, "n"), Value::Int(10), "row 1 was not rewritten");
+    assert_eq!(
+        Fixture::cell(r1, "n"),
+        Value::Int(10),
+        "row 1 was not rewritten"
+    );
     let r3 = rows
         .iter()
         .find(|r| Fixture::cell(r, "vec_label") == Value::Int(3))
         .expect("the row at vec_label 3 still exists");
     assert_eq!(Fixture::cell(r3, "id"), t("c"));
-    assert_eq!(Fixture::cell(r3, "n"), Value::Int(30), "row 3 was not overwritten");
+    assert_eq!(
+        Fixture::cell(r3, "n"),
+        Value::Int(30),
+        "row 3 was not overwritten"
+    );
 }
 
 #[test]
@@ -878,7 +1090,11 @@ fn or_replace_keeps_conflict_index_consistent() {
     );
     {
         let rows = f.rows("records");
-        assert_eq!(rows.len(), 1, "OR REPLACE overwrites in place, no duplicate");
+        assert_eq!(
+            rows.len(),
+            1,
+            "OR REPLACE overwrites in place, no duplicate"
+        );
         assert_eq!(Fixture::cell(&rows[0], "id"), t("b"));
         assert_eq!(Fixture::cell(&rows[0], "n"), Value::Int(20));
     }
@@ -891,7 +1107,11 @@ fn or_replace_keeps_conflict_index_consistent() {
         &mut cidx,
     );
     let rows = f.rows("records");
-    assert_eq!(rows.len(), 1, "the conflict index still resolves key 1: update in place");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the conflict index still resolves key 1: update in place"
+    );
     assert_eq!(Fixture::cell(&rows[0], "n"), Value::Int(99));
 }
 
@@ -916,20 +1136,35 @@ fn executemany_rollback_invalidates_id_index() {
         vec![Value::Null, Value::Int(3)], // id is NOT NULL → fails on the tail
     ];
     let err = execute_insert_many(
-        &stmt, &f.store, &f.meta, &f.catalog, &f.root_map, seq,
-        Some(&mut idx), None, None, None,
+        &stmt,
+        &f.store,
+        &f.meta,
+        &f.catalog,
+        &f.root_map,
+        seq,
+        Some(&mut idx),
+        None,
+        None,
+        None,
     )
     .unwrap_err();
     assert!(format!("{err}").contains("NOT NULL constraint failed"));
 
     // The whole batch rolled back: no rows survive.
-    assert_eq!(f.rows("records").len(), 0, "a partial batch must not survive");
+    assert_eq!(
+        f.rows("records").len(),
+        0,
+        "a partial batch must not survive"
+    );
     // The id-index must not hold a stale entry for a rolled-back id.
     assert!(
         idx.lookup("alpha").is_none(),
         "a rolled-back id must be dropped from the id-index"
     );
-    assert!(idx.lookup("beta").is_none(), "a rolled-back id must be dropped from the id-index");
+    assert!(
+        idx.lookup("beta").is_none(),
+        "a rolled-back id must be dropped from the id-index"
+    );
 }
 
 #[test]
@@ -949,8 +1184,18 @@ fn conflict_rekey_through_both_indexes_inserts_old_key_fresh() {
             _ => unreachable!(),
         };
         execute_insert(
-            &stmt, &f.store, &f.meta, &f.catalog, &f.root_map, params, None,
-            TxnScope::Own, Some(idx), Some(cidx), None, None,
+            &stmt,
+            &f.store,
+            &f.meta,
+            &f.catalog,
+            &f.root_map,
+            params,
+            None,
+            TxnScope::Own,
+            Some(idx),
+            Some(cidx),
+            None,
+            None,
         )
         .unwrap();
     };
@@ -962,13 +1207,18 @@ fn conflict_rekey_through_both_indexes_inserts_old_key_fresh() {
         "INSERT INTO keyed (k, label) VALUES (?, ?) \
          ON CONFLICT (k) DO UPDATE SET k = 2, label = excluded.label",
         vec![Value::Int(1), t("moved")],
-        &mut idx, &mut cidx,
+        &mut idx,
+        &mut cidx,
     );
     // Insert the OLD key value 1 again: must insert fresh, not conflict.
     run(up, vec![Value::Int(1), t("oldkey")], &mut idx, &mut cidx);
 
     let rows = f.rows("keyed");
-    assert_eq!(rows.len(), 2, "the old conflict key inserts fresh after the re-key");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the old conflict key inserts fresh after the re-key"
+    );
     let mut ks: Vec<i64> = rows
         .iter()
         .map(|r| match Fixture::cell(r, "k") {
@@ -977,5 +1227,9 @@ fn conflict_rekey_through_both_indexes_inserts_old_key_fresh() {
         })
         .collect();
     ks.sort_unstable();
-    assert_eq!(ks, vec![1, 2], "both the moved row (k=2) and the fresh old-key row (k=1) survive");
+    assert_eq!(
+        ks,
+        vec![1, 2],
+        "both the moved row (k=2) and the fresh old-key row (k=1) survive"
+    );
 }

@@ -122,7 +122,10 @@ fn main() {
         "reads/insert(30k) = {:.2}  (gate <= {READS_PER_INSERT_MAX})",
         reads_per_insert[3]
     );
-    println!("full_scans on the insert path = {} (gate == 0)", full_scans[3]);
+    println!(
+        "full_scans on the insert path = {} (gate == 0)",
+        full_scans[3]
+    );
 
     assert!(
         doubling_ratio_ok(ratio_10_20),
@@ -152,9 +155,7 @@ fn main() {
     // ~3x the rows reads at most a couple more pages per insert (one extra level
     // at most), never proportionally more.
     let reads_growth = reads_per_insert[3] / reads_per_insert[0];
-    println!(
-        "reads/insert growth 5k -> 30k = {reads_growth:.3} (gate <= 2.0, height-bounded)"
-    );
+    println!("reads/insert growth 5k -> 30k = {reads_growth:.3} (gate <= 2.0, height-bounded)");
     assert!(
         reads_growth <= 2.0,
         "per-insert reads scale with the row count (5k -> 30k factor {reads_growth:.3}): \

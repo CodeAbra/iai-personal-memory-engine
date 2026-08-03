@@ -8,8 +8,8 @@
 
 use crate::btree::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
 use crate::btree::page::{
-    empty_leaf, encode_inline_cell, encode_spilled_cell, get_sibling, on_page_cell_size,
-    page_kind, raw_leaf_cell_bytes, read_interior_header, read_interior_node, read_leaf_cell_raw,
+    empty_leaf, encode_inline_cell, encode_spilled_cell, get_sibling, on_page_cell_size, page_kind,
+    raw_leaf_cell_bytes, read_interior_header, read_interior_node, read_leaf_cell_raw,
     read_leaf_header, read_leaf_keys, read_spilled_pointer, set_sibling, write_leaf_from_raw,
     LeafCellRaw, PageKind, LEAF_NUM_CELLS_OFFSET, LEAF_PTR_ARRAY_START, LEAF_SIBLING_OFFSET,
     USABLE_END,
@@ -188,7 +188,15 @@ impl<'p> Cursor<'p> {
             }
             if self.leaf_has_room_for(&page, keys.len(), Some(insert_idx), key, value)? {
                 let sibling = get_sibling(&page);
-                let new_page = self.rebuild_leaf(&page, keys.len(), Some(insert_idx), insert_idx, key, value, sibling)?;
+                let new_page = self.rebuild_leaf(
+                    &page,
+                    keys.len(),
+                    Some(insert_idx),
+                    insert_idx,
+                    key,
+                    value,
+                    sibling,
+                )?;
                 self.pager.write_page(leaf_page_no, &new_page)?;
                 return Ok(false);
             }
@@ -197,9 +205,7 @@ impl<'p> Cursor<'p> {
             let slimmed = self.rebuild_leaf_excluding(&page, keys.len(), insert_idx, sibling)?;
             self.pager.write_page(leaf_page_no, &slimmed)?;
             let path = self.path_stack.clone();
-            crate::btree::split::leaf_split_and_insert(
-                self.pager, path, leaf_page_no, key, value,
-            )?;
+            crate::btree::split::leaf_split_and_insert(self.pager, path, leaf_page_no, key, value)?;
             return Ok(false);
         }
 
@@ -208,7 +214,8 @@ impl<'p> Cursor<'p> {
             && keys.len() < leaf_max_cells();
         if fits {
             let sibling = get_sibling(&page);
-            let new_page = self.rebuild_leaf(&page, keys.len(), None, insert_idx, key, value, sibling)?;
+            let new_page =
+                self.rebuild_leaf(&page, keys.len(), None, insert_idx, key, value, sibling)?;
             self.pager.write_page(leaf_page_no, &new_page)?;
             return Ok(true);
         }
@@ -410,10 +417,7 @@ impl<'p> Cursor<'p> {
                 page_no = get_sibling(&page);
                 continue;
             }
-            let last_key = read_leaf_cell_raw(
-                &page, hdr.num_cells - 1, OVERFLOW_THRESHOLD,
-            )?
-            .key;
+            let last_key = read_leaf_cell_raw(&page, hdr.num_cells - 1, OVERFLOW_THRESHOLD)?.key;
             let mut lo = 0usize;
             while ki < keys.len() {
                 let target = keys[ki];
@@ -427,8 +431,7 @@ impl<'p> Cursor<'p> {
                 let mut right = hdr.num_cells;
                 while left < right {
                     let mid = left + (right - left) / 2;
-                    let mid_key =
-                        read_leaf_cell_raw(&page, mid, OVERFLOW_THRESHOLD)?.key;
+                    let mid_key = read_leaf_cell_raw(&page, mid, OVERFLOW_THRESHOLD)?.key;
                     if mid_key < target {
                         left = mid + 1;
                     } else {

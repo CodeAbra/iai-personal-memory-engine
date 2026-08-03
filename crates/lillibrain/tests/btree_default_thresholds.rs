@@ -84,7 +84,9 @@ fn assert_invariants(
     let want_max = oracle.keys().last().copied();
     let got_max = store.tree(root).max_key().map_err(|e| e.to_string())?;
     if got_max != want_max {
-        return Err(format!("max_key mismatch: got {got_max:?}, want {want_max:?}"));
+        return Err(format!(
+            "max_key mismatch: got {got_max:?}, want {want_max:?}"
+        ));
     }
 
     let errs = store.check_integrity(root).map_err(|e| e.to_string())?;
@@ -180,7 +182,12 @@ fn default_thresholds_deep_tree_survives_bulk_delete_and_churn() {
     const N_KEYS: i64 = 2_600;
     for i in 0..N_KEYS {
         let key = WIDE_BASE + i * WIDE_STEP;
-        apply(&store, root, &mut oracle, &Op::Insert(key, dense_value(&mut rng)));
+        apply(
+            &store,
+            root,
+            &mut oracle,
+            &Op::Insert(key, dense_value(&mut rng)),
+        );
     }
     assert_invariants(&store, root, &oracle).unwrap_or_else(|r| panic!("after build: {r}"));
 
@@ -238,10 +245,7 @@ fn default_thresholds_deep_tree_survives_bulk_delete_and_churn() {
 /// Shrinkable variant: mixed-width keys and dense values at default
 /// thresholds; any divergence minimizes to the exact failing op prefix.
 fn op_strategy() -> impl Strategy<Value = Op> {
-    let key = prop_oneof![
-        (0i64..64).prop_map(|k| WIDE_BASE + k * WIDE_STEP),
-        0i64..64,
-    ];
+    let key = prop_oneof![(0i64..64).prop_map(|k| WIDE_BASE + k * WIDE_STEP), 0i64..64,];
     let value = prop_oneof![
         9 => proptest::collection::vec(any::<u8>(), 300..900),
         1 => proptest::collection::vec(any::<u8>(), 8200..9000),

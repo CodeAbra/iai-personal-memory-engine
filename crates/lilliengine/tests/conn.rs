@@ -8,8 +8,8 @@
 //! from the catalog; and the raw adapter's read-only gate (a write is rejected,
 //! a read delegates).
 
-use lilliengine::conn::{Connection, RawAction, RawConn};
 use lillibrain::Value;
+use lilliengine::conn::{Connection, RawAction, RawConn};
 use tempfile::tempdir;
 
 const DDL_RECORDS: &str = "CREATE TABLE IF NOT EXISTS records ( \
@@ -211,10 +211,16 @@ fn pragma_table_info_from_catalog() {
 fn composite_key_upsert_in_place() {
     let (_dir, mut conn) = open();
     conn.execute(DDL_EDGES, vec![]).unwrap();
-    conn.execute(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")])
-        .unwrap();
-    conn.execute(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(9.0), t("t2")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")],
+    )
+    .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(9.0), t("t2")],
+    )
+    .unwrap();
     let mut sel = conn
         .execute("SELECT src, weight, updated_at FROM edges", vec![])
         .unwrap();
@@ -231,8 +237,11 @@ fn in_transaction_reflects_begin_commit() {
     assert!(!conn.in_transaction());
     conn.execute("BEGIN", vec![]).unwrap();
     assert!(conn.in_transaction());
-    conn.execute("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+    )
+    .unwrap();
     conn.execute("COMMIT", vec![]).unwrap();
     assert!(!conn.in_transaction());
     let mut sel = conn.execute("SELECT id FROM records", vec![]).unwrap();
@@ -254,7 +263,9 @@ fn executemany_batch_atomic() {
         )
         .unwrap();
     assert_eq!(cur.rowcount, 3);
-    let mut sel = conn.execute("SELECT vec_label FROM records", vec![]).unwrap();
+    let mut sel = conn
+        .execute("SELECT vec_label FROM records", vec![])
+        .unwrap();
     let rows = sel.fetchall();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].get_name("vec_label"), Some(&Value::Int(1)));
@@ -269,9 +280,13 @@ fn alter_rename_of_quoted_identifier_survives_reopen() {
     {
         let mut conn = Connection::open(p, 384).unwrap();
         // A bracket-quoted table name, renamed via a bracket-quoted reference.
-        conn.execute("CREATE TABLE [t] ( id TEXT , n INTEGER )", vec![]).unwrap();
-        conn.execute("INSERT INTO [t] (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)])
+        conn.execute("CREATE TABLE [t] ( id TEXT , n INTEGER )", vec![])
             .unwrap();
+        conn.execute(
+            "INSERT INTO [t] (id, n) VALUES (?, ?)",
+            vec![t("a"), Value::Int(1)],
+        )
+        .unwrap();
         conn.execute("ALTER TABLE [t] RENAME TO u", vec![]).unwrap();
         conn.close().unwrap();
     }
@@ -279,7 +294,11 @@ fn alter_rename_of_quoted_identifier_survives_reopen() {
     let mut conn = Connection::open(p, 384).unwrap();
     let mut sel = conn.execute("SELECT id, n FROM u", vec![]).unwrap();
     let rows = sel.fetchall();
-    assert_eq!(rows.len(), 1, "the renamed table u is queryable after reopen");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the renamed table u is queryable after reopen"
+    );
     assert_eq!(rows[0].get_name("id"), Some(&t("a")));
     // The stored DDL surfaced via sqlite_master names the new table u.
     let mut master = conn
@@ -306,8 +325,11 @@ fn reopen_replays_schema_and_data() {
     {
         let mut conn = Connection::open(p, 384).unwrap();
         conn.execute(DDL_RECORDS, vec![]).unwrap();
-        conn.execute("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(7)])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO records (id, n) VALUES (?, ?)",
+            vec![t("a"), Value::Int(7)],
+        )
+        .unwrap();
         conn.close().unwrap();
     }
     let mut conn = Connection::open(p, 384).unwrap();
@@ -318,7 +340,10 @@ fn reopen_replays_schema_and_data() {
     assert_eq!(rows[0].get_name("n"), Some(&Value::Int(7)));
     // The AUTOINCREMENT high-water mark resumes after reopen.
     let cur = conn
-        .execute("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("b"), Value::Int(8)])
+        .execute(
+            "INSERT INTO records (id, n) VALUES (?, ?)",
+            vec![t("b"), Value::Int(8)],
+        )
         .unwrap();
     assert_eq!(cur.lastrowid, Some(2));
 }
@@ -329,7 +354,10 @@ fn query_only_blocks_writes() {
     conn.execute(DDL_RECORDS, vec![]).unwrap();
     conn.execute("PRAGMA query_only=ON", vec![]).unwrap();
     let err = conn
-        .execute("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)])
+        .execute(
+            "INSERT INTO records (id, n) VALUES (?, ?)",
+            vec![t("a"), Value::Int(1)],
+        )
         .unwrap_err();
     assert!(format!("{err}").contains("attempt to write a readonly database"));
     // A read still succeeds under query_only.
@@ -344,8 +372,11 @@ fn query_only_off_cannot_flip_a_readonly_mount() {
     {
         let mut conn = Connection::open(p, 384).unwrap();
         conn.execute(DDL_RECORDS, vec![]).unwrap();
-        conn.execute("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("a"), Value::Int(1)])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO records (id, n) VALUES (?, ?)",
+            vec![t("a"), Value::Int(1)],
+        )
+        .unwrap();
         conn.close().unwrap();
     }
     let mut ro = Connection::open_read_only(p, 384).unwrap();
@@ -353,7 +384,10 @@ fn query_only_off_cannot_flip_a_readonly_mount() {
     // read-only mount; the write still reports the read-only error.
     ro.execute("PRAGMA query_only=OFF", vec![]).unwrap();
     let err = ro
-        .execute("INSERT INTO records (id, n) VALUES (?, ?)", vec![t("b"), Value::Int(2)])
+        .execute(
+            "INSERT INTO records (id, n) VALUES (?, ?)",
+            vec![t("b"), Value::Int(2)],
+        )
         .unwrap_err();
     assert!(
         format!("{err}").contains("attempt to write a readonly database"),
@@ -405,8 +439,11 @@ fn sql_rollback_clears_conflict_cache_no_wrong_row_overwrite() {
     // Under an outer transaction, UPSERT a single edge. It lands at row-key 1 and
     // primes the conflict cache with (g,h,rel) -> 1.
     conn.execute("BEGIN", vec![]).unwrap();
-    conn.execute(UPSERT, vec![t("g"), t("h"), t("rel"), Value::Float(1.0), t("t1")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("g"), t("h"), t("rel"), Value::Float(1.0), t("t1")],
+    )
+    .unwrap();
     // Roll the transaction back via the SQL string the production `_txn` uses.
     // The tree is reverted (row-key 1 is freed) — but a stale cache would retain
     // (g,h,rel) -> 1.
@@ -416,16 +453,22 @@ fn sql_rollback_clears_conflict_cache_no_wrong_row_overwrite() {
 
     // A committed INSERT of a DIFFERENT edge now reuses the freed row-key 1 (the
     // tree is empty, so next_key descends to 1 again).
-    conn.execute(UPSERT, vec![t("x"), t("y"), t("rel"), Value::Float(7.0), t("keep")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("x"), t("y"), t("rel"), Value::Float(7.0), t("keep")],
+    )
+    .unwrap();
 
     // UPSERT the key from the rolled-back batch. With a stale cache, its lookup
     // returns row-key 1, `tree.get(1)` finds the LIVE (x,y,rel) row, and the
     // engine wrongly treats it as a conflict-hit — overwriting (x,y,rel) with the
     // (g,h,rel) values. With the cache cleared on ROLLBACK, (g,h,rel) inserts
     // fresh and (x,y,rel) is left intact.
-    conn.execute(UPSERT, vec![t("g"), t("h"), t("rel"), Value::Float(2.0), t("t2")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("g"), t("h"), t("rel"), Value::Float(2.0), t("t2")],
+    )
+    .unwrap();
 
     let mut sel = conn
         .execute(
@@ -472,10 +515,16 @@ fn col_index_maintained_incrementally_no_rebuild_on_steady_state_read() {
     conn.execute(DDL_EDGES, vec![]).unwrap();
 
     // Seed two edges so the col-index has content, then a recall builds the index.
-    conn.execute(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")])
-        .unwrap();
-    conn.execute(UPSERT, vec![t("c"), t("d"), t("rel"), Value::Float(1.0), t("t1")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")],
+    )
+    .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("c"), t("d"), t("rel"), Value::Float(1.0), t("t1")],
+    )
+    .unwrap();
 
     const ADJ: &str = "SELECT src , dst , weight FROM edges \
                        WHERE ( src IN ( 'a' , 'c' ) OR dst IN ( 'a' , 'c' ) )";
@@ -486,8 +535,11 @@ fn col_index_maintained_incrementally_no_rebuild_on_steady_state_read() {
     // A coalesced write between recalls — the provenance/event shape that DROPPED
     // the col-index under the old drop-and-rebuild discipline. Now it is maintained
     // incrementally: the new edge is filed at its row-key, the index stays built.
-    conn.execute(UPSERT, vec![t("a"), t("e"), t("rel"), Value::Float(2.0), t("t2")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("a"), t("e"), t("rel"), Value::Float(2.0), t("t2")],
+    )
+    .unwrap();
 
     // The next recall must be SCAN-FREE: the index already reflects the new edge
     // without a rebuild. A non-zero scan count here is the churn regression.
@@ -520,28 +572,51 @@ fn col_index_incremental_write_reflects_new_and_dropped_rows() {
     // maintenance against drift from the committed tree.
     let (_dir, mut conn) = open();
     conn.execute(DDL_EDGES, vec![]).unwrap();
-    conn.execute(UPSERT, vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0), t("t1")],
+    )
+    .unwrap();
 
     const ADJ_A: &str = "SELECT src , dst FROM edges WHERE src IN ( 'a' )";
     // Build the index.
     assert_eq!(conn.execute(ADJ_A, vec![]).unwrap().fetchall().len(), 1);
 
     // Insert another (a,*) edge: the incremental posting must add it.
-    conn.execute(UPSERT, vec![t("a"), t("c"), t("rel"), Value::Float(1.0), t("t1")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("a"), t("c"), t("rel"), Value::Float(1.0), t("t1")],
+    )
+    .unwrap();
     conn.reset_full_scan_count();
     let after_insert = conn.execute(ADJ_A, vec![]).unwrap().fetchall();
-    assert_eq!(conn.full_scan_count(), 0, "the post-insert recall must be scan-free");
-    assert_eq!(after_insert.len(), 2, "the incrementally-added (a,c) edge must appear");
+    assert_eq!(
+        conn.full_scan_count(),
+        0,
+        "the post-insert recall must be scan-free"
+    );
+    assert_eq!(
+        after_insert.len(),
+        2,
+        "the incrementally-added (a,c) edge must appear"
+    );
 
     // Delete one (a,*) edge: the incremental remove must drop its posting so the
     // freed key is never returned by a later probe.
-    conn.execute("DELETE FROM edges WHERE dst = 'b'", vec![]).unwrap();
+    conn.execute("DELETE FROM edges WHERE dst = 'b'", vec![])
+        .unwrap();
     conn.reset_full_scan_count();
     let after_delete = conn.execute(ADJ_A, vec![]).unwrap().fetchall();
-    assert_eq!(conn.full_scan_count(), 0, "the post-delete recall must be scan-free");
-    assert_eq!(after_delete.len(), 1, "the deleted (a,b) edge must be gone from the index");
+    assert_eq!(
+        conn.full_scan_count(),
+        0,
+        "the post-delete recall must be scan-free"
+    );
+    assert_eq!(
+        after_delete.len(),
+        1,
+        "the deleted (a,b) edge must be gone from the index"
+    );
     assert_eq!(after_delete[0].get_name("dst"), Some(&t("c")));
 }
 
@@ -558,8 +633,11 @@ fn sql_rollback_discards_incremental_col_index_entries_no_freed_key_hit() {
     conn.execute(DDL_EDGES, vec![]).unwrap();
 
     // Commit one real edge and build the index over it.
-    conn.execute(UPSERT, vec![t("x"), t("y"), t("rel"), Value::Float(7.0), t("keep")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("x"), t("y"), t("rel"), Value::Float(7.0), t("keep")],
+    )
+    .unwrap();
     const ADJ_Z: &str = "SELECT src , dst , weight FROM edges WHERE src IN ( 'z' )";
     const ADJ_X: &str = "SELECT src , dst , weight FROM edges WHERE src IN ( 'x' )";
     // Build the col-index (no (z,*) row yet).
@@ -568,8 +646,11 @@ fn sql_rollback_discards_incremental_col_index_entries_no_freed_key_hit() {
     // Under an outer transaction, insert a (z,*) edge — incrementally filed at its
     // row-key — then roll the transaction back via the SQL string.
     conn.execute("BEGIN", vec![]).unwrap();
-    conn.execute(UPSERT, vec![t("z"), t("w"), t("rel"), Value::Float(9.0), t("t2")])
-        .unwrap();
+    conn.execute(
+        UPSERT,
+        vec![t("z"), t("w"), t("rel"), Value::Float(9.0), t("t2")],
+    )
+    .unwrap();
     conn.execute("ROLLBACK", vec![]).unwrap();
 
     // The rolled-back (z,*) edge must be gone — both from the tree AND from the
@@ -624,7 +705,10 @@ fn raw_conn_read_write_delegates_writes() {
         other => panic!("expected delegate, got {other:?}"),
     }
     // Reading the query_only flag reports false.
-    assert_eq!(rw.gate("PRAGMA query_only"), RawAction::ReportQueryOnly(false));
+    assert_eq!(
+        rw.gate("PRAGMA query_only"),
+        RawAction::ReportQueryOnly(false)
+    );
 }
 
 #[test]
@@ -653,7 +737,10 @@ fn sqlite_master_lists_tables() {
         )
         .unwrap();
     let rows = cur.fetchall();
-    let names: Vec<Value> = rows.iter().map(|r| r.get_name("name").cloned().unwrap()).collect();
+    let names: Vec<Value> = rows
+        .iter()
+        .map(|r| r.get_name("name").cloned().unwrap())
+        .collect();
     assert_eq!(names, vec![t("edges"), t("records")]);
 }
 
@@ -718,7 +805,10 @@ fn sqlite_master_count_star() {
     conn.execute(DDL_RECORDS, vec![]).unwrap();
     conn.execute(DDL_EDGES, vec![]).unwrap();
     let mut cur = conn
-        .execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'", vec![])
+        .execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+            vec![],
+        )
         .unwrap();
     let row = cur.fetchone().unwrap();
     assert_eq!(row.get_name("COUNT(*)"), Some(&Value::Int(2)));
@@ -736,7 +826,10 @@ fn sqlite_master_rootpage_survives_reopen() {
     // A reopen replays the DDL + root rows; sqlite_master still reports the table.
     let mut conn = Connection::open(p, 384).unwrap();
     let mut cur = conn
-        .execute("SELECT name, rootpage, sql FROM sqlite_master WHERE type='table'", vec![])
+        .execute(
+            "SELECT name, rootpage, sql FROM sqlite_master WHERE type='table'",
+            vec![],
+        )
         .unwrap();
     let rows = cur.fetchall();
     assert_eq!(rows.len(), 1);
@@ -775,9 +868,7 @@ fn maintenance_statements_are_accepted_noops() {
     }
 
     // The row survives every maintenance no-op byte-identically.
-    let mut sel = conn
-        .execute("SELECT id, n FROM records", vec![])
-        .unwrap();
+    let mut sel = conn.execute("SELECT id, n FROM records", vec![]).unwrap();
     let rows = sel.fetchall();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get_name("id"), Some(&t("keep")));
@@ -823,7 +914,9 @@ fn owned_scope_error_leaves_no_open_transaction() {
     .unwrap_or_else(|e| panic!("the next write must succeed (no leaked open txn), got: {e}"));
 
     // The failed UPSERT left the seed row untouched; the follow-up row landed.
-    let mut sel = conn.execute("SELECT vec_label, id FROM records", vec![]).unwrap();
+    let mut sel = conn
+        .execute("SELECT vec_label, id FROM records", vec![])
+        .unwrap();
     let rows = sel.fetchall();
     assert_eq!(rows.len(), 2);
 }
@@ -864,7 +957,9 @@ fn suppressed_scope_error_does_not_roll_back_outer_batch() {
     .unwrap_or_else(|e| panic!("the suppressed-scope error must not abort the batch, got: {e}"));
     conn.execute("COMMIT", vec![]).unwrap();
 
-    let mut sel = conn.execute("SELECT vec_label FROM records", vec![]).unwrap();
+    let mut sel = conn
+        .execute("SELECT vec_label FROM records", vec![])
+        .unwrap();
     let rows = sel.fetchall();
     assert_eq!(
         rows.len(),
@@ -880,7 +975,8 @@ fn conflict_key_rewrite_reinserts_old_key_through_connection() {
     // insert of the OLD key value inserts fresh rather than falsely conflicting and
     // overwriting the moved row.
     let (_dir, mut conn) = open();
-    conn.execute("CREATE TABLE keyed (k INTEGER, label TEXT)", vec![]).unwrap();
+    conn.execute("CREATE TABLE keyed (k INTEGER, label TEXT)", vec![])
+        .unwrap();
     let up = "INSERT INTO keyed (k, label) VALUES (?, ?) \
               ON CONFLICT (k) DO UPDATE SET label = excluded.label";
     conn.execute(up, vec![Value::Int(1), t("first")]).unwrap();

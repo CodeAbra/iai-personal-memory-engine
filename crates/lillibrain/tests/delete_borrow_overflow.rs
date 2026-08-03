@@ -63,10 +63,7 @@ fn right_borrow_with_spilled_receiver_cell_does_not_leak_overflow_pages() {
     let l2 = alloc_page(&pager).unwrap();
 
     // L0: two inline cells (a stable left sibling, not the borrow source).
-    let l0_cells = vec![
-        encode_inline_cell(0, b"a"),
-        encode_inline_cell(1, b"b"),
-    ];
+    let l0_cells = vec![encode_inline_cell(0, b"a"), encode_inline_cell(1, b"b")];
     let mut l0_page = write_leaf_from_raw(&l0_cells, l1).unwrap();
     set_sibling(&mut l0_page, l1);
     pager.write_page(l0, &l0_page).unwrap();

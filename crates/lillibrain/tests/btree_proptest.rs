@@ -89,7 +89,9 @@ fn assert_invariants(
     let want_max = oracle.keys().last().copied();
     let got_max = store.tree(root).max_key().map_err(|e| e.to_string())?;
     if got_max != want_max {
-        return Err(format!("max_key mismatch: got {got_max:?}, want {want_max:?}"));
+        return Err(format!(
+            "max_key mismatch: got {got_max:?}, want {want_max:?}"
+        ));
     }
 
     // (b) STRUCTURAL — check_integrity clean.
@@ -128,7 +130,9 @@ fn assert_invariants(
         }
     }
     if let Some(p) = double {
-        return Err(format!("page {p} appears in more than one role (double-free/use)"));
+        return Err(format!(
+            "page {p} appears in more than one role (double-free/use)"
+        ));
     }
     // freelist header count must match the actual set (no phantom frees).
     if free_count as usize != census.freelist.len() {

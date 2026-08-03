@@ -314,7 +314,12 @@ def test_authority_hit_surfaces_at_head_when_ann_tier_misses_it(store, monkeypat
     assert resp["hits"][0]["record_id"] == str(target_id), (
         f"authority hit must surface at head; got hits={resp['hits']}"
     )
-    assert resp["hits"][0]["reason"] == "exact-cosine"
+    reason = resp["hits"][0]["reason"]
+    assert reason.startswith("exact-cosine")
+    # When the pipeline rank outscored the bare cosine, the served score is
+    # the pipeline's and the reason must carry that provenance.
+    if " | score from pipeline rank: " not in reason:
+        assert reason == "exact-cosine"
     assert resp.get("exact_authority_used") is True
 
 

@@ -52,7 +52,10 @@ fn count_cells_tracks_full_scan_across_churn() {
 
     store.begin_write().unwrap();
     for k in 0..100i64 {
-        store.tree(root).insert(k, format!("v{k}").as_bytes()).unwrap();
+        store
+            .tree(root)
+            .insert(k, format!("v{k}").as_bytes())
+            .unwrap();
     }
     store.commit().unwrap();
     assert_eq!(counted(&store), scanned(&store), "after inserts");

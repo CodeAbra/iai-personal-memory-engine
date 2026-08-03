@@ -50,8 +50,7 @@ fn freelist_conserves_page_count_across_churn() {
     }
     assert_eq!(p.freelist_count().unwrap(), 8);
 
-    let reused: std::collections::HashSet<u32> =
-        (0..8).map(|_| alloc_page(&p).unwrap()).collect();
+    let reused: std::collections::HashSet<u32> = (0..8).map(|_| alloc_page(&p).unwrap()).collect();
     let original: std::collections::HashSet<u32> = pages.into_iter().collect();
     assert_eq!(reused, original, "no leak, no double-free");
     assert_eq!(p.db_size().unwrap(), stable, "file did not grow");

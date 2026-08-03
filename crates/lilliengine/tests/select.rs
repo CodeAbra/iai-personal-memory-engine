@@ -6,11 +6,11 @@
 //! NULL-propagating comparisons, numeric-affinity coercion, NULLs-first
 //! collation, and datetime() second-resolution UTC normalization.
 
+use lillibrain::Value;
 use lilliengine::eval::{
     datetime_scalar, eval_predicate, eval_scalar, like_match, order_key, sql_and, sql_compare,
     sql_not, sql_or, Row,
 };
-use lillibrain::Value;
 
 // ---------------------------------------------------------------------------
 // Three-valued evaluator
@@ -23,8 +23,14 @@ fn t(s: &str) -> Value {
 #[test]
 fn compare_int_equals_real() {
     // 1 == 1.0 is true under numeric coercion.
-    assert_eq!(sql_compare("=", Value::Int(1), Value::Float(1.0)), Some(true));
-    assert_eq!(sql_compare("=", Value::Float(2.0), Value::Int(2)), Some(true));
+    assert_eq!(
+        sql_compare("=", Value::Int(1), Value::Float(1.0)),
+        Some(true)
+    );
+    assert_eq!(
+        sql_compare("=", Value::Float(2.0), Value::Int(2)),
+        Some(true)
+    );
 }
 
 #[test]
@@ -89,18 +95,17 @@ fn like_wildcards_case_insensitive() {
 fn in_list_null_semantics() {
     let row = Row::new();
     // 5 IN (1, NULL, 2) -> NULL (no match, NULL present => unknown).
-    let items = vec![
-        lit(Value::Int(1)),
-        lit(Value::Null),
-        lit(Value::Int(2)),
-    ];
+    let items = vec![lit(Value::Int(1)), lit(Value::Null), lit(Value::Int(2))];
     let in_expr = in_list(lit(Value::Int(5)), items.clone());
     assert_eq!(eval_predicate(&in_expr, &row), None);
     // 1 IN (1, NULL, 2) -> true (match found).
     let in_expr = in_list(lit(Value::Int(1)), items);
     assert_eq!(eval_predicate(&in_expr, &row), Some(true));
     // 5 IN (1, 2) -> false (no NULL, no match).
-    let in_expr = in_list(lit(Value::Int(5)), vec![lit(Value::Int(1)), lit(Value::Int(2))]);
+    let in_expr = in_list(
+        lit(Value::Int(5)),
+        vec![lit(Value::Int(1)), lit(Value::Int(2))],
+    );
     assert_eq!(eval_predicate(&in_expr, &row), Some(false));
     // NULL IN (1, 2) -> NULL.
     let in_expr = in_list(lit(Value::Null), vec![lit(Value::Int(1))]);
@@ -217,6 +222,7 @@ fn is_null_predicate_on_column() {
 
 use std::collections::BTreeMap;
 
+use lillibrain::Store;
 use lilliengine::ast::Stmt;
 use lilliengine::catalog::Catalog;
 use lilliengine::exec::{execute_select, execute_select_instrumented, ResultSet};
@@ -224,11 +230,9 @@ use lilliengine::meta::MetaTable;
 use lilliengine::parser::parse;
 use lilliengine::plan::plan_select;
 use lilliengine::rowcodec::encode_row;
-use lillibrain::Store;
 use tempfile::tempdir;
 
-const DDL_T: &str =
-    "CREATE TABLE IF NOT EXISTS t ( vec_label INTEGER PRIMARY KEY AUTOINCREMENT , \
+const DDL_T: &str = "CREATE TABLE IF NOT EXISTS t ( vec_label INTEGER PRIMARY KEY AUTOINCREMENT , \
      id TEXT NOT NULL UNIQUE , n INTEGER , label TEXT , ts TEXT )";
 
 /// A store fixture with table `t` populated by `rows` (each a full column vector
@@ -261,7 +265,12 @@ impl Fixture {
             store.tree(root).insert(tree_key(r), &payload).unwrap();
         }
         store.commit().unwrap();
-        Fixture { _dir: dir, store, catalog, root_map }
+        Fixture {
+            _dir: dir,
+            store,
+            catalog,
+            root_map,
+        }
     }
 
     fn run(&self, sql: &str, params: Vec<Value>) -> ResultSet {
@@ -271,7 +280,16 @@ impl Fixture {
             _ => panic!("not a select"),
         };
         let plan = plan_select(&select, &self.catalog, params, None).unwrap();
-        execute_select(&plan, &self.store, &self.catalog, &self.root_map, None, None, None).unwrap()
+        execute_select(
+            &plan,
+            &self.store,
+            &self.catalog,
+            &self.root_map,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
     }
 
     fn run_instrumented(&self, sql: &str) -> (ResultSet, bool) {
@@ -281,8 +299,16 @@ impl Fixture {
             _ => panic!("not a select"),
         };
         let plan = plan_select(&select, &self.catalog, vec![], None).unwrap();
-        let (rs, stats) =
-            execute_select_instrumented(&plan, &self.store, &self.catalog, &self.root_map, None, None, None).unwrap();
+        let (rs, stats) = execute_select_instrumented(
+            &plan,
+            &self.store,
+            &self.catalog,
+            &self.root_map,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         (rs, stats.decoded_rows)
     }
 }
@@ -292,8 +318,11 @@ fn row(vl: i64, id: &str, n: Option<i64>, label: Option<&str>, ts: Option<&str>)
         Value::Int(vl),
         Value::Text(id.to_string()),
         n.map(Value::Int).unwrap_or(Value::Null),
-        label.map(|s| Value::Text(s.to_string())).unwrap_or(Value::Null),
-        ts.map(|s| Value::Text(s.to_string())).unwrap_or(Value::Null),
+        label
+            .map(|s| Value::Text(s.to_string()))
+            .unwrap_or(Value::Null),
+        ts.map(|s| Value::Text(s.to_string()))
+            .unwrap_or(Value::Null),
     ]
 }
 
@@ -306,7 +335,10 @@ fn col_vals(rs: &ResultSet, col: &str) -> Vec<Value> {
 fn plan_rejects_unknown_table() {
     let f = Fixture::new(&[]);
     let stmt = parse("SELECT * FROM nope").unwrap();
-    let select = match stmt { Stmt::Select(s) => s, _ => unreachable!() };
+    let select = match stmt {
+        Stmt::Select(s) => s,
+        _ => unreachable!(),
+    };
     assert!(plan_select(&select, &f.catalog, vec![], None).is_err());
 }
 
@@ -348,7 +380,10 @@ fn where_three_valued_filter() {
 
 #[test]
 fn where_with_positional_param() {
-    let f = Fixture::new(&[row(1, "a", Some(5), None, None), row(2, "b", Some(7), None, None)]);
+    let f = Fixture::new(&[
+        row(1, "a", Some(5), None, None),
+        row(2, "b", Some(7), None, None),
+    ]);
     let rs = f.run("SELECT id FROM t WHERE n = ?", vec![Value::Int(7)]);
     assert_eq!(col_vals(&rs, "id"), vec![Value::Text("b".to_string())]);
 }
@@ -357,10 +392,14 @@ fn where_with_positional_param() {
 fn bind_count_mismatch_fails_loud() {
     let f = Fixture::new(&[row(1, "a", Some(5), None, None)]);
     let stmt = parse("SELECT id FROM t WHERE n = ? AND vec_label = ?").unwrap();
-    let select = match stmt { Stmt::Select(s) => s, _ => unreachable!() };
+    let select = match stmt {
+        Stmt::Select(s) => s,
+        _ => unreachable!(),
+    };
     // Too few.
     let plan = plan_select(&select, &f.catalog, vec![Value::Int(5)], None).unwrap();
-    let err = execute_select(&plan, &f.store, &f.catalog, &f.root_map, None, None, None).unwrap_err();
+    let err =
+        execute_select(&plan, &f.store, &f.catalog, &f.root_map, None, None, None).unwrap_err();
     assert!(format!("{err}").contains("Incorrect number of bindings supplied"));
     // Too many.
     let plan = plan_select(
@@ -370,7 +409,8 @@ fn bind_count_mismatch_fails_loud() {
         None,
     )
     .unwrap();
-    let err = execute_select(&plan, &f.store, &f.catalog, &f.root_map, None, None, None).unwrap_err();
+    let err =
+        execute_select(&plan, &f.store, &f.catalog, &f.root_map, None, None, None).unwrap_err();
     assert!(format!("{err}").contains("Incorrect number of bindings supplied"));
 }
 
@@ -406,7 +446,10 @@ fn order_by_nulls_first_then_limit_offset() {
     );
     // LIMIT / OFFSET over the ascending order.
     let rs = f.run("SELECT id FROM t ORDER BY n LIMIT 2 OFFSET 1", vec![]);
-    assert_eq!(col_vals(&rs, "id"), vec![Value::Text("c".into()), Value::Text("d".into())]);
+    assert_eq!(
+        col_vals(&rs, "id"),
+        vec![Value::Text("c".into()), Value::Text("d".into())]
+    );
 }
 
 #[test]
@@ -419,7 +462,11 @@ fn order_by_datetime_normalizes() {
     let rs = f.run("SELECT id FROM t ORDER BY datetime ( ts )", vec![]);
     assert_eq!(
         col_vals(&rs, "id"),
-        vec![Value::Text("c".into()), Value::Text("b".into()), Value::Text("a".into())]
+        vec![
+            Value::Text("c".into()),
+            Value::Text("b".into()),
+            Value::Text("a".into())
+        ]
     );
 }
 
@@ -434,7 +481,11 @@ fn two_key_order_by() {
     // n=1 group ordered by label (x<y): b, a; then n=2: c.
     assert_eq!(
         col_vals(&rs, "id"),
-        vec![Value::Text("b".into()), Value::Text("a".into()), Value::Text("c".into())]
+        vec![
+            Value::Text("b".into()),
+            Value::Text("a".into()),
+            Value::Text("c".into())
+        ]
     );
 }
 
@@ -542,7 +593,16 @@ fn id_point_lookup_with_index_is_scan_free_and_matches_unindexed() {
             _ => unreachable!(),
         };
         let plan = plan_select(&select, &f.catalog, vec![], None).unwrap();
-        execute_select(&plan, &f.store, &f.catalog, &f.root_map, Some(idx), None, None).unwrap()
+        execute_select(
+            &plan,
+            &f.store,
+            &f.catalog,
+            &f.root_map,
+            Some(idx),
+            None,
+            None,
+        )
+        .unwrap()
     };
 
     // The indexed point lookup returns the same row as the unindexed scan, and
@@ -551,14 +611,25 @@ fn id_point_lookup_with_index_is_scan_free_and_matches_unindexed() {
     let unindexed = f.run(sql, vec![]);
     f.store.reset_full_scan_count();
     let indexed = run_idx(sql, &mut idx);
-    assert_eq!(f.store.full_scan_count(), 0, "an id point lookup with a built index must be scan-free");
-    assert_eq!(indexed.rows, unindexed.rows, "indexed and unindexed point lookups must return identical rows");
+    assert_eq!(
+        f.store.full_scan_count(),
+        0,
+        "an id point lookup with a built index must be scan-free"
+    );
+    assert_eq!(
+        indexed.rows, unindexed.rows,
+        "indexed and unindexed point lookups must return identical rows"
+    );
     assert_eq!(indexed.columns, unindexed.columns);
 
     // A missing id is also scan-free and returns an empty set.
     f.store.reset_full_scan_count();
     let missing = run_idx("SELECT id FROM t WHERE id = 'nope' LIMIT 1", &mut idx);
-    assert_eq!(f.store.full_scan_count(), 0, "an absent id is scan-free with a built index");
+    assert_eq!(
+        f.store.full_scan_count(),
+        0,
+        "an absent id is scan-free with a built index"
+    );
     assert_eq!(missing.rows.len(), 0);
 }
 
@@ -576,29 +647,46 @@ fn edges_in_lookup_with_col_index_is_scan_free_and_matches_unindexed() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_E).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_E)
+        .unwrap();
 
     // Seed edges: a..a9 each with a contradicts/relates edge. Row key = sequence.
     let mk = |src: &str, dst: &str, et: &str, w: f64| {
-        vec![Value::Text(src.into()), Value::Text(dst.into()), Value::Text(et.into()), Value::Float(w)]
+        vec![
+            Value::Text(src.into()),
+            Value::Text(dst.into()),
+            Value::Text(et.into()),
+            Value::Float(w),
+        ]
     };
     store.begin_write().unwrap();
     let mut k = 1i64;
     for i in 0..50 {
         let src = format!("n{}", i);
         let dst = format!("n{}", (i + 1) % 50);
-        store.tree(root).insert(k, &encode_row(&mk(&src, &dst, "contradicts", 0.5))).unwrap();
+        store
+            .tree(root)
+            .insert(k, &encode_row(&mk(&src, &dst, "contradicts", 0.5)))
+            .unwrap();
         k += 1;
-        store.tree(root).insert(k, &encode_row(&mk(&dst, &src, "relates", 0.2))).unwrap();
+        store
+            .tree(root)
+            .insert(k, &encode_row(&mk(&dst, &src, "relates", 0.2)))
+            .unwrap();
         k += 1;
     }
     store.commit().unwrap();
 
     let mut cidx = ColIndex::new(vec!["src".to_string(), "dst".to_string()]);
-    cidx.ensure_built(&store.tree(root), &catalog.column_names("edges").unwrap()).unwrap();
+    cidx.ensure_built(&store.tree(root), &catalog.column_names("edges").unwrap())
+        .unwrap();
 
     let run = |sql: &str, cidx: Option<&mut ColIndex>| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         execute_select(&plan, &store, &catalog, &root_map, None, cidx, None).unwrap()
     };
@@ -610,16 +698,27 @@ fn edges_in_lookup_with_col_index_is_scan_free_and_matches_unindexed() {
     let unindexed = run(sql, None);
     store.reset_full_scan_count();
     let indexed = run(sql, Some(&mut cidx));
-    assert_eq!(store.full_scan_count(), 0, "an indexed IN lookup must be scan-free");
+    assert_eq!(
+        store.full_scan_count(),
+        0,
+        "an indexed IN lookup must be scan-free"
+    );
     // Row order may differ (index union vs sequential scan) — compare as sets.
     let to_set = |rs: &ResultSet| {
         let mut v: Vec<Vec<(String, Value)>> = rs.rows.clone();
         v.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         v
     };
-    assert_eq!(to_set(&indexed), to_set(&unindexed), "indexed IN lookup must return the same rows as the scan");
+    assert_eq!(
+        to_set(&indexed),
+        to_set(&unindexed),
+        "indexed IN lookup must return the same rows as the scan"
+    );
     assert_eq!(indexed.columns, unindexed.columns);
-    assert!(!indexed.rows.is_empty(), "the seed corpus has matching edges");
+    assert!(
+        !indexed.rows.is_empty(),
+        "the seed corpus has matching edges"
+    );
 }
 
 #[test]
@@ -639,7 +738,9 @@ fn records_id_in_lookup_with_col_index_is_scan_free_and_matches_unindexed() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_R).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_R)
+        .unwrap();
 
     store.begin_write().unwrap();
     for k in 1..=200i64 {
@@ -657,10 +758,14 @@ fn records_id_in_lookup_with_col_index_is_scan_free_and_matches_unindexed() {
     store.commit().unwrap();
 
     let mut cidx = ColIndex::new(vec!["id".to_string()]);
-    cidx.ensure_built(&store.tree(root), &catalog.column_names("records").unwrap()).unwrap();
+    cidx.ensure_built(&store.tree(root), &catalog.column_names("records").unwrap())
+        .unwrap();
 
     let run = |sql: &str, cidx: Option<&mut ColIndex>| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         execute_select(&plan, &store, &catalog, &root_map, None, cidx, None).unwrap()
     };
@@ -671,13 +776,21 @@ fn records_id_in_lookup_with_col_index_is_scan_free_and_matches_unindexed() {
     let unindexed = run(sql, None);
     store.reset_full_scan_count();
     let indexed = run(sql, Some(&mut cidx));
-    assert_eq!(store.full_scan_count(), 0, "an indexed id IN lookup must be scan-free");
+    assert_eq!(
+        store.full_scan_count(),
+        0,
+        "an indexed id IN lookup must be scan-free"
+    );
     let to_set = |rs: &ResultSet| {
         let mut v: Vec<Vec<(String, Value)>> = rs.rows.clone();
         v.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         v
     };
-    assert_eq!(to_set(&indexed), to_set(&unindexed), "indexed id IN lookup must return the same rows as the scan");
+    assert_eq!(
+        to_set(&indexed),
+        to_set(&unindexed),
+        "indexed id IN lookup must return the same rows as the scan"
+    );
     assert_eq!(indexed.columns, unindexed.columns);
     // Three of four ids exist; the absent 'id-9999' contributes nothing.
     assert_eq!(indexed.rows.len(), 3, "exactly the present ids resolve");
@@ -701,11 +814,17 @@ fn records_col_eq_literal_with_col_index_is_scan_free_and_matches_unindexed() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_R).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_R)
+        .unwrap();
 
     store.begin_write().unwrap();
     for k in 1..=300i64 {
-        let pending = if k % 75 == 0 { Value::Int(1) } else { Value::Int(0) };
+        let pending = if k % 75 == 0 {
+            Value::Int(1)
+        } else {
+            Value::Int(0)
+        };
         let row = vec![
             Value::Int(k),
             Value::Text(format!("id-{k:04}")),
@@ -717,10 +836,14 @@ fn records_col_eq_literal_with_col_index_is_scan_free_and_matches_unindexed() {
     store.commit().unwrap();
 
     let mut cidx = ColIndex::new(vec!["id".to_string(), "embedding_pending".to_string()]);
-    cidx.ensure_built(&store.tree(root), &catalog.column_names("records").unwrap()).unwrap();
+    cidx.ensure_built(&store.tree(root), &catalog.column_names("records").unwrap())
+        .unwrap();
 
     let run = |sql: &str, cidx: Option<&mut ColIndex>| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         execute_select(&plan, &store, &catalog, &root_map, None, cidx, None).unwrap()
     };
@@ -730,7 +853,11 @@ fn records_col_eq_literal_with_col_index_is_scan_free_and_matches_unindexed() {
     let unindexed = run(sql, None);
     store.reset_full_scan_count();
     let indexed = run(sql, Some(&mut cidx));
-    assert_eq!(store.full_scan_count(), 0, "an indexed col = literal must be scan-free");
+    assert_eq!(
+        store.full_scan_count(),
+        0,
+        "an indexed col = literal must be scan-free"
+    );
     let to_set = |rs: &ResultSet| {
         let mut v: Vec<Vec<(String, Value)>> = rs.rows.clone();
         v.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -760,7 +887,9 @@ fn select_star_limit_zero_is_scan_free_and_returns_columns() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_E).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_E)
+        .unwrap();
 
     store.begin_write().unwrap();
     for i in 0..500i64 {
@@ -775,7 +904,10 @@ fn select_star_limit_zero_is_scan_free_and_returns_columns() {
     store.commit().unwrap();
 
     let run = |sql: &str| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         execute_select(&plan, &store, &catalog, &root_map, None, None, None).unwrap()
     };
@@ -820,7 +952,9 @@ fn aliased_scan_early_limit_matches_full_scan_first_n() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_R).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_R)
+        .unwrap();
 
     store.begin_write().unwrap();
     for k in 1..=400i64 {
@@ -835,7 +969,10 @@ fn aliased_scan_early_limit_matches_full_scan_first_n() {
     store.commit().unwrap();
 
     let run = |sql: &str| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         execute_select(&plan, &store, &catalog, &root_map, None, None, None).unwrap()
     };
@@ -852,10 +989,8 @@ fn aliased_scan_early_limit_matches_full_scan_first_n() {
 
     // No ORDER BY: the coalesce alias forces the aliased executor and the early
     // LIMIT keeps the first 5 episodic rows in scan order — vec_label 1..=5.
-    let scan_order = run(
-        "SELECT id , COALESCE ( tier , 'x' ) AS tier FROM records \
-         WHERE tier = 'episodic' LIMIT 5",
-    );
+    let scan_order = run("SELECT id , COALESCE ( tier , 'x' ) AS tier FROM records \
+         WHERE tier = 'episodic' LIMIT 5");
     assert_eq!(scan_order.rows.len(), 5);
     assert_eq!(
         ids_of(&scan_order),
@@ -865,10 +1000,8 @@ fn aliased_scan_early_limit_matches_full_scan_first_n() {
 
     // With ORDER BY rowid DESC: the aliased path now sorts the survivors before the
     // LIMIT, returning the correctly-sorted top-5 (vec_label 400..=396).
-    let sorted = run(
-        "SELECT id , COALESCE ( tier , 'x' ) AS tier FROM records \
-         WHERE tier = 'episodic' ORDER BY rowid DESC LIMIT 5",
-    );
+    let sorted = run("SELECT id , COALESCE ( tier , 'x' ) AS tier FROM records \
+         WHERE tier = 'episodic' ORDER BY rowid DESC LIMIT 5");
     assert_eq!(sorted.rows.len(), 5);
     assert_eq!(
         ids_of(&sorted),
@@ -896,7 +1029,9 @@ fn records_id_in_with_coalesce_alias_is_scan_free_and_matches_unindexed() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_R).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_R)
+        .unwrap();
 
     store.begin_write().unwrap();
     for k in 1..=200i64 {
@@ -912,10 +1047,14 @@ fn records_id_in_with_coalesce_alias_is_scan_free_and_matches_unindexed() {
     store.commit().unwrap();
 
     let mut cidx = ColIndex::new(vec!["id".to_string()]);
-    cidx.ensure_built(&store.tree(root), &catalog.column_names("records").unwrap()).unwrap();
+    cidx.ensure_built(&store.tree(root), &catalog.column_names("records").unwrap())
+        .unwrap();
 
     let run = |sql: &str, cidx: Option<&mut ColIndex>| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         execute_select(&plan, &store, &catalog, &root_map, None, cidx, None).unwrap()
     };
@@ -925,13 +1064,21 @@ fn records_id_in_with_coalesce_alias_is_scan_free_and_matches_unindexed() {
     let unindexed = run(sql, None);
     store.reset_full_scan_count();
     let indexed = run(sql, Some(&mut cidx));
-    assert_eq!(store.full_scan_count(), 0, "an indexed id IN aliased projection must be scan-free");
+    assert_eq!(
+        store.full_scan_count(),
+        0,
+        "an indexed id IN aliased projection must be scan-free"
+    );
     let to_set = |rs: &ResultSet| {
         let mut v: Vec<Vec<(String, Value)>> = rs.rows.clone();
         v.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         v
     };
-    assert_eq!(to_set(&indexed), to_set(&unindexed), "aliased id IN lookup must match the scan");
+    assert_eq!(
+        to_set(&indexed),
+        to_set(&unindexed),
+        "aliased id IN lookup must match the scan"
+    );
     assert_eq!(indexed.columns, unindexed.columns);
     assert_eq!(indexed.columns, vec!["id", "tier", "embedding_pending"]);
     assert_eq!(indexed.rows.len(), 3);
@@ -955,15 +1102,25 @@ fn aliased_scan_decode_skip_matches_full_decode_with_big_blob() {
     let meta = MetaTable::open(&store).unwrap();
     let mut catalog = Catalog::new();
     let mut root_map: BTreeMap<String, u32> = BTreeMap::new();
-    let root = meta.create_table(&store, &mut catalog, &mut root_map, DDL_R).unwrap();
+    let root = meta
+        .create_table(&store, &mut catalog, &mut root_map, DDL_R)
+        .unwrap();
 
     store.begin_write().unwrap();
     for k in 1..=300i64 {
-        let pending = if k % 50 == 0 { Value::Int(1) } else { Value::Int(0) };
+        let pending = if k % 50 == 0 {
+            Value::Int(1)
+        } else {
+            Value::Int(0)
+        };
         let row = vec![
             Value::Int(k),
             Value::Text(format!("id-{k:04}")),
-            Value::Text(if k % 2 == 0 { "episodic".into() } else { "semantic".into() }),
+            Value::Text(if k % 2 == 0 {
+                "episodic".into()
+            } else {
+                "semantic".into()
+            }),
             Value::Blob(vec![(k % 256) as u8; 1500]),
             pending,
         ];
@@ -972,7 +1129,10 @@ fn aliased_scan_decode_skip_matches_full_decode_with_big_blob() {
     store.commit().unwrap();
 
     let run = |sql: &str| {
-        let select = match parse(sql).unwrap() { Stmt::Select(s) => s, _ => unreachable!() };
+        let select = match parse(sql).unwrap() {
+            Stmt::Select(s) => s,
+            _ => unreachable!(),
+        };
         let plan = plan_select(&select, &catalog, vec![], None).unwrap();
         // No col-index passed: the aliased path falls to the decode-skip scan.
         execute_select(&plan, &store, &catalog, &root_map, None, None, None).unwrap()
@@ -989,7 +1149,11 @@ fn aliased_scan_decode_skip_matches_full_decode_with_big_blob() {
     for row in &rs.rows {
         let tier = &row.iter().find(|(c, _)| c == "tier").unwrap().1;
         assert_eq!(tier, &Value::Text("episodic".into()));
-        let pend = &row.iter().find(|(c, _)| c == "embedding_pending").unwrap().1;
+        let pend = &row
+            .iter()
+            .find(|(c, _)| c == "embedding_pending")
+            .unwrap()
+            .1;
         assert_eq!(pend, &Value::Int(1));
     }
     // A wide projection that DOES include the blob still returns it intact via the
@@ -1080,10 +1244,20 @@ fn group_by_with_count_and_having() {
     assert_eq!(rs.columns, vec!["label", "COUNT(*)"]);
     let labels = col_vals(&rs, "label");
     let counts = col_vals(&rs, "COUNT(*)");
-    assert_eq!(labels, vec![Value::Text("x".into()), Value::Text("y".into()), Value::Text("z".into())]);
+    assert_eq!(
+        labels,
+        vec![
+            Value::Text("x".into()),
+            Value::Text("y".into()),
+            Value::Text("z".into())
+        ]
+    );
     assert_eq!(counts, vec![Value::Int(3), Value::Int(1), Value::Int(1)]);
     // HAVING COUNT(*) > 1 keeps only the x group.
-    let rs = f.run("SELECT label , COUNT ( * ) FROM t GROUP BY label HAVING COUNT ( * ) > 1", vec![]);
+    let rs = f.run(
+        "SELECT label , COUNT ( * ) FROM t GROUP BY label HAVING COUNT ( * ) > 1",
+        vec![],
+    );
     assert_eq!(col_vals(&rs, "label"), vec![Value::Text("x".into())]);
     assert_eq!(col_vals(&rs, "COUNT(*)"), vec![Value::Int(3)]);
 }
@@ -1091,7 +1265,10 @@ fn group_by_with_count_and_having() {
 #[test]
 fn dbstat_returns_a_constant_plan() {
     let f = Fixture::new(&[row(1, "a", None, None, None)]);
-    let rs = f.run("SELECT SUM ( pgsize ) FROM dbstat WHERE name = 'x'", vec![Value::Text("x".into())]);
+    let rs = f.run(
+        "SELECT SUM ( pgsize ) FROM dbstat WHERE name = 'x'",
+        vec![Value::Text("x".into())],
+    );
     assert_eq!(rs.columns, vec!["pgsize"]);
     assert_eq!(rs.rows.len(), 1);
     match rs.rows[0][0].1 {
@@ -1159,8 +1336,15 @@ fn sum_over_real_promotes_and_compensates_like_sqlite3() {
         .create_table(&store2, &mut catalog2, &mut root_map2, DDL_E)
         .unwrap();
     let stmt = parse("SELECT SUM ( score ) FROM e").unwrap();
-    let select = match stmt { Stmt::Select(s) => s, _ => unreachable!() };
+    let select = match stmt {
+        Stmt::Select(s) => s,
+        _ => unreachable!(),
+    };
     let plan = plan_select(&select, &catalog2, vec![], None).unwrap();
     let rs = execute_select(&plan, &store2, &catalog2, &root_map2, None, None, None).unwrap();
-    assert_eq!(rs.rows[0][0].1, Value::Null, "empty SUM must be NULL, not 0");
+    assert_eq!(
+        rs.rows[0][0].1,
+        Value::Null,
+        "empty SUM must be NULL, not 0"
+    );
 }

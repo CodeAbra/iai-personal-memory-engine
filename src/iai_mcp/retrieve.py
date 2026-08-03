@@ -225,7 +225,7 @@ def recall(
     derive_temporal_validity(store, anti_hits)
     apply_stale_downweight(hits)
     apply_stale_downweight(anti_hits)
-    hits.sort(key=lambda h: h.score, reverse=True)
+    sort_served_hits(hits)
 
     try:
         from iai_mcp.s4 import on_read_check
@@ -543,6 +543,14 @@ def derive_temporal_validity(
     return hits
 
 
+def sort_served_hits(hits: list[MemoryHit]) -> list[MemoryHit]:
+    # record_id tiebreak: Python's sort is stable, so score-only ordering
+    # would let equal-scored hits inherit candidate scan order and the same
+    # cue could serve different orderings across calls.
+    hits.sort(key=lambda h: (-h.score, str(h.record_id)))
+    return hits
+
+
 def apply_stale_downweight(
     hits: list[MemoryHit],
     now: datetime | None = None,
@@ -595,9 +603,11 @@ def apply_supersede_cap(
     now_value = now or datetime.now(timezone.utc)
     by_id = {str(h.record_id): h for h in hits}
     for _ in range(len(hits)):
+        # record_id tiebreak: window membership decides who gets capped, so a
+        # score-only key would make served SCORES scan-order dependent at ties.
         top_ids = {
             str(h.record_id)
-            for h in sorted(hits, key=lambda h: h.score, reverse=True)[:window]
+            for h in sorted(hits, key=lambda h: (-h.score, str(h.record_id)))[:window]
         }
         changed = False
         for src_s, dsts in outgoing.items():
@@ -614,7 +624,11 @@ def apply_supersede_cap(
                 if dst_hit is not None and (best is None or dst_hit.score > best):
                     best = dst_hit.score
             if best is not None and src_hit.score >= best:
+                # The served score is replaced wholesale — the reason must
+                # say so instead of describing the old arithmetic.
                 src_hit.score = best - _SUPERSEDE_CAP_EPSILON
+                if not src_hit.reason.endswith(" | capped-below-superseder"):
+                    src_hit.reason += " | capped-below-superseder"
                 changed = True
         if not changed:
             break

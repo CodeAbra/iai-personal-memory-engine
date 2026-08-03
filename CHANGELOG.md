@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] — 2026-08-02
+
+### Fixed
+
+- Recall no longer serves confident noise on topics the store barely
+  covers, and its `reason` string cannot lie. When the candidate head's
+  cosine spread collapses (nothing to distinguish), the degree term is
+  dampened proportionally instead of silently deciding the ranking, and
+  the response carries a `flat_cosine` hint — hints are now actually
+  serialized over the recall RPC (they were declared in the tool schema
+  but never sent). The aaak overlap matches cues against content fields
+  only — entity anchors and doc names — never machine tokens or
+  bookkeeping tag values, so a cue word like "user" cannot bias every
+  record of one role; entity anchors stay dormant until the capture path
+  writes them. `reason` is assembled during scoring with weighted terms
+  and the full multiplier trail (trigram, fts, lex fusion, tier,
+  temporal, profile gain, stability, valence, corrector anchoring), so
+  the printed arithmetic reconciles with the served score.
+- Served recall ordering is now deterministic. Equal-scored hits used to
+  inherit candidate scan order (Python's sort is stable), so the same cue
+  could return a different ordering across calls; the supersede-cap window
+  had the same tie sensitivity, which could shift served scores. Every
+  serve path — pipeline, bank fallback, and the daemon's authority merge —
+  now sorts through one shared helper that breaks ties on `record_id`, and
+  a guard test keeps score-only sorts out of those files. Reported by
+  [@danielhertz1999-bit](https://github.com/danielhertz1999-bit).
+- FHRR bundle golden parity now states its platform tolerance instead of
+  encoding one machine's libm rounding: components whose mean angle sits
+  on a quantisation boundary (byte inputs make that exact) may differ by
+  exactly one step, components with a near-zero resultant are skipped
+  (atan2 is undefined there), everything else stays byte-exact — so
+  formula and rounding-mode regressions still fail. Goldens unchanged.
+  Measured and reported by
+  [@danielhertz1999-bit](https://github.com/danielhertz1999-bit).
+- A read-only reader holding a stale snapshot now raises the typed fence
+  error the caller expects, rather than the older integrity shape. The
+  crash-recovery test covering it had been red since the fence was typed.
+
+### Changed
+
+- The Rust workspace is `rustfmt` clean, so formatting can be enforced in
+  CI from here on.
+- Two test-suite races removed: the multiprocess WAL test no longer
+  depends on process interleaving, and detection-arena isolation is
+  measured with a fresh process per arm.
+
 ## [2.8.0] — 2026-07-31
 
 **Upgrading to this release is manual, once.** `iai-mcp self-update` ships *in*

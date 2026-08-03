@@ -128,11 +128,7 @@ pub fn bind<'py>(py: Python<'py>, a: &[u8], b: &[u8]) -> PyResult<Bound<'py, PyB
 
 #[pyfunction]
 #[pyo3(name = "fhrr_unbind")]
-pub fn unbind<'py>(
-    py: Python<'py>,
-    bound: &[u8],
-    key: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
+pub fn unbind<'py>(py: Python<'py>, bound: &[u8], key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let out = unbind_impl(bound, key)?;
     Ok(PyBytes::new_bound(py, &out))
 }
@@ -153,11 +149,7 @@ pub fn bundle<'py>(
 
 #[pyfunction]
 #[pyo3(name = "fhrr_permute")]
-pub fn permute<'py>(
-    py: Python<'py>,
-    hv: &[u8],
-    shift: i64,
-) -> PyResult<Bound<'py, PyBytes>> {
+pub fn permute<'py>(py: Python<'py>, hv: &[u8], shift: i64) -> PyResult<Bound<'py, PyBytes>> {
     let out = permute_impl(hv, shift);
     Ok(PyBytes::new_bound(py, &out))
 }

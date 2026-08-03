@@ -771,7 +771,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                 _apply_stale_downweight(
                                     resp.hits, cue_intent=_cue_intent,
                                 )
-                                resp.hits.sort(key=lambda h: h.score, reverse=True)
+                                from iai_mcp.retrieve import (
+                                    sort_served_hits as _sort_served_hits,
+                                )
+                                _sort_served_hits(resp.hits)
                         except Exception as _em_exc:  # noqa: BLE001 -- a broken
                             # merge must never break recall; degrade to the
                             # pipeline-only hits already computed above.
@@ -822,6 +825,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             "budget_used": resp.budget_used,
             "cue_mode": resp.cue_mode,
             "patterns_observed": list(resp.patterns_observed or []),
+            "hints": list(resp.hints or []),
             "_knobs_applied": knobs_applied,
             "ann_path_used": getattr(resp, "ann_path_used", False),
             "exact_authority_used": _exact_authority_used,

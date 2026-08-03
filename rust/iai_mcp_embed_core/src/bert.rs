@@ -12,9 +12,7 @@
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{embedding, layer_norm, linear, Embedding, LayerNorm, Linear, Module, VarBuilder};
 use hf_hub::{api::sync::ApiBuilder, Cache, Repo, RepoType};
-use tokenizers::{
-    TruncationDirection, TruncationParams, TruncationStrategy, Tokenizer,
-};
+use tokenizers::{Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
 
 use crate::error::EmbedError;
 
@@ -81,10 +79,7 @@ impl Geometry {
             .map_err(|e| EmbedError::HfHub(format!("config.json read failed: {e}")))?;
         let cfg: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|e| EmbedError::HfHub(format!("config.json parse failed: {e}")))?;
-        let model_type = cfg
-            .get("model_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let model_type = cfg.get("model_type").and_then(|v| v.as_str()).unwrap_or("");
         if model_type != "bert" {
             return Err(EmbedError::HfHub(format!(
                 "{model_id}: model_type {model_type:?} is not \"bert\" — this \
@@ -95,9 +90,7 @@ impl Geometry {
             cfg.get(name)
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize)
-                .ok_or_else(|| {
-                    EmbedError::HfHub(format!("{model_id}: config.json missing {name}"))
-                })
+                .ok_or_else(|| EmbedError::HfHub(format!("{model_id}: config.json missing {name}")))
         };
         let geometry = Geometry {
             vocab_size: field("vocab_size")?,
@@ -143,29 +136,23 @@ impl Geometry {
 ///
 /// If `IAI_MCP_EMBED_OFFLINE=1` is set, fails loudly when any file is missing
 /// rather than attempting a network download.
-fn resolve_model_files() -> Result<
-    (
-        std::path::PathBuf,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    ),
-    EmbedError,
-> {
+fn resolve_model_files(
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), EmbedError> {
     let (model_id, revision) = model_spec();
     let repo = Repo::with_revision(model_id, RepoType::Model, revision);
     let offline = std::env::var("IAI_MCP_EMBED_OFFLINE").is_ok();
 
     if offline {
         let cache = Cache::from_env().repo(repo);
-        let weights = cache
-            .get("model.safetensors")
-            .ok_or_else(|| EmbedError::HfHub("model.safetensors not in HF cache (offline mode)".into()))?;
-        let tokenizer = cache
-            .get("tokenizer.json")
-            .ok_or_else(|| EmbedError::HfHub("tokenizer.json not in HF cache (offline mode)".into()))?;
-        let config = cache
-            .get("config.json")
-            .ok_or_else(|| EmbedError::HfHub("config.json not in HF cache (offline mode)".into()))?;
+        let weights = cache.get("model.safetensors").ok_or_else(|| {
+            EmbedError::HfHub("model.safetensors not in HF cache (offline mode)".into())
+        })?;
+        let tokenizer = cache.get("tokenizer.json").ok_or_else(|| {
+            EmbedError::HfHub("tokenizer.json not in HF cache (offline mode)".into())
+        })?;
+        let config = cache.get("config.json").ok_or_else(|| {
+            EmbedError::HfHub("config.json not in HF cache (offline mode)".into())
+        })?;
         Ok((weights, tokenizer, config))
     } else {
         let api = ApiBuilder::from_env()
@@ -200,24 +187,32 @@ impl BertEmbeddings {
     fn load(vb: VarBuilder, g: &Geometry) -> Result<Self, EmbedError> {
         let vb_emb = vb.pp("embeddings");
         let word_emb = embedding(g.vocab_size, g.hidden_size, vb_emb.pp("word_embeddings"))?;
-        let pos_emb = embedding(g.max_position, g.hidden_size, vb_emb.pp("position_embeddings"))?;
-        let type_emb = embedding(g.type_vocab_size, g.hidden_size, vb_emb.pp("token_type_embeddings"))?;
+        let pos_emb = embedding(
+            g.max_position,
+            g.hidden_size,
+            vb_emb.pp("position_embeddings"),
+        )?;
+        let type_emb = embedding(
+            g.type_vocab_size,
+            g.hidden_size,
+            vb_emb.pp("token_type_embeddings"),
+        )?;
         // Pitfall 3: must pass the config eps explicitly — candle default is 1e-5
         let layer_norm = layer_norm(g.hidden_size, g.layer_norm_eps, vb_emb.pp("LayerNorm"))?;
-        Ok(Self { word_emb, pos_emb, type_emb, layer_norm })
+        Ok(Self {
+            word_emb,
+            pos_emb,
+            type_emb,
+            layer_norm,
+        })
     }
 
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        token_type_ids: &Tensor,
-    ) -> Result<Tensor, EmbedError> {
+    fn forward(&self, input_ids: &Tensor, token_type_ids: &Tensor) -> Result<Tensor, EmbedError> {
         let seq_len = input_ids.dim(1)?;
         let device = input_ids.device();
 
         // Generate position ids at runtime (buffer in safetensors is ignored per Pattern 4)
-        let position_ids = Tensor::arange(0u32, seq_len as u32, device)?
-            .unsqueeze(0)?;
+        let position_ids = Tensor::arange(0u32, seq_len as u32, device)?.unsqueeze(0)?;
 
         let word_out = self.word_emb.forward(input_ids)?;
         let pos_out = self.pos_emb.forward(&position_ids)?;
@@ -257,11 +252,7 @@ impl BertSelfAttention {
         })
     }
 
-    fn forward(
-        &self,
-        hidden: &Tensor,
-        attention_mask: &Tensor,
-    ) -> Result<Tensor, EmbedError> {
+    fn forward(&self, hidden: &Tensor, attention_mask: &Tensor) -> Result<Tensor, EmbedError> {
         let (batch, seq_len, _hidden) = hidden.dims3()?;
 
         // Project Q, K, V
@@ -463,9 +454,8 @@ impl BertEmbedder {
         let device = Device::Cpu;
 
         // Pattern 4: unsafe scoped to mmap call; file integrity assumed via HF CDN + revision pin
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
-        }?;
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device) }?;
 
         let embeddings = BertEmbeddings::load(vb.clone(), &geometry)?;
         let encoder = BertEncoder::load(vb, &geometry)?;
@@ -480,7 +470,14 @@ impl BertEmbedder {
         // (e.g. the E5 family). Empty default = byte-identical behavior.
         let text_prefix = std::env::var("IAI_MCP_EMBED_TEXT_PREFIX").unwrap_or_default();
 
-        Ok(Self { embeddings, encoder, tokenizer, device, pool, text_prefix })
+        Ok(Self {
+            embeddings,
+            encoder,
+            tokenizer,
+            device,
+            pool,
+            text_prefix,
+        })
     }
 
     /// Encode a single text string to a 384-dim L2-normalized embedding.
@@ -516,8 +513,7 @@ impl BertEmbedder {
         let input_ids = Tensor::from_vec(ids, (1, seq_len), &self.device)?;
         let token_type_ids = Tensor::zeros((1, seq_len), DType::I64, &self.device)?;
         // Shape (1, 1, 1, seq_len) broadcasts over (batch, heads, seq_q, seq_k)
-        let attention_mask =
-            Tensor::from_vec(mask, (1, 1, 1, seq_len), &self.device)?;
+        let attention_mask = Tensor::from_vec(mask, (1, 1, 1, seq_len), &self.device)?;
 
         let embedded = self.embeddings.forward(&input_ids, &token_type_ids)?;
         let encoded = self.encoder.forward(&embedded, &attention_mask)?;

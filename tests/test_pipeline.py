@@ -83,16 +83,18 @@ def test_community_gate_returns_top_n_in_order() -> None:
     gated = _community_gate(cue, a, top_n=3)
     assert gated == [c0, c1, c2]
 
-def test_aaak_overlap_basic_jaccard() -> None:
-    assert _aaak_overlap("", "anything") == 0.0
+def test_aaak_overlap_jaccard_over_content_fields() -> None:
+    assert _aaak_overlap("", "W:E/R:abc/E:alice/T:capture") == 0.0
     assert _aaak_overlap("x", "") == 0.0
-    assert _aaak_overlap("a b", "a b") == 1.0
-    assert abs(_aaak_overlap("a b", "b c") - 1 / 3) < 1e-9
+    assert _aaak_overlap("alice bob", "W:E/R:abc/E:alice,bob/T:capture") == 1.0
+    assert abs(
+        _aaak_overlap("alice carol", "W:E/R:abc/E:alice,bob/T:capture") - 1 / 3
+    ) < 1e-9
 
-def test_aaak_overlap_slash_split_symmetric() -> None:
-    assert _aaak_overlap("auth/login", "auth/login") == 1.0
-    assert abs(_aaak_overlap("auth/login", "auth/logout") - 1 / 3) < 1e-9
-    assert _aaak_overlap("AUTH/Login", "auth/login") == 1.0
+def test_aaak_overlap_case_insensitive_on_entities() -> None:
+    idx = "W:E/R:abc/E:alice/T:capture"
+    assert _aaak_overlap("ALICE", idx) == 1.0
+    assert _aaak_overlap("Alice asked", idx) == 0.5
 
 def test_cosine_basic_properties() -> None:
     assert _cosine([1.0, 0.0], [1.0, 0.0]) == 1.0

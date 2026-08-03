@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use lillibrain::btree::page::{
     read_interior_node, write_interior_node, write_leaf_from_raw, INTERIOR_PTR_ARRAY_START,
 };
-use lillibrain::codec::{decode_record, decode_record_columns, encode_record, encode_varint, Value};
+use lillibrain::codec::{
+    decode_record, decode_record_columns, encode_record, encode_varint, Value,
+};
 use lillibrain::consts::{HDR_FIRST_FREELIST_OFFSET, PAGE_SIZE};
 use lillibrain::error::StoreError;
 use lillibrain::Store;
@@ -49,7 +51,10 @@ fn integrity_well_formed_tree_is_clean() {
     }
     store.commit().unwrap();
     let errs = store.check_integrity(root).unwrap();
-    assert!(errs.is_empty(), "expected clean after deletes, got: {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "expected clean after deletes, got: {errs:?}"
+    );
 }
 
 #[test]
@@ -91,8 +96,8 @@ fn integrity_flags_injected_leaf_key_order_violation() {
 
     let errs = store.check_integrity(root).unwrap();
     assert!(
-        errs.iter().any(|e| e.contains("not strictly in order")
-            || e.contains("cross-page key ordering")),
+        errs.iter()
+            .any(|e| e.contains("not strictly in order") || e.contains("cross-page key ordering")),
         "expected a key-order violation, got: {errs:?}"
     );
 }
@@ -116,7 +121,8 @@ fn integrity_flags_orphan_page() {
 
     let errs = store.check_integrity(root).unwrap();
     assert!(
-        errs.iter().any(|e| e.contains(&format!("page {orphan}")) && e.contains("orphaned")),
+        errs.iter()
+            .any(|e| e.contains(&format!("page {orphan}")) && e.contains("orphaned")),
         "expected an orphan-page violation for page {orphan}, got: {errs:?}"
     );
 }
@@ -138,12 +144,15 @@ fn integrity_flags_freelist_cycle() {
     // next_trunk -> itself (cycle); leaf_count = 0.
     buf[0..4].copy_from_slice(&trunk.to_be_bytes());
     pager.write_page(trunk, &buf).unwrap();
-    pager.update_header_u32(HDR_FIRST_FREELIST_OFFSET, trunk).unwrap();
+    pager
+        .update_header_u32(HDR_FIRST_FREELIST_OFFSET, trunk)
+        .unwrap();
     store.commit().unwrap();
 
     let errs = store.check_integrity(root).unwrap();
     assert!(
-        errs.iter().any(|e| e.contains("freelist") && (e.contains("cycle") || e.contains("corruption"))),
+        errs.iter()
+            .any(|e| e.contains("freelist") && (e.contains("cycle") || e.contains("corruption"))),
         "expected a freelist-cycle violation, got: {errs:?}"
     );
 }
@@ -159,9 +168,11 @@ fn integrity_flags_child_out_of_range() {
     if page[0] == lillibrain::consts::PAGE_INTERIOR_TABLE {
         // Corrupt the first child pointer to an out-of-range page number.
         let mut p = page.clone();
-        let cell_ptr =
-            u16::from_be_bytes(p[INTERIOR_PTR_ARRAY_START..INTERIOR_PTR_ARRAY_START + 2].try_into().unwrap())
-                as usize;
+        let cell_ptr = u16::from_be_bytes(
+            p[INTERIOR_PTR_ARRAY_START..INTERIOR_PTR_ARRAY_START + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let huge = u32::MAX;
         p[cell_ptr..cell_ptr + 4].copy_from_slice(&huge.to_be_bytes());
         pager.write_page(root, &p).unwrap();

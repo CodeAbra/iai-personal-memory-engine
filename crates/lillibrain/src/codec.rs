@@ -204,9 +204,7 @@ pub fn encode_record(values: &[Value]) -> Vec<u8> {
 
     // The header_size field counts itself; iterate to a fixed point because the
     // varint width of header_size depends on header_size.
-    let mut header_size_varint = encode_varint(
-        (encode_varint(0).len() + type_bytes.len()) as i64,
-    );
+    let mut header_size_varint = encode_varint((encode_varint(0).len() + type_bytes.len()) as i64);
     for _ in 0..3 {
         let candidate = (header_size_varint.len() + type_bytes.len()) as i64;
         let next = encode_varint(candidate);
@@ -253,9 +251,11 @@ pub fn decode_record(data: &[u8], offset: usize) -> Result<(Vec<Value>, usize)> 
     for st in serial_types {
         let sz = body_size(st)?;
         values.push(decode_cell(st, sz, data, body_offset)?);
-        body_offset = body_offset.checked_add(sz).ok_or_else(|| StoreError::Integrity {
-            detail: "record: body offset overflow".to_string(),
-        })?;
+        body_offset = body_offset
+            .checked_add(sz)
+            .ok_or_else(|| StoreError::Integrity {
+                detail: "record: body offset overflow".to_string(),
+            })?;
     }
 
     Ok((values, body_offset - start))
@@ -269,11 +269,12 @@ fn checked_header_end(start: usize, header_size: i64, data_len: usize) -> Result
             detail: "record: negative header size".to_string(),
         });
     }
-    let header_end = start
-        .checked_add(header_size as usize)
-        .ok_or_else(|| StoreError::Integrity {
-            detail: "record: header end offset overflow".to_string(),
-        })?;
+    let header_end =
+        start
+            .checked_add(header_size as usize)
+            .ok_or_else(|| StoreError::Integrity {
+                detail: "record: header end offset overflow".to_string(),
+            })?;
     if header_end > data_len {
         return Err(StoreError::Integrity {
             detail: "record: header runs past buffer".to_string(),
@@ -296,11 +297,7 @@ fn checked_header_end(start: usize, header_size: i64, data_len: usize) -> Result
 ///
 /// `wanted` shorter than the record's column count treats the missing tail as
 /// unwanted; longer than the column count ignores the surplus flags.
-pub fn decode_record_columns(
-    data: &[u8],
-    offset: usize,
-    wanted: &[bool],
-) -> Result<Vec<Value>> {
+pub fn decode_record_columns(data: &[u8], offset: usize, wanted: &[bool]) -> Result<Vec<Value>> {
     let start = offset;
     let (header_size, n) = decode_varint(data, offset)?;
     let mut pos = offset.checked_add(n).ok_or_else(|| StoreError::Integrity {
@@ -326,9 +323,11 @@ pub fn decode_record_columns(
         } else {
             values.push(Value::Null);
         }
-        body_offset = body_offset.checked_add(sz).ok_or_else(|| StoreError::Integrity {
-            detail: "record: body offset overflow".to_string(),
-        })?;
+        body_offset = body_offset
+            .checked_add(sz)
+            .ok_or_else(|| StoreError::Integrity {
+                detail: "record: body offset overflow".to_string(),
+            })?;
     }
     Ok(values)
 }
@@ -359,30 +358,30 @@ fn decode_cell(st: i64, sz: usize, data: &[u8], body_offset: usize) -> Result<Va
             Value::Float(f64::from_be_bytes(raw.try_into().unwrap()))
         }
         st if st >= 13 && st % 2 == 1 => {
-            let raw = data
-                .get(body_offset..body_end(sz)?)
-                .ok_or_else(|| StoreError::Integrity {
-                    detail: "record: blob body past end".to_string(),
-                })?;
+            let raw =
+                data.get(body_offset..body_end(sz)?)
+                    .ok_or_else(|| StoreError::Integrity {
+                        detail: "record: blob body past end".to_string(),
+                    })?;
             Value::Blob(raw.to_vec())
         }
         st if st >= 12 && st % 2 == 0 => {
-            let raw = data
-                .get(body_offset..body_end(sz)?)
-                .ok_or_else(|| StoreError::Integrity {
-                    detail: "record: text body past end".to_string(),
-                })?;
+            let raw =
+                data.get(body_offset..body_end(sz)?)
+                    .ok_or_else(|| StoreError::Integrity {
+                        detail: "record: text body past end".to_string(),
+                    })?;
             let s = String::from_utf8(raw.to_vec()).map_err(|_| StoreError::Integrity {
                 detail: "record: text column is not valid UTF-8".to_string(),
             })?;
             Value::Text(s)
         }
         _ => {
-            let raw = data
-                .get(body_offset..body_end(sz)?)
-                .ok_or_else(|| StoreError::Integrity {
-                    detail: "record: integer body past end".to_string(),
-                })?;
+            let raw =
+                data.get(body_offset..body_end(sz)?)
+                    .ok_or_else(|| StoreError::Integrity {
+                        detail: "record: integer body past end".to_string(),
+                    })?;
             let mut acc: i64 = if raw.first().is_some_and(|b| b & 0x80 != 0) {
                 -1
             } else {
@@ -424,7 +423,10 @@ mod tests {
         assert_eq!(proj[0], full[0]);
         assert_eq!(proj[1], full[1]);
         assert_eq!(proj[2], Value::Null, "skipped blob is a Null placeholder");
-        assert_eq!(proj[3], full[3], "a wanted column after a skipped blob still decodes");
+        assert_eq!(
+            proj[3], full[3],
+            "a wanted column after a skipped blob still decodes"
+        );
         assert_eq!(proj[4], full[4]);
 
         // Wanting the blob returns it byte-for-byte.
@@ -495,7 +497,7 @@ mod tests {
             Value::Int(2_000_000_000),
             Value::Int(i64::MIN),
             Value::Int(i64::MAX),
-            Value::Float(3.141592653589793),
+            Value::Float(std::f64::consts::PI),
             Value::Float(-0.0),
             Value::Text("hello".to_string()),
             Value::Blob(vec![0, 1, 2, 255]),
@@ -518,7 +520,9 @@ mod tests {
         prop_oneof![
             Just(Value::Null),
             any::<i64>().prop_map(Value::Int),
-            any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(Value::Float),
+            any::<f64>()
+                .prop_filter("finite", |f| f.is_finite())
+                .prop_map(Value::Float),
             "\\PC*".prop_map(Value::Text),
             prop::collection::vec(any::<u8>(), 0..96).prop_map(Value::Blob),
         ]

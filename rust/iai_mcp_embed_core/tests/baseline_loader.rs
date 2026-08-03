@@ -71,15 +71,15 @@ pub fn load_npy_f32<P: AsRef<Path>>(path: P) -> io::Result<(Vec<f32>, Vec<usize>
     }
 
     // Parse 'shape': (N, M, ...)
-    let shape_start = header.find("'shape':").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "no shape key in header")
-    })?;
-    let paren_open = header[shape_start..].find('(').ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "no shape open paren")
-    })?;
-    let paren_close = header[shape_start..].find(')').ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "no shape close paren")
-    })?;
+    let shape_start = header
+        .find("'shape':")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no shape key in header"))?;
+    let paren_open = header[shape_start..]
+        .find('(')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no shape open paren"))?;
+    let paren_close = header[shape_start..]
+        .find(')')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no shape close paren"))?;
     let shape_str = &header[shape_start + paren_open + 1..shape_start + paren_close];
     let shape: Vec<usize> = shape_str
         .split(',')

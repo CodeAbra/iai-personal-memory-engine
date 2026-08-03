@@ -11,6 +11,8 @@
 
 use std::collections::BTreeMap;
 
+use lillibrain::{Store, Value};
+use lilliengine::ast::Stmt;
 use lilliengine::catalog::Catalog;
 use lilliengine::conn::Connection;
 use lilliengine::exec::{execute_select, execute_select_instrumented};
@@ -18,8 +20,6 @@ use lilliengine::meta::MetaTable;
 use lilliengine::parser::parse;
 use lilliengine::plan::plan_select;
 use lilliengine::rowcodec::encode_row;
-use lilliengine::ast::Stmt;
-use lillibrain::{Store, Value};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,12 @@ impl WideFixture {
         }
         store.commit().unwrap();
 
-        WideFixture { _dir: dir, store, catalog, root_map }
+        WideFixture {
+            _dir: dir,
+            store,
+            catalog,
+            root_map,
+        }
     }
 
     fn run_sql(&self, sql: &str) -> lilliengine::exec::ResultSet {
@@ -101,8 +106,16 @@ impl WideFixture {
             _ => panic!("not a SELECT"),
         };
         let plan = plan_select(&select, &self.catalog, vec![], None).unwrap();
-        execute_select(&plan, &self.store, &self.catalog, &self.root_map, None, None, None)
-            .unwrap()
+        execute_select(
+            &plan,
+            &self.store,
+            &self.catalog,
+            &self.root_map,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
     }
 
     fn run_instrumented(&self, sql: &str) -> (lilliengine::exec::ResultSet, bool) {
@@ -137,7 +150,11 @@ fn count_star_is_key_only() {
 
     let rs = f.run_sql("SELECT COUNT ( * ) FROM records");
 
-    assert_eq!(rs.rows[0][0].1, Value::Int(N_ROWS), "COUNT(*) must return the right row count");
+    assert_eq!(
+        rs.rows[0][0].1,
+        Value::Int(N_ROWS),
+        "COUNT(*) must return the right row count"
+    );
 
     let scan_count = f.store.full_scan_count();
     assert_eq!(
@@ -156,9 +173,7 @@ fn filtered_count_skips_wide_column() {
     let f = WideFixture::new();
 
     // Reference: count via a full-decode path so we know the expected value.
-    let reference = f.run_sql(
-        "SELECT COUNT ( * ) FROM records WHERE tombstoned_at IS NULL",
-    );
+    let reference = f.run_sql("SELECT COUNT ( * ) FROM records WHERE tombstoned_at IS NULL");
     let expected_count = match reference.rows[0][0].1 {
         Value::Int(n) => n,
         _ => panic!("expected integer count"),
@@ -171,9 +186,7 @@ fn filtered_count_skips_wide_column() {
     );
 
     f.store.reset_full_scan_count();
-    let rs = f.run_sql(
-        "SELECT COUNT ( * ) FROM records WHERE tombstoned_at IS NULL",
-    );
+    let rs = f.run_sql("SELECT COUNT ( * ) FROM records WHERE tombstoned_at IS NULL");
     assert_eq!(
         rs.rows[0][0].1,
         Value::Int(expected_count),
@@ -196,16 +209,12 @@ fn projected_select_skips_wide_column() {
     let f = WideFixture::new();
 
     // Reference result via full decode.
-    let reference = f.run_sql(
-        "SELECT id , tier FROM records WHERE tombstoned_at IS NULL",
-    );
+    let reference = f.run_sql("SELECT id , tier FROM records WHERE tombstoned_at IS NULL");
     let expected_row_count = reference.rows.len();
     assert_eq!(expected_row_count, (N_ROWS / 2) as usize);
 
     f.store.reset_full_scan_count();
-    let rs = f.run_sql(
-        "SELECT id , tier FROM records WHERE tombstoned_at IS NULL",
-    );
+    let rs = f.run_sql("SELECT id , tier FROM records WHERE tombstoned_at IS NULL");
     assert_eq!(
         rs.rows.len(),
         expected_row_count,
@@ -241,11 +250,17 @@ fn projected_decode_parity() {
     // Seed a diverse corpus: NUL bytes, emoji (multi-byte UTF-8), CJK text,
     // max-size blob, and a tombstoned row so the parity holds across all cases.
     let cases: Vec<(i64, &str, &str, Value, usize)> = vec![
-        (1, "id-nul",   "episodic",  Value::Null,                               EMBEDDING_BYTES),
-        (2, "id-emoji", "semantic",  Value::Null,                               16),
-        (3, "id-cjk",   "episodic",  Value::Text("2024-01-01 00:00:00".into()), 32),
-        (4, "id-big",   "procedural",Value::Null,                               EMBEDDING_BYTES * 4),
-        (5, "id-zero",  "episodic",  Value::Null,                               1),
+        (1, "id-nul", "episodic", Value::Null, EMBEDDING_BYTES),
+        (2, "id-emoji", "semantic", Value::Null, 16),
+        (
+            3,
+            "id-cjk",
+            "episodic",
+            Value::Text("2024-01-01 00:00:00".into()),
+            32,
+        ),
+        (4, "id-big", "procedural", Value::Null, EMBEDDING_BYTES * 4),
+        (5, "id-zero", "episodic", Value::Null, 1),
     ];
 
     store.begin_write().unwrap();
@@ -266,27 +281,42 @@ fn projected_decode_parity() {
 
     // Full decode reference: SELECT * returns all columns.
     let full_stmt = parse("SELECT * FROM records").unwrap();
-    let full_select = match full_stmt { Stmt::Select(s) => s, _ => unreachable!() };
+    let full_select = match full_stmt {
+        Stmt::Select(s) => s,
+        _ => unreachable!(),
+    };
     let full_plan = plan_select(&full_select, &catalog, vec![], None).unwrap();
-    let full_rs = execute_select(&full_plan, &store, &catalog, &root_map, None, None, None).unwrap();
+    let full_rs =
+        execute_select(&full_plan, &store, &catalog, &root_map, None, None, None).unwrap();
 
     // Build a lookup: id -> (tier, tombstoned_at) from the full decode.
     let id_idx = full_rs.columns.iter().position(|c| c == "id").unwrap();
     let tier_idx = full_rs.columns.iter().position(|c| c == "tier").unwrap();
-    let tomb_idx = full_rs.columns.iter().position(|c| c == "tombstoned_at").unwrap();
+    let tomb_idx = full_rs
+        .columns
+        .iter()
+        .position(|c| c == "tombstoned_at")
+        .unwrap();
 
     let mut full_map: std::collections::HashMap<String, (Value, Value)> =
         std::collections::HashMap::new();
     for row in &full_rs.rows {
-        let id = match &row[id_idx].1 { Value::Text(s) => s.clone(), _ => panic!() };
+        let id = match &row[id_idx].1 {
+            Value::Text(s) => s.clone(),
+            _ => panic!(),
+        };
         full_map.insert(id, (row[tier_idx].1.clone(), row[tomb_idx].1.clone()));
     }
 
     // Projected decode: SELECT id, tier, tombstoned_at (no embedding).
     let proj_stmt = parse("SELECT id , tier , tombstoned_at FROM records").unwrap();
-    let proj_select = match proj_stmt { Stmt::Select(s) => s, _ => unreachable!() };
+    let proj_select = match proj_stmt {
+        Stmt::Select(s) => s,
+        _ => unreachable!(),
+    };
     let proj_plan = plan_select(&proj_select, &catalog, vec![], None).unwrap();
-    let proj_rs = execute_select(&proj_plan, &store, &catalog, &root_map, None, None, None).unwrap();
+    let proj_rs =
+        execute_select(&proj_plan, &store, &catalog, &root_map, None, None, None).unwrap();
 
     assert_eq!(
         proj_rs.rows.len(),
@@ -296,11 +326,19 @@ fn projected_decode_parity() {
 
     let p_id_idx = proj_rs.columns.iter().position(|c| c == "id").unwrap();
     let p_tier_idx = proj_rs.columns.iter().position(|c| c == "tier").unwrap();
-    let p_tomb_idx = proj_rs.columns.iter().position(|c| c == "tombstoned_at").unwrap();
+    let p_tomb_idx = proj_rs
+        .columns
+        .iter()
+        .position(|c| c == "tombstoned_at")
+        .unwrap();
 
     for proj_row in &proj_rs.rows {
-        let id = match &proj_row[p_id_idx].1 { Value::Text(s) => s.clone(), _ => panic!() };
-        let (expected_tier, expected_tomb) = full_map.get(&id)
+        let id = match &proj_row[p_id_idx].1 {
+            Value::Text(s) => s.clone(),
+            _ => panic!(),
+        };
+        let (expected_tier, expected_tomb) = full_map
+            .get(&id)
             .unwrap_or_else(|| panic!("projected row id {id:?} not in full-decode set"));
         assert_eq!(
             &proj_row[p_tier_idx].1, expected_tier,
@@ -422,7 +460,10 @@ fn persisted_col_index_loads_without_scan() {
         let _ = probe_src(&mut conn, "src-000000");
         conn.persist_col_indexes().unwrap();
     }
-    assert!(f.sidecar_path().exists(), "persist must create the sidecar file");
+    assert!(
+        f.sidecar_path().exists(),
+        "persist must create the sidecar file"
+    );
 
     let mut loaded = f.open();
     loaded.reset_full_scan_count();
@@ -444,10 +485,16 @@ fn persisted_col_index_loads_without_scan() {
         control_dir.path().join("control.lilli"),
     )
     .unwrap();
-    let mut control =
-        Connection::open(control_dir.path().join("control.lilli").to_str().unwrap(), 0).unwrap();
+    let mut control = Connection::open(
+        control_dir.path().join("control.lilli").to_str().unwrap(),
+        0,
+    )
+    .unwrap();
     let control_rows = probe_src(&mut control, "src-000049");
-    assert_eq!(held_out, control_rows, "loaded and lazy-built results must be byte-identical");
+    assert_eq!(
+        held_out, control_rows,
+        "loaded and lazy-built results must be byte-identical"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +527,11 @@ fn stale_generation_discards_and_lazy_rebuilds() {
     reopened.reset_full_scan_count();
     reopened.reset_cells_visited_count();
     let rows = probe_src(&mut reopened, "src-new");
-    assert_eq!(rows, vec!["dst-new".to_string()], "the post-persist insert must be visible");
+    assert_eq!(
+        rows,
+        vec!["dst-new".to_string()],
+        "the post-persist insert must be visible"
+    );
     assert!(
         reopened.full_scan_count() > 0 || reopened.cells_visited_count() > 0,
         "a generation mismatch must discard the sidecar and lazily rebuild \
@@ -584,7 +635,13 @@ fn loaded_then_repersisted_equals_from_tree_rebuild() {
 /// per-table (generation, row_count, sorted columns, sorted postings).
 fn decode_envelope(
     path: &std::path::Path,
-) -> Vec<(String, i64, u64, Vec<String>, Vec<((String, String), Vec<i64>)>)> {
+) -> Vec<(
+    String,
+    i64,
+    u64,
+    Vec<String>,
+    Vec<((String, String), Vec<i64>)>,
+)> {
     let bytes = std::fs::read(path).unwrap();
     let envelope: lilliengine::conn::PersistedColIndexes =
         ciborium::de::from_reader(bytes.as_slice()).unwrap();
@@ -612,8 +669,20 @@ fn decode_envelope(
 }
 
 fn assert_envelopes_equal(
-    a: &[(String, i64, u64, Vec<String>, Vec<((String, String), Vec<i64>)>)],
-    b: &[(String, i64, u64, Vec<String>, Vec<((String, String), Vec<i64>)>)],
+    a: &[(
+        String,
+        i64,
+        u64,
+        Vec<String>,
+        Vec<((String, String), Vec<i64>)>,
+    )],
+    b: &[(
+        String,
+        i64,
+        u64,
+        Vec<String>,
+        Vec<((String, String), Vec<i64>)>,
+    )],
 ) {
     assert_eq!(
         a, b,
@@ -653,7 +722,10 @@ fn read_only_open_loads_sidecar() {
     // persist_col_indexes on the RO connection must not create/modify the file:
     // a read-only mount is a bypass-safe no-op (Ok, untouched file), not an error.
     let result = ro.persist_col_indexes();
-    assert!(result.is_ok(), "a read-only connection's persist must be a no-op, not an error");
+    assert!(
+        result.is_ok(),
+        "a read-only connection's persist must be a no-op, not an error"
+    );
     let sidecar_bytes_after = std::fs::read(f.sidecar_path()).unwrap();
     assert_eq!(
         sidecar_bytes_before, sidecar_bytes_after,
@@ -670,13 +742,21 @@ fn read_only_open_loads_sidecar() {
 #[test]
 fn garbage_sidecar_falls_back_lazily() {
     let f = EdgeFixture::seeded(8);
-    std::fs::write(f.sidecar_path(), b"not a valid cbor envelope, just junk bytes").unwrap();
+    std::fs::write(
+        f.sidecar_path(),
+        b"not a valid cbor envelope, just junk bytes",
+    )
+    .unwrap();
 
     let mut conn = f.open();
     conn.reset_full_scan_count();
     conn.reset_cells_visited_count();
     let rows = probe_src(&mut conn, "src-000003");
-    assert_eq!(rows, vec!["dst-000003".to_string()], "results must stay correct on a garbage sidecar");
+    assert_eq!(
+        rows,
+        vec!["dst-000003".to_string()],
+        "results must stay correct on a garbage sidecar"
+    );
     assert!(
         conn.full_scan_count() > 0 || conn.cells_visited_count() > 0,
         "a garbage sidecar must be treated as absent (lazy rebuild fires)"
@@ -695,7 +775,10 @@ fn persist_refuses_inside_open_transaction() {
     let mut conn = f.open();
     conn.execute("BEGIN", vec![]).unwrap();
     let result = conn.persist_col_indexes();
-    assert!(result.is_err(), "persist_col_indexes must refuse inside an open transaction");
+    assert!(
+        result.is_err(),
+        "persist_col_indexes must refuse inside an open transaction"
+    );
     assert!(
         !f.sidecar_path().exists(),
         "a refused persist inside an open transaction must not create the sidecar"
@@ -726,10 +809,16 @@ fn cbor_map_shape_round_trip() {
         .iter()
         .find(|t| t.table == "edges")
         .expect("edges table entry must be present");
-    assert!(!edges_table.index.map_is_empty(), "the edges ColIndex map must be populated");
+    assert!(
+        !edges_table.index.map_is_empty(),
+        "the edges ColIndex map must be populated"
+    );
     // edges keys on its composite PK, not an `id` column, so its persisted
     // id-index stays the unbuilt placeholder (the load path skips it).
-    assert!(!edges_table.id_index.is_built(), "the edges table has no id column to index");
+    assert!(
+        !edges_table.id_index.is_built(),
+        "the edges table has no id column to index"
+    );
 
     // Re-encode and re-decode to confirm the round trip is stable.
     let mut reencoded = Vec::new();

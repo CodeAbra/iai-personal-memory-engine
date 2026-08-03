@@ -18,7 +18,9 @@ use crate::error::Result;
 
 /// True when the caller opted out of the full drive-cache flush.
 fn full_flush_disabled() -> bool {
-    std::env::var("LILLI_FSYNC_MODE").map(|v| v == "fast").unwrap_or(false)
+    std::env::var("LILLI_FSYNC_MODE")
+        .map(|v| v == "fast")
+        .unwrap_or(false)
 }
 
 /// Flush a file to stable storage.

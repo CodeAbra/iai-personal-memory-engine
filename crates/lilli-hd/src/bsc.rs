@@ -226,11 +226,7 @@ pub fn cosine_packed_impl(a: &[u8], b: &[u8]) -> f64 {
 
 #[pyfunction]
 #[pyo3(name = "bsc_bind")]
-pub fn bind<'py>(
-    py: Python<'py>,
-    a: &[u8],
-    b: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
+pub fn bind<'py>(py: Python<'py>, a: &[u8], b: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let out = bind_impl(a, b)?;
     Ok(PyBytes::new_bound(py, &out))
 }
@@ -252,11 +248,7 @@ pub fn bundle<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bsc_permute")]
-pub fn permute<'py>(
-    py: Python<'py>,
-    hv: &[u8],
-    shift: i64,
-) -> PyResult<Bound<'py, PyBytes>> {
+pub fn permute<'py>(py: Python<'py>, hv: &[u8], shift: i64) -> PyResult<Bound<'py, PyBytes>> {
     let out = permute_impl(hv, shift);
     Ok(PyBytes::new_bound(py, &out))
 }

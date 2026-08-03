@@ -6,8 +6,8 @@
 //! differential oracle catching divergence in value, ordering, tie handling,
 //! NULL handling, or output shape.
 
-use lilliengine::conn::Connection;
 use lillibrain::Value;
+use lilliengine::conn::Connection;
 use tempfile::tempdir;
 
 const DDL_INDEXED: &str = "CREATE TABLE IF NOT EXISTS records ( \
@@ -87,7 +87,12 @@ fn all_rows(conn: &mut Connection, sql: &str, params: Vec<Value>) -> Vec<Vec<(St
 
 /// Assert `sql` produces byte-identical rows on the indexed and scan
 /// connections.
-fn assert_differential(sql: &str, params: Vec<Value>, indexed: &mut Connection, scan: &mut Connection) {
+fn assert_differential(
+    sql: &str,
+    params: Vec<Value>,
+    indexed: &mut Connection,
+    scan: &mut Connection,
+) {
     let fast = all_rows(indexed, sql, params.clone());
     let slow = all_rows(scan, sql, params);
     assert_eq!(fast, slow, "indexed vs scan diverged for: {sql}");
@@ -138,17 +143,29 @@ fn min_max_on_empty_table_matches_scan() {
 fn min_max_stays_fresh_across_writes() {
     let (_dir, mut indexed, mut scan) = open_pair(20);
     // Warm the ordered index first.
-    assert_differential("SELECT MAX(vec_label) FROM records", vec![], &mut indexed, &mut scan);
+    assert_differential(
+        "SELECT MAX(vec_label) FROM records",
+        vec![],
+        &mut indexed,
+        &mut scan,
+    );
     // Insert / delete / update on BOTH, then re-compare: the built index must
     // reflect maintained state, never a stale snapshot.
     for conn in [&mut indexed, &mut scan] {
         conn.execute(
             "INSERT INTO records (id, tombstoned_at, embedding_pending, created_at, n) \
              VALUES (?, ?, ?, ?, ?)",
-            vec![t("id-new"), Value::Null, Value::Int(0), t("2026-02-01T00:00:00+00:00"), Value::Int(999)],
+            vec![
+                t("id-new"),
+                Value::Null,
+                Value::Int(0),
+                t("2026-02-01T00:00:00+00:00"),
+                Value::Int(999),
+            ],
         )
         .unwrap();
-        conn.execute("DELETE FROM records WHERE id = ?", vec![t("id-2")]).unwrap();
+        conn.execute("DELETE FROM records WHERE id = ?", vec![t("id-2")])
+            .unwrap();
         conn.execute(
             "UPDATE records SET tombstoned_at = ? WHERE id = ?",
             vec![t("2026-03-01T00:00:00+00:00"), t("id-1")],

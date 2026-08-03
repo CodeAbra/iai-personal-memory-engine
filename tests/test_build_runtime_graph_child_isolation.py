@@ -17,9 +17,12 @@ Three guarantees are pinned here:
 """
 from __future__ import annotations
 
-import gc
+import json
 import os
 import platform
+import subprocess
+import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -223,21 +226,81 @@ def test_child_timeout_falls_back_to_in_process(
     assert graph.node_count() == 10
 
 
-def _settled_rss_bytes() -> int:
-    """Force returnable pages back to the OS, then take one RSS reading.
-
-    Mirrors the shipped per-step relief (pyarrow pool release + gc.collect +
-    macOS zone pressure relief) so the reading is a reproducible
-    "all-returnable-pages-returned" footprint rather than a jittery sample.
+_RSS_ARM_WORKER = textwrap.dedent(
     """
-    from iai_mcp.lilli.cycle.sleep_pipeline._memory_relief import (
-        _current_rss_bytes,
-        _step_memory_relief,
-    )
+    import json, pathlib, resource, sys
+    from datetime import datetime, timezone
+    from uuid import uuid4
 
-    _step_memory_relief("rss-proof")
-    gc.collect()
-    return _current_rss_bytes()
+    import numpy as np
+
+    from iai_mcp import retrieve, runtime_graph_cache
+    import iai_mcp.community as _cm
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.types import MemoryRecord
+
+    seed_base = int(sys.argv[1])
+    in_parent = sys.argv[2] == "in_parent"
+    root = sys.argv[3]
+    n_records = int(sys.argv[4])
+
+    s = MemoryStore(path=root + "/store")
+    s.root = pathlib.Path(root) / "root"
+    s.root.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    for i in range(n_records):
+        rng = np.random.default_rng(seed_base + i)
+        vec = rng.random(s.embed_dim).astype(np.float32)
+        vec = (vec / np.linalg.norm(vec)).tolist()
+        s.insert(MemoryRecord(
+            id=uuid4(), tier="episodic",
+            literal_surface=f"surface number {seed_base + i} carrying real text",
+            aaak_index="", embedding=vec, community_id=None, centrality=0.0,
+            detail_level=2, pinned=bool((seed_base + i) % 7 == 0),
+            stability=0.0, difficulty=0.0, last_reviewed=None,
+            never_decay=False, never_merge=False, provenance=[],
+            created_at=now, updated_at=now,
+            tags=[f"tag{(seed_base + i) % 3}"], language="en",
+        ))
+
+    if in_parent:
+        # Route the "child" call through the in-process kernel so the
+        # detection arenas are reserved in this process. Honor the
+        # `with_centrality` contract: when requested, compute centrality
+        # locally too, so this arm retains both intermediates.
+        def _in_parent_detect(graph, **kw):
+            assignment = _cm.detect_communities(
+                graph, prior=None, prior_mode="seeded"
+            )
+            if kw.get("with_centrality"):
+                return assignment, graph.centrality()
+            return assignment
+        runtime_graph_cache.compute_assignment_in_child = _in_parent_detect
+
+    retrieve.build_runtime_graph(s)
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(json.dumps({"peak_rss_raw": peak}))
+    """
+)
+
+
+def _run_isolation_arm(seed_base: int, in_parent: bool, root: Path) -> int:
+    env = os.environ.copy()
+    env["IAI_MCP_CRYPTO_PASSPHRASE"] = "test-passphrase-not-secret"
+    proc = subprocess.run(
+        [
+            sys.executable, "-c", _RSS_ARM_WORKER,
+            str(seed_base),
+            "in_parent" if in_parent else "isolated",
+            str(root),
+            "3000",
+        ],
+        capture_output=True, text=True, env=env, timeout=600,
+    )
+    assert proc.returncode == 0, (
+        f"RSS arm subprocess failed (rc={proc.returncode}):\n{proc.stderr}"
+    )
+    return int(json.loads(proc.stdout.strip().splitlines()[-1])["peak_rss_raw"])
 
 
 @pytest.mark.skipif(
@@ -261,67 +324,28 @@ def test_parent_rss_lower_with_child_isolation(tmp_path: Path):
     materially below the in-parent-detection baseline, proving the detection
     arenas no longer reside in the parent.
 
-    The two arms run on independent fresh stores seeded identically so the
-    only difference is where detection executes. The in-parent arm forces
-    detection to run locally by routing the child call straight through the
-    in-process kernel; the isolated arm uses the real spawn-context child.
-    Each arm subtracts a fresh settled baseline, so an arm only measures the
-    resident growth it itself retains.
+    Each arm runs in its OWN fresh process and reports its own peak RSS
+    (getrusage RUSAGE_SELF, ru_maxrss on Darwin is bytes). The in-parent arm
+    forces detection to run locally by routing the child call straight through
+    the in-process kernel; the isolated arm uses the real spawn-context child.
+    Comparing two independent clean processes is robust to ambient load and to
+    arm ordering — an in-process before/after delta on a shared runner is
+    noise once suite-wide memory pressure collapses the arena cost into
+    already-resident pages.
     """
-    import iai_mcp.community as _cm
+    in_parent_peak = _run_isolation_arm(
+        seed_base=10_000, in_parent=True, root=tmp_path / "in_parent"
+    )
+    isolated_peak = _run_isolation_arm(
+        seed_base=50_000, in_parent=False, root=tmp_path / "isolated"
+    )
 
-    n_records = 3000
-
-    def _build_arm(seed_base: int, in_parent: bool) -> int:
-        s = MemoryStore(path=tmp_path / f"arm-{seed_base}-{in_parent}")
-        s.root = tmp_path / f"arm-root-{seed_base}-{in_parent}"
-        s.root.mkdir(parents=True, exist_ok=True)
-        _seed_store(s, n=n_records, seed_base=seed_base)
-
-        with pytest.MonkeyPatch.context() as mp:
-            if in_parent:
-                # Route the "child" call through the in-process kernel so the
-                # detection arenas are reserved in this (parent) process. Honor
-                # the `with_centrality` contract: when requested, also compute
-                # centrality locally and return it alongside the assignment so
-                # the in-parent path retains both intermediates.
-                def _in_parent_detect(graph, **kw):
-                    assignment = _cm.detect_communities(
-                        graph, prior=None, prior_mode="seeded"
-                    )
-                    if kw.get("with_centrality"):
-                        return assignment, graph.centrality()
-                    return assignment
-
-                mp.setattr(
-                    runtime_graph_cache,
-                    "compute_assignment_in_child",
-                    _in_parent_detect,
-                )
-            baseline = _settled_rss_bytes()
-            retrieve.build_runtime_graph(s)
-            settled = _settled_rss_bytes()
-        return settled - baseline
-
-    # In-parent arm first: detection runs locally, leaving arenas resident.
-    in_parent_delta = _build_arm(seed_base=10_000, in_parent=True)
-    gc.collect()
-    _settled_rss_bytes()
-
-    # Isolated arm: detection runs in the ephemeral child.
-    isolated_delta = _build_arm(seed_base=50_000, in_parent=False)
-
-    # The isolated build must leave a materially smaller resident delta in the
-    # parent. Allow generous slack — the proof is the order-of-magnitude gap,
-    # not a tight bound. Below the noise floor the comparison is meaningless:
-    # under full-suite memory pressure the allocator can serve the in-parent
-    # arenas from already-resident freed pages, collapsing BOTH deltas to
-    # sub-MB values whose ordering is page-reuse noise. Sub-floor deltas mean
-    # the parent retained no material arena in either arm — the exact
-    # property this test protects.
-    noise_floor = 4 * 1024 * 1024
-    assert isolated_delta < max(in_parent_delta, noise_floor), (
+    print(
+        f"\n[detection-rss] in_parent_peak={in_parent_peak / 1e6:.1f}MB "
+        f"isolated_peak={isolated_peak / 1e6:.1f}MB"
+    )
+    assert isolated_peak < in_parent_peak, (
         f"child isolation did not lower the parent footprint: "
-        f"in_parent_delta={in_parent_delta / 1e6:.1f}MB "
-        f"isolated_delta={isolated_delta / 1e6:.1f}MB"
+        f"in_parent_peak={in_parent_peak / 1e6:.1f}MB "
+        f"isolated_peak={isolated_peak / 1e6:.1f}MB"
     )

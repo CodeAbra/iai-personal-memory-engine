@@ -272,9 +272,7 @@ fn like_ci(text: &[u8], pat: &[u8]) -> bool {
             star_pat = Some(pi);
             star_text = ti;
             pi += 1;
-        } else if pi < pat.len()
-            && (pat[pi] == b'_' || ascii_eq_ci(pat[pi], text[ti]))
-        {
+        } else if pi < pat.len() && (pat[pi] == b'_' || ascii_eq_ci(pat[pi], text[ti])) {
             ti += 1;
             pi += 1;
         } else if let Some(sp) = star_pat {
@@ -313,14 +311,14 @@ pub fn datetime_scalar(value: &Value) -> Value {
         Value::Null => Value::Null,
         // The 'now' time value resolves to the current UTC second, matching
         // sqlite3's single-argument datetime('now').
-        Value::Text(s) if s.trim().eq_ignore_ascii_case("now") => {
-            Value::Text(now_utc_datetime())
-        }
+        Value::Text(s) if s.trim().eq_ignore_ascii_case("now") => Value::Text(now_utc_datetime()),
         Value::Text(s) => parse_datetime(s).map(Value::Text).unwrap_or(Value::Null),
         // sqlite3's datetime() coerces a number through its text form; a numeric
         // timestamp string is the only parseable shape, so a bare number is
         // unparseable and degrades to NULL.
-        Value::Int(i) => parse_datetime(&i.to_string()).map(Value::Text).unwrap_or(Value::Null),
+        Value::Int(i) => parse_datetime(&i.to_string())
+            .map(Value::Text)
+            .unwrap_or(Value::Null),
         Value::Float(f) => parse_datetime(&crate::catalog::render_float_text(*f))
             .map(Value::Text)
             .unwrap_or(Value::Null),
@@ -821,9 +819,11 @@ pub fn eval_expr(expr: &Expr, row: &Row) -> EvalVal {
             let is_null = matches!(v, Value::Null);
             EvalVal::Bool(Some(if *negated { !is_null } else { is_null }))
         }
-        Expr::InList { operand, items, text_set } => {
-            eval_in_list(operand, items, text_set.as_deref(), row)
-        }
+        Expr::InList {
+            operand,
+            items,
+            text_set,
+        } => eval_in_list(operand, items, text_set.as_deref(), row),
         Expr::Coalesce(args) => {
             for arg in args {
                 let v = eval_expr(arg, row).into_value();
@@ -905,12 +905,7 @@ fn eval_binop(op: &str, left: &Expr, right: &Expr, row: &Row) -> EvalVal {
 /// shape with a text column value and a numeric literal is rewritten; every other
 /// pairing is returned unchanged, leaving the numeric-numeric and text-text paths
 /// exactly as they were.
-fn apply_literal_text_affinity(
-    left: &Expr,
-    right: &Expr,
-    l: Value,
-    r: Value,
-) -> (Value, Value) {
+fn apply_literal_text_affinity(left: &Expr, right: &Expr, l: Value, r: Value) -> (Value, Value) {
     let is_col = |e: &Expr| matches!(e, Expr::Column(_));
     let is_lit = |e: &Expr| matches!(e, Expr::Literal(_));
     // Column on the left, numeric literal on the right.

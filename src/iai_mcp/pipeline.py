@@ -78,6 +78,22 @@ W_COSINE = 1.0
 W_AAAK = 0.3
 W_DEGREE = 0.1
 W_AGE = 0.05
+COS_SPREAD_MIN = 0.02
+"""Below this cosine spread across the candidate head, similarity carries no
+decision signal and the degree term must not inherit it (dampened
+proportionally; the response gets a flat_cosine hint)."""
+
+
+def _flat_cosine_damp(head_spread: float, threshold: float) -> float:
+    """Degree-weight damp factor for a cosine-flat candidate head.
+
+    Proportional ramp: 0.0 at a fully flat head, 1.0 at or above the
+    threshold — a fixed cutoff would make the degree term snap back to full
+    strength one ulp above it.
+    """
+    if threshold <= 0.0:
+        return 1.0
+    return min(1.0, max(0.0, head_spread / threshold))
 
 W_SPREAD_ACT = 0.0
 """Activation transfer: a graph-reached candidate inherits a decayed
@@ -260,14 +276,35 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return float(np.dot(av, bv) / (na * nb))
 
 
+# Tag keys whose VALUES carry content a natural-language cue can name.
+# Bookkeeping tags (capture, role:*, idem:*, shield:*, raw:*) must never
+# match a cue — a common word like "user" would otherwise bias every
+# record of one role.
+_AAAK_CONTENT_TAG_KEYS = frozenset({"doc"})
+
+
 def _aaak_overlap(cue_text: str, aaak_index: str) -> float:
+    # Match the cue against the content of the index — entity anchors and
+    # doc names — never against machine tokens (field keys, wing letters,
+    # hex room ids) or bookkeeping tag values. Entity anchors stay dormant
+    # until the capture path writes entity: tags; until then this term is
+    # honestly near-zero rather than falsely confident.
     if not aaak_index:
         return 0.0
+    from iai_mcp.aaak import parse_aaak_index
+
+    parsed = parse_aaak_index(aaak_index)
+    meaningful: set[str] = set()
+    for ent in parsed["entities"]:
+        meaningful.update(ent.lower().split())
+    for tag in parsed["tags"]:
+        key, sep, value = tag.partition(":")
+        if sep and key.lower() in _AAAK_CONTENT_TAG_KEYS and value.strip():
+            meaningful.add(value.lower().strip())
     cue_set = set(cue_text.lower().replace("/", " ").split())
-    idx_set = set(aaak_index.lower().replace("/", " ").split())
-    if not cue_set or not idx_set:
+    if not cue_set or not meaningful:
         return 0.0
-    return len(cue_set & idx_set) / len(cue_set | idx_set)
+    return len(cue_set & meaningful) / len(cue_set | meaningful)
 
 
 def _has_doc_tag(rec) -> bool:
@@ -1283,7 +1320,24 @@ def _recall_core(
     if trace_mark is not None:
         trace_mark("cleanup_attractor")
 
-    scored: list[tuple[float, UUID, float, float, float, float, float, float]] = []
+    flat_cosine_pool = False
+    if reachable_indices.size >= 3 and effective_w_degree > 0.0:
+        # Spread is measured over the competing HEAD of the pool: a single
+        # distant graph- or lexical-reached candidate must not mask that the
+        # slot-winning candidates are cosine-indistinguishable.
+        _pool_cos = np.sort(shared_cos[reachable_indices])[::-1]
+        _head = _pool_cos[: min(10, _pool_cos.size)]
+        _cos_spread = float(_head[0] - _head[-1])
+        _spread_min = _env_weight("IAI_MCP_COS_SPREAD_MIN", COS_SPREAD_MIN)
+        _damp = _flat_cosine_damp(_cos_spread, _spread_min)
+        if _damp < 1.0:
+            effective_w_degree *= _damp
+            flat_cosine_pool = True
+
+    # Each entry carries the served reason string, assembled DURING scoring
+    # so every additive term and multiplier that touched the score is in it
+    # — the printed arithmetic must reconcile with the served number.
+    scored: list[tuple[float, UUID, str]] = []
     tier_boost = _tier_knowledge_boost()
     w_spread_act = _env_weight("IAI_MCP_W_SPREAD_ACT", W_SPREAD_ACT)
     spread_act_decay = _env_weight("IAI_MCP_SPREAD_ACT_DECAY", SPREAD_ACT_DECAY)
@@ -1315,6 +1369,7 @@ def _recall_core(
                 + effective_w_degree * deg_norm
                 - W_AGE * age
             )
+            spread_contrib = 0.0
             if w_spread_act > 0.0:
                 _prov = spread_provenance.get(cid)
                 # Transfer rides ONLY a fully transfer-carrying path (entity
@@ -1322,17 +1377,20 @@ def _recall_core(
                 if _prov is not None and _prov[2]:
                     _seed_idx = id_to_idx.get(_prov[0])
                     if _seed_idx is not None:
-                        base_s += (
+                        spread_contrib = (
                             w_spread_act
                             * float(shared_cos[int(_seed_idx)])
                             * (spread_act_decay ** _prov[1])
                         )
+                        base_s += spread_contrib
+            community_contrib = 0.0
             cand_community = community_id_by_member.get(cid)
             if cand_community is not None and max_community_score > 0.0:
                 graded_weight = max(
                     0.0, community_scores.get(cand_community, 0.0) / max_community_score,
                 )
-                base_s += mode_bias * cos * graded_weight
+                community_contrib = mode_bias * cos * graded_weight
+                base_s += community_contrib
             structural_score = 0.0
             if (
                 structural_weight > 0.0
@@ -1345,10 +1403,23 @@ def _recall_core(
                 structural_score = structural_similarity(
                     cue_structure_hv, _cleaned_structure_hv,
                 )
+            reason = (
+                f"cos {cos:.3f}*{W_COSINE:g} + aaak {aaak:.2f}*{W_AAAK:g} "
+                f"+ deg_norm {deg_norm:.3f}*{effective_w_degree:.3g} "
+                f"- age {age:.2f}*{W_AGE:g}"
+            )
+            if spread_contrib:
+                reason += f" + spread {spread_contrib:.3f}"
+            if community_contrib:
+                reason += f" + community {community_contrib:.3f}"
             if structural_weight > 0.0:
                 base_s = (
                     (1.0 - structural_weight) * base_s
                     + structural_weight * structural_score
+                )
+                reason += (
+                    f" | structural {structural_score:.3f} "
+                    f"(w={structural_weight:.2f})"
                 )
             if profile_state:
                 gains = profile_modulation_for_record(
@@ -1363,6 +1434,8 @@ def _recall_core(
                         except (TypeError, ValueError):
                             continue
                     s = base_s * gain_product
+                    if gain_product != 1.0:
+                        reason += f" | xgain {gain_product:.3f}"
                 else:
                     s = base_s
             else:
@@ -1371,17 +1444,24 @@ def _recall_core(
                 _stability = getattr(rec, "stability", 0.5) or 0.5
                 _ig = (1.0 - min(float(_stability), 1.0)) * 0.1
                 s += _ig
+                if _ig:
+                    reason += f" + stab {_ig:.3f}"
             except (TypeError, ValueError, AttributeError) as exc:
                 logger.debug("stability_lift_failed: %s", exc)
             _valence = getattr(rec, "valence", None) or 0.0
             if _valence > 0.0:
                 s *= (1.0 + _valence)
+                reason += f" | xval {1.0 + _valence:.2f}"
             if cue and rec.literal_surface and _trigram_jaccard(cue.lower(), rec.literal_surface.lower()) > 0.3:
                 s *= 2.0
+                reason += " | x2.0 trigram"
             if fts_hits and cid in fts_hits:
                 s *= 3.0
+                reason += " | x3.0 fts"
             if lex_rank and cid in lex_rank:
-                s += _lex_fusion_w() / (1.0 + lex_rank[cid])
+                _lex_add = _lex_fusion_w() / (1.0 + lex_rank[cid])
+                s += _lex_add
+                reason += f" + lex {_lex_add:.3f}"
             if (
                 tier_boost != 1.0
                 and mode != "verbatim"
@@ -1392,16 +1472,16 @@ def _recall_core(
                 )
             ):
                 s *= tier_boost
+                reason += f" | xtier {tier_boost:g}"
             if date_mentions:
                 from iai_mcp.temporal_cue import matches_mentions
                 if matches_mentions(rec.created_at, date_mentions):
                     s *= temporal_boost
+                    reason += f" | xtemp {temporal_boost:g}"
             if cue_intent == "historical_verbatim" and contradicts_dst_set:
                 if str(cid) in contradicts_dst_set:
                     corrector_base_score[str(cid)] = s
-            scored.append(
-                (s, cid, cos, aaak, deg, deg_norm, age, structural_score),
-            )
+            scored.append((s, cid, reason))
 
     if (
         cue_intent == "historical_verbatim"
@@ -1423,7 +1503,9 @@ def _recall_core(
             for j, row in enumerate(scored):
                 tgt = anchor_target.get(str(row[1]))
                 if tgt is not None and row[0] < tgt:
-                    scored[j] = (tgt,) + row[1:]
+                    # The served score is replaced wholesale — the reason
+                    # must say so instead of describing the old arithmetic.
+                    scored[j] = (tgt, row[1], row[2] + " | anchored-below-corrector")
 
     scored.sort(key=lambda x: (-x[0], str(x[1])))
     if trace_mark is not None:
@@ -1431,25 +1513,12 @@ def _recall_core(
 
     scored_hits: list[MemoryHit] = []
     budget_used = 0
-    for s, cid, cos, aaak, deg, deg_norm, age, structural_score in scored:
+    for s, cid, reason in scored:
         rec = records_cache.get(cid)
         if rec is None:
             continue
         tokens = len(rec.literal_surface) // 4
         suggestions = graph.two_hop_neighborhood([cid], top_k=3)[:3]
-        if structural_weight > 0.0:
-            reason = (
-                f"cos {cos:.3f} + aaak {aaak:.2f} "
-                f"+ deg_norm {deg_norm:.3f} "
-                f"- age {age:.2f} | structural {structural_score:.3f} "
-                f"(w={structural_weight:.2f})"
-            )
-        else:
-            reason = (
-                f"cos {cos:.3f} + aaak {aaak:.2f} "
-                f"+ deg_norm {deg_norm:.3f} "
-                f"- age {age:.2f}"
-            )
         _prov = (rec.provenance or [{}])[0]
         scored_hits.append(
             MemoryHit(
@@ -1512,11 +1581,24 @@ def _recall_core(
         except Exception as exc:  # noqa: BLE001 -- telemetry MUST NOT break recall
             logger.debug("recall_timing_emit_failed: %s", exc)
 
+    core_hints: list[dict] = []
+    if flat_cosine_pool:
+        core_hints.append({
+            "kind": "flat_cosine",
+            "severity": "info",
+            "source_ids": [],
+            "text": (
+                "candidate cosines are near-identical for this cue — the "
+                "ranking carries no similarity signal; the degree term was "
+                "dampened and this ordering should be treated as low "
+                "confidence"
+            ),
+        })
     return _RecallCoreResult(
         scored_hits=scored_hits,
         activation_trace=activation_trace,
         anti_hits=[],
-        hints=[],
+        hints=core_hints,
         patterns_observed=[],
         cue_mode=mode,
         budget_used=budget_used,
@@ -1738,6 +1820,7 @@ def recall_for_response(
         apply_supersede_cap,
         build_temporal_validity_maps,
         derive_temporal_validity,
+        sort_served_hits,
     )
     _cue_mode_unused, _cue_intent, _cue_label_unused = _classify_cue(cue)
     if tv_maps is not None:
@@ -1770,7 +1853,7 @@ def recall_for_response(
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
     apply_supersede_cap(core.scored_hits, _tv_outgoing, cue_intent=_cue_intent)
-    core.scored_hits.sort(key=lambda h: h.score, reverse=True)
+    sort_served_hits(core.scored_hits)
 
     if (
         len(core.scored_hits) == 1
@@ -1949,7 +2032,7 @@ def recall_for_response(
         anti_hits=anti_hits,
         activation_trace=core.activation_trace,
         budget_used=budget_used,
-        hints=hints,
+        hints=[*core.hints, *hints],
         cue_mode=core.cue_mode,
         patterns_observed=patterns_observed,
     )
@@ -2014,7 +2097,10 @@ def merge_authority_hits(
             if displaced.adjacent_suggestions and not h.adjacent_suggestions:
                 h.adjacent_suggestions = list(displaced.adjacent_suggestions)
             if displaced.score > h.score:
+                # The authority hit keeps its identity but serves the higher
+                # pipeline score — the reason must carry both provenances.
                 h.score = displaced.score
+                h.reason += f" | score from pipeline rank: {displaced.reason}"
     head_ids = {h.record_id for h in authority_hits}
     tail = [h for h in pipeline_hits if h.record_id not in head_ids]
     union = list(authority_hits) + tail
@@ -2054,6 +2140,7 @@ def recall_for_benchmark(
         apply_supersede_cap,
         build_temporal_validity_maps,
         derive_temporal_validity,
+        sort_served_hits,
     )
     _cue_mode_unused, _cue_intent, _cue_label_unused = _classify_cue(cue)
     _tv_maps = build_temporal_validity_maps(store)
@@ -2093,7 +2180,7 @@ def recall_for_benchmark(
     apply_stale_downweight(core.scored_hits, cue_intent=_cue_intent)
     apply_stale_downweight(core.anti_hits, cue_intent=_cue_intent)
     apply_supersede_cap(core.scored_hits, _tv_outgoing, cue_intent=_cue_intent)
-    core.scored_hits.sort(key=lambda h: h.score, reverse=True)
+    sort_served_hits(core.scored_hits)
 
     hits = core.scored_hits[:k_hits]
     budget_used = sum(len(h.literal_surface) // 4 for h in hits)
@@ -2113,7 +2200,7 @@ def recall_for_benchmark(
         anti_hits=anti_hits,
         activation_trace=core.activation_trace,
         budget_used=budget_used,
-        hints=hints,
+        hints=[*core.hints, *hints],
         cue_mode=core.cue_mode,
         patterns_observed=patterns_observed,
     )

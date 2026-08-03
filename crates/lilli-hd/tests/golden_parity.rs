@@ -4,6 +4,15 @@
 //! mismatch means the Rust kernel is wrong — never regenerate a golden to make
 //! a test pass. All tests run with plain `cargo test`: the kernels exercised
 //! here are the pure-Rust inner functions; no Python, no maturin.
+//!
+//! One deliberate exception: FHRR `bundle` goes through libm (cos/sin/atan2),
+//! and the golden bakes in the recording machine's rounding. Byte inputs put
+//! angles on the TAU/256 grid, so bundle means land exactly ON quantisation
+//! boundaries (n=2 puts ~half of D there), where a 1-ulp libm difference flips
+//! the truncated byte by one; antipodal sums leave atan2 undefined. Those two
+//! provable cases — and only those — are allowed to differ, by at most one
+//! step. Everything else stays byte-exact, so a rounding-mode or formula bug
+//! (which shifts off-boundary components) still fails.
 
 use std::path::PathBuf;
 
@@ -64,7 +73,11 @@ fn projection_embeds_the_frozen_matrix_with_no_filesystem_dependency() {
     // load_p decodes the embedded bytes (default path, no override set) into the
     // full f32 matrix, self-checking the same sha256 and length on the way.
     let p = lilli_hd::projection::load_p();
-    assert_eq!(p.len(), 384 * 10000, "embedded projection decodes to [384, 10000]");
+    assert_eq!(
+        p.len(),
+        384 * 10000,
+        "embedded projection decodes to [384, 10000]"
+    );
 }
 
 #[test]
@@ -100,7 +113,16 @@ fn bsc_bundle_rejects_a_short_hypervector() {
     // index out of bounds. d = 4096 expects 512-byte hvs; pass a 4-byte one.
     let short = vec![0u8; 4];
     let err = bsc::bundle_impl(&[short], 4096).expect_err("short hv must error");
-    assert!(matches!(err, HvError::Length { expected: 512, actual: 4 }), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            HvError::Length {
+                expected: 512,
+                actual: 4
+            }
+        ),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -121,7 +143,10 @@ fn fhrr_bundle_rejects_a_short_hypervector() {
     let short = vec![0u8; 4];
     let full = vec![0u8; fhrr::FHRR_DIM];
     let err = fhrr::bundle_impl(&[full, short]).expect_err("short hv must error");
-    assert!(matches!(err, HvError::Length { expected, actual: 4 } if expected == fhrr::FHRR_DIM), "got {err:?}");
+    assert!(
+        matches!(err, HvError::Length { expected, actual: 4 } if expected == fhrr::FHRR_DIM),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -161,8 +186,16 @@ fn bsc_role_hv_per_dim_identical() {
     let roles_10000 = load_rows("bsc_roles_10000", 18, 1250);
 
     for (idx, role) in BSC_ROLE_VOCABULARY.iter().enumerate() {
-        assert_eq!(bsc_role_hv(role, 4096).unwrap(), roles_4096[idx], "{role}@4096");
-        assert_eq!(bsc_role_hv(role, 10000).unwrap(), roles_10000[idx], "{role}@10000");
+        assert_eq!(
+            bsc_role_hv(role, 4096).unwrap(),
+            roles_4096[idx],
+            "{role}@4096"
+        );
+        assert_eq!(
+            bsc_role_hv(role, 10000).unwrap(),
+            roles_10000[idx],
+            "{role}@10000"
+        );
     }
 }
 
@@ -181,7 +214,11 @@ fn sparse_role_indices_identical() {
     let roles = load_rows("sparse_roles", 18, 40);
     for (idx, role) in BSC_ROLE_VOCABULARY.iter().enumerate() {
         let want = unpack_sparse(&roles[idx]);
-        assert_eq!(sparse_role_indices(role).unwrap(), want, "sparse role {role}");
+        assert_eq!(
+            sparse_role_indices(role).unwrap(),
+            want,
+            "sparse role {role}"
+        );
     }
 }
 
@@ -209,10 +246,18 @@ fn bsc_ops_byte_identical() {
         assert_eq!(binds[i], ops[i], "bsc bind row {i}");
     }
     for (k, &n) in [3usize, 7, 10].iter().enumerate() {
-        assert_eq!(bsc::bundle_impl(&binds[..n], 4096).unwrap(), ops[18 + k], "bsc bundle n={n}");
+        assert_eq!(
+            bsc::bundle_impl(&binds[..n], 4096).unwrap(),
+            ops[18 + k],
+            "bsc bundle n={n}"
+        );
     }
     for (k, &shift) in [1i64, 7, 33, 4095].iter().enumerate() {
-        assert_eq!(bsc::permute_impl(&binds[0], shift), ops[21 + k], "bsc permute {shift}");
+        assert_eq!(
+            bsc::permute_impl(&binds[0], shift),
+            ops[21 + k],
+            "bsc permute {shift}"
+        );
     }
 }
 
@@ -260,6 +305,49 @@ fn bsc_ops_sims_integer_exact() {
 
 // --- FHRR ops ---------------------------------------------------------------
 
+/// FHRR bundle parity with the two provable escape hatches (see module doc).
+///
+/// A component may differ from the golden only when (a) its resultant
+/// magnitude is ~0 (antipodal phasors, atan2 undefined) — skipped — or (b) its
+/// pre-truncation value sits within EPS of an integer boundary (knife-edge),
+/// where the difference must be exactly one step mod 256.
+fn assert_fhrr_bundle_parity(inputs: &[Vec<u8>], got: &[u8], want: &[u8], label: &str) {
+    use std::f64::consts::TAU;
+    const KNIFE_EPS: f64 = 1e-6;
+    const MAG_EPS: f64 = 1e-9;
+    assert_eq!(got.len(), want.len(), "{label}: length");
+    for j in 0..got.len() {
+        if got[j] == want[j] {
+            continue;
+        }
+        let (mut c, mut s) = (0f64, 0f64);
+        for hv in inputs {
+            let radians = (hv[j] as f64 / 256.0) * TAU;
+            c += radians.cos();
+            s += radians.sin();
+        }
+        if c.hypot(s) < MAG_EPS {
+            continue;
+        }
+        let pre = s.atan2(c).rem_euclid(TAU) / TAU * 256.0;
+        let frac = (pre - pre.round()).abs();
+        // A value within EPS of boundary k can only truncate to k-1 or k, so
+        // the pair {got, want} must be exactly {k-1, k} mod 256 — one step,
+        // and only on the low side of the boundary.
+        let k = (pre.round() as i32).rem_euclid(256);
+        let k_low = (k - 1).rem_euclid(256);
+        let pair_ok = (got[j] as i32 == k && want[j] as i32 == k_low)
+            || (got[j] as i32 == k_low && want[j] as i32 == k);
+        assert!(
+            frac < KNIFE_EPS && pair_ok,
+            "{label}: component {j} differs beyond the knife-edge allowance \
+             (got {}, want {}, boundary k={k}, frac {frac:e})",
+            got[j],
+            want[j],
+        );
+    }
+}
+
 fn fhrr_bind_rows() -> Vec<Vec<u8>> {
     use lilli_hd::codebook::{fhrr_role_hv, BSC_ROLE_VOCABULARY};
     use lilli_hd::fhrr;
@@ -286,17 +374,35 @@ fn fhrr_ops_byte_identical() {
     // rows[10:20] = unbind(bound_i, role_i)
     for i in 0..10 {
         let role = fhrr_role_hv(BSC_ROLE_VOCABULARY[i]).unwrap();
-        assert_eq!(fhrr::unbind_impl(&bound[i], &role).unwrap(), ops[10 + i], "fhrr unbind {i}");
+        assert_eq!(
+            fhrr::unbind_impl(&bound[i], &role).unwrap(),
+            ops[10 + i],
+            "fhrr unbind {i}"
+        );
     }
     // row[20] = bundle([bound_0]) passthrough
-    assert_eq!(fhrr::bundle_impl(&bound[..1]).unwrap(), ops[20], "fhrr single passthrough");
+    assert_eq!(
+        fhrr::bundle_impl(&bound[..1]).unwrap(),
+        ops[20],
+        "fhrr single passthrough"
+    );
     // rows[21:24] = bundle(bound[:n]) for n in (2,3,5)
     for (k, &n) in [2usize, 3, 5].iter().enumerate() {
-        assert_eq!(fhrr::bundle_impl(&bound[..n]).unwrap(), ops[21 + k], "fhrr bundle n={n}");
+        let got = fhrr::bundle_impl(&bound[..n]).unwrap();
+        assert_fhrr_bundle_parity(
+            &bound[..n],
+            &got,
+            &ops[21 + k],
+            &format!("fhrr bundle n={n}"),
+        );
     }
     // rows[24:27] = permute(bound_0, shift) for shift in (1,13,9999)
     for (k, &shift) in [1i64, 13, 9999].iter().enumerate() {
-        assert_eq!(fhrr::permute_impl(&bound[0], shift), ops[24 + k], "fhrr permute {shift}");
+        assert_eq!(
+            fhrr::permute_impl(&bound[0], shift),
+            ops[24 + k],
+            "fhrr permute {shift}"
+        );
     }
 }
 
@@ -319,7 +425,9 @@ fn fhrr_ops_sims_within_tolerance() {
 
 #[test]
 fn sparse_ops_byte_identical() {
-    use lilli_hd::codebook::{pack_sparse, sparse_role_indices, unpack_sparse, BSC_ROLE_VOCABULARY};
+    use lilli_hd::codebook::{
+        pack_sparse, sparse_role_indices, unpack_sparse, BSC_ROLE_VOCABULARY,
+    };
     use lilli_hd::sparse;
 
     let ops = load_rows("sparse_ops", 13, 40);

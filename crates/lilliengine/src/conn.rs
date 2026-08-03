@@ -23,9 +23,8 @@ use crate::ast::Stmt;
 use crate::catalog::Catalog;
 use crate::error::{EngineError, Result};
 use crate::exec::{
-    execute_delete, execute_insert, execute_insert_many, execute_select, execute_update,
-    ColIndex, ConflictIndex, IdIndex, OrderedColIndex,
-    TxnScope, WriteOutcome,
+    execute_delete, execute_insert, execute_insert_many, execute_select, execute_update, ColIndex,
+    ConflictIndex, IdIndex, OrderedColIndex, TxnScope, WriteOutcome,
 };
 use crate::meta::MetaTable;
 use crate::parser::parse;
@@ -349,7 +348,11 @@ impl Connection {
     /// EVERY row (including NULLs) by its collation tag, so an ordered walk is
     /// total across storage classes and the executor's shape gates alone decide
     /// whether a query is index-servable.
-    fn catalog_ordered_index_column(&self, table: &str, query_order_col: Option<&str>) -> Option<String> {
+    fn catalog_ordered_index_column(
+        &self,
+        table: &str,
+        query_order_col: Option<&str>,
+    ) -> Option<String> {
         // No ordered target => no ordered index to serve; never create one
         // speculatively.
         let target = query_order_col?;
@@ -765,11 +768,7 @@ impl Connection {
         );
         let cache = built_index_cache();
         if let Ok(mut guard) = cache.lock() {
-            let iidx = self
-                .id_caches
-                .get(table)
-                .cloned()
-                .unwrap_or_default();
+            let iidx = self.id_caches.get(table).cloned().unwrap_or_default();
             // A same-generation entry is replaced only by a MORE complete
             // pair: a reader's lazy build publishes col-only (no id, no
             // count), and leaving it untouched would shadow the writer's
@@ -808,19 +807,11 @@ impl Connection {
             let Ok(generation) = self.meta.col_generation(&self.store, table) else {
                 continue;
             };
-            let iidx = self
-                .id_caches
-                .get(table)
-                .cloned()
-                .unwrap_or_default();
+            let iidx = self.id_caches.get(table).cloned().unwrap_or_default();
             // The ordered index rides the same generation stamp: rebuilt from
             // scratch by every fresh reader otherwise (its population scan is
             // the dominant reopen cost after the col/id indexes are adopted).
-            let oidx = self
-                .ordered_caches
-                .get(table)
-                .cloned()
-                .unwrap_or_default();
+            let oidx = self.ordered_caches.get(table).cloned().unwrap_or_default();
             tables.push((table.clone(), generation, cidx.clone(), iidx, oidx));
         }
         IndexSnapshot { tables }
@@ -853,19 +844,21 @@ impl Connection {
                 continue;
             }
             self.col_caches.insert(table.clone(), cidx.clone());
-            if iidx.is_built() && !self
-                .id_caches
-                .get(table)
-                .map(|i| i.is_built())
-                .unwrap_or(false)
+            if iidx.is_built()
+                && !self
+                    .id_caches
+                    .get(table)
+                    .map(|i| i.is_built())
+                    .unwrap_or(false)
             {
                 self.id_caches.insert(table.clone(), iidx.clone());
             }
-            if oidx.is_built() && !self
-                .ordered_caches
-                .get(table)
-                .map(|o| o.is_built())
-                .unwrap_or(false)
+            if oidx.is_built()
+                && !self
+                    .ordered_caches
+                    .get(table)
+                    .map(|o| o.is_built())
+                    .unwrap_or(false)
             {
                 self.ordered_caches.insert(table.clone(), oidx.clone());
             }
@@ -977,11 +970,8 @@ impl Connection {
         // Collect the target table list before mutably borrowing `col_caches`
         // (disjoint-field discipline: `root_map`/`catalog` immutable, `col_caches`
         // mutable, never aliased in the same statement).
-        let targets: Vec<(String, u32)> = self
-            .root_map
-            .iter()
-            .map(|(t, r)| (t.clone(), *r))
-            .collect();
+        let targets: Vec<(String, u32)> =
+            self.root_map.iter().map(|(t, r)| (t.clone(), *r)).collect();
         for (table, root) in targets {
             let cols = self.catalog_col_index_columns(&table);
             if cols.is_empty() {
@@ -1042,15 +1032,12 @@ impl Connection {
         let sidecar = col_index_sidecar_path(self.store.path());
         let tmp = sidecar.with_extension("colindex.tmp");
         let mut bytes: Vec<u8> = Vec::new();
-        ciborium::ser::into_writer(&envelope, &mut bytes).map_err(|e| {
-            EngineError::parse(format!("persist_col_indexes: encode error: {e}"))
-        })?;
-        std::fs::write(&tmp, &bytes).map_err(|e| {
-            EngineError::parse(format!("persist_col_indexes: write error: {e}"))
-        })?;
-        std::fs::rename(&tmp, &sidecar).map_err(|e| {
-            EngineError::parse(format!("persist_col_indexes: rename error: {e}"))
-        })?;
+        ciborium::ser::into_writer(&envelope, &mut bytes)
+            .map_err(|e| EngineError::parse(format!("persist_col_indexes: encode error: {e}")))?;
+        std::fs::write(&tmp, &bytes)
+            .map_err(|e| EngineError::parse(format!("persist_col_indexes: write error: {e}")))?;
+        std::fs::rename(&tmp, &sidecar)
+            .map_err(|e| EngineError::parse(format!("persist_col_indexes: rename error: {e}")))?;
         Ok(())
     }
 
@@ -1098,7 +1085,10 @@ impl Connection {
         // reporting the invalidation. Cheap: a file-length stat plus a 32-byte
         // WAL-sidecar header read, no lock.
         if self.is_readonly_mount {
-            self.store.pager().revalidate_ro_snapshot_fence().map_err(open_err)?;
+            self.store
+                .pager()
+                .revalidate_ro_snapshot_fence()
+                .map_err(open_err)?;
         }
 
         // Read-only guard: reject writes on a read-only mount (immutable) or while
@@ -1143,7 +1133,7 @@ impl Connection {
                 self.col_caches.clear();
                 self.ordered_caches.clear();
                 self.bare_count_cache.clear();
-        self.filtered_count_cache.clear();
+                self.filtered_count_cache.clear();
             } else {
                 self.publish_indexes_on_demand();
             }
@@ -1174,7 +1164,7 @@ impl Connection {
             self.col_caches.clear();
             self.ordered_caches.clear();
             self.bare_count_cache.clear();
-        self.filtered_count_cache.clear();
+            self.filtered_count_cache.clear();
             result.map_err(open_err)?;
             return Ok(CursorState::empty());
         }
@@ -1360,8 +1350,13 @@ impl Connection {
                     entry
                 });
                 let rs = execute_select(
-                    &plan, &self.store, &self.catalog, &self.root_map,
-                    Some(id_ref), col_ref, ord_ref,
+                    &plan,
+                    &self.store,
+                    &self.catalog,
+                    &self.root_map,
+                    Some(id_ref),
+                    col_ref,
+                    ord_ref,
                 )?;
                 // Populate the bare-count cache from the freshly computed
                 // result, keyed by the generation observed AFTER the walk (any
@@ -1389,8 +1384,7 @@ impl Connection {
                                 if self.filtered_count_cache.len() >= FILTERED_COUNT_CACHE_CAP {
                                     self.filtered_count_cache.clear();
                                 }
-                                self.filtered_count_cache
-                                    .insert(key, (current_gen, *count));
+                                self.filtered_count_cache.insert(key, (current_gen, *count));
                             }
                         }
                     }
@@ -1567,11 +1561,7 @@ impl Connection {
     /// INSERTs route through the batch executor (one store transaction, inner
     /// per-statement transactions suppressed). Other statements fall back to a
     /// per-row execute under one outer transaction so the batch is still atomic.
-    pub fn executemany(
-        &mut self,
-        sql: &str,
-        seq: Vec<Vec<Value>>,
-    ) -> Result<CursorState> {
+    pub fn executemany(&mut self, sql: &str, seq: Vec<Vec<Value>>) -> Result<CursorState> {
         if seq.is_empty() {
             return Ok(CursorState::empty());
         }
@@ -1606,7 +1596,7 @@ impl Connection {
             self.col_caches.remove(&table);
             self.ordered_caches.remove(&table);
             self.bare_count_cache.remove(&table);
-        self.filtered_count_cache.retain(|(t, _), _| t != &table);
+            self.filtered_count_cache.retain(|(t, _), _| t != &table);
             let outcome = {
                 let cidx = self.conflict_caches.entry(table.clone()).or_default();
                 execute_insert_many(
@@ -1652,7 +1642,7 @@ impl Connection {
                         self.col_caches.clear();
                         self.ordered_caches.clear();
                         self.bare_count_cache.clear();
-        self.filtered_count_cache.clear();
+                        self.filtered_count_cache.clear();
                     } else {
                         // Inside a caller-owned outer transaction: mark it tainted
                         // so that if the caller commits, caches are cleared.
@@ -1673,7 +1663,7 @@ impl Connection {
                 self.col_caches.clear();
                 self.ordered_caches.clear();
                 self.bare_count_cache.clear();
-        self.filtered_count_cache.clear();
+                self.filtered_count_cache.clear();
             }
             self.txn_tainted = false;
         }
@@ -1697,7 +1687,7 @@ impl Connection {
             self.col_caches.clear();
             self.ordered_caches.clear();
             self.bare_count_cache.clear();
-        self.filtered_count_cache.clear();
+            self.filtered_count_cache.clear();
         } else {
             self.publish_indexes_on_demand();
         }
@@ -1988,7 +1978,7 @@ impl Connection {
             self.conflict_caches.remove(&old);
             self.ordered_caches.remove(&old);
             self.bare_count_cache.remove(&old);
-        self.filtered_count_cache.retain(|(t, _), _| t != &old);
+            self.filtered_count_cache.retain(|(t, _), _| t != &old);
         }
         if let Some(name) = drop_name {
             self.root_map.remove(&name);
@@ -1997,11 +1987,10 @@ impl Connection {
             self.conflict_caches.remove(&name);
             self.ordered_caches.remove(&name);
             self.bare_count_cache.remove(&name);
-        self.filtered_count_cache.retain(|(t, _), _| t != &name);
+            self.filtered_count_cache.retain(|(t, _), _| t != &name);
         }
         Ok(())
     }
-
 }
 
 /// The read-only auto-commit adapter's pre-delegation decision.
@@ -2125,7 +2114,10 @@ fn rename_names(ddl: &str) -> Option<(String, String)> {
     if upper.get(rename_pos + 1).map(String::as_str) != Some("TO") {
         return None;
     }
-    let old = toks.get(2)?.trim_matches(|c| c == '[' || c == ']' || c == '"').to_string();
+    let old = toks
+        .get(2)?
+        .trim_matches(|c| c == '[' || c == ']' || c == '"')
+        .to_string();
     let new = toks
         .get(rename_pos + 2)?
         .trim_matches(|c| c == '[' || c == ']' || c == '"' || c == ';')
@@ -2148,8 +2140,10 @@ fn drop_table_name(ddl: &str) -> Option<String> {
     {
         i += 2;
     }
-    toks.get(i)
-        .map(|s| s.trim_matches(|c| c == '[' || c == ']' || c == '"' || c == ';').to_string())
+    toks.get(i).map(|s| {
+        s.trim_matches(|c| c == '[' || c == ']' || c == '"' || c == ';')
+            .to_string()
+    })
 }
 
 /// Adapt a storage-layer error into the engine error taxonomy, preserving the
@@ -2204,7 +2198,9 @@ fn same_column_set(a: &[String], b: &[String]) -> bool {
 /// (`records.colindex` / `.tmp`) beside the store's own file, mirroring where
 /// `records.hnsw` lives alongside `brain.sqlite3` in the host storage layer.
 fn col_index_sidecar_path(store_path: &std::path::Path) -> std::path::PathBuf {
-    let parent = store_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = store_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     parent.join(COL_INDEX_SIDECAR_NAME)
 }
 
@@ -2260,8 +2256,7 @@ fn load_col_indexes(
         if current_generation != entry.generation {
             continue;
         }
-        let current_count = match gated_count_cells(store, root, &entry.table, current_generation)
-        {
+        let current_count = match gated_count_cells(store, root, &entry.table, current_generation) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -2322,9 +2317,7 @@ const BUILT_INDEX_CACHE_CAP: usize = 32;
 /// post-commit generation) — never mid-write, never inside a transaction, so
 /// an uncommitted state can never be cached.
 static BUILT_INDEX_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<
-        HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>,
-    >,
+    std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>>,
 > = std::sync::OnceLock::new();
 
 fn built_index_cache() -> &'static std::sync::Mutex<
@@ -2426,8 +2419,7 @@ static RO_TABLE_LAST_COMMIT: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 fn ro_index_commit_spacing_allows(path: &std::path::Path, table: &str) -> bool {
-    let registry =
-        RO_TABLE_LAST_COMMIT.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let registry = RO_TABLE_LAST_COMMIT.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut guard) = registry.lock() {
         let key = (path.to_path_buf(), table.to_string());
         let ok = publish_spacing_ok(
@@ -2462,8 +2454,7 @@ static RO_INDEX_PUBLISH_PENDING: std::sync::OnceLock<
 
 fn ro_index_publish_pending(
 ) -> &'static std::sync::Mutex<std::collections::HashSet<(std::path::PathBuf, String)>> {
-    RO_INDEX_PUBLISH_PENDING
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+    RO_INDEX_PUBLISH_PENDING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 fn record_publish_pending(path: &std::path::Path, table: &str) {
@@ -2493,8 +2484,7 @@ fn publish_pending_for(path: &std::path::Path) -> Vec<String> {
 }
 
 fn ro_index_publish_allowed(path: &std::path::Path, table: &str) -> bool {
-    let registry = RO_INDEX_LAST_PUBLISH
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let registry = RO_INDEX_LAST_PUBLISH.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut guard) = registry.lock() {
         let key = (path.to_path_buf(), table.to_string());
         let ok = publish_spacing_ok(
@@ -2525,8 +2515,14 @@ mod publish_spacing_tests {
     #[test]
     fn within_interval_blocked_past_interval_allowed() {
         let interval = Duration::from_millis(1500);
-        assert!(!publish_spacing_ok(Some(Duration::from_millis(10)), interval));
-        assert!(publish_spacing_ok(Some(Duration::from_millis(1501)), interval));
+        assert!(!publish_spacing_ok(
+            Some(Duration::from_millis(10)),
+            interval
+        ));
+        assert!(publish_spacing_ok(
+            Some(Duration::from_millis(1501)),
+            interval
+        ));
     }
 }
 

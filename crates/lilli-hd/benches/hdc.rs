@@ -39,20 +39,22 @@ fn py_baseline_ns(field: &str) -> f64 {
     let path = fixtures_dir().join("py_baseline.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read py_baseline.json ({}): {e}", path.display()));
-    let json: serde_json::Value =
-        serde_json::from_str(&text).expect("py_baseline.json parses");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("py_baseline.json parses");
     let ns = json
         .get(field)
         .and_then(|v| v.as_f64())
         .unwrap_or_else(|| panic!("py_baseline.json missing numeric field {field:?}"));
-    assert!(ns > 0.0, "py_baseline.json field {field:?} must be positive");
+    assert!(
+        ns > 0.0,
+        "py_baseline.json field {field:?} must be positive"
+    );
     ns
 }
 
 /// The first frozen 384-d embedding, used as the projection input.
 fn first_embedding() -> Vec<f32> {
-    let raw = std::fs::read(fixtures_dir().join("proj_100_in.bin"))
-        .expect("proj_100_in.bin readable");
+    let raw =
+        std::fs::read(fixtures_dir().join("proj_100_in.bin")).expect("proj_100_in.bin readable");
     raw.chunks_exact(4)
         .take(384)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
@@ -66,7 +68,9 @@ fn bound_hvs_4096() -> Vec<Vec<u8>> {
         .map(|seed| {
             let mut hv = vec![0u8; D_4096 / 8];
             for (i, byte) in hv.iter_mut().enumerate() {
-                *byte = (i as u8).wrapping_mul(31).wrapping_add(seed.wrapping_mul(97));
+                *byte = (i as u8)
+                    .wrapping_mul(31)
+                    .wrapping_add(seed.wrapping_mul(97));
             }
             hv
         })
@@ -145,7 +149,11 @@ fn hdc(c: &mut Criterion) {
     // kernel replaces (role lookups and binds stay host-side, so timing the
     // full `bsc.bundle` would mismatch the kernel boundary).
     assert_speedup("hamming", py_baseline_ns("hamming_ns"), hamming_rust);
-    assert_speedup("bsc_bundle", py_baseline_ns("bsc_bundle_vote_ns"), bundle_rust);
+    assert_speedup(
+        "bsc_bundle",
+        py_baseline_ns("bsc_bundle_vote_ns"),
+        bundle_rust,
+    );
 
     // Projection is parity-only: production runs on numpy/BLAS. Reported, not gated.
     report_only("project", py_baseline_ns("from_embedding_ns"), project_rust);

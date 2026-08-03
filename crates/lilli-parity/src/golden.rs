@@ -64,7 +64,9 @@ pub enum GoldenError {
     #[error("unknown dtype {dtype:?}")]
     UnknownDtype { dtype: String },
 
-    #[error("degenerate shape {shape:?}: every dimension must be >= 1 and the shape must be non-empty")]
+    #[error(
+        "degenerate shape {shape:?}: every dimension must be >= 1 and the shape must be non-empty"
+    )]
     DegenerateShape { shape: Vec<usize> },
 
     #[error("length mismatch: .bin is {actual} bytes, manifest implies {expected}")]

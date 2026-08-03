@@ -57,11 +57,10 @@ fn duplicate_bare_create_index_errors_like_sqlite3() {
     let mut conn = Connection::open(path, 0).unwrap();
     conn.execute("CREATE TABLE t (a TEXT)", vec![]).unwrap();
     conn.execute("CREATE INDEX ix ON t (a)", vec![]).unwrap();
-    let err = conn.execute("CREATE INDEX ix ON t (a)", vec![]).unwrap_err();
-    assert!(
-        err.to_string().contains("already exists"),
-        "got: {err}"
-    );
+    let err = conn
+        .execute("CREATE INDEX ix ON t (a)", vec![])
+        .unwrap_err();
+    assert!(err.to_string().contains("already exists"), "got: {err}");
     assert!(conn
         .execute("CREATE INDEX IF NOT EXISTS ix ON t (a)", vec![])
         .is_ok());

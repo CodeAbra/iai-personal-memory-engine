@@ -32,8 +32,8 @@ use pyo3::prelude::*;
 // `GraphProp` / `Visitable` / `IntoNeighbors*` impls — otherwise a
 // "multiple different versions of crate `petgraph`" trait-resolution
 // error fires at the call site.
-use rustworkx_core::petgraph::graphmap::UnGraphMap;
 use rustworkx_core::connectivity::connected_components;
+use rustworkx_core::petgraph::graphmap::UnGraphMap;
 use rustworkx_core::shortest_path::distance_matrix;
 
 /// Parallel-threshold node count above which `distance_matrix` switches
@@ -53,13 +53,8 @@ const PARALLEL_THRESHOLD: usize = 50;
 /// expected to be present in the CSR (the source-side caller materializes
 /// undirected adjacency before handing the buffers to PyO3); `add_edge`
 /// is idempotent for `UnGraphMap`, so a double-listed edge is a no-op.
-fn build_ungraph_from_csr(
-    indptr: &[i64],
-    indices: &[i64],
-    n_nodes: usize,
-) -> UnGraphMap<i64, ()> {
-    let mut g: UnGraphMap<i64, ()> =
-        UnGraphMap::with_capacity(n_nodes, indices.len() / 2);
+fn build_ungraph_from_csr(indptr: &[i64], indices: &[i64], n_nodes: usize) -> UnGraphMap<i64, ()> {
+    let mut g: UnGraphMap<i64, ()> = UnGraphMap::with_capacity(n_nodes, indices.len() / 2);
     for u in 0..n_nodes {
         g.add_node(u as i64);
     }
@@ -81,9 +76,7 @@ fn build_ungraph_from_csr(
 /// On an empty input the empty graph is returned. On an already-connected
 /// input a 1-component clone is returned — the post-call code path is
 /// identical, no `Option` indirection needed.
-fn largest_connected_component_subgraph(
-    graph: &UnGraphMap<i64, ()>,
-) -> UnGraphMap<i64, ()> {
+fn largest_connected_component_subgraph(graph: &UnGraphMap<i64, ()>) -> UnGraphMap<i64, ()> {
     let components = connected_components(graph);
     // Deterministic tie-break: among equal-size components, pick the one with
     // the smallest minimum node id. connected_components returns HashSets in an
@@ -99,8 +92,7 @@ fn largest_connected_component_subgraph(
         None => return UnGraphMap::new(),
     };
     let keep: HashSet<i64> = largest.iter().copied().collect();
-    let mut sub: UnGraphMap<i64, ()> =
-        UnGraphMap::with_capacity(keep.len(), keep.len());
+    let mut sub: UnGraphMap<i64, ()> = UnGraphMap::with_capacity(keep.len(), keep.len());
     for &n in &keep {
         sub.add_node(n);
     }
@@ -114,9 +106,7 @@ fn largest_connected_component_subgraph(
 
 /// Compute APSL on an already-connected subgraph. Returns `0.0` for the
 /// empty and singleton cases (matches `networkx.average_shortest_path_length`).
-fn average_shortest_path_length_on_connected_subgraph(
-    subgraph: &UnGraphMap<i64, ()>,
-) -> f64 {
+fn average_shortest_path_length_on_connected_subgraph(subgraph: &UnGraphMap<i64, ()>) -> f64 {
     let n = subgraph.node_count();
     if n <= 1 {
         return 0.0;
@@ -181,8 +171,7 @@ pub fn average_shortest_path_length(
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
     let result = py.allow_threads(move || {
-        let graph =
-            build_ungraph_from_csr(&indptr_owned, &indices_owned, n_nodes);
+        let graph = build_ungraph_from_csr(&indptr_owned, &indices_owned, n_nodes);
         let largest_cc = largest_connected_component_subgraph(&graph);
         average_shortest_path_length_on_connected_subgraph(&largest_cc)
     });
@@ -198,18 +187,14 @@ pub fn average_shortest_path_length(
 /// UUIDs, so their sort order is topology-agnostic and an even stride over the
 /// sorted ids approximates uniform source sampling. With `n_sources >= n` every
 /// node is a source and the estimate EQUALS the exact APSL.
-fn sampled_apsl_on_connected_subgraph(
-    subgraph: &UnGraphMap<i64, ()>,
-    n_sources: usize,
-) -> f64 {
+fn sampled_apsl_on_connected_subgraph(subgraph: &UnGraphMap<i64, ()>, n_sources: usize) -> f64 {
     let n = subgraph.node_count();
     if n <= 1 || n_sources == 0 {
         return 0.0;
     }
     let mut nodes: Vec<i64> = subgraph.nodes().collect();
     nodes.sort_unstable();
-    let idx: HashMap<i64, usize> =
-        nodes.iter().enumerate().map(|(i, &v)| (v, i)).collect();
+    let idx: HashMap<i64, usize> = nodes.iter().enumerate().map(|(i, &v)| (v, i)).collect();
 
     let k = n_sources.min(n);
     let mut total: f64 = 0.0;
@@ -270,8 +255,7 @@ pub fn average_shortest_path_length_sampled(
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
     let result = py.allow_threads(move || {
-        let graph =
-            build_ungraph_from_csr(&indptr_owned, &indices_owned, n_nodes);
+        let graph = build_ungraph_from_csr(&indptr_owned, &indices_owned, n_nodes);
         let largest_cc = largest_connected_component_subgraph(&graph);
         sampled_apsl_on_connected_subgraph(&largest_cc, n_sources)
     });

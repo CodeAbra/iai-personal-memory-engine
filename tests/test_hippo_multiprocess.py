@@ -34,6 +34,10 @@ _WRITER_SCRIPT = textwrap.dedent("""\
         )
         if result.get("status") in ("inserted", "reinforced"):
             ok += 1
+        if i == 0:
+            ready = os.environ.get("IAI_TEST_READY_FILE")
+            if ready:
+                Path(ready).write_text("ready")
 
     print(f"writer: inserted {ok} records")
     sys.exit(0)
@@ -250,6 +254,8 @@ def test_multiprocess_concurrent_write_read_wal_safe(
     n_records = 5
     env = _child_env(hermetic_store, tmp_path)
     env["IAI_TEST_N_RECORDS"] = str(n_records)
+    ready_file = tmp_path / "writer-ready"
+    env["IAI_TEST_READY_FILE"] = str(ready_file)
 
     writer = subprocess.Popen(
         [sys.executable, "-c", _WRITER_SCRIPT],
@@ -259,8 +265,15 @@ def test_multiprocess_concurrent_write_read_wal_safe(
         text=True,
     )
 
-    # Let the writer start, then open the reader while the writer is still running.
-    time.sleep(0.05)
+    # Open the reader only after the writer's FIRST commit — the overlap under
+    # test is read-during-write, not read-before-schema-creation. A fixed sleep
+    # loses that race under load: the writer subprocess may not even finish its
+    # imports in time.
+    deadline = time.monotonic() + 30
+    while not ready_file.exists():
+        if writer.poll() is not None or time.monotonic() > deadline:
+            break
+        time.sleep(0.01)
 
     reader = subprocess.Popen(
         [sys.executable, "-c", _READER_SCRIPT],

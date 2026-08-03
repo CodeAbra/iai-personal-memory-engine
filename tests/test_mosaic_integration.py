@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import inspect
 import random
-import subprocess
-import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -109,29 +107,6 @@ def test_detect_communities_uses_cpm_floor_not_legacy_0_2() -> None:
     assert "CPM_MODULARITY_FLOOR" in src, (
         "community.py must reference CPM_MODULARITY_FLOOR in the mid-N guard"
     )
-
-
-def test_existing_community_tests_still_pass_smoke() -> None:
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_community.py",
-            "-x",
-            "--no-header",
-            "-q",
-        ],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        pytest.fail(
-            "tests/test_community.py regression failed:\n"
-            f"STDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}"
-        )
 
 
 def test_sleep_pipeline_crisis_mode_uses_prior_mode_cold() -> None:
