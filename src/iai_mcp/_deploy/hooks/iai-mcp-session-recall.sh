@@ -73,8 +73,11 @@ fi
 #   1. IAI_MCP_SESSION_RECALL_CLI environment variable (developer override
 #      for non-standard install locations; export in your shell init).
 #   2. ~/.iai-mcp/.cli-path cache file (auto-populated below once the
-#      candidates array finds a working binary).
-#   3. Generic install locations in the candidates array.
+#      lookup finds a working binary).
+#   3. `command -v iai-mcp` — PATH lookup; picks up pyenv shims, pipx
+#      wrappers, and any other PATH-managed install transparently.
+#   4. Generic install locations in the candidates array, checked when PATH
+#      has no entry.
 # Only generic install paths are baked into the source; developer-specific
 # paths belong in the env var or the cache, never here.
 cli_cache="$HOME/.iai-mcp/.cli-path"
@@ -87,7 +90,18 @@ if [ -z "$iai_cli" ] && [ -f "$cli_cache" ]; then
   [ -x "$cached" ] && iai_cli="$cached"
 fi
 if [ -z "$iai_cli" ]; then
+  resolved=$(command -v iai-mcp 2>/dev/null || true)
+  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    iai_cli="$resolved"
+    printf '%s' "$iai_cli" > "$cli_cache" 2>/dev/null || true
+  fi
+fi
+if [ -z "$iai_cli" ]; then
   for candidate in \
+    "$HOME/.pyenv/shims/iai-mcp" \
+    "$HOME/.local/bin/iai-mcp" \
+    "$HOME/.local/pipx/venvs/iai-mcp/bin/iai-mcp" \
+    "/opt/homebrew/bin/iai-mcp" \
     "$HOME/IAI-MCP/.venv/bin/iai-mcp" \
     "/usr/local/bin/iai-mcp"
   do
