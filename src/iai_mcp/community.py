@@ -101,9 +101,7 @@ def detect_communities(
     prior: CommunityAssignment | None = None,
     prior_mode: Literal["seeded", "cold"] = "seeded",
 ) -> CommunityAssignment:
-    from iai_mcp.mosaic import run_mosaic
     from iai_mcp.mosaic_lineage import LineageReport
-    from iai_mcp.mosaic_policy import CPM_MODULARITY_FLOOR
 
     n = graph.node_count()
     if n == 0:
@@ -116,6 +114,14 @@ def detect_communities(
         return flat
 
     try:
+        # Imported inside the guard, not at function entry: iai_mcp.mosaic
+        # imports numba at module scope and mosaic_policy reaches numba
+        # through it. A missing or ABI-mismatched numba raises at import
+        # time, which must degrade to the flat assignment below rather than
+        # propagate out of detect_communities and fail the whole recall.
+        from iai_mcp.mosaic import run_mosaic
+        from iai_mcp.mosaic_policy import CPM_MODULARITY_FLOOR
+
         inner_assignment, lineage_report = run_mosaic(
             graph, prior=prior, prior_mode=prior_mode, seed=42
         )
