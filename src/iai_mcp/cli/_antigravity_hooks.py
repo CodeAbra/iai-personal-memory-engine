@@ -14,20 +14,25 @@ import os
 import stat
 from importlib import resources as _res
 from pathlib import Path
+import platform
 
 _GROUP = "iai-pme"
 
+_IS_WIN = platform.system() == "Windows"
+_EXT = ".ps1" if _IS_WIN else ".sh"
+_CMD_PREFIX = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File " if _IS_WIN else "bash "
+
 _HOOK_SCRIPTS = (
-    "iai-mcp-session-capture.sh",
-    "iai-mcp-session-recall.sh",
-    "iai-mcp-per-turn-recall.sh",
-    "iai-mcp-antigravity-recall.sh",
-    "iai-mcp-antigravity-capture.sh",
+    "iai-mcp-session-capture",
+    "iai-mcp-session-recall",
+    "iai-mcp-per-turn-recall",
+    "iai-mcp-antigravity-recall",
+    "iai-mcp-antigravity-capture",
 )
 
 _EVENT_WIRING = (
-    ("PreInvocation", "iai-mcp-antigravity-recall.sh", 30),
-    ("Stop", "iai-mcp-antigravity-capture.sh", 35),
+    ("PreInvocation", f"iai-mcp-antigravity-recall{_EXT}", 30),
+    ("Stop", f"iai-mcp-antigravity-capture{_EXT}", 35),
 )
 
 
@@ -59,13 +64,14 @@ def install_antigravity_hooks() -> int:
     hooks_dir, hooks_json = _antigravity_paths()
 
     templates = _res.files("iai_mcp") / "_deploy" / "hooks"
-    missing = [n for n in _HOOK_SCRIPTS if not (templates / n).exists()]
+    missing = [n + _EXT for n in _HOOK_SCRIPTS if not (templates / (n + _EXT)).exists()]
     if missing:
         print(f"ERROR: hook templates missing in package data: {missing}")
         return 1
 
     hooks_dir.mkdir(parents=True, exist_ok=True)
-    for name in _HOOK_SCRIPTS:
+    for base_name in _HOOK_SCRIPTS:
+        name = base_name + _EXT
         dst = hooks_dir / name
         dst.write_bytes((templates / name).read_bytes())
         dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
@@ -95,7 +101,7 @@ def install_antigravity_hooks() -> int:
         entries.append({
             "hooks": [{
                 "type": "command",
-                "command": f"bash {hooks_dir / marker}",
+                "command": f"{_CMD_PREFIX}{hooks_dir / marker}",
                 "timeout": timeout,
             }]
         })
@@ -106,10 +112,21 @@ def install_antigravity_hooks() -> int:
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
         hooks_json.write_text(json.dumps(data, indent=2))
 
+    if _IS_WIN:
+        print("\nSetting up auto-scan for Antigravity GUI (Desktop App) users...")
+        scan_script = hooks_dir / "iai-mcp-auto-scan-antigravity.ps1"
+        if scan_script.exists():
+            import subprocess
+            cmd = f'schtasks /create /tn "IaiMcpAntigravityAutoScan" /tr "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File {scan_script}" /sc minute /mo 30 /f /rl limited'
+            try:
+                subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL)
+                print("status: ACTIVE — Antigravity GUI auto-scanner scheduled in Windows Task Scheduler (runs every 30m).")
+            except Exception as e:
+                print(f"WARNING: failed to create scheduled task: {e}")
+
     print(
-        "\nNote: verified against the Antigravity CLI (`agy`); the IDE "
-        "shares this config dir but is untested. Restart the CLI to pick "
-        "up hooks.json."
+        "\nNote: verified against the Antigravity CLI (`agy`) and the Antigravity GUI (Desktop App)."
+        "\nRestart the CLI or let the background scanner handle the GUI logs."
     )
     return 0
 
@@ -117,7 +134,8 @@ def install_antigravity_hooks() -> int:
 def uninstall_antigravity_hooks() -> int:
     hooks_dir, hooks_json = _antigravity_paths()
 
-    for name in _HOOK_SCRIPTS:
+    for base_name in _HOOK_SCRIPTS:
+        name = base_name + _EXT
         dst = hooks_dir / name
         if dst.exists():
             dst.unlink()
@@ -147,7 +165,8 @@ def status_antigravity_hooks() -> int:
     templates = _res.files("iai_mcp") / "_deploy" / "hooks"
 
     all_installed = True
-    for name in _HOOK_SCRIPTS:
+    for base_name in _HOOK_SCRIPTS:
+        name = base_name + _EXT
         src_ok = (templates / name).exists()
         dst_ok = (hooks_dir / name).exists()
         all_installed = all_installed and dst_ok
