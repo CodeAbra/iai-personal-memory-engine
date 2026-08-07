@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -19,7 +19,7 @@ def lifecycle_state_path(store_root: Path | str | None = None) -> Path:
     write side and the read side can never diverge. With no explicit
     ``store_root``, the ``IAI_MCP_STORE`` environment variable is honored;
     absent that, the module-level ``LIFECYCLE_STATE_PATH`` is returned as the
-    default — read at call time so it stays the single authoritative default for
+    default вЂ” read at call time so it stays the single authoritative default for
     the home-rooted store. For the default store the resolved path is
     byte-identical to ``LIFECYCLE_STATE_PATH``.
     """
@@ -198,7 +198,7 @@ def save_state(record: LifecycleStateRecord, path: Path | None = None) -> None:
     )
     replaced = False
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -211,3 +211,4 @@ def save_state(record: LifecycleStateRecord, path: Path | None = None) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+

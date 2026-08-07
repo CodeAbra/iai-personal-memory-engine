@@ -88,6 +88,8 @@ iai_mcp = [
     "_deploy/systemd/*.service",
     "_deploy/windows/*.xml",
     "_deploy/hooks/*.sh",
+    "_deploy/hooks/*.ps1",
+    "_deploy/windows/*.xml",
     "_deploy/brainview/*.html",
     "_wrapper/*.js",
 ]

@@ -1,4 +1,4 @@
-
+﻿
 from __future__ import annotations
 
 import hashlib
@@ -24,12 +24,12 @@ MAX_DRAIN_EVENTS_PER_RUN = 5000
 # cleanly (leaving the remaining files on disk for the next cycle, exactly like
 # the per-run event cap) and emits a telemetry event. Default 2.5 GiB sits well
 # under the watchdog hard cap (4 GiB) so the drain yields BEFORE the watchdog
-# would kill the process — self-limit instead of getting killed. Operator-
+# would kill the process вЂ” self-limit instead of getting killed. Operator-
 # overridable; ``0`` or a non-positive / malformed value disables the soft cap.
 DRAIN_RSS_SOFT_CAP_DEFAULT_BYTES = 2_684_354_560
 #: The drain may GROW the resident set by this much past its own starting
 #: point before yielding. The cap exists to yield before the watchdog's
-#: hard kill — it must measure what the DRAIN adds, not the daemon's
+#: hard kill вЂ” it must measure what the DRAIN adds, not the daemon's
 #: legitimate standing footprint (indexes + embedder grow with the corpus,
 #: and an absolute cap below that baseline silences the drain forever).
 DRAIN_RSS_GROWTH_BUDGET_DEFAULT_BYTES = 805_306_368
@@ -391,7 +391,7 @@ def capture_turn(
 
     text = (text or "").strip()
     # A durable working-tier result is stored byte-identical even below the
-    # generic noise floor — the marker is carried out-of-band in
+    # generic noise floor вЂ” the marker is carried out-of-band in
     # provenance_extra, never folded into text, so literal_surface stays
     # verbatim. Only the length floor is relaxed for the marked path.
     durable = bool((provenance_extra or {}).get("working_tier_durable"))
@@ -419,15 +419,15 @@ def capture_turn(
         # validated non-empty above (the MIN_CAPTURE_LEN guard), so embedding
         # text is safe for every caller.
         #
-        # The capture date goes into the VECTOR only — the stored surface
+        # The capture date goes into the VECTOR only вЂ” the stored surface
         # stays verbatim. Both modes MUST stay opt-in: same-day binding at
         # the embedding layer NECESSARILY raises same-day unrelated-pair
         # cosine, and the similarity floors leave ~0.03 headroom on natural
-        # short turns — any strength that binds also breaches a floor.
+        # short turns вЂ” any strength that binds also breaches a floor.
         # Temporal binding belongs in the rank layer (date-mention cues
         # matched against created_at), not in the vector.
-        #   "true"  — literal shared prefix (+~0.18 same-day inflation).
-        #   "blend" — normalize(v_text + alpha*perp(v_date, v_text));
+        #   "true"  вЂ” literal shared prefix (+~0.18 same-day inflation).
+        #   "blend" вЂ” normalize(v_text + alpha*perp(v_date, v_text));
         #             +~0.07 inflation at alpha=0.15, still a floor breach;
         #             a floor-safe alpha no longer binds.
         _embedder = embedder_for_store(store)
@@ -589,7 +589,7 @@ def capture_turn(
             },
         )
 
-    # Mirror every capture into the recent bank, not just transcript drains —
+    # Mirror every capture into the recent bank, not just transcript drains вЂ”
     # the daemon-down degraded-recall path (bank-recall) must surface direct
     # CLI/MCP captures too, or the transit layer goes blind to them.
     try:
@@ -635,14 +635,14 @@ def _drain_write_pending(
     of the synchronous embed. The row lands with ``embedding_pending=1`` and a
     zero-vector placeholder; a later deferred-embed pass fills the real vector.
     This keeps the drain a sequence of cheap SQLite writes whose resident-memory
-    cost does not grow with the backlog size — a long backlog does not hold the
+    cost does not grow with the backlog size вЂ” a long backlog does not hold the
     embedder, JIT, and columnar pages resident through one synchronous run.
 
     The same validation, idempotency tag, tags, and provenance shape as the
     synchronous capture path are applied, so the row is dedup-findable by tag and
     verbatim-recallable the instant it is written (recall surfaces pending rows
     through its recency union, independent of the embedding). Pinned-record and
-    cosine-dedup semantics that need an embedding are deferred with the vector —
+    cosine-dedup semantics that need an embedding are deferred with the vector вЂ”
     the drain handles only conversational episodic turns, whose dedup is the
     exact-key idem tag, never a cosine neighbour.
     """
@@ -729,7 +729,7 @@ def _drain_write_pending(
         )
 
     # A pending row is arrived memory: stamp the store-advance sidecar the
-    # per-turn hooks watch, and feed the working tier — ambient turns must
+    # per-turn hooks watch, and feed the working tier вЂ” ambient turns must
     # update the active task exactly like fully-embedded inserts do.
     try:
         from iai_mcp.store_watermark import emit as _emit_watermark
@@ -774,7 +774,7 @@ def capture_transcript(
 
     counts = {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 0}
     seen = 0
-    with path.open() as fh:
+    with path.open(encoding="utf-8") as fh:
         for line in fh:
             if seen >= max_turns:
                 break
@@ -843,7 +843,7 @@ def _parse_transcript_obj(
 ) -> tuple[str, str, str | None, str | None] | None:
     if obj.get("type") == "response_item":
         # Codex rollout transcript: user messages also appear as event_msg
-        # records, so ONLY response_item is consumed — anything else would
+        # records, so ONLY response_item is consumed вЂ” anything else would
         # double-capture every user turn.
         payload = obj.get("payload")
         if not isinstance(payload, dict) or payload.get("type") != "message":
@@ -867,7 +867,7 @@ def _parse_transcript_obj(
             return None
         return role, text, payload.get("id") or obj.get("uuid"), obj.get("timestamp")
     if "step_index" in obj and "source" in obj:
-        # Antigravity transcript_full lines: conversational turns only —
+        # Antigravity transcript_full lines: conversational turns only вЂ”
         # tool views, history replays, and system steps are not dialogue.
         src, typ = obj.get("source"), obj.get("type")
         if src == "USER_EXPLICIT" and typ == "USER_INPUT":
@@ -925,11 +925,12 @@ def write_deferred_event(
     # O_CREAT mode applies only on create; enforce 0600 on every open so a
     # pre-existing 0644 file is tightened too (idempotent, best-effort).
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
     except OSError:
         pass
     try:
-        fh = os.fdopen(fd, "a")  # fdopen now owns fd; the with-block closes it
+        fh = os.fdopen(fd, "a", encoding="utf-8")  # fdopen now owns fd; the with-block closes it
     except BaseException:
         os.close(fd)  # only reached if fdopen itself failed (fd not yet owned)
         raise
@@ -1005,7 +1006,7 @@ def _compact_live_file_if_oversized(path: Path, session_id: str) -> None:
 
     # Best-effort self-drain: succeeds only when NO daemon holds the writer
     # (daemon down). When the daemon IS alive it owns the single writer and
-    # advances the drain-offset itself at its drowsy edges — so a failed open
+    # advances the drain-offset itself at its drowsy edges вЂ” so a failed open
     # here is normal, NOT a reason to skip the trim below. The trim keys off
     # the persisted offset regardless of who advanced it, which is what keeps
     # a marathon session's file bounded while the daemon is the one promoting.
@@ -1059,7 +1060,7 @@ def _compact_live_file_if_oversized(path: Path, session_id: str) -> None:
     try:
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            tmp_fh = os.fdopen(fd, "w")  # fdopen now owns fd
+            tmp_fh = os.fdopen(fd, "w", encoding="utf-8")  # fdopen now owns fd
         except BaseException:
             os.close(fd)  # only reached if fdopen itself failed
             raise
@@ -1202,7 +1203,7 @@ def write_deferred_captures(
     # Include pid for collision safety: two parallel bulk-import workers in
     # the same wall-clock second would otherwise race for the same final
     # path. Stream to a sibling .jsonl.tmp file and atomic-rename only after
-    # flush+fsync — drain filters by ``suffix != ".jsonl"`` so the in-progress
+    # flush+fsync вЂ” drain filters by ``suffix != ".jsonl"`` so the in-progress
     # .tmp is never claimed mid-write.
     final_name = f"{session_id}-{int(time.time())}-{os.getpid()}.jsonl"
     out_path = deferred_dir / final_name
@@ -1218,7 +1219,7 @@ def write_deferred_captures(
         path = Path(transcript_path).expanduser()
         if path.exists():
             seen = 0
-            with path.open() as src:
+            with path.open(encoding="utf-8") as src:
                 for line in src:
                     if seen >= max_turns:
                         break
@@ -1274,8 +1275,8 @@ def drain_deferred_captures(store: MemoryStore) -> dict[str, int]:
         "events_skipped_existing": 0,
     }
 
-    # Rail: operator kill-switch. When set, the in-daemon drain is a no-op — no
-    # files are claimed, no embed runs — deferring the whole backlog to the
+    # Rail: operator kill-switch. When set, the in-daemon drain is a no-op вЂ” no
+    # files are claimed, no embed runs вЂ” deferring the whole backlog to the
     # offline ``iai-mcp deferred-drain`` tool. An escape hatch if the in-daemon
     # drain ever misbehaves; capture liveness is preserved because the deferred
     # files stay untouched on disk.
@@ -1317,14 +1318,14 @@ def _drain_deferred_captures_locked(
     # backlog is dominated by duplicates of already-stored records; embedding each
     # one through capture_turn only to discard it burns the Rust BERT step. The
     # pre-check skips that embed for a known duplicate but still reinforces the
-    # pre-existing record once (a re-seen turn strengthens the memory) — and the
+    # pre-existing record once (a re-seen turn strengthens the memory) вЂ” and the
     # seen_this_run set collapses all repeats of the same tag in one backlog to a
     # single reinforcement, so a giant repeat-backlog cannot inflate the signal.
     # The tag is reproduced exactly as capture_turn computes it, so the pre-check
     # matches capture_turn's own idem-check, which remains the correctness backstop
-    # — the pre-check can only save the embed, never drop a genuinely-new record.
+    # вЂ” the pre-check can only save the embed, never drop a genuinely-new record.
     seen_this_run: set[str] = set()
-    # Newest user turn seen this pass (ts_iso, text, session_id) — the drain's
+    # Newest user turn seen this pass (ts_iso, text, session_id) вЂ” the drain's
     # anchor for one next-turn pack refresh at the end of the pass. Tracked
     # regardless of dedup outcome: a re-seen turn is still the current context.
     newest_live_turn: "tuple[str, str, str] | None" = None
@@ -1399,7 +1400,7 @@ def _drain_deferred_captures_locked(
     for fpath in candidates:
         if cap_hit:
             break
-        # Rail: soft resident-memory ceiling — check before claiming the next file
+        # Rail: soft resident-memory ceiling вЂ” check before claiming the next file
         # so the run yields with the remaining backlog still on disk (deferred, not
         # lost). A 0 reading (psutil unavailable) is treated as unknown and never
         # trips the cap.
@@ -1447,7 +1448,7 @@ def _drain_deferred_captures_locked(
             # bounds the resident batch to ~MAX_DRAIN_EVENTS_PER_RUN parsed
             # events, and the un-processed tail is streamed straight to
             # .partial.jsonl from the same handle (never buffered).
-            with work_path.open() as fh:
+            with work_path.open(encoding="utf-8") as fh:
                 header_line: str | None = None
                 for raw in fh:
                     if raw.strip():
@@ -1483,7 +1484,7 @@ def _drain_deferred_captures_locked(
                         # Write header + the cap-triggering line + the rest of the
                         # still-open handle directly. The marker rename above does
                         # not invalidate the open fd (same inode), so the tail is
-                        # streamed through one line at a time — the remainder is
+                        # streamed through one line at a time вЂ” the remainder is
                         # preserved byte-for-byte without ever being buffered.
                         with tmp_path.open("w") as ph:
                             ph.write(header_line + "\n")
@@ -1521,7 +1522,7 @@ def _drain_deferred_captures_locked(
                     # is reproduced exactly as capture_turn computes it (stripped,
                     # length-bounded text + resolved timestamp). A too-short event
                     # would never become a record (capture_turn skips it before
-                    # embedding), so it can never match a stored tag — leave those to
+                    # embedding), so it can never match a stored tag вЂ” leave those to
                     # fall through to capture_turn's own "too short" skip.
                     if _is_episodic_conversational(tier, role):
                         norm_text = (ev.get("text", "") or "").strip()
@@ -1566,7 +1567,7 @@ def _drain_deferred_captures_locked(
                             existing_id = store.find_record_by_tag(tag)
                             if existing_id is not None:
                                 # The record already exists in the store. Skip the
-                                # expensive embed, but still reinforce it once — re-seeing
+                                # expensive embed, but still reinforce it once вЂ” re-seeing
                                 # a turn is a memory-strengthening signal, exactly what
                                 # capture_turn's own duplicate branch does. reinforce_record
                                 # is a cheap edge boost (no embed), so the drain stays fast.
@@ -1610,8 +1611,8 @@ def _drain_deferred_captures_locked(
                         counts["events_inserted"] += 1
                         # Mirror the new turn into the recent bank so the daemon-down
                         # degraded-recall path (bank-recall) still surfaces it. The
-                        # recent-bank recall is verbatim substring matching — it never
-                        # reads the stored vector — so the pending row's placeholder
+                        # recent-bank recall is verbatim substring matching вЂ” it never
+                        # reads the stored vector вЂ” so the pending row's placeholder
                         # vector is irrelevant here; the verbatim text is what matters.
                         try:
                             from iai_mcp.memory_bank import append_recent_record
@@ -1731,8 +1732,8 @@ def _drain_deferred_captures_locked(
     # Flush the drained records out of the in-memory insert buffer HERE, in
     # the drain's own background context. Left unflushed, the buffer's
     # read-your-writes discipline makes the FIRST post-drain read that needs
-    # a buffered row (a recall's by-id batch fetch) pay the whole flush —
-    # encrypt + batch insert + index feeds — synchronously on the awake
+    # a buffered row (a recall's by-id batch fetch) pay the whole flush вЂ”
+    # encrypt + batch insert + index feeds вЂ” synchronously on the awake
     # recall path, and every concurrent recall serializes behind it.
     if counts["events_inserted"]:
         try:
@@ -1759,7 +1760,7 @@ def _drain_deferred_captures_locked(
 
     # Stash the newest user turn as the next-turn pack anchor. The drain
     # itself never embeds (its resident-set discipline depends on that); the
-    # wake-sequence pass — where the embedder is warm anyway — consumes the
+    # wake-sequence pass вЂ” where the embedder is warm anyway вЂ” consumes the
     # anchor and refreshes the pack once, so anticipation tracks the
     # conversation's current point instead of thrashing per replayed event.
     if newest_live_turn is not None:
@@ -1774,7 +1775,7 @@ _PERMANENT_FAILED_NAMED_RE = re.compile(r"^(.+)\.permanent-failed-([^.]+)\.jsonl
 
 def _count_lines(fpath: Path) -> int:
     try:
-        with fpath.open() as fh:
+        with fpath.open(encoding="utf-8") as fh:
             return sum(1 for ln in fh if ln.strip())
     except OSError:
         return 0
@@ -1839,7 +1840,7 @@ def drain_permanent_failed_files(
         file_dropped = 0
 
         try:
-            with fpath.open() as fh:
+            with fpath.open(encoding="utf-8") as fh:
                 lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
 
             if not lines:
@@ -1961,7 +1962,7 @@ def drain_active_live_captures(
         if not _LIVE_ACTIVE_RE.search(fpath.name):
             continue
         try:
-            with fpath.open() as fh:
+            with fpath.open(encoding="utf-8") as fh:
                 raw_lines = fh.readlines()
         except OSError:
             continue
@@ -2043,7 +2044,7 @@ def drain_active_live_captures(
         if file_had_insert:
             counts["files_drained"] += 1
 
-    # Rail: post-drain memory relief on the wake-edge live-drain path too — hand
+    # Rail: post-drain memory relief on the wake-edge live-drain path too вЂ” hand
     # idle allocator pages back to the OS after real work. Reuses the existing
     # relief helper; adds no consolidation-pipeline step.
     if counts["events_inserted"] or counts["events_reinforced"]:
@@ -2057,3 +2058,4 @@ def drain_active_live_captures(
             log.debug("active_live_drain_post_relief_failed: %s", exc)
 
     return counts
+
