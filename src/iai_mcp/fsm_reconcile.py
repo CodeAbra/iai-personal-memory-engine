@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -106,4 +106,3 @@ def reconcile_fsm_state(
         corrected = _auto_correct_legacy(legacy_path, canonical)
 
     return {"canonical": canonical, "legacy": legacy, "drift": drift, "corrected": corrected}
-

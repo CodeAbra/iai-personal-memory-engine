@@ -50,20 +50,14 @@ def cmd_session_start(args: argparse.Namespace) -> int:
         if not isinstance(resp, dict) or "result" not in resp:
             return 0
         result = resp.get("result")
-        import sys
-        print(f"DEBUG result: {result}", file=sys.stderr)
         if not isinstance(result, dict):
             return 0
         rendered = format_payload_as_markdown(result)
-        print(f"DEBUG rendered length: {len(rendered) if rendered else 0}", file=sys.stderr)
         if not rendered:
             return 0
         _cli.sys.stdout.write(_truncate_for_claude_code_hook(rendered, cap=10000))
         return 0
     except Exception as exc:
-        import sys
-        import traceback
-        traceback.print_exc(file=sys.stderr)
         logger.error("session-start failed: %s", exc)
         return 0
 
@@ -331,10 +325,6 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         os.replace(tmp_path, offset_path)
         return 0
     except Exception as e:
-        import traceback
-        import sys
-        print("TRACEBACK EXACT:")
-        traceback.print_exception(type(e), e, e.__traceback__, file=sys.stdout)
         logger.error("capture-turn-deferred failed: %s", e)
         print(
             f"capture-turn-deferred: failed {type(e).__name__}: {e}",

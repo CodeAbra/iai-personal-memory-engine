@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -289,4 +289,3 @@ class UserModelPrefetcher:
 
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [rid for (_, _, rid) in scored[:top_k]]
-

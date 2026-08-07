@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -50,7 +50,7 @@ def pid_exists(pid: int) -> bool:
 
     psutil-first: the POSIX ``os.kill(pid, 0)`` idiom raises ``OSError``
     (WinError 87) for a HEALTHY pid on Windows, so a kill-0-only probe reads
-    live processes as dead вЂ” lock stealers, crash-quarantine misjudgments,
+    live processes as dead — lock stealers, crash-quarantine misjudgments,
     scanner crashes. The kill-0 fallback survives only for a stripped
     environment and never declares death on an unreliable probe result.
     """
@@ -87,7 +87,7 @@ def _is_pid_alive(pid: int) -> bool:
 
     if psutil is None:
         # POSIX-only probe: on Windows os.kill(pid, 0) raises OSError
-        # (WinError 87) for a HEALTHY pid вЂ” a healthy daemon would read as
+        # (WinError 87) for a HEALTHY pid — a healthy daemon would read as
         # dead. psutil (a hard dependency) is the reliable path; this branch
         # survives only for a stripped environment.
         try:
@@ -97,7 +97,7 @@ def _is_pid_alive(pid: int) -> bool:
         except PermissionError:
             return True
         except OSError:
-            # Unreliable probe result вЂ” never declare death on it.
+            # Unreliable probe result — never declare death on it.
             return True
         log.debug(
             "lifecycle_lock: psutil unavailable; falling back to "
@@ -200,7 +200,7 @@ class LifecycleLock:
     def acquire(self) -> None:
         # Atomic claim: O_CREAT|O_EXCL means exactly ONE racer creates the
         # file. The prior read->check->replace shape let two daemons both
-        # pass the liveness check and both install their payload вЂ” a
+        # pass the liveness check and both install their payload — a
         # double-writer on the same store. A stale lock (dead pid, corrupt
         # payload) is unlinked and the claim retried; only one racer wins the
         # recreate.
@@ -269,4 +269,3 @@ class LifecycleLock:
         except FileNotFoundError:
             pass
         return previous
-
