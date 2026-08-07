@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = "SilentlyContinue"
 $brainDir = [System.IO.Path]::Combine($env:USERPROFILE, ".gemini", "antigravity", "brain")
-$captureScript = [System.IO.Path]::Combine($env:USERPROFILE, ".gemini", "config", "iai-hooks", "antigravity-capture.ps1")
+$captureScript = [System.IO.Path]::Combine($env:USERPROFILE, ".gemini", "config", "iai-hooks", "iai-mcp-antigravity-capture.ps1")
 $stateDir = [System.IO.Path]::Combine($env:USERPROFILE, ".iai-mcp", ".capture-state")
 
 if (-not (Test-Path $brainDir) -or -not (Test-Path $captureScript)) { exit 0 }
@@ -31,3 +31,4 @@ Get-ChildItem -Path $brainDir | Where-Object { $_.PSIsContainer -and $_.Name -ma
         }
     }
 }
+

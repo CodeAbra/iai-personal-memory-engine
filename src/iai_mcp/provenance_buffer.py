@@ -42,7 +42,7 @@ def flush_deferred_provenance(store: MemoryStore) -> int:
     if not path.exists():
         return 0
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             raw_lines = f.read().strip().splitlines()
     except OSError:
         return 0

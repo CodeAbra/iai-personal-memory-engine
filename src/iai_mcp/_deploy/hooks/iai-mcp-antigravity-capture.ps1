@@ -32,3 +32,4 @@ if (Test-Path $liveFile) {
     $newName = "$sessionId.live-$ts-$pidId.jsonl"
     Rename-Item -Path $liveFile -NewName $newName -ErrorAction SilentlyContinue
 }
+

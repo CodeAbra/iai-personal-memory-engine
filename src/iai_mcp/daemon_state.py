@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from iai_mcp import _flock
 import json
@@ -95,7 +95,7 @@ def save_state(state: dict) -> None:
     # Whole-dict replace: legal ONLY for a dict loaded moments ago (boot,
     # tests) or under update_state's lock. A long-held dict saved here
     # silently erases every key another writer persisted since that dict
-    # was loaded — concurrent writers must go through update_state.
+    # was loaded вЂ” concurrent writers must go through update_state.
     with _state_write_lock():
         target = daemon_state_path()
         fd, tmp = tempfile.mkstemp(
@@ -104,7 +104,7 @@ def save_state(state: dict) -> None:
             dir=str(target.parent),
         )
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
@@ -121,7 +121,7 @@ def save_state(state: dict) -> None:
 def update_state(mutator: Callable[[dict], None]) -> dict:
     # The one safe write path under concurrency: EX-flock (cross-process,
     # daemon + CLI), fresh load, targeted mutation, save. Mutators must touch
-    # only their own keys. load_state/save_state stay the patchable seams —
+    # only their own keys. load_state/save_state stay the patchable seams вЂ”
     # tests that stub them see every update_state write.
     with _state_write_lock():
         state = load_state()
@@ -273,3 +273,4 @@ def get_pending_digest(state: dict, now: datetime) -> dict | None:
 
     update_state(_consume)
     return digest
+

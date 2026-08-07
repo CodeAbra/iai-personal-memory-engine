@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -28,7 +28,7 @@ def _create_canonical_staging(db):
     """Create the staging table from the CANONICAL records DDL, not from a
     pyarrow-derived column list. Arrow schemas carry names and types but no
     SQL constraints, so an arrow-derived staging table loses
-    ``vec_label INTEGER PRIMARY KEY AUTOINCREMENT`` and ``id UNIQUE`` — after
+    ``vec_label INTEGER PRIMARY KEY AUTOINCREMENT`` and ``id UNIQUE`` вЂ” after
     the swap, inserts leave ``vec_label`` NULL (the rowid alias is gone) and
     the next label-map load crashes the daemon into a restart loop. The SQL
     DDL is embedding-dim independent (the column is a BLOB), so the canonical
@@ -77,7 +77,7 @@ def _progress_write(store: MemoryStore, state: dict) -> None:
         dir=str(target.parent),
     )
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -441,7 +441,7 @@ def detect_partial_migration(db) -> dict:
             "state": "needs_rollback",
             "old_tables": old_tables,
             "reason": (
-                "records_v_new present alongside records — staging did not "
+                "records_v_new present alongside records вЂ” staging did not "
                 "complete; recover by dropping records_v_new (rollback) or "
                 "resuming from migration_progress.json."
             ),
@@ -459,7 +459,7 @@ def detect_partial_migration(db) -> dict:
             "state": "needs_rollback",
             "old_tables": old_tables,
             "reason": (
-                "records_v_new + records_old_<ts> present, records absent — "
+                "records_v_new + records_old_<ts> present, records absent вЂ” "
                 "swap interrupted between renames; rollback from records_old_<ts>."
             ),
         }
@@ -630,3 +630,4 @@ def _resume(db, store: MemoryStore, target_embedder) -> int:
         )
         return 2
     return 0
+

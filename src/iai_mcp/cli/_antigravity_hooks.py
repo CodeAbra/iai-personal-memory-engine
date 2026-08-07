@@ -117,8 +117,16 @@ def install_antigravity_hooks() -> int:
         scan_script = hooks_dir / "iai-mcp-auto-scan-antigravity.ps1"
         if scan_script.exists():
             import subprocess
-            cmd = f'schtasks /create /tn "IaiMcpAntigravityAutoScan" /tr "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File {scan_script}" /sc minute /mo 30 /f /rl limited'
             try:
+                tmpl = _res.files("iai_mcp") / "_deploy" / "windows" / "iai-mcp-antigravity-scan.xml"
+                text = tmpl.read_text(encoding="utf-8")
+                text = text.replace("{SCAN_SCRIPT}", str(scan_script))
+                
+                xml_out = Path.home() / ".iai-mcp" / "iai-mcp-antigravity-scan.task.xml"
+                xml_out.parent.mkdir(parents=True, exist_ok=True)
+                xml_out.write_text(text, encoding="utf-16")
+                
+                cmd = f'schtasks /Create /TN "IaiMcpAntigravityAutoScan" /XML "{xml_out}" /F'
                 subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL)
                 print("status: ACTIVE — Antigravity GUI auto-scanner scheduled in Windows Task Scheduler (runs every 30m).")
             except Exception as e:
@@ -142,6 +150,15 @@ def uninstall_antigravity_hooks() -> int:
             print(f"removed: {dst}")
         else:
             print(f"(not present) {dst}")
+
+    if _IS_WIN:
+        import subprocess
+        cmd = 'schtasks /Delete /TN "IaiMcpAntigravityAutoScan" /F'
+        try:
+            subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("removed scheduled task: IaiMcpAntigravityAutoScan")
+        except Exception:
+            pass
 
     if not hooks_json.exists():
         print(f"(not present) {hooks_json}")
