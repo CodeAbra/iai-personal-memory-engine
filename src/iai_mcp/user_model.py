@@ -40,7 +40,7 @@ def load() -> UserModel:
     if not path.exists():
         return default()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default()
 

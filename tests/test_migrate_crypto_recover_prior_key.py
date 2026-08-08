@@ -8,7 +8,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from cryptography.exceptions import InvalidTag
 
 from iai_mcp.migrate import migrate_crypto_recover_prior_key
 from iai_mcp.store import MemoryStore
@@ -63,7 +62,11 @@ def test_recover_prior_key_atomic_swap_and_idempotent(tmp_path: Path) -> None:
     kpath.write_bytes(key_b)
     os.chmod(kpath, 0o600)
     store_b = MemoryStore(path=root, user_id="default")
-    with pytest.raises(InvalidTag):
+    # A wrong-generation record surfaces as a NAMED integrity error carrying
+    # the recover-prior-key runbook — never a bare empty-message InvalidTag.
+    from iai_mcp.hippo import HippoIntegrityError
+
+    with pytest.raises(HippoIntegrityError, match="recover-prior-key"):
         store_b.get(rid)
 
     out = migrate_crypto_recover_prior_key(store_b, key_a, dry_run=False)

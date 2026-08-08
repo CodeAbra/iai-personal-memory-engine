@@ -45,6 +45,8 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
     from iai_mcp.capture import (
         MAX_CAPTURE_LEN,
         MIN_CAPTURE_LEN,
+        SpoolKeyUnavailable,
+        _decode_spool_line,
         _idem_tag,
         _is_episodic_conversational,
         _resolve_ts,
@@ -70,16 +72,24 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
             continue
 
         try:
-            header = json.loads(lines[0])
+            header = json.loads(_decode_spool_line(lines[0]))
+        except SpoolKeyUnavailable:
+            # No readable key in this process — leave the file untouched for
+            # a pass that has one; unlinking here would destroy the turns.
+            continue
         except (ValueError, TypeError):
             # Malformed header — skip the whole file rather than abort the batch.
             continue
         session_id = header.get("session_id", "-")
 
+        key_deferred = False
         for ln in lines[1:]:
             events_seen += 1
             try:
-                ev = json.loads(ln)
+                ev = json.loads(_decode_spool_line(ln))
+            except SpoolKeyUnavailable:
+                key_deferred = True
+                break
             except (ValueError, TypeError):
                 skipped += 1
                 continue
@@ -130,6 +140,8 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
             else:
                 skipped += 1
 
+        if key_deferred:
+            continue
         # Unlink only after the file is fully drained — the source_uuid
         # idem-tag makes a re-run loss-free if a crash interrupts here.
         fpath.unlink(missing_ok=True)

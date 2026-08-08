@@ -66,6 +66,8 @@ def is_editable_install() -> bool:
         return False
     for name in _DIST_NAMES:
         try:
+            # importlib.metadata's read_text takes only a filename — it has
+            # no encoding parameter (it decodes utf-8 itself).
             raw = distribution(name).read_text("direct_url.json")
         except Exception:  # noqa: BLE001
             continue

@@ -50,6 +50,25 @@ def _format_hits(hits: list[dict], *, max_surface_chars: int = 200) -> str:
     return "\n".join(lines)
 
 
+def _print_refusal_exit(message: str, *, json_mode: bool) -> int:
+    # One carrier for the CLI half of the refusal wire contract — recall and
+    # temporal-recall must emit the identical document or scripts keying on
+    # error_code/rc 2 see the verbs drift apart.
+    import json as _json
+
+    from iai_mcp.errors import ERR_EMBEDDER_REFUSAL
+
+    if json_mode:
+        print(_json.dumps({
+            "error": f"embedder refused: {message}",
+            "error_code": ERR_EMBEDDER_REFUSAL,
+            "hits": [],
+            "count": 0,
+        }))
+    print(_color(f"embedder refused: {message}"), file=sys.stderr)
+    return 2
+
+
 def cmd_recall(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -90,6 +109,37 @@ def cmd_recall(args: argparse.Namespace) -> int:
             print(_format_hits(hits))
             return 0
 
+    try:
+        from iai_mcp.embed import (
+            REEMBED_RUNBOOK_HINT,
+            EmbedderConfigError,
+            EmbedIdentityMismatch,
+        )
+
+        _refusal_types: tuple = (EmbedderConfigError, EmbedIdentityMismatch)
+    except Exception:  # noqa: BLE001 -- refusal detection is best-effort:
+        # an unimportable embed stack must still leave bank-fallback alive.
+        REEMBED_RUNBOOK_HINT = None
+        # Must stay a FLAT tuple: a nested empty tuple in an except clause
+        # raises TypeError at match time instead of matching nothing.
+        _refusal_types = ()
+
+    from iai_mcp.errors import ERR_EMBEDDER_REFUSAL
+
+    def _refusal_exit(message: str) -> int:
+        return _print_refusal_exit(message, json_mode=json_mode)
+
+    # An embedder-selection refusal from the daemon is misconfiguration
+    # the degraded rails would hit identically — surface it, never
+    # relabel it as an unreachable daemon.
+    if isinstance(resp, dict) and isinstance(resp.get("error"), dict):
+        _err_msg = str(resp["error"].get("message") or "")
+        # The typed wire code is authoritative; the message hint stays as
+        # a fallback for a daemon predating the code.
+        if resp["error"].get("code") == ERR_EMBEDDER_REFUSAL or (
+            REEMBED_RUNBOOK_HINT and REEMBED_RUNBOOK_HINT in _err_msg
+        ):
+            return _refusal_exit(_err_msg)
 
     _store_root_direct: "str | None" = None
     _store_reached: bool = False
@@ -130,6 +180,8 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 score = 0.0
             print(f"  {score:.3f}  {surface}")
         return 0
+    except _refusal_types as _refusal:
+        return _refusal_exit(str(_refusal))
     except Exception:  # noqa: BLE001
         if _store_reached:
             pass
@@ -213,6 +265,15 @@ def cmd_temporal_recall(args: argparse.Namespace) -> int:
             print(_color(f"via daemon  [records={len(shown)} events={len(events)}]"))
             print(_format_hits(shown))
             return 0
+
+    if isinstance(resp, dict) and isinstance(resp.get("error"), dict):
+        from iai_mcp.errors import ERR_EMBEDDER_REFUSAL as _REFUSAL_CODE
+
+        _terr = resp["error"]
+        if _terr.get("code") == _REFUSAL_CODE:
+            return _print_refusal_exit(
+                str(_terr.get("message") or ""), json_mode=json_mode
+            )
 
     return _cmd_temporal_recall_direct(
         cue=cue,
@@ -387,7 +448,7 @@ def _read_events_direct(
             try:
                 aad = str(row.get("id") or "").encode("ascii")
                 raw_data = decrypt_field(raw_data, crypto_key, associated_data=aad)
-            except (OSError, ValueError, RuntimeError) as exc:
+            except Exception as exc:  # noqa: BLE001 -- AEAD raises bare InvalidTag; one bad row must not fail the query
                 _logging.getLogger(__name__).debug(
                     "event_decrypt_failed id=%s err=%s",
                     row.get("id"), str(exc)[:80],
@@ -580,10 +641,9 @@ def cmd_capture(args: argparse.Namespace) -> int:
 
 
 def _resolve_store_root():
-    from pathlib import Path
+    from iai_mcp.tz import store_root
 
-    env = os.environ.get("IAI_MCP_STORE")
-    return Path(env) if env else Path.home() / ".iai-mcp"
+    return store_root()
 
 
 def _open_store_shared(store_root=None):
@@ -1300,6 +1360,128 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lang_config_path():
+    from iai_mcp.tz import store_config_path
+
+    return store_config_path()
+
+
+def cmd_lang(args: argparse.Namespace) -> int:
+    import json
+
+    from iai_mcp.embed import (
+        DEFAULT_MODEL_KEY,
+        MULTILINGUAL_MODEL_KEY,
+        SUPPORTED_OPTIN_LANGS,
+    )
+
+    path = _lang_config_path()
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except ValueError:
+        print(f"config unreadable: {path}", file=sys.stderr)
+        return 1
+    embed_cfg = cfg.get("embed") or {}
+    langs = sorted(set(embed_cfg.get("languages") or []))
+    model_key = embed_cfg.get("model_key") or DEFAULT_MODEL_KEY
+
+    if args.action == "status":
+        print(f"embedder: {model_key}")
+        print(f"languages: {', '.join(langs) if langs else '(english-only default)'}")
+        print(f"supported: {', '.join(sorted(SUPPORTED_OPTIN_LANGS))}")
+        return 0
+
+    lang = (args.language or "").strip().lower()
+    if not lang:
+        print("usage: iai lang add|remove <lang>", file=sys.stderr)
+        return 2
+    if args.action == "add" and lang not in SUPPORTED_OPTIN_LANGS:
+        print(
+            f"{lang!r} is not a supported language; supported: "
+            f"{', '.join(sorted(SUPPORTED_OPTIN_LANGS))}",
+            file=sys.stderr,
+        )
+        return 2
+
+    before_key = model_key
+    if args.action == "add":
+        langs = sorted(set(langs) | {lang})
+        model_key = MULTILINGUAL_MODEL_KEY
+    else:
+        langs = sorted(set(langs) - {lang})
+        if not langs:
+            model_key = DEFAULT_MODEL_KEY
+
+    cfg["embed"] = {**embed_cfg, "model_key": model_key, "languages": langs}
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.rename(path)
+
+    print(f"embedder: {model_key}")
+    print(f"languages: {', '.join(langs) if langs else '(english-only default)'}")
+    if model_key != before_key:
+        # The switch is inert until the store is re-embedded: the identity
+        # guard refuses to mix vector generations, by design.
+        print(
+            "\nembedder changed — the store must be re-embedded before the "
+            "daemon will serve it:\n"
+            "  iai-mcp daemon stop\n"
+            "  iai-mcp migrate --reembed-to-configured-provider\n"
+            "  iai-mcp daemon start"
+        )
+    return 0
+
+
+def cmd_reflect(args: argparse.Namespace) -> int:
+    from iai_mcp.reflection_provider import (
+        SUPPORTED_REFLECTION_PROVIDERS,
+        configured_reflection_provider,
+        resolve_provider_bin,
+        set_reflection_provider,
+    )
+
+    if args.action == "provider":
+        name = (args.name or "").strip().lower()
+        if not name:
+            print("usage: iai reflect provider <name>", file=sys.stderr)
+            return 2
+        try:
+            set_reflection_provider(name)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(f"reflection provider: {name}")
+        if resolve_provider_bin(name) is None:
+            print(
+                f"note: no {name!r} CLI resolves from the daemon's search "
+                "path — install and log into it, or the nightly reflection "
+                "will report the provider as missing",
+            )
+        return 0
+
+    exit_code = 0
+    try:
+        current = configured_reflection_provider()
+        note = ""
+    except ValueError as exc:
+        current = "INVALID"
+        note = str(exc)
+        exit_code = 1
+    print(f"reflection provider: {current}")
+    if note:
+        print(f"  {note}")
+    for name in SUPPORTED_REFLECTION_PROVIDERS:
+        # Same resolution ladder the daemon uses — a bare which() would
+        # report a binary the service PATH cannot see.
+        resolved = resolve_provider_bin(name)
+        print(
+            f"  {name}: {'CLI found at ' + resolved if resolved else 'CLI not found'}"
+        )
+        if name == current and resolved is None:
+            exit_code = 1
+    return exit_code
+
+
 def cmd_brain(args: argparse.Namespace) -> int:
     """Serve the local brain-view dashboard (loopback only, daemon-free)."""
     from iai_mcp.brainview import BRAINVIEW_DEFAULT_PORT, serve
@@ -1564,6 +1746,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit turns as a JSON object on stdout (for programmatic use)",
     )
     p_last.set_defaults(func=cmd_last)
+
+    p_lang = sub.add_parser(
+        "lang",
+        help="Multilingual memory opt-in: add/remove languages, show status",
+        description="Manage the multilingual embedder opt-in. Adding the "
+        "first language switches the configured embedder to the "
+        "multilingual model; the store must then be fully re-embedded "
+        "(one vector generation, identity-stamped) before the daemon "
+        "serves it. English-only remains the default.",
+    )
+    p_lang.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["status", "add", "remove"],
+    )
+    p_lang.add_argument("language", nargs="?", default=None, metavar="LANG")
+    p_lang.set_defaults(func=cmd_lang)
+
+    p_reflect = sub.add_parser(
+        "reflect",
+        help="Overnight reflection provider: show status or pick a provider",
+        description="Choose which subscription CLI runs the nightly "
+        "reflection (claude, codex, or gemini). The selection lives in "
+        "the store's config.json; no API keys are ever used — each "
+        "provider rides its own logged-in CLI.",
+    )
+    p_reflect.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["status", "provider"],
+    )
+    p_reflect.add_argument("name", nargs="?", default=None, metavar="PROVIDER")
+    p_reflect.set_defaults(func=cmd_reflect)
 
     return parser
 

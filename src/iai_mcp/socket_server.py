@@ -12,6 +12,8 @@ from typing import Any
 
 from iai_mcp.concurrency import SOCKET_PATH, cleanup_stale_socket
 from iai_mcp.core import UnknownMethodError
+from iai_mcp.embed import EmbedderConfigError, EmbedIdentityMismatch
+from iai_mcp.errors import ERR_EMBEDDER_REFUSAL
 
 ERR_DAEMON_INTERNAL = -32001
 ERR_INVALID_REQUEST = -32600
@@ -219,6 +221,16 @@ class SocketServer:
                         "id": req_id,
                         "error": {"code": ERR_INVALID_PARAMS, "message": str(e)},
                     }
+                except (EmbedderConfigError, EmbedIdentityMismatch) as e:
+                    # Typed wire code: clients must distinguish a refusal
+                    # (store misconfiguration the degraded rails cannot
+                    # answer either) from an internal fault, without
+                    # matching message prose.
+                    resp = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": ERR_EMBEDDER_REFUSAL, "message": str(e)},
+                    }
                 except Exception as e:  # noqa: BLE001 -- socket must never crash daemon
                     resp = {
                         "jsonrpc": "2.0",
@@ -255,6 +267,9 @@ class SocketServer:
             env_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
             socket_path = Path(env_path) if env_path else SOCKET_PATH
 
+        sig = inspect.signature(asyncio.start_unix_server)
+        supports_cleanup_socket = "cleanup_socket" in sig.parameters
+
         # One JSON-RPC request is one line; a relayed document upload
         # (base64, ≤25 MB raw) must fit the StreamReader line buffer.
         _line_limit = 64 * 1024 * 1024
@@ -271,10 +286,6 @@ class SocketServer:
             finally:
                 shutdown_ipc()
             return
-        # POSIX from here down. start_unix_server does not exist on Windows,
-        # so even its signature must only be inspected past the branch above.
-        sig = inspect.signature(asyncio.start_unix_server)
-        supports_cleanup_socket = "cleanup_socket" in sig.parameters
         inherited = _inherit_activated_socket()
         if inherited is not None:
             server = await asyncio.start_unix_server(

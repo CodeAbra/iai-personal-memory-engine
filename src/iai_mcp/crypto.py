@@ -161,6 +161,46 @@ def derive_key_from_passphrase(passphrase: str, salt: bytes) -> bytes:
     return kdf.derive(passphrase.encode("utf-8"))
 
 
+def write_key_material(path: Path, data: bytes) -> None:
+    """Key bytes reach disk ONLY through this shape: O_BINARY (the Windows
+    CRT text mode rewrites 0x0A as 0x0D0A — a silently corrupted AES key),
+    0600 enforced via fchmod, tmp + fsync + atomic replace, Windows ACL."""
+    if len(data) == 0 or len(data) % KEY_BYTES != 0:
+        raise ValueError(
+            f"key material must be a positive multiple of {KEY_BYTES} bytes "
+            f"(got {len(data)})"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for stale in path.parent.glob(f"{path.name}.tmp.*"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    tmp = path.parent / f"{path.name}.tmp.{os.getpid()}"
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    if os.name == "nt":
+        # 0o600 in the open mode is advisory on Windows; the ACL is the
+        # real gate there.
+        from iai_mcp._ipc import restrict_file_to_current_user
+        restrict_file_to_current_user(path)
+
+
+def try_file_key(store_root: Path | None = None) -> Optional[bytes]:
+    """Key from the store's key FILE only — never the keychain or a
+    passphrase prompt (callers run inside editor hooks where any
+    credential prompt would hang the host)."""
+    return CryptoKey(store_root=store_root)._try_file_get()
+
+
 class CryptoKey:
 
     SERVICE_NAME: str = SERVICE_NAME_DEFAULT
@@ -217,31 +257,7 @@ class CryptoKey:
     def _try_file_set(self, key: bytes) -> None:
         if len(key) != KEY_BYTES:
             raise ValueError(f"key must be {KEY_BYTES} bytes (got {len(key)})")
-        final = self._key_file_path()
-        final.parent.mkdir(parents=True, exist_ok=True)
-        for stale in final.parent.glob(f"{final.name}.tmp.*"):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-        tmp = final.parent / f"{final.name}.tmp.{os.getpid()}"
-        # O_BINARY: without it the Windows CRT opens the fd in text mode and
-        # rewrites any 0x0A key byte as 0x0D0A — a silently corrupted AES key.
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-        fd = os.open(str(tmp), flags, 0o600)
-        try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            os.write(fd, key)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(str(tmp), str(final))
-        if os.name == "nt":
-            # 0o600 in the open mode is advisory on Windows; the ACL is the
-            # real gate there.
-            from iai_mcp._ipc import restrict_file_to_current_user
-            restrict_file_to_current_user(final)
+        write_key_material(self._key_file_path(), key)
 
 
     def get_or_create(self) -> bytes:
@@ -273,8 +289,13 @@ class CryptoKey:
             f"(suitable for CI or non-interactive environments)."
         )
 
-    def rotate(self) -> bytes:
-        fresh = secrets.token_bytes(KEY_BYTES)
+    def rotate(self, key: Optional[bytes] = None) -> bytes:
+        """Persist a fresh key (or the caller's pre-generated one — callers
+        that must re-encrypt side stores BEFORE the key file changes generate
+        first and persist only once everything re-encrypted)."""
+        fresh = key if key is not None else secrets.token_bytes(KEY_BYTES)
+        if len(fresh) != KEY_BYTES:
+            raise ValueError(f"key must be {KEY_BYTES} bytes (got {len(fresh)})")
         self._try_file_set(fresh)
         self._cached_key = fresh
         return fresh

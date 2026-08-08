@@ -38,6 +38,28 @@ const DEFAULT_GEOMETRY: Geometry = Geometry {
     layer_norm_eps: 1e-12,
 };
 
+/// Sentence pooling over the final hidden states. CLS is the historical
+/// default (bge family); MEAN is required by mean-pooled retrieval models
+/// (e5 family) — serving a mean-pooled model through CLS silently degrades
+/// every vector it emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pooling {
+    Cls,
+    Mean,
+}
+
+impl Pooling {
+    pub fn parse(raw: &str) -> Result<Self, EmbedError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "cls" => Ok(Pooling::Cls),
+            "mean" => Ok(Pooling::Mean),
+            other => Err(EmbedError::HfHub(format!(
+                "invalid pooling mode {other:?}; valid: cls, mean"
+            ))),
+        }
+    }
+}
+
 /// Which model snapshot to load. The default is the pinned
 /// bge-small-en-v1.5 revision; `IAI_MCP_EMBED_MODEL_ID` selects another
 /// BERT-architecture model (with `IAI_MCP_EMBED_REVISION`, default `main`).
@@ -136,24 +158,78 @@ impl Geometry {
 ///
 /// If `IAI_MCP_EMBED_OFFLINE=1` is set, fails loudly when any file is missing
 /// rather than attempting a network download.
-fn resolve_model_files(
+///
+/// Stats `<hub>/models--<org>--<name>/snapshots/<revision>/<filename>`
+/// directly. The hf-hub ref-based lookup needs `refs/<revision>`, which only
+/// an online fetch writes — a sha-pinned snapshot already on disk must still
+/// resolve offline.
+// "0", "false", and empty must read as off — presence alone is not consent.
+fn offline_mode_enabled() -> bool {
+    matches!(
+        std::env::var("IAI_MCP_EMBED_OFFLINE").ok().as_deref(),
+        Some(v) if !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+    )
+}
+
+fn cached_file_direct(
+    model_id: &str,
+    revision: &str,
+    filename: &str,
+) -> Option<std::path::PathBuf> {
+    // The revision joins a filesystem path below — separators or parent
+    // traversal must never escape the snapshots directory.
+    if revision.is_empty() || revision.contains(['/', '\\']) || revision.contains("..") {
+        return None;
+    }
+    let repo = Repo::with_revision(model_id.to_string(), RepoType::Model, revision.to_string());
+    let path = Cache::from_env()
+        .path()
+        .join(repo.folder_name())
+        .join("snapshots")
+        .join(revision)
+        .join(filename);
+    path.exists().then_some(path)
+}
+
+fn resolve_model_files_for(
+    model_id_arg: Option<&str>,
+    revision_arg: Option<&str>,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), EmbedError> {
-    let (model_id, revision) = model_spec();
-    let repo = Repo::with_revision(model_id, RepoType::Model, revision);
-    let offline = std::env::var("IAI_MCP_EMBED_OFFLINE").is_ok();
+    let (model_id, revision) = match model_id_arg {
+        Some(id) => (
+            id.to_string(),
+            revision_arg.unwrap_or("main").to_string(),
+        ),
+        None => model_spec(),
+    };
+    let repo = Repo::with_revision(model_id.clone(), RepoType::Model, revision.clone());
+
+    // Complete sha-pinned snapshots on disk serve without touching the
+    // network OR the hf-hub ref indirection, in every mode.
+    if let (Some(weights), Some(tokenizer), Some(config)) = (
+        cached_file_direct(&model_id, &revision, "model.safetensors"),
+        cached_file_direct(&model_id, &revision, "tokenizer.json"),
+        cached_file_direct(&model_id, &revision, "config.json"),
+    ) {
+        return Ok((weights, tokenizer, config));
+    }
+
+    let offline = offline_mode_enabled();
 
     if offline {
         let cache = Cache::from_env().repo(repo);
-        let weights = cache.get("model.safetensors").ok_or_else(|| {
-            EmbedError::HfHub("model.safetensors not in HF cache (offline mode)".into())
-        })?;
-        let tokenizer = cache.get("tokenizer.json").ok_or_else(|| {
-            EmbedError::HfHub("tokenizer.json not in HF cache (offline mode)".into())
-        })?;
-        let config = cache.get("config.json").ok_or_else(|| {
-            EmbedError::HfHub("config.json not in HF cache (offline mode)".into())
-        })?;
-        Ok((weights, tokenizer, config))
+        let get = |filename: &str| -> Result<std::path::PathBuf, EmbedError> {
+            cached_file_direct(&model_id, &revision, filename)
+                .or_else(|| cache.get(filename))
+                .ok_or_else(|| {
+                    EmbedError::HfHub(format!("{filename} not in HF cache (offline mode)"))
+                })
+        };
+        Ok((
+            get("model.safetensors")?,
+            get("tokenizer.json")?,
+            get("config.json")?,
+        ))
     } else {
         let api = ApiBuilder::from_env()
             .build()
@@ -414,6 +490,7 @@ pub struct BertEmbedder {
     // install() scopes all kernel parallelism to this private pool.
     pool: rayon::ThreadPool,
     text_prefix: String,
+    pooling: Pooling,
 }
 
 impl BertEmbedder {
@@ -422,8 +499,25 @@ impl BertEmbedder {
     /// Triggers a lazy download from HF Hub if the snapshot is absent
     /// (unless `IAI_MCP_EMBED_OFFLINE=1` is set, in which case this fails loudly).
     pub fn load() -> Result<Self, EmbedError> {
-        let (weights_path, tokenizer_path, config_path) = resolve_model_files()?;
-        let (model_id, _revision) = model_spec();
+        Self::load_with(None, None, None)
+    }
+
+    /// Load an explicit model spec. `None` fields fall back to the env
+    /// override / pinned default resolution of `load()`. An explicit spec
+    /// wins over the environment — the caller (the Python registry) is the
+    /// single source of truth for which model serves, so a stray env var
+    /// cannot silently redirect a spec-driven construction.
+    pub fn load_with(
+        model_id_arg: Option<&str>,
+        revision_arg: Option<&str>,
+        pooling_arg: Option<Pooling>,
+    ) -> Result<Self, EmbedError> {
+        let (weights_path, tokenizer_path, config_path) =
+            resolve_model_files_for(model_id_arg, revision_arg)?;
+        let model_id = match model_id_arg {
+            Some(id) => id.to_string(),
+            None => model_spec().0,
+        };
 
         // Geometry comes from the model's own config.json. For the pinned
         // default model any drift from the historical architecture fails
@@ -470,6 +564,10 @@ impl BertEmbedder {
         // (e.g. the E5 family). Empty default = byte-identical behavior.
         let text_prefix = std::env::var("IAI_MCP_EMBED_TEXT_PREFIX").unwrap_or_default();
 
+        // Pooling comes ONLY from the explicit spec — an env knob here would
+        // let the service environment flip pooling behind the identity stamp.
+        let pooling = pooling_arg.unwrap_or(Pooling::Cls);
+
         Ok(Self {
             embeddings,
             encoder,
@@ -477,6 +575,7 @@ impl BertEmbedder {
             device,
             pool,
             text_prefix,
+            pooling,
         })
     }
 
@@ -518,12 +617,29 @@ impl BertEmbedder {
         let embedded = self.embeddings.forward(&input_ids, &token_type_ids)?;
         let encoded = self.encoder.forward(&embedded, &attention_mask)?;
 
-        // Pattern 8 / Pitfall 1: raw CLS token — NOT BertPooler dense+tanh
-        let cls = encoded.i((0, 0))?;
+        let pooled = match self.pooling {
+            // Pattern 8 / Pitfall 1: raw CLS token — NOT BertPooler dense+tanh
+            Pooling::Cls => encoded.i((0, 0))?,
+            Pooling::Mean => {
+                // Attention-weighted mean over real tokens only; the additive
+                // mask above is for attention scores, so a fresh binary mask
+                // weights the hidden states here.
+                let bin: Vec<f32> = encoding
+                    .get_attention_mask()
+                    .iter()
+                    .map(|&m| if m == 1 { 1.0_f32 } else { 0.0_f32 })
+                    .collect();
+                let count: f32 = bin.iter().sum::<f32>().max(1.0);
+                let bin_t = Tensor::from_vec(bin, (seq_len, 1), &self.device)?;
+                let hidden = encoded.i((0,))?;
+                let summed = hidden.broadcast_mul(&bin_t)?.sum(0)?;
+                (summed / count as f64)?
+            }
+        };
 
         // L2 normalize
-        let norm = cls.sqr()?.sum_keepdim(0)?.sqrt()?;
-        let normalized = cls.broadcast_div(&norm)?;
+        let norm = pooled.sqr()?.sum_keepdim(0)?.sqrt()?;
+        let normalized = pooled.broadcast_div(&norm)?;
 
         Ok(normalized.to_vec1::<f32>()?)
     }
@@ -649,5 +765,146 @@ mod tests {
         let long = "word ".repeat(1000);
         let v = e.encode(&long).unwrap();
         assert_eq!(v.len(), 384);
+    }
+
+    const E5_ID: &str = "intfloat/multilingual-e5-small";
+    const E5_REV: &str = "614241f622f53c4eeff9890bdc4f31cfecc418b3";
+
+    // Stat the snapshot path directly: the hf-hub ref-based lookup needs
+    // refs/<sha>, which only an online fetch writes, and a silent skip here
+    // would let the golden read as verified without ever running.
+    fn require_e5() {
+        assert!(
+            cached_file_direct(E5_ID, E5_REV, "model.safetensors").is_some(),
+            "e5 snapshot absent — golden cannot run; fetch {E5_ID}@{E5_REV} into the HF cache first"
+        );
+    }
+
+    /// Golden: the mean arm against the reference implementation (masked
+    /// mean of last hidden states, then L2). Reference head computed with
+    /// the transformers library on the same pinned snapshot.
+    #[test]
+    fn mean_pooling_matches_reference_on_e5() {
+        require_e5();
+        let e = BertEmbedder::load_with(Some(E5_ID), Some(E5_REV), Some(Pooling::Mean)).unwrap();
+        let v = e.encode("query: hello world").unwrap();
+        assert_eq!(v.len(), 384);
+        let expected = [
+            0.046284_f32, 0.031391, -0.038663, -0.055825, 0.066460, -0.043633, 0.011182, 0.087065,
+        ];
+        for (i, exp) in expected.iter().enumerate() {
+            assert!(
+                (v[i] - exp).abs() < 1e-3,
+                "dim {i}: got {} expected {exp}",
+                v[i]
+            );
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn mean_and_cls_pooling_disagree_on_multi_token_input() {
+        require_e5();
+        let mean = BertEmbedder::load_with(Some(E5_ID), Some(E5_REV), Some(Pooling::Mean))
+            .unwrap()
+            .encode("query: hello world")
+            .unwrap();
+        let cls = BertEmbedder::load_with(Some(E5_ID), Some(E5_REV), Some(Pooling::Cls))
+            .unwrap()
+            .encode("query: hello world")
+            .unwrap();
+        let dot: f32 = mean.iter().zip(&cls).map(|(a, b)| a * b).sum();
+        assert!(dot < 0.999, "pooling arms must be distinguishable, cos={dot}");
+    }
+
+    /// Restores the prior value on drop, so a panicking assertion cannot
+    /// leak a mutated env var into the rest of the test run.
+    struct EnvVarGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            EnvVarGuard { key, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    // Sibling tests only READ these vars, through loads that resolve from
+    // the on-disk snapshot in every mode — a concurrently observed mutation
+    // changes which branch resolves them, never whether they resolve.
+    #[test]
+    fn env_knobs_stay_inert_and_offline_serves_from_cache() {
+        require_e5();
+        {
+            let _off = EnvVarGuard::set("IAI_MCP_EMBED_OFFLINE", "0");
+            assert!(!offline_mode_enabled());
+        }
+        {
+            let _off = EnvVarGuard::set("IAI_MCP_EMBED_OFFLINE", "false");
+            assert!(!offline_mode_enabled());
+        }
+        let _off = EnvVarGuard::set("IAI_MCP_EMBED_OFFLINE", "1");
+        assert!(offline_mode_enabled());
+
+        // Pooling comes only from the spec — a revived env knob must fail here.
+        let _pool = EnvVarGuard::set("IAI_MCP_EMBED_POOL", "mean");
+        let default_pool = BertEmbedder::load_with(Some(E5_ID), Some(E5_REV), None)
+            .unwrap()
+            .pooling;
+        assert!(matches!(default_pool, Pooling::Cls));
+
+        // Offline load of a sha-pinned snapshot must resolve from disk even
+        // when the cache carries no refs entry for that sha.
+        let mean_pool = BertEmbedder::load_with(Some(E5_ID), Some(E5_REV), Some(Pooling::Mean))
+            .unwrap()
+            .pooling;
+        assert!(matches!(mean_pool, Pooling::Mean));
+    }
+
+    #[test]
+    fn cached_file_direct_rejects_traversal_revisions() {
+        require_e5();
+        // Each escaping revision resolves to a path that DOES exist on
+        // disk — only the reject stands between it and a hit, so deleting
+        // the guard fails this test instead of passing vacuously.
+        let dotted = format!("./{E5_REV}");
+        for (rev, file) in [
+            ("..", "refs"),
+            ("", E5_REV),
+            (dotted.as_str(), "model.safetensors"),
+        ] {
+            assert!(
+                cached_file_direct(E5_ID, rev, file).is_none(),
+                "revision {rev:?} must be rejected"
+            );
+        }
+        assert!(cached_file_direct(E5_ID, E5_REV, "model.safetensors").is_some());
+    }
+
+    #[test]
+    fn argless_load_matches_explicit_default_spec() {
+        if !cache_present() {
+            eprintln!("HF cache absent — skipping");
+            return;
+        }
+        let a = BertEmbedder::load().unwrap().encode("stability probe").unwrap();
+        let b = BertEmbedder::load_with(None, None, None)
+            .unwrap()
+            .encode("stability probe")
+            .unwrap();
+        assert_eq!(a, b);
     }
 }

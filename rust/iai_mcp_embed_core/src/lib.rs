@@ -56,9 +56,22 @@ impl Embedder {
     /// `BertEmbedder::load` is pure Rust and holds no Python objects,
     /// making this safe.
     #[new]
-    fn py_new(py: Python<'_>) -> PyResult<Self> {
+    #[pyo3(signature = (model_id=None, revision=None, pool=None))]
+    fn py_new(
+        py: Python<'_>,
+        model_id: Option<String>,
+        revision: Option<String>,
+        pool: Option<String>,
+    ) -> PyResult<Self> {
+        let pooling = pool
+            .as_deref()
+            .map(bert::Pooling::parse)
+            .transpose()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let inner = py
-            .allow_threads(|| BertEmbedder::load())
+            .allow_threads(|| {
+                BertEmbedder::load_with(model_id.as_deref(), revision.as_deref(), pooling)
+            })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }

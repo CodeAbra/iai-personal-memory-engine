@@ -169,9 +169,18 @@ def detect_wind_down(
     if not matched:
         return None
 
-    window = state.get("quiet_window") if isinstance(state, dict) else None
-    if not window:
-        return None
+    from iai_mcp.quiet_window import effective_consolidation_window
+
+    # Same resolver as the consolidation gate: a reset or unlearned window
+    # must fall back to the night default here too, never go dark.
+    window = effective_consolidation_window(
+        state.get("quiet_window") if isinstance(state, dict) else None,
+        manual=(
+            state.get("quiet_window_manual_override")
+            if isinstance(state, dict)
+            else None
+        ),
+    )
     if not is_late_in_quiet_window(window, now, tz):
         return None
 

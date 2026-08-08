@@ -67,7 +67,7 @@ def _maintenance_compact_preflight_daemon_alive() -> str | None:
     if not _cli.STATE_PATH.exists():
         return None
     try:
-        state = _json.loads(_cli.STATE_PATH.read_text())
+        state = _json.loads(_cli.STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     pid = state.get("daemon_pid")
@@ -183,7 +183,7 @@ def _maintenance_compact_apply(
         }
         try:
             failed_path.parent.mkdir(parents=True, exist_ok=True)
-            failed_path.write_text(_json.dumps(failed_payload, indent=2))
+            failed_path.write_text(_json.dumps(failed_payload, indent=2), encoding="utf-8")
         except OSError:
             pass
         print(
@@ -208,7 +208,7 @@ def _maintenance_compact_apply(
     }
     try:
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_path.write_text(_json.dumps(payload, indent=2))
+        audit_path.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
         print(
             f"warning: could not write audit file {audit_path}: {exc}",
@@ -726,6 +726,119 @@ def cmd_idem_dedup(args: argparse.Namespace) -> int:
     if mode_str == "dry-run" and summary.get("groups", 0) > 0:
         print()
         print("  Run with --apply to execute.")
+    return 0
+
+
+def cmd_blob_quarantine(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate._blob_quarantine import quarantine_notification_blobs
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    store = MemoryStore(path=store_path)
+    summary = quarantine_notification_blobs(
+        store, apply=apply, store_path=store_path
+    )
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp blob-quarantine [{mode_str}]")
+    print(f"  records scanned:      {summary.get('records_scanned', 0)}")
+    print(f"  notification blobs:   {summary.get('blobs_found', 0)}")
+    print(f"  tombstoned:           {summary.get('tombstoned', 0)}")
+    if summary.get("snapshot_dir"):
+        print(f"  snapshot directory:   {summary['snapshot_dir']}")
+    if summary.get("journal"):
+        print(f"  journal:              {summary['journal']}")
+    if mode_str == "dry-run" and summary.get("blobs_found", 0) > 0:
+        print()
+        print("  Run with --apply to execute.")
+    errors = summary.get("errors") or []
+    if errors:
+        print(f"error: {len(errors)} record(s) failed:", file=_cli.sys.stderr)
+        for line in errors[:10]:
+            print(f"  {line}", file=_cli.sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_entity_backfill(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate._entity_backfill import backfill_entity_anchors
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    refresh = bool(getattr(args, "refresh", False))
+    store = MemoryStore(path=store_path)
+    summary = backfill_entity_anchors(
+        store, apply=apply, store_path=store_path, refresh=refresh
+    )
+
+    mode_str = summary.get("mode", "dry-run")
+    refresh_str = " --refresh" if summary.get("refresh") else ""
+    print(f"iai-mcp entity-backfill [{mode_str}{refresh_str}]")
+    print(f"  records scanned:        {summary.get('records_scanned', 0)}")
+    print(f"  already anchored:       {summary.get('already_anchored', 0)}")
+    print(f"  records to anchor:      {summary.get('records_to_anchor', 0)}")
+    print(f"  anchors proposed:       {summary.get('anchors_proposed', 0)}")
+    if summary.get("anchors_to_remove"):
+        print(f"  anchors to remove:      {summary['anchors_to_remove']}")
+    print(f"  records written:        {summary.get('records_written', 0)}")
+    print(f"  aaak indexes refreshed: {summary.get('aaak_refreshed', 0)}")
+    if summary.get("journal"):
+        print(f"  undo journal:           {summary['journal']}")
+    if mode_str == "apply" and summary.get("records_written", 0) > 0:
+        print()
+        if summary.get("graph_cache_invalidated"):
+            print(
+                "  Graph cache invalidated; restart the daemon to serve "
+                "the new anchors."
+            )
+        else:
+            print(
+                "  Live recall serves the new anchors after the next "
+                "index rebuild (nightly, or a daemon restart)."
+            )
+    if mode_str == "dry-run" and summary.get("records_to_anchor", 0) > 0:
+        print()
+        print("  Run with --apply to execute.")
+    errors = summary.get("errors") or []
+    if errors:
+        print(
+            f"error: {len(errors)} record(s) failed:",
+            file=_cli.sys.stderr,
+        )
+        for line in errors[:10]:
+            print(f"  {line}", file=_cli.sys.stderr)
+        if len(errors) > 10:
+            print(
+                f"  ... and {len(errors) - 10} more",
+                file=_cli.sys.stderr,
+            )
+        return 1
     return 0
 
 

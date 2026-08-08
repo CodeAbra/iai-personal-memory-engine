@@ -18,6 +18,8 @@ _skip_on_lilli = pytest.mark.skipif(
 
 def test_row_f_hippo_readable_clean_store(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     from iai_mcp.doctor import check_f_hippo_readable
 
 
@@ -32,7 +34,25 @@ def test_row_f_hippo_readable_clean_store(tmp_path, monkeypatch):
     assert "Hippo storage opens without error" in result.detail
 
 
-def test_row_f_hippo_readable_missing_file_fail(monkeypatch):
+def test_row_f_hippo_readable_missing_file_warns_without_creating(
+    tmp_path, monkeypatch
+):
+    """An absent store is a fresh-host condition, not a failure — and the
+    diagnostic must never mint the store file it looks for."""
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    from iai_mcp.doctor import check_f_hippo_readable
+
+    result = check_f_hippo_readable()
+    assert result.status == "WARN"
+    assert result.passed is True
+    assert "no store yet" in result.detail
+    assert not (tmp_path / "hippo" / "brain.sqlite3").exists()
+
+
+def test_row_f_hippo_readable_open_error_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setattr(
         "iai_mcp.store.MemoryStore",
         _raise_runtime_error,
@@ -235,6 +255,8 @@ def test_row_s_db_absent_pass(tmp_path, monkeypatch):
 
 
 def test_row_t_hippo_compaction_fresh_pass(tmp_path, monkeypatch):
+    (tmp_path / "hippo").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from datetime import datetime, timezone
 
@@ -259,9 +281,12 @@ def test_row_t_hippo_compaction_fresh_pass(tmp_path, monkeypatch):
     assert result.status == "PASS"
     assert result.passed is True
     assert "hippo_compacted" in result.name
+    assert "0.0h ago" in result.detail
 
 
 def test_row_t_hippo_compaction_stale_warn(tmp_path, monkeypatch):
+    (tmp_path / "hippo").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
 
     import iai_mcp.store as _store
@@ -290,8 +315,8 @@ def test_doctor_total_row_count(tmp_path, monkeypatch):
     from iai_mcp.doctor import run_diagnosis
 
     results = run_diagnosis()
-    assert len(results) == 27, (
-        f"expected 27 rows; got {len(results)}: {[r.name for r in results]}"
+    assert len(results) == 28, (
+        f"expected 28 rows; got {len(results)}: {[r.name for r in results]}"
     )
 
 

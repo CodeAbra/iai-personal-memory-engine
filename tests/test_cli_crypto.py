@@ -409,6 +409,36 @@ def test_cli_crypto_rotate_no_loss_on_reencrypt_failure(tmp_path, monkeypatch):
         "rec2 ciphertext must remain the old-key value when re-encryption failed"
     )
 
+    # Sidecar lifecycle: the partial rotation retained the outgoing key.
+    backup = tmp_path / ".crypto.key.pre-rotate"
+    assert backup.exists(), "a partial rotation must retain the outgoing key"
+    assert len(backup.read_bytes()) == 32
+    assert (backup.stat().st_mode & 0o777) == 0o600
+
+    # A record under the old generation surfaces as a NAMED error, never a
+    # bare empty-message InvalidTag traceback.
+    from iai_mcp.hippo import HippoIntegrityError
+
+    with pytest.raises(HippoIntegrityError):
+        MemoryStore().all_records()
+
+    # Recovery per the printed instruction: recover-prior-key consumes the
+    # sidecar (re-keying rec2 to the current key), then a re-run rotates
+    # fully clean and removes the sidecar.
+    monkeypatch.setattr(_crypto_mod, "encrypt_field", original_encrypt)
+    from iai_mcp.cli._crypto import cmd_crypto_recover_prior_key
+
+    rc = cmd_crypto_recover_prior_key(argparse.Namespace(
+        user_id="default", prior_key_file=backup, dry_run=False,
+    ))
+    assert rc == 0, "recover-prior-key must accept the retained sidecar"
+
+    rc = cmd_crypto_rotate(argparse.Namespace(user_id="default"))
+    assert rc == 0
+    assert not backup.exists(), (
+        "a fully clean rotation must remove the retained key"
+    )
+
 
 def test_cli_crypto_rotate_swaps_active_key(tmp_path, monkeypatch):
     """After cmd_crypto_rotate, the store's active key reference must be the
@@ -437,3 +467,307 @@ def test_cli_crypto_rotate_swaps_active_key(tmp_path, monkeypatch):
         "rotate must replace the on-disk key bytes"
     )
     assert len(post_rotate_key) == 32
+
+
+def test_cli_crypto_rotate_refuses_passphrase_only_store(
+    tmp_path, monkeypatch, capsys
+):
+    import argparse
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-passphrase-refusal")
+
+    from iai_mcp.cli import cmd_crypto_rotate
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore()
+    assert store._key() is not None, "passphrase-derived key must resolve"
+
+    rc = cmd_crypto_rotate(argparse.Namespace(user_id="default"))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "no key file" in err
+    assert not (tmp_path / ".crypto.key").exists(), (
+        "a refused rotation must not materialise a key file that would "
+        "shadow the passphrase"
+    )
+    assert not (tmp_path / ".crypto.key.pre-rotate").exists()
+
+
+def test_cli_crypto_rotate_refuses_while_daemon_alive(
+    tmp_path, monkeypatch, capsys
+):
+    import argparse
+    import secrets as _secrets
+    from pathlib import Path as _Path
+
+    # The daemon serves the HOME store; the preflight applies only there.
+    home_store = _Path.home() / ".iai-mcp"
+    home_store.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv("IAI_MCP_STORE", raising=False)
+    monkeypatch.delenv("IAI_MCP_CRYPTO_PASSPHRASE", raising=False)
+    key_path = home_store / ".crypto.key"
+    key_path.write_bytes(_secrets.token_bytes(32))
+    os.chmod(key_path, 0o600)
+    key_before = key_path.read_bytes()
+
+    monkeypatch.setattr(
+        "iai_mcp.cli._maintenance._maintenance_compact_preflight_daemon_alive",
+        lambda: "daemon running (pid 12345); run `iai-mcp daemon stop` first",
+    )
+
+    from iai_mcp.cli import cmd_crypto_rotate
+
+    rc = cmd_crypto_rotate(argparse.Namespace(user_id="default"))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "refusing to rotate" in err
+    assert "daemon running" in err
+    assert key_path.read_bytes() == key_before, "no key swap on refusal"
+
+
+def test_cli_crypto_rotate_env_store_skips_daemon_preflight(
+    tmp_path, monkeypatch, capsys
+):
+    import argparse
+    import secrets as _secrets
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.delenv("IAI_MCP_CRYPTO_PASSPHRASE", raising=False)
+    key_path = tmp_path / ".crypto.key"
+    key_path.write_bytes(_secrets.token_bytes(32))
+    os.chmod(key_path, 0o600)
+
+    def _boom():
+        raise AssertionError(
+            "an env-selected store must not consult the home daemon state"
+        )
+
+    monkeypatch.setattr(
+        "iai_mcp.cli._maintenance._maintenance_compact_preflight_daemon_alive",
+        _boom,
+    )
+
+    from iai_mcp.cli import cmd_crypto_rotate
+
+    rc = cmd_crypto_rotate(argparse.Namespace(user_id="default"))
+    assert rc == 0
+    capsys.readouterr()
+
+
+def test_cli_crypto_rotate_undecryptable_event_has_exit(
+    tmp_path, monkeypatch, capsys
+):
+    """An event no key generation opens must not wedge the key lifecycle:
+    rotate reports it with the redact runbook and retains NO key material
+    for it; redact-undecryptable clears it; the next rotate is clean."""
+    import argparse
+    import json as _json
+    import secrets as _secrets
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.delenv("IAI_MCP_CRYPTO_PASSPHRASE", raising=False)
+    key_path = tmp_path / ".crypto.key"
+    key_path.write_bytes(_secrets.token_bytes(32))
+    os.chmod(key_path, 0o600)
+
+    from iai_mcp.cli import cmd_crypto_rotate
+    from iai_mcp.cli._crypto import cmd_crypto_redact_undecryptable
+    from iai_mcp.crypto import encrypt_field
+    from iai_mcp.events import write_event
+    from iai_mcp.store import EVENTS_TABLE, MemoryStore
+
+    store = MemoryStore()
+    write_event(store, kind="probe", data={"x": 1}, severity="info")
+    tbl = store.db.open_table(EVENTS_TABLE)
+    eid = str(tbl.to_pandas().iloc[0]["id"])
+    foreign_ct = encrypt_field(
+        "{\"x\": 1}",
+        _secrets.token_bytes(32),
+        associated_data=eid.encode("ascii"),
+    )
+    tbl.update(where=f"id = '{eid}'", values={"data_json": foreign_ct})
+
+    rc = cmd_crypto_rotate(argparse.Namespace(user_id="default"))
+    result = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert result["status"] == "partial"
+    assert result["events_undecryptable"] == 1
+    assert "redact-undecryptable" in result["recovery"]
+    assert "pre_rotate_key_retained" not in result
+    assert not (tmp_path / ".crypto.key.pre-rotate").exists(), (
+        "no retained generation opens this row — retaining key material "
+        "for it would retain it forever"
+    )
+
+    rc = cmd_crypto_redact_undecryptable(argparse.Namespace(user_id="default"))
+    red = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert red["events_redacted"] == 1
+
+    rc = cmd_crypto_rotate(argparse.Namespace(user_id="default"))
+    result2 = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert result2["status"] == "rotated"
+    assert not (tmp_path / ".crypto.key.pre-rotate").exists()
+
+
+def test_cli_crypto_recover_prior_key_multi_generation_file(
+    tmp_path, monkeypatch, capsys
+):
+    import argparse
+    import secrets as _secrets
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.delenv("IAI_MCP_CRYPTO_PASSPHRASE", raising=False)
+    key_a = _secrets.token_bytes(32)
+    key_b = _secrets.token_bytes(32)
+    key_path = tmp_path / ".crypto.key"
+    key_path.write_bytes(key_a)
+    os.chmod(key_path, 0o600)
+
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.types import EMBED_DIM, MemoryRecord
+
+    store = MemoryStore()
+    rec = MemoryRecord(
+        id=uuid4(),
+        tier="episodic",
+        literal_surface="multi-generation sidecar recovery",
+        aaak_index="",
+        embedding=[0.1] * EMBED_DIM,
+        community_id=None,
+        centrality=0.0,
+        detail_level=2,
+        pinned=False,
+        stability=0.0,
+        difficulty=0.0,
+        last_reviewed=None,
+        never_decay=False,
+        never_merge=False,
+        provenance=[],
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        tags=[],
+        language="en",
+    )
+    store.insert(rec)
+    del store
+
+    key_path.write_bytes(key_b)
+    os.chmod(key_path, 0o600)
+
+    # The needed generation sits LAST, behind an unrelated one — every
+    # block must be tried.
+    sidecar = tmp_path / ".crypto.key.pre-rotate"
+    sidecar.write_bytes(_secrets.token_bytes(32) + key_a)
+    os.chmod(sidecar, 0o600)
+
+    from iai_mcp.cli._crypto import cmd_crypto_recover_prior_key
+
+    rc = cmd_crypto_recover_prior_key(argparse.Namespace(
+        user_id="default", prior_key_file=sidecar, dry_run=False,
+    ))
+    assert rc == 0
+    capsys.readouterr()
+
+    store2 = MemoryStore()
+    got = store2.get(rec.id)
+    assert got is not None
+    assert got.literal_surface == "multi-generation sidecar recovery"
+
+
+def test_cli_crypto_redact_rekeys_rows_a_retained_generation_opens(
+    tmp_path, monkeypatch, capsys
+):
+    """Redaction is terminal: a row the retained sidecar still opens must be
+    RE-KEYED to the current key, never replaced with a marker while its key
+    sits on disk one directory entry away."""
+    import argparse
+    import json as _json
+    import secrets as _secrets
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.delenv("IAI_MCP_CRYPTO_PASSPHRASE", raising=False)
+    key_a = _secrets.token_bytes(32)
+    key_b = _secrets.token_bytes(32)
+    key_path = tmp_path / ".crypto.key"
+    key_path.write_bytes(key_a)
+    os.chmod(key_path, 0o600)
+
+    from iai_mcp.crypto import encrypt_field
+    from iai_mcp.events import write_event
+    from iai_mcp.store import EVENTS_TABLE, MemoryStore
+    from iai_mcp.types import EMBED_DIM, MemoryRecord
+
+    store = MemoryStore()
+    rec = MemoryRecord(
+        id=uuid4(),
+        tier="episodic",
+        literal_surface="recoverable memory — must survive redact",
+        aaak_index="",
+        embedding=[0.1] * EMBED_DIM,
+        community_id=None,
+        centrality=0.0,
+        detail_level=2,
+        pinned=False,
+        stability=0.0,
+        difficulty=0.0,
+        last_reviewed=None,
+        never_decay=False,
+        never_merge=False,
+        provenance=[],
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        tags=[],
+        language="en",
+    )
+    store.insert(rec)
+    write_event(store, kind="probe", data={"keep": "me"}, severity="info")
+    ev_tbl = store.db.open_table(EVENTS_TABLE)
+    recoverable_eid = str(ev_tbl.to_pandas().iloc[0]["id"])
+    dead_ct = encrypt_field(
+        "{\"gone\": 1}",
+        _secrets.token_bytes(32),
+        associated_data=recoverable_eid.encode("ascii"),
+    )
+    del store
+
+    # Simulate a partial rotation: current key becomes B, the sidecar
+    # retains A (which still opens the record and the event above).
+    key_path.write_bytes(key_b)
+    os.chmod(key_path, 0o600)
+    sidecar = tmp_path / ".crypto.key.pre-rotate"
+    sidecar.write_bytes(key_a)
+    os.chmod(sidecar, 0o600)
+
+    # Plus one event genuinely beyond every generation.
+    store2 = MemoryStore()
+    write_event(store2, kind="probe2", data={"x": 2}, severity="info")
+    ev_tbl2 = store2.db.open_table(EVENTS_TABLE)
+    df = ev_tbl2.to_pandas()
+    dead_eid = str(df[df["id"] != recoverable_eid].iloc[0]["id"])
+    dead_ct2 = encrypt_field(
+        "{\"gone\": 2}",
+        _secrets.token_bytes(32),
+        associated_data=dead_eid.encode("ascii"),
+    )
+    ev_tbl2.update(where=f"id = '{dead_eid}'", values={"data_json": dead_ct2})
+    del dead_ct
+
+    from iai_mcp.cli._crypto import cmd_crypto_redact_undecryptable
+
+    rc = cmd_crypto_redact_undecryptable(argparse.Namespace(user_id="default"))
+    out = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["redacted"] == 0, "the recoverable record must NOT be redacted"
+    assert out["records_rekeyed"] == 1
+    # The store writes bookkeeping events of its own under key A; every one
+    # a retained generation opens re-keys, so the floor is 1, not an exact.
+    assert out["events_rekeyed"] >= 1
+    assert out["events_redacted"] == 1, "only the truly dead event is redacted"
+
+    store3 = MemoryStore()
+    got = store3.get(rec.id)
+    assert got is not None
+    assert got.literal_surface == "recoverable memory — must survive redact"

@@ -5,6 +5,138 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-08-08
+
+**Upgrading takes three steps.** The capture hooks and the engine must agree on
+the new spool and pack formats, so reinstall them in lockstep:
+
+```bash
+pip install -U iai-pme
+iai-mcp capture-hooks install
+iai-mcp daemon restart
+```
+
+**If the daemon then refuses to start** with `refusing to mix vector
+generations`, the store is telling the truth: its vectors were produced by a
+different embedder than the one your environment now configures. Clear any
+`IAI_MCP_EMBED_MODEL_ID` / `IAI_MCP_EMBED_TEXT_PREFIX` override from the service
+environment (`iai-mcp daemon install --yes` re-renders the unit from a clean
+template), or run `iai-mcp migrate --reembed-from-text` to move the store to the
+new model. Working around the guard is the one wrong answer: the state it blocks
+is a semantic lane that returns nothing while keyword matching hides the loss.
+
+### Added
+
+- **Memory can speak thirteen more languages, when you ask it to.** `iai lang
+  add|remove|status` opts a store into `cs de es fr hi id it ja pt ru th vi zh`.
+  English stays the default and nothing changes until you run the verb. The
+  selection lives in the store's own config, never in the service environment,
+  so a shell export cannot silently repoint an existing store at a foreign
+  vector space. The embedder is `multilingual-e5-small` at a pinned revision,
+  used raw: on a pre-registered 318-probe battery the raw model beat both a
+  distilled student and the MiniLM control, so the pack ships zero training.
+  Non-Latin scripts (ja, th, hi, zh) currently get no lexical contribution —
+  Unicode-aware keyword matching is queued.
+- **Reflection can ride a second subscription.** `iai reflect provider …`
+  routes the nightly synthesis through the Codex or Gemini CLI instead of
+  Claude. Child environments are allow-listed, the argv is sandboxed and
+  non-interactive, and the prompt goes in on stdin.
+- **Named things are recallable by name.** Capture extracts entity anchors from
+  every stored turn — backticked identifiers, at-prefixed handles, dotted and
+  dashed names, CamelCase, mid-sentence proper nouns including Cyrillic — and
+  writes them as `entity:` tags. `iai-mcp entity-backfill` anchors a corpus
+  captured before this shipped; `--refresh` recomputes the whole corpus.
+- **`iai-mcp blob-quarantine`** tombstones machine-notification blobs captured
+  before the noise filter existed. They drown real records on any cue that
+  shares their vocabulary. Dry-run by default; applying snapshots the store
+  first, journals every id, and spares pinned records.
+- **Captured turns record their mechanics, not only their words.** Assistant
+  turns carry a `[tools: …]` trailer, so memory remembers what was used and not
+  just what was said.
+- **The upload surface accepts source files.** Alongside prose and Office
+  containers, `iai upload` and the dashboard now take 30-odd code and config
+  suffixes, so a repository or a config tree ingests as readily as a document.
+
+### Changed
+
+- **The deferred capture spool is encrypted.** Every line is sealed with
+  AES-256-GCM under the store's existing key file and a constant AAD, so the
+  in-place renames the drain relies on cannot orphan a line. The inline hooks
+  stay dependency-free and stage at `0600`; the daemon re-encrypts those lines
+  in place on its first pass, line for line, fenced against concurrent appends.
+  Readers accept both formats, a tampered line is skipped rather than fatal, and
+  a missing key defers the file to a later pass instead of walking it toward
+  permanent failure. Nothing is ever evicted — the verbatim guarantee holds —
+  but a soft size cap (`IAI_MCP_SPOOL_SOFT_CAP_MB`, default 100) now warns
+  loudly through `doctor` and `status`, because a growing spool means a daemon
+  that has stopped draining.
+- **Key rotation is recoverable from every partial state.** Retained
+  generations are tracked in a sidecar, prior-key recovery spans multiple
+  generations, and redaction re-keys before it redacts, so an interrupted
+  rotation no longer leaves a store that opens under no key at all.
+- **The socket binds before the embedder builds.** A cold native model build
+  used to run to completion first, leaving a live process that no client could
+  reach and every surface reporting the daemon as down. Liveness no longer
+  waits on a model: `status` answers immediately and reports a warming
+  identity, while `recall` waits on a single-flight build.
+- **An embedder refusal says so.** A refused embedder selection — foreign
+  dimension, misconfigured model, identity mismatch — now travels as a typed
+  code across every serving surface instead of degrading into a zero cue vector
+  or surfacing as "daemon unreachable".
+- **The nightly cycle learns quiet from the machine, not from session counts.**
+  The quiet window is derived from OS input idle, with a persisted 48-hour
+  starvation backstop and a boot-time reset of a poisoned window. Parallel
+  agent activity can no longer invert the window onto the working day and
+  starve consolidation.
+- **Ambient injection is per session.** The next-turn anticipation pack is
+  published per session with a strict ownership model, so one conversation's
+  refresh can no longer overwrite another's, and the session-start recent-work
+  feed labels every line with its origin.
+- **Text files declare their encoding.** Every state and spool write now names
+  UTF-8 explicitly, across 161 call sites, so a Windows default codec cannot
+  mangle stored content.
+
+### Fixed
+
+- The store records which embedder produced its vectors and refuses to open
+  under a different one. Two 384-dimension models pass a dimension check and
+  still write vectors that read as noise against each other.
+- `memory_recall` honors a caller-supplied `cue_embedding` on the warm path, as
+  the tool schema always promised. One validated vector drives candidate
+  selection, the exact-cosine authority and the final rank.
+- The re-embed migration covers every tier rather than episodic alone, rebuilds
+  the recall index, and clears its checkpoint even on a zero-write resume.
+- The Antigravity hook installer picks its script set per platform. As
+  published in 2.9.0 it demanded the POSIX `.sh` set on Windows and could never
+  succeed there.
+- `detect_communities` reaches its own fallback. The numba-tainted import sat
+  above the guard that was written to catch it, so an unusable numba escaped
+  the function and surfaced on every tool call. Thanks
+  [@ZhdanDesign](https://github.com/ZhdanDesign).
+- The session-recall hook resolves the CLI the way the capture hook already
+  did. A standard `pip install` puts the binary where the recall hook never
+  looked, so capture worked and recall silently did not. Thanks
+  [@ZhdanDesign](https://github.com/ZhdanDesign).
+- Windows portability across the daemon, the locks, the state files and the
+  migrations: `fcntl` degrades instead of crashing, `os.fchmod` is guarded, and
+  PowerShell capture and recall hooks ship for Antigravity along with a Task
+  Scheduler scanner for its GUI, which fires no hooks of its own. Thanks
+  [@owlze](https://github.com/owlze).
+- Documentation accuracy, found by reading the code rather than the prose: the
+  encryption key is `~/.iai-mcp/.crypto.key` and two of three mentions named a
+  file that does not exist; the doctor table promised 27 checks and listed 26;
+  the upload list named 12 of 45 accepted suffixes; and one sentence claimed
+  plaintext never reaches disk while the deferred spool wrote exactly that. The
+  claim returns in this release as truth, because the spool is now encrypted.
+
+### Security
+
+- Deferred captures are encrypted at rest. Before this release they were
+  written as owner-only plaintext and, on a machine where the daemon had
+  stopped, accumulated without a ceiling.
+- A guard test scans every tracked text file for cp1251 damage, for byte-order
+  marks outside PowerShell scripts, and for debug prints in shipped code.
+
 ## [2.8.1] — 2026-08-02
 
 ### Fixed

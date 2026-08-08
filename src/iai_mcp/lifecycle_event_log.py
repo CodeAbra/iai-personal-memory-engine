@@ -127,7 +127,7 @@ class LifecycleEventLog:
         if not target.exists():
             return []
         out: list[dict[str, Any]] = []
-        with target.open("r") as f:
+        with target.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

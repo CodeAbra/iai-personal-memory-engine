@@ -144,7 +144,8 @@ def test_hook_appends_serve_ledger(tmp_path):
     pack = tmp_path / "pack.md"
     pack.write_text("- [episodic] served words\n", encoding="utf-8")
     env = dict(os.environ)
-    env["IAI_MCP_ROOT"] = str(root)
+    env["IAI_MCP_STORE"] = str(root)
+    env.pop("IAI_MCP_ROOT", None)
     env["IAI_MCP_FORESIGHT_PACK"] = str(pack)
     env["IAI_MCP_WORKING_TIER_CACHE"] = str(tmp_path / "absent.md")
     env.pop("IAI_MCP_PER_TURN_SOCKET_ACCEL", None)

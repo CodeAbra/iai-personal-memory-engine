@@ -167,8 +167,18 @@ def migrate_crypto_recover_prior_key(
 
     from iai_mcp.crypto import KEY_BYTES
 
-    if len(prior_key) != KEY_BYTES:
-        raise ValueError(f"prior_key must be {KEY_BYTES} raw bytes")
+    # One key or several retained generations (a `.crypto.key.pre-rotate`
+    # sidecar concatenates KEY_BYTES blocks) — every generation is tried.
+    if isinstance(prior_key, (list, tuple)):
+        prior_generations = list(prior_key)
+    else:
+        prior_generations = [prior_key]
+    if not prior_generations or any(
+        len(k) != KEY_BYTES for k in prior_generations
+    ):
+        raise ValueError(
+            f"each prior key must be {KEY_BYTES} raw bytes"
+        )
 
     mig = detect_partial_migration(store.db)
     if mig["state"] not in ("clean", "needs_cleanup"):
@@ -178,7 +188,7 @@ def migrate_crypto_recover_prior_key(
         )
 
     cur_key = store._key()
-    key_chain = [cur_key, prior_key] if prior_key != cur_key else [cur_key]
+    key_chain = [cur_key] + [k for k in prior_generations if k != cur_key]
 
     names = _db_table_names_set(store.db)
     if CRYPTO_RECOVER_STAGING in names:
@@ -205,12 +215,15 @@ def migrate_crypto_recover_prior_key(
             _decrypt_field_try_keys(lit, rid, [cur_key])
         except (InvalidTag, ValueError):
             try:
-                _decrypt_field_try_keys(lit, rid, [prior_key])
+                _decrypt_field_try_keys(lit, rid, prior_generations)
                 needs_prior += 1
             except (InvalidTag, ValueError):
                 raise RuntimeError(
-                    f"record {rid}: literal_surface not decryptable with current "
-                    "or prior key — run crypto redact-undecryptable or restore backup"
+                    f"record {rid}: literal_surface not decryptable with the "
+                    "current key or any prior generation — run crypto "
+                    "redact-undecryptable (rows the current key or a retained "
+                    "generation opens are preserved or re-keyed; only rows "
+                    "nothing opens are redacted) or restore backup"
                 ) from None
 
     if needs_prior == 0:
@@ -280,46 +293,120 @@ def migrate_crypto_recover_prior_key(
     }
 
 
-def migrate_redact_undecryptable_records(store: MemoryStore) -> dict:
-    from cryptography.exceptions import InvalidTag
+def _retained_generations(store: MemoryStore) -> list[bytes]:
+    """Key generations retained by a partial rotation. Redaction is a
+    terminal verb: a row one of these still opens must be RE-KEYED, never
+    destroyed while its key sits on disk."""
+    from iai_mcp.crypto import KEY_BYTES
 
+    import os
+
+    try:
+        sidecar = store._crypto_key_wrapper._key_file_path().with_name(
+            ".crypto.key.pre-rotate"
+        )
+        if not sidecar.exists():
+            return []
+        if os.name != "nt":
+            st = os.stat(sidecar)
+            if st.st_mode & 0o077 != 0:
+                # Fail LOUD: silently ignoring the sidecar would route
+                # recoverable rows into redaction.
+                raise RuntimeError(
+                    f"retained key file at {sidecar} has insecure mode "
+                    f"0o{st.st_mode & 0o777:03o}; run: chmod 600 {sidecar}"
+                )
+        raw = sidecar.read_bytes()
+    except OSError:
+        return []
+    return [
+        raw[i:i + KEY_BYTES]
+        for i in range(0, len(raw) - len(raw) % KEY_BYTES, KEY_BYTES)
+    ]
+
+
+def migrate_redact_undecryptable_records(store: MemoryStore) -> dict:
     tbl = store.db.open_table(RECORDS_TABLE)
     if tbl.count_rows() == 0:
-        return {"redacted": 0, "skipped_ok": 0, "skipped_plain": 0}
+        return {
+            "redacted": 0, "skipped_ok": 0, "skipped_plain": 0,
+            "records_rekeyed": 0,
+        }
 
+    retained = _retained_generations(store)
+    cur_key = store._key()
+    key_chain = [cur_key] + [k for k in retained if k != cur_key]
     df = tbl.to_pandas()
     redacted = 0
     skipped_ok = 0
     skipped_plain = 0
+    records_rekeyed = 0
     for _, r in df.iterrows():
         rid = UUID(str(r["id"]))
         lit = str(r.get("literal_surface") or "")
         if not is_encrypted(lit):
             skipped_plain += 1
             continue
-        try:
-            plain = store._decrypt_for_record(rid, lit)
-        except (InvalidTag, ValueError):
-            plain = None
+        plain = store._decrypt_for_record_or_none(rid, lit)
         if plain is not None:
             skipped_ok += 1
             continue
         prov_raw = str(r.get("provenance_json") or "[]")
-        try:
-            if is_encrypted(prov_raw):
-                prov_plain = store._decrypt_for_record(rid, prov_raw)
-            else:
-                prov_plain = prov_raw
-        except (InvalidTag, ValueError):
-            prov_plain = "[]"
         gain_raw = str(r.get("profile_modulation_gain_json") or "{}")
-        try:
-            if is_encrypted(gain_raw):
-                gain_plain = store._decrypt_for_record(rid, gain_raw)
-            else:
-                gain_plain = gain_raw
-        except (InvalidTag, ValueError):
-            gain_plain = "{}"
+        if retained:
+            healed = None
+            try:
+                healed = _decrypt_field_try_keys(lit, rid, retained)
+            except Exception:  # noqa: BLE001 -- opens under no retained generation either
+                healed = None
+            if healed is not None:
+                try:
+                    prov_plain = (
+                        _decrypt_field_try_keys(prov_raw, rid, key_chain)
+                        if is_encrypted(prov_raw) else prov_raw
+                    )
+                except Exception:  # noqa: BLE001 -- companion column beyond every generation
+                    prov_plain = "[]"
+                try:
+                    gain_plain = (
+                        _decrypt_field_try_keys(gain_raw, rid, key_chain)
+                        if is_encrypted(gain_raw) else gain_raw
+                    )
+                except Exception:  # noqa: BLE001 -- companion column beyond every generation
+                    gain_plain = "{}"
+                tbl.update(
+                    where=f"id = '{_uuid_literal(rid)}'",
+                    values={
+                        "literal_surface": store._encrypt_for_record(
+                            rid, healed
+                        ),
+                        "provenance_json": store._encrypt_for_record(
+                            rid, prov_plain
+                        ),
+                        "profile_modulation_gain_json": (
+                            store._encrypt_for_record(rid, gain_plain)
+                        ),
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                )
+                records_rekeyed += 1
+                continue
+        # Companion columns get the same courtesy as the literal: every
+        # available generation is tried before content is dropped.
+        if is_encrypted(prov_raw):
+            try:
+                prov_plain = _decrypt_field_try_keys(prov_raw, rid, key_chain)
+            except Exception:  # noqa: BLE001 -- opens under no available generation
+                prov_plain = "[]"
+        else:
+            prov_plain = prov_raw
+        if is_encrypted(gain_raw):
+            try:
+                gain_plain = _decrypt_field_try_keys(gain_raw, rid, key_chain)
+            except Exception:  # noqa: BLE001 -- opens under no available generation
+                gain_plain = "{}"
+        else:
+            gain_plain = gain_raw
         new_lit = store._encrypt_for_record(rid, REDACT_UNDECRYPTABLE_MARKER)
         new_prov = store._encrypt_for_record(rid, prov_plain)
         new_gain = store._encrypt_for_record(rid, gain_plain)
@@ -347,6 +434,79 @@ def migrate_redact_undecryptable_records(store: MemoryStore) -> dict:
         "redacted": redacted,
         "skipped_ok": skipped_ok,
         "skipped_plain": skipped_plain,
+        "records_rekeyed": records_rekeyed,
+    }
+
+
+def migrate_redact_undecryptable_events(store: MemoryStore) -> dict:
+    """Terminal escape for event rows that decrypt under no available key
+    generation — current OR retained. A row a retained generation still
+    opens is re-keyed to the current key, never redacted; only then is the
+    payload replaced with a marker so the next `crypto rotate` can report
+    clean instead of staying `partial` forever."""
+    from iai_mcp.crypto import decrypt_field
+
+    tbl = store.db.open_table(EVENTS_TABLE)
+    df = tbl.to_pandas()
+    events_redacted = 0
+    events_ok = 0
+    events_plain = 0
+    events_rekeyed = 0
+    retained = _retained_generations(store)
+    cur_key = store._key()
+    for _, r in df.iterrows():
+        raw = str(r.get("data_json") or "{}")
+        if not is_encrypted(raw):
+            events_plain += 1
+            continue
+        eid = str(r["id"])
+        ad = eid.encode("ascii")
+        try:
+            decrypt_field(raw, cur_key, associated_data=ad)
+            events_ok += 1
+            continue
+        except Exception:  # noqa: BLE001 -- undecryptable under the current key
+            pass
+        healed = None
+        for k in retained:
+            try:
+                healed = decrypt_field(raw, k, associated_data=ad)
+                break
+            except Exception:  # noqa: BLE001 -- try the next retained generation
+                continue
+        if healed is not None:
+            new_ct = encrypt_field(healed, cur_key, associated_data=ad)
+            try:
+                tbl.update(where=f"id = '{eid}'", values={"data_json": new_ct})
+                events_rekeyed += 1
+            except (OSError, ValueError, RuntimeError) as exc:
+                log.error("event re-key update failed id=%s: %s", eid, exc)
+            continue
+        marker = json.dumps({"redacted": REDACT_UNDECRYPTABLE_MARKER})
+        new_ct = encrypt_field(marker, cur_key, associated_data=ad)
+        try:
+            tbl.update(where=f"id = '{eid}'", values={"data_json": new_ct})
+            events_redacted += 1
+        except (OSError, ValueError, RuntimeError) as exc:
+            log.error("event redaction update failed id=%s: %s", eid, exc)
+    if events_redacted:
+        try:
+            write_event(
+                store,
+                kind="crypto_redaction",
+                data={
+                    "events_redacted": events_redacted,
+                    "reason": "undecryptable_event_payload",
+                },
+                severity="warning",
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            log.error("crypto_redaction event write failed: %s", exc)
+    return {
+        "events_redacted": events_redacted,
+        "events_ok": events_ok,
+        "events_plain": events_plain,
+        "events_rekeyed": events_rekeyed,
     }
 
 

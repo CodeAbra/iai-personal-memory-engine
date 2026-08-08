@@ -1109,6 +1109,11 @@ class _VectorInjectionEmbedder:
     def embed(self, text: str) -> list[float]:
         if text in self._registry:
             return self._registry[text]
+        if self._wrapped is None:
+            raise RuntimeError(
+                "synthetic-dim baseline attempted a real text embed; every "
+                "cue must go through the sentinel registry"
+            )
         return self._wrapped.embed(text)
 
 
@@ -1483,7 +1488,13 @@ def run_baseline(
 
     # ---- Embedder shim — injects the perturbed cue vector into the production
     # dispatch path (see ``_inject_embedder_into_dispatch``). --------------------
-    real_embedder = embedder_for_store(store)
+    try:
+        real_embedder = embedder_for_store(store)
+    except ValueError:
+        # A synthetic-dim store has no matching real embedder — and needs
+        # none: every baseline cue goes through the sentinel registry, and
+        # the shim fails loudly if a real text embed is ever attempted.
+        real_embedder = None
     embedder = _VectorInjectionEmbedder(real_embedder)
 
     # ---- Scan the active corpus once (id→vec + exact-embedding class sizes) --

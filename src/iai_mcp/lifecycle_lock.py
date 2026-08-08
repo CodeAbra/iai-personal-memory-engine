@@ -21,6 +21,20 @@ DEFAULT_LOCK_PATH: Path = _default_lock_path()
 
 SCHEMA_VERSION: int = 1
 
+DAEMON_PROCESS_TITLE_BASE = "iai lilli (iai_mcp.daemon)"
+
+
+def daemon_process_title(store_root: "str | Path") -> str:
+    """The exact process title a daemon serving `store_root` sets on itself.
+
+    Single source for both the daemon's setproctitle call and the stop
+    verb's orphan sweep — the sweep matches this string by EQUALITY, so
+    any drift between the two sides silently disables sweeping. The store
+    path is resolved so symlinked spellings of the same store compare
+    equal.
+    """
+    return f"{DAEMON_PROCESS_TITLE_BASE} store={Path(store_root).resolve()}"
+
 
 class LifecycleLockConflict(RuntimeError):
 

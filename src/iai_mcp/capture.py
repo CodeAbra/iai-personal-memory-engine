@@ -190,7 +190,7 @@ def _strip_processing_marker(
     except OSError as e:
         if log_path is not None:
             try:
-                with log_path.open("a") as logf:
+                with log_path.open("a", encoding="utf-8") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} "
                         f"strip-marker-failed {path.name}: {type(e).__name__}\n"
@@ -236,7 +236,7 @@ def _quarantine_file(
     except Exception as exc:  # noqa: BLE001 -- fail-safe boundary
         log.debug("quarantine_event_write_failed: %s", exc)
         try:
-            with log_path.open("a") as logf:
+            with log_path.open("a", encoding="utf-8") as logf:
                 logf.write(
                     f"{datetime.now(timezone.utc).isoformat()} "
                     f"quarantined-event-skipped {target.name}\n"
@@ -245,7 +245,7 @@ def _quarantine_file(
             log.debug("quarantine_event_log_fallback_failed: %s", exc2)
 
     try:
-        with log_path.open("a") as logf:
+        with log_path.open("a", encoding="utf-8") as logf:
             logf.write(
                 f"{datetime.now(timezone.utc).isoformat()} "
                 f"quarantined {target.name}: crash_loop attempts={attempts}\n"
@@ -302,7 +302,7 @@ def _advance_failed_path(
         except Exception as exc:  # noqa: BLE001 -- fail-safe boundary
             log.debug("permanent_capture_failure_event_failed: %s", exc)
             try:
-                with log_path.open("a") as logf:
+                with log_path.open("a", encoding="utf-8") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} "
                         f"permanent_capture_failure-event-skipped {new_name}\n"
@@ -454,6 +454,15 @@ def capture_turn(
         raise NativeError(f"capture encode failed: {exc}") from exc
     embedding = list(emb)
 
+    # Anchor extraction stays OUTSIDE the dedup lock: a slow input must
+    # never wedge every other session's capture behind it.
+    try:
+        from iai_mcp.entity_anchors import entity_tags
+        _entity_tag_list = entity_tags(text)
+    except Exception as exc:  # noqa: BLE001 -- capture fail-safe
+        log.debug("entity_anchor_extraction_failed: %s", exc)
+        _entity_tag_list = []
+
     with _CAPTURE_DEDUP_LOCK:
         conversational = _is_episodic_conversational(tier, role)
         if conversational:
@@ -522,6 +531,7 @@ def capture_turn(
                     }
 
         tags = ["capture", f"role:{role}"]
+        tags.extend(_entity_tag_list)
         if extra_tags:
             # Caller-scoped grouping tags (e.g. a per-document tag on a study
             # ingest). Bounded and deduped; never fold into the idem tag.
@@ -568,6 +578,11 @@ def capture_turn(
             profile_modulation_gain={},
             schema_version=SCHEMA_VERSION_CURRENT,
         )
+        try:
+            from iai_mcp.aaak import generate_aaak_index
+            rec.aaak_index = generate_aaak_index(rec)
+        except Exception:  # noqa: BLE001 -- index mint must never block capture
+            rec.aaak_index = ""
 
         try:
             store.insert(rec)
@@ -628,6 +643,7 @@ def _drain_write_pending(
     role: str = "user",
     ts: str | None = None,
     source_uuid: str | None = None,
+    provenance_extra: dict | None = None,
 ) -> dict[str, Any]:
     """Write a captured turn as a pending (un-embedded) row.
 
@@ -697,6 +713,8 @@ def _drain_write_pending(
             {"ts": now.isoformat(), "cue": cue or "(auto-capture)",
              "session_id": session_id, "role": role}
         ]
+        if provenance_extra:
+            provenance_list.append(dict(provenance_extra))
 
         record_id = str(uuid4())
         try:
@@ -774,6 +792,7 @@ def capture_transcript(
 
     counts = {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 0}
     seen = 0
+    pending_tools: list[str] = []
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             if seen >= max_turns:
@@ -785,10 +804,36 @@ def capture_transcript(
                 log.debug("capture_transcript_json_parse_failed: %s", exc)
                 counts["errors"] += 1
                 continue
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+            obj_role = obj.get("type") or msg.get("role") or obj.get("role", "")
+            tools = (
+                _tool_names(msg.get("content", ""))
+                if obj_role == "assistant" else []
+            )
             parsed = _parse_transcript_obj(obj)
             if parsed is None:
+                # Action-only assistant entries carry the mechanics of the
+                # episode; their tool names ride the response's next text
+                # turn. A user entry clears them ONLY when it is dialogue —
+                # tool-result-only user entries are plumbing, not a boundary.
+                if tools:
+                    pending_tools.extend(tools)
+                elif obj_role == "user" and _has_conversational_text(
+                    msg.get("content", "")
+                ):
+                    pending_tools = []
                 continue
             role, text, src_uuid, ts = parsed
+            if role == "assistant":
+                # Floor on the BARE text: the trailer must never turn an
+                # otherwise-skipped stub into a record.
+                if len(text.strip()) >= MIN_CAPTURE_LEN:
+                    text = text + _tools_trailer(pending_tools + tools)
+                    pending_tools = []
+                else:
+                    pending_tools.extend(tools)
+            else:
+                pending_tools = []
             result = capture_turn(
                 store,
                 cue=f"session {session_id} turn {seen}",
@@ -826,6 +871,44 @@ def _is_noise(text: str) -> bool:
             if text == pattern:
                 return True
     return False
+
+
+def _tools_trailer(names: "list[str]") -> str:
+    """Labeled trace of the tools a response invoked, appended to its text.
+
+    Memory otherwise holds only what the assistant SAID — the results — and
+    a later session cannot answer which instrument produced them.
+    """
+    seen: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.append(n)
+    if not seen:
+        return ""
+    extra = f" +{len(seen) - 8}" if len(seen) > 8 else ""
+    return "\n[tools: " + ", ".join(seen[:8]) + extra + "]"
+
+
+def _tool_names(content: "list | str") -> "list[str]":
+    if not isinstance(content, list):
+        return []
+    return [
+        str(b.get("name") or "")
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name")
+    ]
+
+
+def _has_conversational_text(content: "list | str") -> bool:
+    # A user entry with only tool_result blocks is plumbing, not dialogue —
+    # it must not act as a response boundary for pending tool names.
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") == "text"
+            and str(b.get("text") or "").strip()
+            for b in content
+        )
+    return bool(str(content or "").strip())
 
 
 def _parse_transcript_line(
@@ -903,6 +986,109 @@ def _parse_transcript_obj(
     return role, text, obj.get("uuid"), obj.get("timestamp")
 
 
+# Spool lines are AES-GCM-encrypted with the store's key FILE only — never
+# the keychain or a passphrase prompt: writers run inside editor hooks where
+# any credential prompt would hang the host. Keyless stores spool plaintext
+# (0600) with a one-time warning. AAD is a constant, NOT the filename —
+# spool files are renamed in place (.processing/.partial/.permanent-failed)
+# and a filename AAD would break every rename.
+_SPOOL_AAD: bytes = b"iai-mcp:deferred-spool:v1"
+
+_spool_key_cache: dict[tuple, bytes] = {}
+_spool_plaintext_warned: bool = False
+
+
+class SpoolKeyUnavailable(RuntimeError):
+    """Encrypted spool line but no readable key in THIS process. Not line
+    corruption: readers must leave the file for a later pass — never advance
+    it toward permanent failure, never advance a drain offset past it."""
+
+
+def _spool_root() -> Path:
+    # Spool dir AND spool key resolve from this one root — the default home
+    # store — regardless of IAI_MCP_STORE. Hook writers often run without
+    # the env; two resolutions would write one file under two keys.
+    return Path.home() / ".iai-mcp"
+
+
+def deferred_captures_dir() -> Path:
+    return _spool_root() / ".deferred-captures"
+
+
+def _spool_key() -> bytes | None:
+    global _spool_plaintext_warned
+    sig: "tuple | None" = None
+    try:
+        from iai_mcp.crypto import CryptoKey, try_file_key
+
+        root = _spool_root()
+        key_path = CryptoKey(store_root=root)._key_file_path()
+        try:
+            st = os.stat(key_path)
+            # Cache keyed on (path, mtime, size): `crypto rotate` rewrites
+            # the file, so a long-lived daemon self-invalidates. Absence is
+            # never cached — a later-created key is picked up next line.
+            sig = (str(key_path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        if sig is not None:
+            cached = _spool_key_cache.get(sig)
+            if cached is not None:
+                return cached
+        key = try_file_key(store_root=root)
+    except Exception as exc:  # noqa: BLE001 -- a hook must never die on key trouble
+        if not _spool_plaintext_warned:
+            _spool_plaintext_warned = True
+            log.warning(
+                "spool key unavailable (%s); deferred captures spool plaintext",
+                exc,
+            )
+        return None
+    if key is None:
+        if not _spool_plaintext_warned:
+            _spool_plaintext_warned = True
+            log.warning(
+                "no crypto key file — deferred captures spool as plaintext (0600)"
+            )
+        return None
+    if sig is not None:
+        _spool_key_cache[sig] = key
+    return key
+
+
+def _encode_spool_line(obj: dict) -> str:
+    line = json.dumps(obj, ensure_ascii=False)
+    key = _spool_key()
+    if key is None:
+        return line
+    from iai_mcp.crypto import encrypt_field
+
+    return encrypt_field(line, key, _SPOOL_AAD)
+
+
+def _decode_spool_line(line: str) -> str:
+    line = line.strip()
+    from iai_mcp.crypto import is_encrypted
+
+    if not is_encrypted(line):
+        return line
+    key = _spool_key()
+    if key is None:
+        raise SpoolKeyUnavailable("encrypted spool line but no readable key")
+    from iai_mcp.crypto import decrypt_field
+
+    try:
+        return decrypt_field(line, key, _SPOOL_AAD)
+    except ValueError:
+        raise
+    except Exception as exc:
+        # InvalidTag and friends become ValueError so every existing
+        # skip-this-line/skip-this-file except-shape keeps holding.
+        raise ValueError(
+            f"spool line decrypt failed: {type(exc).__name__}"
+        ) from exc
+
+
 def write_deferred_event(
     session_id: str,
     role: str,
@@ -912,7 +1098,7 @@ def write_deferred_event(
     ts: str | None = None,
     source_uuid: str | None = None,
 ) -> Path:
-    deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    deferred_dir = deferred_captures_dir()
     deferred_dir.mkdir(parents=True, exist_ok=True)
     path = deferred_dir / f"{session_id}.live.jsonl"
 
@@ -942,7 +1128,7 @@ def write_deferred_event(
                 "session_id": session_id,
                 "cwd": cwd or os.getcwd(),
             }
-            fh.write(json.dumps(header, ensure_ascii=False) + "\n")
+            fh.write(_encode_spool_line(header) + "\n")
         event = {
             "text": text,
             "cue": f"session {session_id} turn",
@@ -952,7 +1138,12 @@ def write_deferred_event(
         }
         if source_uuid:
             event["source_uuid"] = source_uuid
-        fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        fh.write(_encode_spool_line(event) + "\n")
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError as exc:  # noqa: BLE001 -- fsync is best-effort
+            log.debug("write_deferred_event fsync failed: %s", exc)
     return path
 
 
@@ -1032,7 +1223,7 @@ def _compact_live_file_if_oversized(path: Path, session_id: str) -> None:
     state_dir = Path.home() / ".iai-mcp" / ".capture-state"
     offset_path = state_dir / f"{session_id}.drain-offset"
     try:
-        drain_offset = int(offset_path.read_text().strip() or "0") if offset_path.exists() else 0
+        drain_offset = int(offset_path.read_text(encoding="utf-8").strip() or "0") if offset_path.exists() else 0
     except (ValueError, OSError):
         drain_offset = 0
 
@@ -1100,14 +1291,14 @@ def _compact_live_file_if_oversized(path: Path, session_id: str) -> None:
 
     try:
         tmp_offset = offset_path.with_suffix(".drain-offset.tmp")
-        tmp_offset.write_text("0")
+        tmp_offset.write_text("0", encoding="utf-8")
         os.replace(tmp_offset, offset_path)
     except OSError as exc:
         log.warning("live_compact_offset_reset_failed: %s", exc)
 
 
 def read_pending_live_events(session_id: str | None = None) -> list[dict]:
-    deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    deferred_dir = deferred_captures_dir()
     if not deferred_dir.exists():
         return []
 
@@ -1154,8 +1345,8 @@ def read_pending_live_events(session_id: str | None = None) -> list[dict]:
                 if not first_line.endswith("\n"):
                     continue
                 try:
-                    header = json.loads(first_line)
-                except (json.JSONDecodeError, ValueError):
+                    header = json.loads(_decode_spool_line(first_line))
+                except (json.JSONDecodeError, ValueError, SpoolKeyUnavailable):
                     continue
                 if header.get("version", 0) > 1:
                     continue
@@ -1169,8 +1360,8 @@ def read_pending_live_events(session_id: str | None = None) -> list[dict]:
 
                 for line in complete_lines:
                     try:
-                        ev = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
+                        ev = json.loads(_decode_spool_line(line))
+                    except (json.JSONDecodeError, ValueError, SpoolKeyUnavailable):
                         continue
                     ts_raw = ev.get("ts")
                     ts_dt = _resolve_ts(ts_raw)
@@ -1198,7 +1389,7 @@ def write_deferred_captures(
     cwd: str | None = None,
     max_turns: int = 100_000,
 ) -> Path:
-    deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    deferred_dir = deferred_captures_dir()
     deferred_dir.mkdir(parents=True, exist_ok=True)
     # Include pid for collision safety: two parallel bulk-import workers in
     # the same wall-clock second would otherwise race for the same final
@@ -1208,14 +1399,14 @@ def write_deferred_captures(
     final_name = f"{session_id}-{int(time.time())}-{os.getpid()}.jsonl"
     out_path = deferred_dir / final_name
     tmp_path = deferred_dir / f"{final_name}.tmp"
-    with tmp_path.open("w") as fh:
+    with tmp_path.open("w", encoding="utf-8") as fh:
         header = {
             "version": 1,
             "deferred_at": datetime.now(timezone.utc).isoformat(),
             "session_id": session_id,
             "cwd": cwd or os.getcwd(),
         }
-        fh.write(json.dumps(header, ensure_ascii=False) + "\n")
+        fh.write(_encode_spool_line(header) + "\n")
         path = Path(transcript_path).expanduser()
         if path.exists():
             seen = 0
@@ -1241,7 +1432,7 @@ def write_deferred_captures(
                     }
                     if src_uuid:
                         event["source_uuid"] = src_uuid
-                    fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    fh.write(_encode_spool_line(event) + "\n")
         fh.flush()
         try:
             os.fsync(fh.fileno())
@@ -1251,9 +1442,98 @@ def write_deferred_captures(
     return out_path
 
 
+def _reencrypt_one_spool_file(path: Path, key: bytes) -> int:
+    from iai_mcp.crypto import encrypt_field, is_encrypted
+
+    for _attempt in range(3):
+        try:
+            pre = path.stat()
+            with path.open("r", encoding="utf-8") as fh:
+                raw_lines = fh.readlines()
+        except OSError:
+            return 0
+        out: list[str] = []
+        changed = 0
+        for ln in raw_lines:
+            if not ln.endswith("\n"):
+                # Torn tail from a concurrent append — preserved verbatim.
+                out.append(ln)
+                continue
+            s = ln.strip()
+            if not s or is_encrypted(s):
+                out.append(ln)
+                continue
+            out.append(encrypt_field(s, key, _SPOOL_AAD) + "\n")
+            changed += 1
+        if not changed:
+            return 0
+        tmp = path.with_name(path.name + ".enc-tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, "".join(out).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # Fence: a hook may append between the read and this swap; replacing
+        # then would drop that turn. Re-stat and retry on any change.
+        try:
+            post = path.stat()
+        except OSError:
+            post = None
+        if (
+            post is not None
+            and post.st_size == pre.st_size
+            and post.st_mtime_ns == pre.st_mtime_ns
+        ):
+            os.replace(str(tmp), str(path))
+            return changed
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def reencrypt_plaintext_spool_lines() -> dict[str, int]:
+    """Encrypt plaintext lines staged by the inline hook writers.
+
+    The per-turn hooks run stdlib-only python for latency and cannot carry
+    AES-GCM; they stage plaintext at 0600 and the daemon closes the at-rest
+    gap here on its next pass. Rewrites preserve the line count 1:1, so
+    drain offsets stay valid."""
+    counts = {"files": 0, "lines": 0}
+    key = _spool_key()
+    if key is None:
+        return counts
+    spool_dir = deferred_captures_dir()
+    if not spool_dir.exists():
+        return counts
+    for path in sorted(spool_dir.iterdir()):
+        if not path.is_file() or path.suffix == ".tmp":
+            continue
+        try:
+            changed = _reencrypt_one_spool_file(path, key)
+        except Exception as exc:  # noqa: BLE001 -- per-file isolation
+            log.debug("spool re-encrypt skipped %s: %s", path.name, exc)
+            continue
+        if changed:
+            counts["files"] += 1
+            counts["lines"] += changed
+    return counts
+
+
 def drain_capture_backlog(store: MemoryStore) -> dict[str, int]:
     """Drain both the rotated/crashed deferred files and the still-open live
     spools (incremental, offset-tracked) into the store."""
+    try:
+        enc = reencrypt_plaintext_spool_lines()
+        if enc["lines"]:
+            log.info(
+                "spool re-encrypt: %d line(s) in %d file(s)",
+                enc["lines"], enc["files"],
+            )
+    except Exception as exc:  # noqa: BLE001 -- encryption catch-up must not sink the drain
+        log.debug("spool re-encrypt pass failed: %s", exc)
     counts = drain_deferred_captures(store)
     try:
         live = drain_active_live_captures(store, exclude_session_id="-")
@@ -1298,7 +1578,7 @@ def drain_deferred_captures(store: MemoryStore) -> dict[str, int]:
 def _drain_deferred_captures_locked(
     store: MemoryStore, counts: dict[str, int]
 ) -> dict[str, int]:
-    deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    deferred_dir = deferred_captures_dir()
     log_dir = Path.home() / ".iai-mcp" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = (
@@ -1410,7 +1690,7 @@ def _drain_deferred_captures_locked(
                 rss_soft_cap_hit = True
                 cap_hit = True
                 try:
-                    with log_path.open("a") as logf:
+                    with log_path.open("a", encoding="utf-8") as logf:
                         logf.write(
                             f"{datetime.now(timezone.utc).isoformat()} "
                             f"rss-soft-cap stop: rss={rss_now} > cap={rss_soft_cap}\n"
@@ -1427,7 +1707,7 @@ def _drain_deferred_captures_locked(
             continue
         except OSError as e:
             try:
-                with log_path.open("a") as logf:
+                with log_path.open("a", encoding="utf-8") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} "
                         f"claim-failed {fpath.name}: {type(e).__name__}\n"
@@ -1457,9 +1737,9 @@ def _drain_deferred_captures_locked(
                 if header_line is None:
                     work_path.unlink()
                     continue
-                header = json.loads(header_line)
+                header = json.loads(_decode_spool_line(header_line))
                 if header.get("version", 0) > 1:
-                    with log_path.open("a") as logf:
+                    with log_path.open("a", encoding="utf-8") as logf:
                         logf.write(
                             f"{datetime.now(timezone.utc).isoformat()} skip "
                             f"{work_path.name}: version={header.get('version')}\n"
@@ -1467,6 +1747,7 @@ def _drain_deferred_captures_locked(
                     _strip_processing_marker(work_path, log_path=log_path)
                     continue
                 session_id = header.get("session_id", "-")
+                header_cwd = str(header.get("cwd") or "")
                 processed_in_file = 0
                 for raw in fh:
                     if not raw.strip():
@@ -1486,7 +1767,7 @@ def _drain_deferred_captures_locked(
                         # not invalidate the open fd (same inode), so the tail is
                         # streamed through one line at a time — the remainder is
                         # preserved byte-for-byte without ever being buffered.
-                        with tmp_path.open("w") as ph:
+                        with tmp_path.open("w", encoding="utf-8") as ph:
                             ph.write(header_line + "\n")
                             ph.write(ln + "\n")
                             for tail in fh:
@@ -1500,7 +1781,7 @@ def _drain_deferred_captures_locked(
                         counts["files_drained"] += 1
                         cap_hit = True
                         break
-                    ev = json.loads(ln)
+                    ev = json.loads(_decode_spool_line(ln))
                     tier = ev.get("tier", "episodic")
                     role = ev.get("role", "user")
 
@@ -1604,6 +1885,9 @@ def _drain_deferred_captures_locked(
                         role=role,
                         ts=ev.get("ts"),
                         source_uuid=ev.get("source_uuid"),
+                        provenance_extra=(
+                            {"cwd": header_cwd} if header_cwd else None
+                        ),
                     )
                     status = result.get("status", "skipped")
                     reason = result.get("reason", "")
@@ -1647,7 +1931,7 @@ def _drain_deferred_captures_locked(
                 )
                 if not _strip_ok:
                     try:
-                        with log_path.open("a") as logf:
+                        with log_path.open("a", encoding="utf-8") as logf:
                             logf.write(
                                 f"{datetime.now(timezone.utc).isoformat()} "
                                 f"insert-failed-skip {work_path.name}: "
@@ -1663,7 +1947,7 @@ def _drain_deferred_captures_locked(
                     first_error=file_first_error or "unknown",
                     log_path=log_path,
                 )
-                with log_path.open("a") as logf:
+                with log_path.open("a", encoding="utf-8") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} insert-failed "
                         f"{work_path.name}: first_error={file_first_error}\n"
@@ -1672,6 +1956,21 @@ def _drain_deferred_captures_locked(
             else:
                 work_path.unlink()
                 counts["files_drained"] += 1
+        except SpoolKeyUnavailable as e:
+            # No readable key in this process. The file is intact and its
+            # lines are valid ciphertext — advancing it toward
+            # .permanent-failed would turn a chmod accident into a storm of
+            # critical events. Restore the claim and leave it for a pass
+            # that has the key.
+            work_path, _strip_ok = _strip_processing_marker(
+                work_path, log_path=log_path
+            )
+            log.warning(
+                "spool key unavailable; leaving %s for a later pass: %s",
+                work_path.name, e,
+            )
+            counts["files_key_deferred"] = counts.get("files_key_deferred", 0) + 1
+            continue
         except Exception as e:  # noqa: BLE001 -- per-file isolation, never raise
             try:
                 work_path, _strip_ok = _strip_processing_marker(
@@ -1679,7 +1978,7 @@ def _drain_deferred_captures_locked(
                 )
                 if not _strip_ok:
                     try:
-                        with log_path.open("a") as logf:
+                        with log_path.open("a", encoding="utf-8") as logf:
                             logf.write(
                                 f"{datetime.now(timezone.utc).isoformat()} "
                                 f"exception-skip {work_path.name}: "
@@ -1695,7 +1994,7 @@ def _drain_deferred_captures_locked(
                     first_error=file_first_error or repr(e),
                     log_path=log_path,
                 )
-                with log_path.open("a") as logf:
+                with log_path.open("a", encoding="utf-8") as logf:
                     logf.write(
                         f"{datetime.now(timezone.utc).isoformat()} failed "
                         f"{work_path.name}: {type(e).__name__}: {e}\n"
@@ -1788,11 +2087,7 @@ def drain_permanent_failed_files(
     dry_run: bool = False,
 ) -> dict:
     if deferred_dir is None:
-        store_env = os.environ.get("IAI_MCP_STORE")
-        if store_env:
-            deferred_dir = Path(store_env).parent / ".deferred-captures"
-        else:
-            deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+        deferred_dir = deferred_captures_dir()
 
     if not deferred_dir.exists():
         if dry_run:
@@ -1853,7 +2148,7 @@ def drain_permanent_failed_files(
 
             first_obj: dict | None = None
             try:
-                first_obj = json.loads(lines[0])
+                first_obj = json.loads(_decode_spool_line(lines[0]))
             except (json.JSONDecodeError, ValueError):
                 pass
 
@@ -1863,7 +2158,7 @@ def drain_permanent_failed_files(
                 event_lines = lines[1:]
                 for ln in event_lines:
                     try:
-                        ev = json.loads(ln)
+                        ev = json.loads(_decode_spool_line(ln))
                     except (json.JSONDecodeError, ValueError):
                         file_dropped += 1
                         continue
@@ -1889,6 +2184,11 @@ def drain_permanent_failed_files(
             else:
                 raw_session_id = "-"
                 for ln in lines:
+                    try:
+                        ln = _decode_spool_line(ln)
+                    except ValueError:
+                        file_dropped += 1
+                        continue
                     try:
                         obj = json.loads(ln)
                         if isinstance(obj, dict) and "session_id" in obj:
@@ -1925,6 +2225,17 @@ def drain_permanent_failed_files(
             files_recovered.append(fpath.name)
             file_list.append({"name": fpath.name, "line_count": line_count})
 
+        except SpoolKeyUnavailable as exc:
+            # Healthy ciphertext, no readable key in this process — the file
+            # is left in place for a keyed pass and is NOT a drop.
+            log.warning(
+                "drain_permanent_failed_key_deferred %s: %s", fpath.name, exc
+            )
+            file_list.append({
+                "name": fpath.name,
+                "line_count": line_count,
+                "key_deferred": True,
+            })
         except Exception as exc:  # noqa: BLE001 -- per-file isolation
             log.warning("drain_permanent_failed_file_error %s: %s", fpath.name, exc)
             dropped_total += 1
@@ -1945,7 +2256,7 @@ def drain_active_live_captures(
     *,
     exclude_session_id: str,
 ) -> dict[str, int]:
-    deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    deferred_dir = deferred_captures_dir()
     state_dir = Path.home() / ".iai-mcp" / ".capture-state"
     counts: dict[str, int] = {
         "files_drained": 0,
@@ -1974,7 +2285,10 @@ def drain_active_live_captures(
             continue
 
         try:
-            header = json.loads(complete_lines[0])
+            header = json.loads(_decode_spool_line(complete_lines[0]))
+        except SpoolKeyUnavailable:
+            # Leave the file AND its offset untouched for a keyed pass.
+            continue
         except (json.JSONDecodeError, ValueError):
             continue
         if header.get("version", 0) > 1:
@@ -1988,7 +2302,7 @@ def drain_active_live_captures(
         prev_offset: int = 0
         try:
             if offset_path.exists():
-                prev_offset = int(offset_path.read_text().strip() or "0")
+                prev_offset = int(offset_path.read_text(encoding="utf-8").strip() or "0")
         except (ValueError, OSError):
             prev_offset = 0
 
@@ -2001,7 +2315,11 @@ def drain_active_live_captures(
         file_had_insert = False
         for ln in new_lines:
             try:
-                ev = json.loads(ln)
+                ev = json.loads(_decode_spool_line(ln))
+            except SpoolKeyUnavailable:
+                # The offset must NOT advance past a line this process
+                # cannot decrypt — a keyed pass picks up exactly here.
+                break
             except (json.JSONDecodeError, ValueError):
                 new_offset += 1
                 counts["events_skipped"] += 1
@@ -2036,7 +2354,7 @@ def drain_active_live_captures(
         state_dir.mkdir(parents=True, exist_ok=True)
         tmp_offset = offset_path.with_suffix(".drain-offset.tmp")
         try:
-            tmp_offset.write_text(str(new_offset))
+            tmp_offset.write_text(str(new_offset), encoding="utf-8")
             os.replace(tmp_offset, offset_path)
         except OSError as exc:
             log.warning("drain_active_offset_write_failed: %s", exc)

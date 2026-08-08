@@ -85,23 +85,38 @@ def restrict_file_to_current_user(path: Path) -> None:
     """Restrict a file to the current user only via icacls (Windows equivalent of chmod 0o600)."""
     import logging
 
-    username = os.environ.get("USERNAME", "")
+    if os.name != "nt":
+        # icacls does not exist off Windows; POSIX callers chmod/fchmod.
+        return
+
+    username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
     if not username:
         logging.getLogger(__name__).warning(
             "ipc token ACL not tightened: USERNAME unset; relying on the "
             "profile directory's inherited ACL"
         )
         return
-    proc = subprocess.run(
-        ["icacls", str(path), "/inheritance:d", "/grant:r", f"{username}:F"],
-        check=False,
-        capture_output=True,
-    )
-    if proc.returncode != 0:
+    # /inheritance:r removes inherited ACEs outright — the file's ACL is
+    # exactly the one grant below. (/inheritance:d merely copies inherited
+    # ACEs forward, keeping every principal that already had access.)
+    try:
+        proc = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:F"],
+            check=False,
+            capture_output=True,
+        )
+        rc = proc.returncode
+    except OSError as exc:  # icacls missing/unlaunchable must not crash key creation
+        logging.getLogger(__name__).warning(
+            "ipc token ACL not tightened (icacls unavailable: %s); relying "
+            "on the profile directory's inherited ACL", exc,
+        )
+        return
+    if rc != 0:
         logging.getLogger(__name__).warning(
             "ipc token ACL not tightened (icacls rc=%d); relying on the "
             "profile directory's inherited ACL",
-            proc.returncode,
+            rc,
         )
 
 

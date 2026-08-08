@@ -66,7 +66,12 @@ def _make_record(vec: list[float], text: str) -> MemoryRecord:
     )
 
 
-def test_centrality_row_warn_when_no_events(monkeypatch) -> None:
+def test_centrality_row_warn_when_no_events(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 
@@ -79,7 +84,12 @@ def test_centrality_row_warn_when_no_events(monkeypatch) -> None:
     assert "no recall_timing" in result.detail.lower()
 
 
-def test_centrality_row_warn_when_median_above_threshold(monkeypatch) -> None:
+def test_centrality_row_warn_when_median_above_threshold(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 
@@ -99,7 +109,12 @@ def test_centrality_row_warn_when_median_above_threshold(monkeypatch) -> None:
     assert "30ms threshold" in result.detail
 
 
-def test_centrality_row_pass_when_median_below_threshold(monkeypatch) -> None:
+def test_centrality_row_pass_when_median_below_threshold(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 
@@ -117,7 +132,12 @@ def test_centrality_row_pass_when_median_below_threshold(monkeypatch) -> None:
     assert "15.0ms" in result.detail
 
 
-def test_centrality_row_emits_health_concern_when_warn(monkeypatch) -> None:
+def test_centrality_row_emits_health_concern_when_warn(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 

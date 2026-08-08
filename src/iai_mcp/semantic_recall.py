@@ -58,6 +58,16 @@ def _construct_with_budget(root: "str | Path") -> "tuple[Any, float]":
     th.start()
     th.join(timeout=_construct_budget_ms() / 1000.0)
     if th.is_alive() or "emb" not in box:
+        _worker_err = box.get("err")
+        if _worker_err is not None:
+            from iai_mcp.embed import EmbedderConfigError, EmbedIdentityMismatch
+
+            if isinstance(
+                _worker_err, (EmbedderConfigError, EmbedIdentityMismatch)
+            ):
+                # A selection refusal is misconfiguration, not slowness —
+                # the recency floor would mask it as a degraded answer.
+                raise _worker_err
         return None, (_time.monotonic() - t0) * 1000.0
     return box["emb"], box.get("ms", (_time.monotonic() - t0) * 1000.0)
 
@@ -155,7 +165,42 @@ def _recall_daemon_down_post_warm(
 
     local_store = _get_or_open_warm_local_store(store_root)
     if local_store is None:
-        return _ann_only_daemon_down(store_root, list(_test_vec), n, cue, session_id)
+        return _ann_only_daemon_down(
+            store_root, list(_test_vec), n, cue, session_id, embedder=embedder
+        )
+
+    # The budget-bounded constructor had no store handle, so the vector-space
+    # guards run HERE, on the freshly opened store: a cross-generation or
+    # wrong-dim answer served confidently is worse than no answer. Guard
+    # FAILURES (e.g. an unreadable meta table) keep the old recency-floor
+    # degrade; only genuine refusals propagate.
+    from iai_mcp.embed import (
+        REEMBED_RUNBOOK_HINT,
+        EmbedderConfigError,
+        EmbedIdentityMismatch,
+        _enforce_store_embed_identity,
+    )
+
+    try:
+        _store_dim = getattr(local_store, "embed_dim", None)
+        _emb_dim = getattr(embedder, "DIM", None)
+        if (
+            _store_dim is not None
+            and _emb_dim is not None
+            and int(_store_dim) != int(_emb_dim)
+        ):
+            raise EmbedderConfigError(
+                f"store uses {_store_dim}d embeddings but the local embedder "
+                f"produces {_emb_dim}d; {REEMBED_RUNBOOK_HINT} before serving "
+                "daemon-down recall from this store"
+            )
+        _enforce_store_embed_identity(local_store, embedder, allow_mismatch=False)
+    except (EmbedderConfigError, EmbedIdentityMismatch):
+        raise
+    except Exception as _guard_exc:  # noqa: BLE001 -- guard fault, not refusal
+        logger.debug("daemon_down_identity_guard_failed: %s", _guard_exc)
+        rows = _degrade(store_root, cue, limit=n, session_id=session_id)
+        return _stamp_degrade_source(rows)
 
     try:
         import iai_mcp.embed as _embed_mod
@@ -163,7 +208,7 @@ def _recall_daemon_down_post_warm(
 
         _captured_embedder = embedder
 
-        def _injected_embedder_for_store(_store: "Any") -> "Any":
+        def _injected_embedder_for_store(_store: "Any", **_kwargs: "Any") -> "Any":
             return _captured_embedder
 
         # INVARIANT: single-process, single-recall-per-process only.
@@ -203,7 +248,12 @@ def _recall_daemon_down_post_warm(
     except Exception as exc:  # noqa: BLE001 — structural path failure: ANN-only fallback
         logger.debug("daemon_down_structural_path_failed: %s", exc)
 
-    return _ann_only_daemon_down(store_root, list(_test_vec), n, cue, session_id)
+    # embedder threads through so the ANN rail's identity guard also covers
+    # this fallback; the guard already passed once on local_store above, but
+    # the rail re-opens its own DB handle and must verify what it serves from.
+    return _ann_only_daemon_down(
+        store_root, list(_test_vec), n, cue, session_id, embedder=embedder
+    )
 
 
 def _ann_only_daemon_down(
@@ -212,21 +262,27 @@ def _ann_only_daemon_down(
     n: int,
     cue: str,
     session_id: "str | None",
+    embedder: "Any | None" = None,
 ) -> "list[dict]":
     from iai_mcp.hippo import (
         degraded_semantic_recall as _degrade,
         EMBED_DIM,
     )
     from iai_mcp.hippo import _ann_lookup_client
+    from iai_mcp.embed import EmbedderConfigError, EmbedIdentityMismatch
 
     try:
         labels = _ann_lookup_client(store_root, vec, k=n, embed_dim=EMBED_DIM)
         if labels:
-            rows = _fetch_records_by_labels(store_root, labels, n=n)
+            rows = _fetch_records_by_labels(
+                store_root, labels, n=n, embedder=embedder
+            )
             if rows:
                 return rows
-    except Exception:  # noqa: BLE001
-        pass
+    except (EmbedderConfigError, EmbedIdentityMismatch):
+        raise
+    except Exception as _ann_exc:  # noqa: BLE001
+        logger.debug("ann_only_rail_failed: %s", _ann_exc)
 
     rows = _degrade(store_root, cue, limit=n, session_id=session_id)
     return _stamp_degrade_source(rows)
@@ -321,6 +377,7 @@ def _fetch_records_by_labels(
     store_root: "str | Path",
     vec_labels: "list[int]",
     n: int = 10,
+    embedder: "Any | None" = None,
 ) -> "list[dict]":
     from iai_mcp.hippo import AccessMode, HippoDB
 
@@ -328,10 +385,49 @@ def _fetch_records_by_labels(
         return []
 
     root = Path(store_root)
-    db: "HippoDB | None" = None
     try:
         db = HippoDB(root, access_mode=AccessMode.SHARED, read_only=True, _lock_timeout_override=0.25)
+    except Exception:  # noqa: BLE001 -- store unopenable: nothing to serve
+        return []
+    try:
+        if embedder is not None:
+            # The identity guard MUST run outside the row-serving try below:
+            # its swallow-all handler would convert a refusal into [], and a
+            # rail that cannot verify the vector space must never emit
+            # confident rows — refusals raise to the caller, guard faults
+            # return [] so the caller falls to the recency degrade.
+            from types import SimpleNamespace as _NS
 
+            from iai_mcp.embed import (
+                EmbedderConfigError,
+                EmbedIdentityMismatch,
+                _enforce_store_embed_identity,
+            )
+
+            try:
+                _enforce_store_embed_identity(
+                    _NS(db=db), embedder, allow_mismatch=False
+                )
+            except (EmbedderConfigError, EmbedIdentityMismatch):
+                raise
+            except Exception:  # noqa: BLE001 -- guard fault, not refusal
+                return []
+
+        return _serve_rows_for_labels(root, db, vec_labels, n)
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _serve_rows_for_labels(
+    root: Path,
+    db: "Any",
+    vec_labels: "list[int]",
+    n: int,
+) -> "list[dict]":
+    try:
         _crypto_key: "bytes | None" = None
         try:
             from iai_mcp.crypto import CryptoKey as _CK
@@ -380,9 +476,3 @@ def _fetch_records_by_labels(
         return results
     except Exception:  # noqa: BLE001
         return []
-    finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:  # noqa: BLE001
-                pass

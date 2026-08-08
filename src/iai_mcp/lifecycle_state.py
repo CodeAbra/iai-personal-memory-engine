@@ -177,7 +177,7 @@ def load_state(path: Path | None = None) -> LifecycleStateRecord:
     if not target.exists():
         return default_state()
     try:
-        raw = json.loads(target.read_text())
+        raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default_state()
     try:

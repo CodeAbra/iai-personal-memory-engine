@@ -11,24 +11,35 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import stat
 from importlib import resources as _res
 from pathlib import Path
-import platform
 
 _GROUP = "iai-pme"
 
 _IS_WIN = platform.system() == "Windows"
 _EXT = ".ps1" if _IS_WIN else ".sh"
-_CMD_PREFIX = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File " if _IS_WIN else "bash "
+_CMD_PREFIX = (
+    "powershell.exe -ExecutionPolicy Bypass -NoProfile -File " if _IS_WIN else "bash "
+)
 
-_HOOK_SCRIPTS = (
+# POSIX installs the Antigravity pair PLUS the Claude-Code trio they
+# delegate to; the PowerShell pair is self-contained and Windows instead
+# needs the Task Scheduler scanner script.
+_POSIX_HOOK_SCRIPTS = (
     "iai-mcp-session-capture",
     "iai-mcp-session-recall",
     "iai-mcp-per-turn-recall",
     "iai-mcp-antigravity-recall",
     "iai-mcp-antigravity-capture",
 )
+_WIN_HOOK_SCRIPTS = (
+    "iai-mcp-antigravity-recall",
+    "iai-mcp-antigravity-capture",
+    "iai-mcp-auto-scan-antigravity",
+)
+_HOOK_SCRIPTS = _WIN_HOOK_SCRIPTS if _IS_WIN else _POSIX_HOOK_SCRIPTS
 
 _EVENT_WIRING = (
     ("PreInvocation", f"iai-mcp-antigravity-recall{_EXT}", 30),
@@ -54,7 +65,7 @@ def _load_hooks_json(path: Path) -> "dict | None":
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -110,30 +121,46 @@ def install_antigravity_hooks() -> int:
 
     if changed or not hooks_json.exists():
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
-        hooks_json.write_text(json.dumps(data, indent=2))
+        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     if _IS_WIN:
         print("\nSetting up auto-scan for Antigravity GUI (Desktop App) users...")
         scan_script = hooks_dir / "iai-mcp-auto-scan-antigravity.ps1"
+        if not scan_script.exists():
+            # The copy loop above places it; reaching here means the install
+            # is broken and the user must know — a silent skip would report
+            # a scheduled scanner that does not exist.
+            print(f"ERROR: scanner script missing after install: {scan_script}")
+            return 1
         if scan_script.exists():
             import subprocess
             try:
-                tmpl = _res.files("iai_mcp") / "_deploy" / "windows" / "iai-mcp-antigravity-scan.xml"
+                tmpl = (
+                    _res.files("iai_mcp") / "_deploy" / "windows"
+                    / "iai-mcp-antigravity-scan.xml"
+                )
                 text = tmpl.read_text(encoding="utf-8")
                 text = text.replace("{SCAN_SCRIPT}", str(scan_script))
-                
+
                 xml_out = Path.home() / ".iai-mcp" / "iai-mcp-antigravity-scan.task.xml"
                 xml_out.parent.mkdir(parents=True, exist_ok=True)
                 xml_out.write_text(text, encoding="utf-16")
-                
-                cmd = f'schtasks /Create /TN "IaiMcpAntigravityAutoScan" /XML "{xml_out}" /F'
-                subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL)
-                print("status: ACTIVE — Antigravity GUI auto-scanner scheduled in Windows Task Scheduler (runs every 30m).")
-            except Exception as e:
+
+                subprocess.run(
+                    ["schtasks", "/Create", "/TN", "IaiMcpAntigravityAutoScan",
+                     "/XML", str(xml_out), "/F"],
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+                print(
+                    "status: ACTIVE — Antigravity GUI auto-scanner scheduled in "
+                    "Windows Task Scheduler (runs every 30m)."
+                )
+            except Exception as e:  # noqa: BLE001 -- scheduler absence must not fail install
                 print(f"WARNING: failed to create scheduled task: {e}")
 
     print(
-        "\nNote: verified against the Antigravity CLI (`agy`) and the Antigravity GUI (Desktop App)."
+        "\nNote: verified against the Antigravity CLI (`agy`) and the "
+        "Antigravity GUI (Desktop App)."
         "\nRestart the CLI or let the background scanner handle the GUI logs."
     )
     return 0
@@ -153,11 +180,14 @@ def uninstall_antigravity_hooks() -> int:
 
     if _IS_WIN:
         import subprocess
-        cmd = 'schtasks /Delete /TN "IaiMcpAntigravityAutoScan" /F'
         try:
-            subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["schtasks", "/Delete", "/TN", "IaiMcpAntigravityAutoScan", "/F"],
+                check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
             print("removed scheduled task: IaiMcpAntigravityAutoScan")
-        except Exception:
+        except Exception:  # noqa: BLE001 -- absent task is a clean uninstall
             pass
 
     if not hooks_json.exists():
@@ -170,7 +200,7 @@ def uninstall_antigravity_hooks() -> int:
         return 1
     if _GROUP in data:
         data.pop(_GROUP, None)
-        hooks_json.write_text(json.dumps(data, indent=2))
+        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
         print(f"patched: {hooks_json} ({_GROUP} group removed)")
     else:
         print(f"(no {_GROUP} group to remove) {hooks_json}")

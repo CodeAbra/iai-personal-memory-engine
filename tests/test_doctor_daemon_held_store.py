@@ -13,8 +13,12 @@ def _raise_lock_held(*_a, **_kw):
     raise HippoLockHeldError("/tmp/alice-store/hippo/.lock", "12345")
 
 
-def test_f_reports_healthy_when_daemon_holds_store(monkeypatch) -> None:
+def test_f_reports_healthy_when_daemon_holds_store(monkeypatch, tmp_path) -> None:
     import iai_mcp.store as _store_mod
+
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
 
     monkeypatch.setattr(_store_mod, "MemoryStore", _raise_lock_held)
 
@@ -27,8 +31,12 @@ def test_f_reports_healthy_when_daemon_holds_store(monkeypatch) -> None:
     assert "normal" in result.detail.lower()
 
 
-def test_f_reports_healthy_on_sqlite_database_locked(monkeypatch) -> None:
+def test_f_reports_healthy_on_sqlite_database_locked(monkeypatch, tmp_path) -> None:
     import iai_mcp.store as _store_mod
+
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
 
     def _raise_locked(*_a, **_kw):
         raise errors.OperationalError("database is locked")
@@ -42,8 +50,14 @@ def test_f_reports_healthy_on_sqlite_database_locked(monkeypatch) -> None:
     assert "daemon" in result.detail.lower()
 
 
-def test_f_still_fails_on_real_open_error_daemon_down(monkeypatch) -> None:
+def test_f_still_fails_on_real_open_error_daemon_down(monkeypatch, tmp_path) -> None:
     import iai_mcp.store as _store_mod
+
+    # The open-error scenario requires an EXISTING store file — an
+    # absent store now short-circuits to the no-store WARN row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
 
     def _raise_corruption(*_a, **_kw):
         raise errors.DatabaseError("file is not a database")
@@ -57,8 +71,14 @@ def test_f_still_fails_on_real_open_error_daemon_down(monkeypatch) -> None:
     assert "open failed" in result.detail.lower()
 
 
-def test_f_still_fails_on_other_operational_error(monkeypatch) -> None:
+def test_f_still_fails_on_other_operational_error(monkeypatch, tmp_path) -> None:
     import iai_mcp.store as _store_mod
+
+    # The open-error scenario requires an EXISTING store file — an
+    # absent store now short-circuits to the no-store WARN row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
 
     def _raise_other(*_a, **_kw):
         raise errors.OperationalError("disk I/O error")
@@ -71,7 +91,12 @@ def test_f_still_fails_on_other_operational_error(monkeypatch) -> None:
     assert result.status == "FAIL"
 
 
-def test_t_benign_when_daemon_holds_store(monkeypatch) -> None:
+def test_t_benign_when_daemon_holds_store(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     import iai_mcp.store as _store_mod
 
     monkeypatch.setattr(_store_mod, "MemoryStore", _raise_lock_held)
@@ -85,7 +110,12 @@ def test_t_benign_when_daemon_holds_store(monkeypatch) -> None:
     assert "daemon holds the store" in result.detail.lower()
 
 
-def test_t_benign_on_lock_held_during_events_query(monkeypatch) -> None:
+def test_t_benign_on_lock_held_during_events_query(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     import iai_mcp.events as _events
     import iai_mcp.store as _store_mod
 
@@ -98,7 +128,12 @@ def test_t_benign_on_lock_held_during_events_query(monkeypatch) -> None:
     assert "deferred" in result.detail.lower()
 
 
-def test_t_still_warns_on_genuine_query_failure(monkeypatch) -> None:
+def test_t_still_warns_on_genuine_query_failure(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     import iai_mcp.events as _events
     import iai_mcp.store as _store_mod
 
@@ -115,7 +150,12 @@ def test_t_still_warns_on_genuine_query_failure(monkeypatch) -> None:
     assert result.passed is True
 
 
-def test_u_benign_when_daemon_holds_store(monkeypatch) -> None:
+def test_u_benign_when_daemon_holds_store(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     import iai_mcp.store as _store_mod
 
     monkeypatch.setattr(_store_mod, "MemoryStore", _raise_lock_held)
@@ -129,7 +169,12 @@ def test_u_benign_when_daemon_holds_store(monkeypatch) -> None:
     assert "daemon holds the store" in result.detail.lower()
 
 
-def test_u_benign_on_lock_held_during_events_query(monkeypatch) -> None:
+def test_u_benign_on_lock_held_during_events_query(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     import iai_mcp.events as _events
     import iai_mcp.store as _store_mod
 
@@ -142,7 +187,12 @@ def test_u_benign_on_lock_held_during_events_query(monkeypatch) -> None:
     assert "deferred" in result.detail.lower()
 
 
-def test_u_still_warns_on_genuine_query_failure(monkeypatch) -> None:
+def test_u_still_warns_on_genuine_query_failure(monkeypatch, tmp_path) -> None:
+    # The stubbed-open scenario presumes an existing store file; an
+    # absent one now short-circuits to the no-store skip row.
+    (tmp_path / "hippo").mkdir(parents=True)
+    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     import iai_mcp.events as _events
     import iai_mcp.store as _store_mod
 

@@ -80,8 +80,16 @@ _profile_lock: threading.RLock = threading.RLock()
 _TOPOLOGY_SNAPSHOT_TTL_S: float = 900.0
 _topology_cache: dict[str, Any] | None = None
 _topology_cache_at: float = 0.0
+#: The cache is process-global; a multi-store process (tests, CLI, brain
+#: view) must never serve one store's snapshot for another.
+_topology_cache_key: str | None = None
 _topology_state_lock: threading.Lock = threading.Lock()
 _topology_inflight: threading.Lock = threading.Lock()
+
+
+def _topology_store_key(store: "MemoryStore") -> str:
+    root = getattr(store, "root", None)
+    return str(root) if root else f"id:{id(store)}"
 
 LIVE_KNOBS: dict[str, Any] = _profile_state
 DEFERRED_KNOBS: frozenset[str] = frozenset(profile.DEFERRED_KNOB_NAMES)
@@ -109,6 +117,7 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
     empty ONLY when the data genuinely has no match or this tier itself
     fails -- never as an unconditional policy choice.
     """
+    from iai_mcp.embed import EmbedderConfigError, EmbedIdentityMismatch
     try:
         from iai_mcp.cue_router import _classify_cue
         from iai_mcp.embed import embed_query, embedder_for_store
@@ -119,7 +128,10 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
         cue_mode, _cue_intent, _triggered_pattern = _classify_cue(params.get("cue", ""))
 
         embedder = embedder_for_store(store)
-        _cue_vec = embed_query(embedder, params["cue"])
+        from iai_mcp.embed import _valid_cue_vec
+        _cue_vec = _valid_cue_vec(params.get("cue_embedding"), store.embed_dim)
+        if _cue_vec is None:
+            _cue_vec = embed_query(embedder, params["cue"])
 
         _ann_pairs = store.query_similar(_cue_vec, k=K_CANDIDATES)
         _candidate_recs: dict = {_r.id: _r for _r, _s in _ann_pairs}
@@ -222,6 +234,10 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
             "_degraded": True,
             "_reason": "daemon_consolidation_stuck",
         }
+    except (EmbedderConfigError, EmbedIdentityMismatch):
+        # An embedder-selection refusal is misconfiguration, not a broken
+        # tier — serving an empty answer would hide it behind a shrug.
+        raise
     except Exception as exc:  # noqa: BLE001 -- a broken degraded tier must
         # never escape as an exception; last-resort empty response only.
         logger.warning("crisis_degraded_recall_failed: %s", exc)
@@ -273,7 +289,7 @@ def _incident_edges_warm(
 
 def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
     global _last_injection_embedding, _last_injection_ids, _arousal_state
-    global _topology_cache, _topology_cache_at
+    global _topology_cache, _topology_cache_at, _topology_cache_key
     if method == "memory_recall":
         _recall_t0 = _time.perf_counter()
         # Stamp the foreground-activity beacon so polite background loops
@@ -307,20 +323,25 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         # response -- consolidation health must never zero recall. The
         # client is still told via `_degraded` to prefer bank-recall for a
         # non-degraded answer.
+        # The dispatch stays OUTSIDE the guard's try: the broad except is
+        # for a failing crisis-state read only, and folding the tier call
+        # into it would swallow the tier's own fail-loud refusals.
+        _crisis_active = False
         try:
             _crisis_state = _CRISIS_STATE_CACHE.get("crisis")
             if _crisis_state is None:
                 from iai_mcp.lifecycle_state import load_state as _ls_load_cm
                 _crisis_state = _ls_load_cm()
                 _CRISIS_STATE_CACHE["crisis"] = _crisis_state
-            if bool(_crisis_state.get("crisis_mode", False)):
-                logger.warning(
-                    "memory_recall served degraded under crisis_mode; "
-                    "client should fall back to bank-recall"
-                )
-                return _crisis_degraded_recall(store, params)
+            _crisis_active = bool(_crisis_state.get("crisis_mode", False))
         except Exception as exc:  # noqa: BLE001 -- never let the guard crash recall
             logger.debug("crisis_mode load_state failed; serving warm path: %s", exc)
+        if _crisis_active:
+            logger.warning(
+                "memory_recall served degraded under crisis_mode; "
+                "client should fall back to bank-recall"
+            )
+            return _crisis_degraded_recall(store, params)
         from iai_mcp.cue_router import _classify_cue
         cue_mode, _cue_intent, _triggered_pattern = _classify_cue(params.get("cue", ""))
 
@@ -379,12 +400,28 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 mode=cue_mode,
             )
         else:
-            from iai_mcp.embed import embed_query, embedder_for_store
+            from iai_mcp.embed import (
+                EmbedderConfigError,
+                EmbedIdentityMismatch,
+                embed_query,
+                embedder_for_store,
+            )
             from iai_mcp.pipeline import recall_for_response
+            # State detection and the recall dispatch keep separate guards:
+            # folding the dispatch into the detection except would swallow
+            # the tier's fail-loud refusals (the crisis guard had the same
+            # bug).
+            _daemon_sleeping = False
             try:
                 from iai_mcp.daemon_state import load_state as _ds_load
                 _ds = _ds_load()
-                if _ds.get("current_state", "WAKE") in ("SLEEP", "DREAMING"):
+                _daemon_sleeping = (
+                    _ds.get("current_state", "WAKE") in ("SLEEP", "DREAMING")
+                )
+            except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
+                logger.debug("cqrs_sleep_detection_failed: %s", exc)
+            if _daemon_sleeping:
+                try:
                     cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
                     resp = retrieve.recall(
                         store=store,
@@ -395,8 +432,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         mode=cue_mode,
                     )
                     _cortex_fallback = True
-            except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
-                logger.debug("cqrs_sleep_detection_failed: %s", exc)
+                except (EmbedderConfigError, EmbedIdentityMismatch):
+                    raise
+                except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
+                    logger.debug("cqrs_sleep_recall_failed; warm path: %s", exc)
             if not _cortex_fallback:
                 try:
                     from iai_mcp import runtime_graph_cache as _rgc
@@ -410,23 +449,37 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
                     _encode_ms: "float | None" = None
                     _encode_t0 = _time.perf_counter()
-                    try:
-                        _cue_vec = embed_query(embedder, params["cue"])
-                        _encode_ms = (_time.perf_counter() - _encode_t0) * 1000.0
+                    # One cue vector drives ANN selection, the exact-cosine
+                    # authority AND the pipeline rank: a valid supplied
+                    # cue_embedding replaces the server-side embed end-to-end
+                    # (tool-schema contract) -- never just one stage, which
+                    # would select candidates by one vector and rank by
+                    # another.
+                    from iai_mcp.embed import _valid_cue_vec
+                    _cue_vec = _valid_cue_vec(
+                        params.get("cue_embedding"), store.embed_dim,
+                    )
+                    if _cue_vec is not None:
+                        _encode_ms = 0.0
                         _trace_mark("encode")
-                    except Exception as _emb_exc:
+                    else:
                         try:
-                            from iai_mcp.events import write_event, TELEMETRY_EMBED_NATIVE_FAILURE
-                            write_event(
-                                store,
-                                TELEMETRY_EMBED_NATIVE_FAILURE,
-                                {"op_type": "recall_cue", "error": str(_emb_exc)},
-                                severity="critical",
-                                buffered=True,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                        raise NativeError(f"recall cue encode failed: {_emb_exc}") from _emb_exc
+                            _cue_vec = embed_query(embedder, params["cue"])
+                            _encode_ms = (_time.perf_counter() - _encode_t0) * 1000.0
+                            _trace_mark("encode")
+                        except Exception as _emb_exc:
+                            try:
+                                from iai_mcp.events import write_event, TELEMETRY_EMBED_NATIVE_FAILURE
+                                write_event(
+                                    store,
+                                    TELEMETRY_EMBED_NATIVE_FAILURE,
+                                    {"op_type": "recall_cue", "error": str(_emb_exc)},
+                                    severity="critical",
+                                    buffered=True,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                            raise NativeError(f"recall cue encode failed: {_emb_exc}") from _emb_exc
 
                     _ann_pairs = store.query_similar(_cue_vec, k=K_CANDIDATES)
                     _candidate_recs: dict = {_r.id: _r for _r, _s in _ann_pairs}
@@ -537,6 +590,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                             "tier": _rec.tier or "episodic",
                             "tags": list(_rec.tags or []),
                             "language": _rec.language or "en",
+                            "aaak_index": str(getattr(_rec, "aaak_index", "") or ""),
+                            "created_at": str(getattr(_rec, "created_at", "") or ""),
+                            "stability": float(getattr(_rec, "stability", 0.5) or 0.5),
                         })
                     for _qid, _nbr_list in _hop1_edges.items():
                         for (_nbr, _et, _wt) in _nbr_list:
@@ -685,6 +741,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         arousal_state=_arousal_diag,
                         tv_maps=(_tv_outgoing_l1, _tv_ts_l1) if _tv_ts_l1 else None,
                         trace_mark=_trace_mark,
+                        cue_embedding=_cue_vec,
                     )
                     resp.ann_path_used = True
                     _trace_mark("pipeline")
@@ -796,6 +853,12 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     except Exception:  # noqa: BLE001 -- telemetry must never break recall
                         pass
                 except NativeError:
+                    raise
+                except (EmbedderConfigError, EmbedIdentityMismatch):
+                    # An embedder-selection refusal (foreign vector space,
+                    # misconfigured model, mismatched vector identity) must
+                    # surface — degrading to a zero cue vector would
+                    # silently serve garbage recall.
                     raise
                 except Exception as exc:  # noqa: BLE001 -- soft availability fallback
                     logger.warning("recall_pipeline_fallback: %s", exc)
@@ -1448,8 +1511,11 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         # must answer instantly, so this surface reads only the O(1) corpus
         # count and whatever topology snapshot the cache already holds.
         records_count = store.active_records_count()
+        topo_key = _topology_store_key(store)
         with _topology_state_lock:
-            cached_snapshot = _topology_cache
+            cached_snapshot = (
+                _topology_cache if _topology_cache_key == topo_key else None
+            )
         return {
             "N": records_count,
             "regime": (cached_snapshot or {}).get("regime", "unknown"),
@@ -1472,8 +1538,11 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 "regime": "insufficient_data",
             }
         now = _time.monotonic()
+        topo_key = _topology_store_key(store)
         with _topology_state_lock:
-            cached_snapshot = _topology_cache
+            cached_snapshot = (
+                _topology_cache if _topology_cache_key == topo_key else None
+            )
             cache_fresh = (
                 cached_snapshot is not None
                 and (now - _topology_cache_at) < _TOPOLOGY_SNAPSHOT_TTL_S
@@ -1512,6 +1581,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             with _topology_state_lock:
                 _topology_cache = dict(snapshot)
                 _topology_cache_at = _time.monotonic()
+                _topology_cache_key = topo_key
             return snapshot
         except Exception as exc:
             write_event(
@@ -1813,11 +1883,13 @@ def _inject_sleep_suggestion(
     try:
         from iai_mcp.bedtime import detect_wind_down
         from iai_mcp.daemon_state import load_state
-        from iai_mcp.tz import load_user_tz
 
         state = load_state()
         now = datetime.now(timezone.utc)
-        tz = load_user_tz()
+        # System-local tz: the presence stamps and the consolidation gate
+        # bucket in system local time — the wind-down consumer must read
+        # the same clock or the gate drifts from the data.
+        tz = datetime.now().astimezone().tzinfo
         suggestion = detect_wind_down(cue, language, state, now, tz)
         if suggestion:
             response["sleep_suggestion"] = suggestion

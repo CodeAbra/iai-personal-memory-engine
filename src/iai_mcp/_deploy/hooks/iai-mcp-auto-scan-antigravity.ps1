@@ -27,7 +27,7 @@ Get-ChildItem -Path $brainDir | Where-Object { $_.PSIsContainer -and $_.Name -ma
         
         if ($shouldProcess) {
             $json = @{ conversationId = $cid; transcriptPath = $targetFile.FullName } | ConvertTo-Json -Compress
-            $json | powershell.exe -ExecutionPolicy Bypass -NoProfile -File $captureScript -ErrorAction SilentlyContinue
+            $json | powershell.exe -ExecutionPolicy Bypass -NoProfile -File $captureScript
         }
     }
 }

@@ -4,6 +4,7 @@ if (-not $inputJson) { exit 0 }
 $sessionId = $inputJson.conversationId
 if (-not $sessionId) { $sessionId = $inputJson.conversation_id }
 if (-not $sessionId) { $sessionId = $inputJson.session_id }
+if (-not $sessionId) { exit 0 }
 
 $transcriptPath = $inputJson.transcriptPath
 if (-not $transcriptPath) { $transcriptPath = $inputJson.transcript_path }
@@ -18,6 +19,11 @@ if ($transcriptPath -and $transcriptPath.EndsWith("transcript.jsonl")) {
 if (-not $transcriptPath -or -not (Test-Path $transcriptPath)) {
     exit 0
 }
+# Host-controlled text lands on a joined command line below; a value
+# carrying a double-quote could splice extra arguments. Refuse it.
+if ($sessionId -match '"' -or $transcriptPath -match '"') {
+    exit 0
+}
 
 $cli = $null
 $command = Get-Command iai-mcp -ErrorAction SilentlyContinue
@@ -28,7 +34,18 @@ if (-not $cli) {
 }
 if (-not $cli) { exit 0 }
 
-& $cli capture-turn-deferred --session-id $sessionId --transcript-path $transcriptPath --max-turns-per-call 1000
+# Bounded like the .sh path's `timeout 30`: a hung CLI must not hang the
+# host's Stop hook. Start-Process joins -ArgumentList WITHOUT quoting, so
+# any value that may contain spaces must carry its own quotes.
+$proc = Start-Process -FilePath $cli -ArgumentList @(
+    "capture-turn-deferred",
+    "--session-id", "`"$sessionId`"",
+    "--transcript-path", "`"$transcriptPath`"",
+    "--max-turns-per-call", "1000"
+) -NoNewWindow -PassThru
+if (-not $proc.WaitForExit(30000)) {
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+}
 
 $deferredDir = [System.IO.Path]::Combine($env:USERPROFILE, ".iai-mcp", ".deferred-captures")
 $liveFile = [System.IO.Path]::Combine($deferredDir, "$sessionId.live.jsonl")

@@ -70,7 +70,7 @@ def _read_keychain_credentials() -> dict | None:
 def verify_credentials_subscription() -> dict:
     if CREDENTIALS_PATH.exists():
         try:
-            data = json.loads(CREDENTIALS_PATH.read_text())
+            data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return {"ok": False, "reason": "credentials_unreadable", "error": str(exc)}
     else:

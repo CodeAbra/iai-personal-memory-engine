@@ -129,7 +129,7 @@ def _build_hooks_json() -> dict:
 
 def _write_json_atomic(path: Path, data: dict) -> None:
     tmp = path.parent / (path.name + ".tmp-iai")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -193,7 +193,7 @@ def _plugin_materialized() -> bool:
 
 def _load_json(path: Path) -> dict:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -260,13 +260,13 @@ def _seed_cli_path_cache() -> None:
     try:
         cache = Path.home() / ".iai-mcp" / ".cli-path"
         if cache.exists():
-            cached = cache.read_text().strip()
+            cached = cache.read_text(encoding="utf-8").strip()
             if cached and os.access(cached, os.X_OK):
                 return
         candidate = Path(sys.argv[0]).resolve()
         if candidate.name == "iai-mcp" and os.access(candidate, os.X_OK):
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(str(candidate))
+            cache.write_text(str(candidate), encoding="utf-8")
     except OSError:
         pass
 

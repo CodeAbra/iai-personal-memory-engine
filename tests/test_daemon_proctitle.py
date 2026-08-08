@@ -9,7 +9,10 @@ def test_set_process_title_sets_iai_lilli():
     try:
         _daemon._set_process_title()
         title = getproctitle()
-        assert title == "iai lilli (iai_mcp.daemon)"
+        from iai_mcp.lifecycle_lock import DAEMON_PROCESS_TITLE_BASE
+        # The title carries the resolved store path so the orphan sweep can
+        # match daemons of the same store by argv[0] equality.
+        assert title.startswith(DAEMON_PROCESS_TITLE_BASE + " store=")
         assert "iai_mcp.daemon" in title
         assert title.startswith("iai lilli")
     finally:

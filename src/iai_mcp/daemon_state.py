@@ -42,7 +42,7 @@ def load_state() -> dict:
     if not target.exists():
         return {}
     try:
-        return json.loads(target.read_text())
+        return json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 

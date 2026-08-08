@@ -144,7 +144,7 @@ class _InjectEmbedderCtx:
         import iai_mcp.embed as _emb
         self._emb_mod = _emb
         self._orig = _emb.embedder_for_store
-        _emb.embedder_for_store = lambda _store: self._shim
+        _emb.embedder_for_store = lambda _store, **_kw: self._shim
         return self
 
     def __exit__(self, *_exc) -> None:

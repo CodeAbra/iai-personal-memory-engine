@@ -1839,7 +1839,7 @@ class HippoDB:
                     _log.warning("ingest_pending_embeddings: malformed .npy %s, skipping", npy_path)
                     continue
                 vec = list(_struct.unpack(f"<{n_floats}f", vec_bytes))
-                meta = _json.loads(json_path.read_text())
+                meta = _json.loads(json_path.read_text(encoding="utf-8"))
                 vec_label = int(meta["vec_label"])
             except Exception as exc:  # noqa: BLE001
                 _log.warning("ingest_pending_embeddings: failed to load %s: %s", npy_path, exc)

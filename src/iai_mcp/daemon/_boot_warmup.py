@@ -288,7 +288,7 @@ def run_boot_warmup(
             "shapes": shapes,
             "total_elapsed_ms": summary["total_elapsed_ms"],
         }
-        sidecar_path.write_text(json.dumps(sidecar_payload, indent=2))
+        sidecar_path.write_text(json.dumps(sidecar_payload, indent=2), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 -- sidecar failure must not raise
         log.debug("boot_warmup sidecar write failed: %s", exc, exc_info=True)
 

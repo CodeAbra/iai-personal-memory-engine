@@ -48,6 +48,16 @@ def test_topology_native_failure_emits_and_raises(tmp_path, monkeypatch):
         raise RuntimeError("simulated native build failure")
 
     monkeypatch.setattr(retrieve, "build_runtime_graph", _fail)
+    # The topology snapshot cache is module-global with a 900s TTL; a warm
+    # entry from any earlier test would short-circuit dispatch before the
+    # patched build ever runs. Same for a held single-flight lock — it makes
+    # dispatch answer with a placeholder instead of raising.
+    import threading
+
+    monkeypatch.setattr(core, "_topology_cache", None)
+    monkeypatch.setattr(core, "_topology_cache_at", 0.0)
+    monkeypatch.setattr(core, "_topology_cache_key", None)
+    monkeypatch.setattr(core, "_topology_inflight", threading.Lock())
 
     with pytest.raises(RuntimeError, match="simulated native build failure"):
         core.dispatch(store, "topology", {})
@@ -167,3 +177,58 @@ def test_capture_encode_failure_emits_store_event_and_raises(
     assert data.get("op_type") == "capture", (
         f"expected op_type='capture', got: {data}"
     )
+
+def test_topology_cache_never_crosses_stores(tmp_path, monkeypatch):
+    """A snapshot cached for one store must never be served for another —
+    the cache is process-global and only the store key keeps it honest."""
+    import threading
+    import time
+
+    from iai_mcp import core, retrieve
+
+    store = _make_store(tmp_path)
+    _seed_one_record(store)
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("cross-store build attempted")
+
+    monkeypatch.setattr(retrieve, "build_runtime_graph", _fail)
+    monkeypatch.setattr(core, "_topology_inflight", threading.Lock())
+    monkeypatch.setattr(
+        core,
+        "_topology_cache",
+        {"N": 1, "C": 0.0, "L": 0.0, "sigma": None,
+         "community_count": 1, "rich_club_ratio": 0.0, "regime": "ok"},
+    )
+    monkeypatch.setattr(core, "_topology_cache_at", time.monotonic())
+    monkeypatch.setattr(core, "_topology_cache_key", "some-other-store")
+
+    with pytest.raises(RuntimeError, match="cross-store build attempted"):
+        core.dispatch(store, "topology", {})
+
+def test_recall_raises_on_embedder_config_error(tmp_path, monkeypatch):
+    """An embedder-selection refusal must surface from recall — the soft
+    availability fallback would otherwise serve a zero-vector cue."""
+    import iai_mcp.embed as embed_mod
+    from iai_mcp import core
+    from iai_mcp.embed import EmbedderConfigError
+
+    store = _make_store(tmp_path)
+    _seed_one_record(store)
+
+    monkeypatch.setattr(
+        "iai_mcp.daemon_state.load_state", lambda: {"current_state": "WAKE"}
+    )
+    monkeypatch.setattr("iai_mcp.daemon_state.save_state", lambda s: None)
+
+    from iai_mcp.embed import EmbedIdentityMismatch
+
+    for refusal_type in (EmbedderConfigError, EmbedIdentityMismatch):
+        def _refuse(store, **kwargs):
+            raise refusal_type("vector space mismatch")
+
+        monkeypatch.setattr(embed_mod, "embedder_for_store", _refuse)
+        with pytest.raises(refusal_type):
+            core.dispatch(store, "memory_recall", {
+                "cue": "any cue", "session_id": "test-session",
+            })

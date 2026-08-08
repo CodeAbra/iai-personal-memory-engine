@@ -5,12 +5,18 @@
 # ~/.iai-mcp/.deferred-captures/{session_id}.live.jsonl. Inline system
 # python3 (stdlib only) so cold-start stays under the per-turn latency
 # budget; the equivalent `iai-mcp capture-turn-deferred` CLI exists for
-# manual / debugging use. Format invariants are kept in sync with
-# src/iai_mcp/capture.py::write_deferred_event.
+# manual / debugging use.
+#
+# At-rest contract: this writer STAGES PLAINTEXT at mode 0600 (stdlib
+# python carries no AES-GCM); the daemon encrypts staged lines on its next
+# drain pass (capture.reencrypt_plaintext_spool_lines). Readers accept
+# both wire formats — never assume this file is uniformly either.
 #
 # Fail-safe: any error exits 0. Hard 5s wall-clock timeout.
 
 set -u
+# Spool files must never be world-readable.
+umask 077
 input=$(cat 2>/dev/null || true)
 
 # Extract session_id and transcript_path in a single subprocess call.
@@ -152,7 +158,7 @@ def parse_line(raw):
         agy_text = str(obj.get("content") or "").strip()
         if not agy_text or _is_noise(agy_text):
             return None
-        return agy_role, agy_text, None, obj.get("created_at")
+        return agy_role, agy_text, None, obj.get("created_at"), []
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
     # Claude puts the role in top-level "type", Cursor in top-level "role"
     # with the content nested under "message".
@@ -160,6 +166,7 @@ def parse_line(raw):
     if role not in {"user", "assistant"}:
         return None
     content = msg.get("content", "")
+    tools = []
     if isinstance(content, list):
         parts = [
             b.get("text", "")
@@ -167,19 +174,50 @@ def parse_line(raw):
             if isinstance(b, dict) and b.get("type") == "text"
         ]
         text = "\n".join(parts).strip()
+        if role == "assistant":
+            tools = [
+                str(b.get("name") or "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_use"
+                and b.get("name")
+            ]
     else:
         text = str(content).strip()
+    src_uuid = obj.get("uuid") or None
+    src_ts = obj.get("timestamp") or None
     if not text:
+        # Action-only assistant entries carry the mechanics of the episode;
+        # their tool names attach to the nearest text turn of the response.
+        # A text-less user entry is a tool RESULT, not a conversational
+        # boundary — it must not reach the caller at all.
+        if role == "assistant" and tools:
+            return role, "", src_uuid, src_ts, tools
         return None
     if _is_noise(text):
+        # Noise text never becomes a record, but an assistant noise entry
+        # may still carry tool calls, and a user noise entry is still a
+        # conversational boundary; both signal via empty text.
+        if role == "assistant" and tools:
+            return role, "", src_uuid, src_ts, tools
+        if role == "user":
+            return role, "", src_uuid, src_ts, []
         return None
     # Extract transcript-native identity when present.  Real Claude Code
     # JSONL lines carry top-level "uuid" and "timestamp" fields.  Test
     # fixtures may lack these; None is the safe fallback so capture.py
     # _idem_tag falls back to the (session, role, ts, text) key.
-    src_uuid = obj.get("uuid") or None
-    src_ts = obj.get("timestamp") or None
-    return role, text, src_uuid, src_ts
+    return role, text, src_uuid, src_ts, tools
+
+
+def _tools_trailer(names):
+    seen = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    if not seen:
+        return ""
+    extra = f" +{len(seen) - 8}" if len(seen) > 8 else ""
+    return "\n[tools: " + ", ".join(seen[:8]) + extra + "]"
 
 if total > prev:
     need_header = (not live.exists()) or live.stat().st_size == 0
@@ -192,6 +230,7 @@ if total > prev:
                 "cwd": cwd,
             }
             out.write(json.dumps(header, ensure_ascii=False) + "\n")
+        pending_tools = []
         for raw in lines[prev:]:
             if emitted >= MAX_TURNS:
                 break
@@ -199,7 +238,31 @@ if total > prev:
             parsed = parse_line(raw)
             if parsed is None:
                 continue
-            role, text, src_uuid, src_ts = parsed
+            role, text, src_uuid, src_ts, tools = parsed
+            if role == "assistant" and not text:
+                # Action-only entry: hold the tool names for the next text
+                # turn of the response so the episode records its mechanics.
+                pending_tools.extend(tools)
+                continue
+            if role == "user" and not text:
+                # Conversational user boundary with no recordable text (a
+                # noise line, not a tool result): mechanics of the previous
+                # response must not leak across it.
+                pending_tools = []
+                continue
+            if role == "assistant":
+                # The floor guards the BARE text: a trailer must never turn
+                # an otherwise-skipped stub into a record (mirror of
+                # capture.MIN_CAPTURE_LEN — keep the two in lockstep).
+                if len(text) >= 12:
+                    text = text + _tools_trailer(pending_tools + tools)
+                    pending_tools = []
+                else:
+                    pending_tools.extend(tools)
+            else:
+                # A user turn closes the previous response; tool names that
+                # never met a text turn must not leak across the boundary.
+                pending_tools = []
             event = {
                 "text": text,
                 "cue": f"session {session_id} turn",

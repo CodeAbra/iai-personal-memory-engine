@@ -1,6 +1,10 @@
-"""Every tracked text surface stays UTF-8 and free of debug scaffolding."""
+"""Every tracked text surface stays UTF-8, free of debug scaffolding, and
+every text-mode file open under src/ declares its encoding — the platform
+default is cp1252 on Windows and would silently mangle any non-ASCII
+state-file content."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -23,10 +27,8 @@ DEBUG_MARKERS = ('print("DEBUG', "print(f\"DEBUG", 'print("TRACEBACK', "tracebac
 # purpose: the diagnostics are its output, not scaffolding left behind.
 DEBUG_ROOTS = ("src/", "mcp-wrapper/src/")
 
-# This file spells out every pattern it forbids, so it must exempt itself from
-# all three scans. Until it is committed `git ls-files` does not list it, which
-# means a green run before the first commit says nothing about this case.
-DETECTORS = {"tests/test_source_text_encoding.py"}
+# The detector names every marker in order to forbid it — exempt from all scans.
+SELF = "tests/test_source_text_encoding.py"
 
 
 def _tracked_text_files() -> list[Path]:
@@ -37,7 +39,9 @@ def _tracked_text_files() -> list[Path]:
     return [
         REPO / rel
         for rel in out
-        if rel and (Path(rel).suffix in TEXT_SUFFIXES or Path(rel).suffix == ".ps1")
+        if rel
+        and rel != SELF
+        and (Path(rel).suffix in TEXT_SUFFIXES or Path(rel).suffix == ".ps1")
     ]
 
 
@@ -50,8 +54,6 @@ def test_the_scan_sees_a_real_tree() -> None:
 
 @pytest.mark.parametrize("path", TRACKED, ids=lambda p: str(p.relative_to(REPO)))
 def test_no_mojibake(path: Path) -> None:
-    if str(path.relative_to(REPO)) in DETECTORS:
-        return
     text = path.read_bytes().decode("utf-8", errors="replace")
     for marker in MOJIBAKE:
         assert marker not in text, (
@@ -63,8 +65,6 @@ def test_no_mojibake(path: Path) -> None:
 @pytest.mark.parametrize("path", TRACKED, ids=lambda p: str(p.relative_to(REPO)))
 def test_no_unexpected_byte_order_mark(path: Path) -> None:
     if path.suffix in BOM_ALLOWED_SUFFIXES:
-        return
-    if str(path.relative_to(REPO)) in DETECTORS:
         return
     assert not path.read_bytes().startswith(b"\xef\xbb\xbf"), (
         f"{path.relative_to(REPO)} starts with a byte-order mark"
@@ -83,8 +83,67 @@ def test_no_unexpected_byte_order_mark(path: Path) -> None:
 )
 def test_no_debug_scaffolding(path: Path) -> None:
     rel = str(path.relative_to(REPO))
-    if rel in DETECTORS:
-        return
     text = path.read_text(encoding="utf-8")
     for marker in DEBUG_MARKERS:
         assert marker not in text, f"{rel} still carries {marker!r}"
+
+
+# --- text-mode opens must declare their encoding -------------------------
+
+#: Call shapes that read or write TEXT through the platform-default codec
+#: when no encoding is given. Object methods that merely share the name
+#: (zipfile/tarfile/webbrowser/engine .open) are excluded by shape.
+_FDOPEN_RX = re.compile(r'os\.fdopen\([^)]*"[rwa]"')
+_PATH_OPEN_RX = re.compile(r'\.open\(\s*(?:"[rwa]"\s*)?\)')
+_READ_TEXT_RX = re.compile(r"\.read_text\(")
+_WRITE_TEXT_RX = re.compile(r"\.write_text\(")
+_BARE_OPEN_RX = re.compile(r'(?<![\w.])open\((?![^)]*"[rw]b")')
+
+
+def _joined_call(lines: list[str], idx: int) -> str:
+    # A call may close on a later line; judge up to four joined lines so a
+    # trailing encoding= argument is seen.
+    return " ".join(x.strip() for x in lines[idx:idx + 4])
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        p
+        for p in TRACKED
+        if p.suffix == ".py" and str(p.relative_to(REPO)).startswith("src/iai_mcp")
+    ],
+    ids=lambda p: str(p.relative_to(REPO)),
+)
+def test_text_opens_declare_encoding(path: Path) -> None:
+    rel = str(path.relative_to(REPO))
+    lines = path.read_text(encoding="utf-8").splitlines()
+    offenders = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        hit = (
+            _FDOPEN_RX.search(line)
+            or _READ_TEXT_RX.search(line)
+            or _WRITE_TEXT_RX.search(line)
+            or _PATH_OPEN_RX.search(line)
+            or _BARE_OPEN_RX.search(line)
+        )
+        if not hit:
+            continue
+        window = _joined_call(lines, i)
+        if "encoding=" in window:
+            continue
+        if "read_bytes" in line or "write_bytes" in line or "os.open(" in line:
+            continue
+        # importlib.metadata's Distribution.read_text(filename) takes no
+        # encoding parameter (it decodes utf-8 itself); forcing one raises
+        # TypeError.
+        if "distribution(" in line:
+            continue
+        offenders.append(f"{rel}:{i + 1}: {stripped[:100]}")
+    assert not offenders, (
+        "text-mode open without encoding= (platform default is cp1252 on "
+        "Windows):\n" + "\n".join(offenders)
+    )

@@ -266,7 +266,9 @@ from ._analytics import (
 )
 
 from ._maintenance import (
+    cmd_blob_quarantine,
     cmd_edge_backfill,
+    cmd_entity_backfill,
     cmd_idem_dedup,
     cmd_schema_cleanup,
     cmd_maintenance_compact_hippo,
@@ -973,6 +975,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     idm.set_defaults(func=cmd_idem_dedup)
 
+    blq = sub.add_parser(
+        "blob-quarantine",
+        help=(
+            "tombstone machine-notification blobs (task notifications, "
+            "system notices, command envelopes) captured before the noise "
+            "filter existed. Default mode is --dry-run; --apply snapshots "
+            "the store dir first. Idempotent."
+        ),
+    )
+    blq_mode = blq.add_mutually_exclusive_group()
+    blq_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) count the blobs without mutating the store",
+    )
+    blq_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="snapshot the store dir + tombstone the blobs",
+    )
+    blq.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    blq.set_defaults(func=cmd_blob_quarantine)
+
     ebf = sub.add_parser(
         "edge-backfill",
         help=(
@@ -1005,6 +1040,48 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     ebf.set_defaults(func=cmd_edge_backfill)
+
+    enb = sub.add_parser(
+        "entity-backfill",
+        help=(
+            "derive entity: anchor tags from each record's surface and "
+            "regenerate its AAAK index so named things become recallable "
+            "by name. Default mode is --dry-run; --apply writes additively "
+            "and records every applied change to a JSONL journal. Idempotent."
+        ),
+    )
+    enb_mode = enb.add_mutually_exclusive_group()
+    enb_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) report proposed anchors without mutating the store",
+    )
+    enb_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="write anchor tags + refreshed AAAK indexes, journaling changes",
+    )
+    enb.add_argument(
+        "--refresh",
+        action="store_true",
+        default=False,
+        help=(
+            "recompute anchors for the whole corpus: remove anchors the "
+            "current extractor no longer emits, add the ones it now does"
+        ),
+    )
+    enb.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    enb.set_defaults(func=cmd_entity_backfill)
 
     mtn = sub.add_parser(
         "maintenance",

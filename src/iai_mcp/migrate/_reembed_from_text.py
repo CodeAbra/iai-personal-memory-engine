@@ -1,13 +1,16 @@
-"""Re-embed episodic records from their verbatim text.
+"""Re-embed records from their verbatim text.
 
-A defect in the capture path embedded the provenance cue label instead of the
-message content, so existing episodic records carry vectors of a positional
-label string ("session <id> turn <n>") rather than of their actual text. The
-ANN/cosine index built from those vectors is semantically collapsed.
+The stored embedding can diverge from ``embed(literal_surface)`` in two known
+ways: the capture path once embedded the provenance cue label instead of the
+message content, and an embedder-model swap (same dimension, different
+weights) leaves every record written during the swap window in a foreign
+vector space where cosine against current-model cues is noise. Either way the
+ANN/cosine index built from those vectors is semantically dead.
 
-This migration rebuilds every episodic record's embedding from its intact
-``literal_surface`` (the verbatim text, which was always stored correctly),
-then rebuilds the recall index from the corrected vectors.
+This migration rebuilds every active record's embedding — all tiers — from
+its intact ``literal_surface`` (the verbatim text, which was always stored
+correctly), then rebuilds the recall index from the corrected vectors and
+stamps the store with the identity of the embedder that produced them.
 
 Boundary held by design: only the ``embedding`` column is rewritten.
 ``literal_surface`` is never modified, and the at-rest encryption boundary is
@@ -96,7 +99,7 @@ def migrate_reembed_from_text(
     batch_size: int = DEFAULT_BATCH_SIZE,
     resume: bool = False,
 ) -> dict:
-    """Re-embed every episodic record from its ``literal_surface`` text.
+    """Re-embed every active record (all tiers) from its ``literal_surface``.
 
     Streams record ids in id-ordered windows so the whole corpus is never
     loaded at once. Per window: a light read decrypts only ``literal_surface``,
@@ -126,7 +129,9 @@ def migrate_reembed_from_text(
     if batch_size < 1:
         batch_size = DEFAULT_BATCH_SIZE
 
-    embedder = embedder_for_store(store)
+    # The migration is the sanctioned way OUT of an identity mismatch, so it
+    # must be able to obtain the embedder while the guard would refuse it.
+    embedder = embedder_for_store(store, allow_identity_mismatch=True)
 
     reembedded = 0
     skipped = 0
@@ -137,7 +142,8 @@ def migrate_reembed_from_text(
     with db._conn_lock:
         total_target_row = db._conn.execute(
             "SELECT COUNT(*) AS n FROM records"
-            " WHERE tier = 'episodic' AND tombstoned_at IS NULL"
+            " WHERE tombstoned_at IS NULL"
+            "   AND COALESCE(embedding_pending, 0) = 0"
         ).fetchone()
     total_target = int(total_target_row["n"]) if total_target_row is not None else 0
 
@@ -150,10 +156,13 @@ def migrate_reembed_from_text(
 
     while True:
         with db._conn_lock:
+            # Pending rows are excluded: their vector is a placeholder owned by
+            # the deferred-embed pass, which also flips embedding_pending —
+            # writing here would leave the flag lying about the vector.
             rows = db._conn.execute(
                 "SELECT id, literal_surface FROM records"
-                " WHERE tier = 'episodic'"
-                "   AND tombstoned_at IS NULL"
+                " WHERE tombstoned_at IS NULL"
+                "   AND COALESCE(embedding_pending, 0) = 0"
                 "   AND id > ?"
                 " ORDER BY id"
                 " LIMIT ?",
@@ -260,7 +269,11 @@ def migrate_reembed_from_text(
             last_id,
         )
 
-    if not dry_run and reembedded > 0:
+    # The derived structures go stale the moment any prior invocation wrote —
+    # a zero-write resume after an interrupted final window must still rebuild
+    # and clear the checkpoint, or the index keeps serving pre-correction
+    # vectors while the operator reads "re-embedded 0" as done.
+    if not dry_run:
         rebuild = db._rebuild_index_from_sqlite()
         # The corpus vectors changed in place but the corpus count did not, so the
         # warm graph's staleness-window cache key never flips. Drop the snapshot so
@@ -299,6 +312,27 @@ def migrate_reembed_from_text(
         # The corpus is fully corrected; drop the checkpoint so a later run
         # starts clean rather than resuming a completed migration.
         _clear_resume_cursor(store)
+        # The identity stamp asserts that EVERY vector belongs to this
+        # embedder, so it lands only when no row was skipped — a corpus with
+        # undecryptable leftovers keeps its legacy (unguarded) status and the
+        # skip count in the result is the operator's signal.
+        if skipped == 0:
+            from iai_mcp.embed import (
+                EmbedderConfigError,
+                EmbedIdentityMismatch,
+                stamp_store_embed_identity,
+            )
+
+            try:
+                stamp_store_embed_identity(store, embedder)
+            except (EmbedderConfigError, EmbedIdentityMismatch):
+                # A typed stamp refusal means the rewritten vectors CANNOT
+                # be attested — swallowing it would leave the old stamp
+                # standing as a false attestation over a success-shaped
+                # result.
+                raise
+            except Exception as exc:  # noqa: BLE001 -- stamp fault must never undo the reembed
+                log.error("reembed identity stamp failed: %s", exc)
 
     return {
         "reembedded": reembedded,

@@ -72,7 +72,7 @@ def test_pack_hint_carries_relative_age(tmp_path):
 
     _turn(store, "How does sleep consolidation strengthen hippocampal memory?", "today")
 
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     hint = next(l for l in body.splitlines() if "hippocampus consolidates" in l)
     assert re.search(r"\(\d+(m|h|d|w|mo|y) ago\) · cos", hint), hint
 
@@ -93,7 +93,7 @@ def test_pack_marks_corrector_as_revised(tmp_path):
 
     _turn(store, "Which database does the vector project store embeddings in?", "today")
 
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     current_lines = [l for l in body.splitlines() if "pearl database" in l]
     assert current_lines, body
     # The stale belief travels only under the superseded flag; the corrector
@@ -115,7 +115,7 @@ def test_pack_footer_carries_volatility_advice(tmp_path):
 
     _turn(store, "How does sleep consolidation strengthen hippocampal memory?", "today")
 
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     assert "volatility signals" in body
     assert "re-verification" in body
 

@@ -101,6 +101,12 @@ def detect_communities(
     prior: CommunityAssignment | None = None,
     prior_mode: Literal["seeded", "cold"] = "seeded",
 ) -> CommunityAssignment:
+    # LineageReport stays importable without numba; the numba-tainted modules
+    # (mosaic -> numba, mosaic_policy) import inside the guard below, so a
+    # numba that raises ImportError at its own import (unsupported numpy)
+    # degrades to flat assignment instead of failing every caller. Function
+    # scope is deliberate: mosaic imports _flat_assignment back from this
+    # module, so hoisting would make that cycle real.
     from iai_mcp.mosaic_lineage import LineageReport
 
     n = graph.node_count()
@@ -114,18 +120,13 @@ def detect_communities(
         return flat
 
     try:
-        # Imported inside the guard, not at function entry: iai_mcp.mosaic
-        # imports numba at module scope and mosaic_policy reaches numba
-        # through it. A missing or ABI-mismatched numba raises at import
-        # time, which must degrade to the flat assignment below rather than
-        # propagate out of detect_communities and fail the whole recall.
         from iai_mcp.mosaic import run_mosaic
         from iai_mcp.mosaic_policy import CPM_MODULARITY_FLOOR
 
         inner_assignment, lineage_report = run_mosaic(
             graph, prior=prior, prior_mode=prior_mode, seed=42
         )
-    except (ImportError, RuntimeError, ValueError, TypeError):
+    except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
         flat = _flat_assignment(graph, prior)
         flat.lineage_report = LineageReport(events=())
         return flat

@@ -33,7 +33,7 @@ def _load_config(path: Path) -> "dict | None":
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -69,7 +69,7 @@ def install_openclaw_mcp() -> int:
     else:
         servers[_SERVER_KEY] = entry
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps(data, indent=2))
+        config.write_text(json.dumps(data, indent=2), encoding="utf-8")
         print(f"patched: {config} (mcp.servers.{_SERVER_KEY})")
 
     print(
@@ -92,7 +92,7 @@ def uninstall_openclaw_mcp() -> int:
     servers = (data.get("mcp") or {}).get("servers")
     if isinstance(servers, dict) and _SERVER_KEY in servers:
         servers.pop(_SERVER_KEY, None)
-        config.write_text(json.dumps(data, indent=2))
+        config.write_text(json.dumps(data, indent=2), encoding="utf-8")
         print(f"patched: {config} (mcp.servers.{_SERVER_KEY} removed)")
     else:
         print(f"(no {_SERVER_KEY} server to remove) {config}")

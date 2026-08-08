@@ -53,12 +53,13 @@ def _tag_cooccurrence(records: Iterable) -> dict:
             except (ValueError, AttributeError):
                 continue
 
-        # idem: tags are per-record idempotency hashes — unique by
-        # construction, so any pattern containing one is noise that can
-        # never generalize past its single record.
+        # idem: tags are per-record idempotency hashes and entity: tags
+        # are per-record name anchors — neither generalizes past its
+        # record, and up to 10 anchors per record would make this
+        # all-pairs dict quadratic in the anchor vocabulary.
         tags = [
             t for t in raw_tags
-            if not t.startswith(("raw:", "domain:", "idem:"))
+            if not t.startswith(("raw:", "domain:", "idem:", "entity:"))
         ]
         for i in range(len(tags)):
             for j in range(i + 1, len(tags)):

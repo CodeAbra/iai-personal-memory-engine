@@ -163,11 +163,11 @@ def check_i_hippo_db_size() -> CheckResult:
 def check_w_no_permanent_failed() -> CheckResult:
     import fnmatch
 
-    env_store = os.environ.get("IAI_MCP_STORE")
-    if env_store:
-        deferred_dir = Path(env_store).parent / ".deferred-captures"
-    else:
-        deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
+    # Single authority for the spool location — the spool is home-fixed and
+    # IAI_MCP_STORE never names its parent directory.
+    from iai_mcp.capture import deferred_captures_dir
+
+    deferred_dir = deferred_captures_dir()
 
     if not deferred_dir.exists():
         return CheckResult(
@@ -177,15 +177,43 @@ def check_w_no_permanent_failed() -> CheckResult:
         )
 
     count = 0
+    total_bytes = 0
     try:
         for entry in os.scandir(deferred_dir):
-            if entry.is_file() and fnmatch.fnmatch(entry.name, "*.permanent-failed-*.jsonl"):
+            if not entry.is_file():
+                continue
+            try:
+                total_bytes += entry.stat().st_size
+            except OSError:
+                pass
+            if fnmatch.fnmatch(entry.name, "*.permanent-failed-*.jsonl"):
                 count += 1
     except OSError as exc:
         return CheckResult(
             name="(w) no permanent-failed captures",
             passed=True,
             detail=f"could not scan deferred-captures dir: {exc}",
+            status="WARN",
+        )
+
+    # Soft cap only — the spool is never evicted (lossless wins over bounded);
+    # a swollen backlog means the drain is not keeping up and the operator
+    # must be told loudly.
+    try:
+        cap_mb = int(os.environ.get("IAI_MCP_SPOOL_SOFT_CAP_MB", "100"))
+    except ValueError:
+        cap_mb = 100
+    size_mb = total_bytes / (1024 * 1024)
+    if cap_mb > 0 and size_mb > cap_mb:
+        return CheckResult(
+            name="(w) no permanent-failed captures",
+            passed=True,
+            detail=(
+                f"deferred spool at {size_mb:.0f} MB (soft cap {cap_mb} MB) — "
+                "the drain is not keeping up; check the daemon, then "
+                "'iai-mcp deferred-drain'"
+                + (f"; {count} permanent-failed file(s)" if count else "")
+            ),
             status="WARN",
         )
 
@@ -457,6 +485,13 @@ def check_t_hippo_compacted_freshness() -> CheckResult:
 
     from iai_mcp.hippo import HippoLockHeldError
 
+    if not _store_file_present():
+        return CheckResult(
+            name="(t) hippo_compacted freshness",
+            passed=True,
+            detail="no store yet (skip)",
+        )
+
     events: list[dict] = []
     _store = None
     try:
@@ -553,6 +588,13 @@ def check_u_recall_centrality_regression() -> CheckResult:
     from datetime import timezone as _tz
 
     from iai_mcp.hippo import HippoLockHeldError
+
+    if not _store_file_present():
+        return CheckResult(
+            name="(u) recall centrality regression",
+            passed=True,
+            detail="no store yet (skip)",
+        )
 
     store = None
     try:
@@ -690,6 +732,188 @@ def check_v_native_embedder() -> CheckResult:
         passed=True,
         detail=f"encode ok, backend={backend}, {emb.DIM}-dim, model={emb.model_key}",
     )
+
+
+def _store_file_present() -> bool:
+    """True when the store's database file already exists.
+
+    Every diagnostic (and the heal audit writer) must consult this before
+    MemoryStore(): opening an absent path CREATES an empty brain.sqlite3
+    whose driver the next daemon boot then misdetects — a doctor run on a
+    fresh host would invalidate its own no-store row within the same run.
+    Path resolution MIRRORS MemoryStore's (env, then the store module's
+    default) — an independent spelling here goes blind on a live store and
+    keeps minting at the virgin root. Fail-open on any resolution error:
+    the subsequent open then reports its own failure as one row instead of
+    a silent skip.
+    """
+    try:
+        from iai_mcp import store as _store_mod
+
+        store_env = os.environ.get("IAI_MCP_STORE")
+        root = Path(store_env) if store_env else Path(_store_mod.DEFAULT_STORAGE_PATH)
+        return (root / "hippo" / "brain.sqlite3").exists()
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _read_store_meta_values(
+    store_root: Path, keys: "tuple[str, ...]"
+) -> "dict[str, str | None]":
+    from iai_mcp.hippo import AccessMode, HippoDB
+
+    # A diagnostic read must never CREATE a store: opening an absent path
+    # would mint an empty stdlib-driver brain.sqlite3 that a later lilli
+    # daemon boot then misdetects.
+    if not (store_root / "hippo" / "brain.sqlite3").exists():
+        raise FileNotFoundError(f"store absent: {store_root}")
+
+    db = HippoDB(
+        store_root,
+        access_mode=AccessMode.SHARED,
+        read_only=True,
+        _lock_timeout_override=0.25,
+    )
+    try:
+        out: "dict[str, str | None]" = {}
+        with db._conn_lock:
+            for key in keys:
+                row = db._conn.execute(
+                    "SELECT value FROM _hippo_meta WHERE key = ?", (key,)
+                ).fetchone()
+                out[key] = row["value"] if row is not None else None
+        return out
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def check_ii_embed_identity() -> CheckResult:
+    """Store vector-identity stamp vs the embedder the runtime would use.
+
+    Daemon up: the daemon's status payload is authoritative — it holds the
+    warm embedder that passed the boot guard. Daemon down: read the stamp
+    directly and compare against the configured embedder for the store's
+    dimension (allow_mismatch, so the comparison itself is reported rather
+    than raised).
+    """
+    import asyncio as _asyncio
+
+    name = "(ii) store embed identity"
+    from iai_mcp import doctor as _pkg
+
+    status = None
+    try:
+        status = _asyncio.run(
+            _pkg._socket_status_probe(_pkg._resolve_socket_path(), 2.0)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("check_ii: socket probe failed: %s", exc)
+
+    if isinstance(status, dict) and not isinstance(
+        status.get("embed_identity"), dict
+    ):
+        # The daemon answered but carries no identity block: an older
+        # daemon or a broken boot wire. The direct read below would only
+        # hit the daemon's own store lock, so name the real remedy.
+        return CheckResult(
+            name, True,
+            "daemon serves no identity block (pre-upgrade daemon or broken "
+            "boot wire) — restart the daemon to restore this row",
+            status="WARN",
+        )
+
+    if isinstance(status, dict) and isinstance(status.get("embed_identity"), dict):
+        ei = status["embed_identity"]
+        if ei.get("state") == "warming":
+            return CheckResult(
+                name, True,
+                "embedder still warming after boot — retry shortly",
+                status="WARN",
+            )
+        if ei.get("error"):
+            return CheckResult(
+                name, True, f"daemon could not compute: {ei['error']}",
+                status="WARN",
+            )
+        stored = ei.get("stored")
+        if stored is None:
+            return CheckResult(
+                name, True,
+                "store unstamped — protection begins at the first stamp",
+                status="WARN",
+            )
+        if ei.get("match"):
+            return CheckResult(name, True, f"match: {stored}")
+        return CheckResult(
+            name, False,
+            f"MISMATCH: store={stored!r} runtime={ei.get('runtime')!r} — "
+            "run the re-embedding migration "
+            "(iai-mcp migrate --reembed-to-configured-provider) or restore "
+            "the original embedder configuration",
+        )
+
+    # Daemon down: direct read.
+    try:
+        from types import SimpleNamespace
+
+        from iai_mcp.embed import (
+            EMBED_IDENTITY_META_KEY,
+            effective_model_identity,
+            embedder_for_store,
+        )
+
+        from iai_mcp import store as _store_mod
+
+        store_env = os.environ.get("IAI_MCP_STORE")
+        store_root = (
+            Path(store_env) if store_env
+            else Path(_store_mod.DEFAULT_STORAGE_PATH)
+        )
+        meta = _read_store_meta_values(
+            store_root, (EMBED_IDENTITY_META_KEY, "embed_dim")
+        )
+        stored = meta[EMBED_IDENTITY_META_KEY]
+        if stored is None:
+            return CheckResult(
+                name, True,
+                "store unstamped — protection begins at the first stamp",
+                status="WARN",
+            )
+        dim_raw = meta["embed_dim"]
+        embed_dim = int(dim_raw) if dim_raw else None
+        # db=None skips the guard inside embedder construction; the
+        # comparison below is the diagnosis this row exists to report.
+        runtime = effective_model_identity(
+            embedder_for_store(
+                SimpleNamespace(db=None, embed_dim=embed_dim),
+                allow_identity_mismatch=True,
+            )
+        )
+        if stored == runtime:
+            return CheckResult(name, True, f"match: {stored}")
+        return CheckResult(
+            name, False,
+            f"MISMATCH: store={stored!r} runtime={runtime!r} — "
+            "run the re-embedding migration "
+            "(iai-mcp migrate --reembed-to-configured-provider) or restore "
+            "the original embedder configuration",
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            name, True,
+            "no store yet — nothing to compare",
+            status="WARN",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name, True,
+            f"could not compare (store busy or embedder unavailable): "
+            f"{type(exc).__name__}: {str(exc)[:120]}",
+            status="WARN",
+        )
 
 
 def check_p_anthropic_sdk_absent() -> CheckResult:

@@ -69,6 +69,16 @@ recall so its vector indexes reopen with the new dimension, then run:
 iai-mcp doctor
 ```
 
-Starting a populated store with a provider whose dimension differs from the
-store fails fast and points to the migration command. This prevents mixed-model
-or mixed-dimension indexes from being used silently.
+A completed re-embed migration stamps the store with the identity of the
+embedder that produced its vectors: effective model id, revision, pooling,
+dimension, and the text-prefix setting. Opening that store under a different
+embedder fails fast, names both identities, and points to the migration
+command. The check covers same-dimension swaps, which a dimension comparison
+alone misses — two different 384-dimension models write vectors that read as
+noise against each other while every dimension check passes.
+
+If the daemon refuses to start with `refusing to mix vector generations`, the
+service environment changed the embedder out from under the store. Fix the
+environment, or run the migration to move the store to the new model. The guard
+is a hard stop rather than a warning because the alternative is a store whose
+semantic lane silently returns nothing.

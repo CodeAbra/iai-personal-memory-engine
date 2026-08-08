@@ -2,6 +2,7 @@
 name = "iai-brain"
 version = "1.0.0"
 description = "IAI Brain — desktop window onto your agent's memory"
+authors = ["Areg Noya"]
 edition = "2021"
 license = "FSL-1.1-Apache-2.0"
 

@@ -179,7 +179,12 @@ export class PythonCoreBridge {
     if (!handler) return;
     this.pending.delete(msg.id);
     if (msg.error) {
-      handler.reject(new Error(msg.error.message));
+      // The JSON-RPC error code travels with the Error so tool handlers
+      // can classify daemon-side failures (e.g. embedder refusals)
+      // without matching message prose.
+      const err = new Error(msg.error.message) as Error & { code?: number };
+      err.code = msg.error.code;
+      handler.reject(err);
     } else {
       handler.resolve(msg.result);
     }

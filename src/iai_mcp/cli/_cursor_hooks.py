@@ -50,7 +50,7 @@ def _load_hooks_json(path: Path) -> "dict | None":
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -97,7 +97,7 @@ def install_cursor_hooks() -> int:
 
     if changed or not hooks_json.exists():
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
-        hooks_json.write_text(json.dumps(data, indent=2))
+        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     print(
         "\nNote: restart Cursor to pick up hooks.json. Per-turn recall is "
@@ -146,7 +146,7 @@ def uninstall_cursor_hooks() -> int:
                 changed = True
                 print(f"patched: {hooks_json} ({event} entry removed)")
     if changed:
-        hooks_json.write_text(json.dumps(data, indent=2))
+        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
     else:
         print(f"(no hook entry to remove) {hooks_json}")
     return 0

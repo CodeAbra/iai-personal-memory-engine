@@ -206,7 +206,7 @@ def query_events(
             ad = str(row["id"]).encode("ascii")
             try:
                 raw_data = decrypt_field(raw_data, store._key(), associated_data=ad)
-            except (OSError, ValueError, RuntimeError) as exc:
+            except Exception as exc:  # noqa: BLE001 -- AEAD raises bare InvalidTag; one bad row must not fail the query
                 logging.getLogger(__name__).debug("event_decrypt_failed", extra={"id": row["id"], "err": str(exc)[:80]})
                 raw_data = "{}"
         try:

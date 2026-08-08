@@ -266,3 +266,99 @@ def test_common_word_cue_gated_out_of_fusion(tmp_path, monkeypatch):
     assert store.lexical_query_warm("zephyrblatt", min_idf=0.5), (
         "a rare-token cue must pass the gate"
     )
+
+
+def test_supplied_cue_embedding_drives_warm_path_rank(tmp_path, monkeypatch):
+    """The tool schema promises the cue is embedded server-side ONLY when
+    cue_embedding is absent. The cue text below is unknown to the embedder
+    (its fallback is orthogonal to every record), so the crafted margins can
+    reach the rank only through the supplied vector."""
+    monkeypatch.setitem(core._profile_state, "literal_preservation", "medium")
+    raw_text = "a raw conversational turn about deployment gates"
+    knowledge_text = "the deployment gate requires a green suite"
+    _install_embedder(monkeypatch, {
+        raw_text: _unit(0), knowledge_text: _mix(0, 1, 0.98),
+    })
+    store = MemoryStore(path=tmp_path)
+    raw = _rec(raw_text, _unit(0))
+    knowledge = _rec(knowledge_text, _mix(0, 1, 0.98), tier="semantic")
+    store.insert(raw)
+    store.insert(knowledge)
+    flush_record_buffer(store)
+
+    resp = _dispatch(store, "cue text the embedder has never seen", _unit(0))
+    by_id = {h["record_id"]: h for h in resp["hits"]}
+    raw_hit = by_id.get(str(raw.id))
+    know_hit = by_id.get(str(knowledge.id))
+    assert raw_hit is not None and know_hit is not None, resp["hits"]
+    assert "cos 1.000" in raw_hit["reason"], (
+        f"supplied cue vector must reach scoring: {raw_hit['reason']}"
+    )
+    assert "cos 0.980" in know_hit["reason"], know_hit["reason"]
+
+
+def test_zero_cue_embedding_falls_back_to_server_side_embed(tmp_path, monkeypatch):
+    cue_text = "which gate colour is the deployment probe"
+    raw_text = "a raw conversational turn about deployment gates"
+    knowledge_text = "the deployment gate requires a green suite"
+    _install_embedder(monkeypatch, {
+        cue_text: _unit(0),
+        raw_text: _unit(0), knowledge_text: _mix(0, 1, 0.98),
+    })
+    store = MemoryStore(path=tmp_path)
+    raw = _rec(raw_text, _unit(0))
+    knowledge = _rec(knowledge_text, _mix(0, 1, 0.98), tier="semantic")
+    store.insert(raw)
+    store.insert(knowledge)
+    flush_record_buffer(store)
+
+    resp = _dispatch(store, cue_text, [0.0] * EMBED_DIM)
+    by_id = {h["record_id"]: h for h in resp["hits"]}
+    raw_hit = by_id.get(str(raw.id))
+    assert raw_hit is not None, resp["hits"]
+    assert "cos 1.000" in raw_hit["reason"], (
+        f"zero vector must defer to the server-side embed of the cue text: "
+        f"{raw_hit['reason']}"
+    )
+
+
+def _cue_fallback_world(tmp_path, monkeypatch, cue_text):
+    raw_text = "a raw conversational turn about deployment gates"
+    knowledge_text = "the deployment gate requires a green suite"
+    _install_embedder(monkeypatch, {
+        cue_text: _unit(0),
+        raw_text: _unit(0), knowledge_text: _mix(0, 1, 0.98),
+    })
+    store = MemoryStore(path=tmp_path)
+    raw = _rec(raw_text, _unit(0))
+    knowledge = _rec(knowledge_text, _mix(0, 1, 0.98), tier="semantic")
+    store.insert(raw)
+    store.insert(knowledge)
+    flush_record_buffer(store)
+    return store, raw
+
+
+def test_wrong_length_cue_embedding_falls_back_to_server_side_embed(tmp_path, monkeypatch):
+    cue_text = "which gate colour is the deployment probe"
+    store, raw = _cue_fallback_world(tmp_path, monkeypatch, cue_text)
+    resp = _dispatch(store, cue_text, [1.0] * 100)
+    by_id = {h["record_id"]: h for h in resp["hits"]}
+    raw_hit = by_id.get(str(raw.id))
+    assert raw_hit is not None, resp["hits"]
+    assert "cos 1.000" in raw_hit["reason"], (
+        f"a wrong-dim vector must defer to the server-side embed: "
+        f"{raw_hit['reason']}"
+    )
+
+
+def test_non_finite_cue_embedding_falls_back_to_server_side_embed(tmp_path, monkeypatch):
+    cue_text = "which gate colour is the deployment probe"
+    store, raw = _cue_fallback_world(tmp_path, monkeypatch, cue_text)
+    resp = _dispatch(store, cue_text, [float("nan")] * EMBED_DIM)
+    by_id = {h["record_id"]: h for h in resp["hits"]}
+    raw_hit = by_id.get(str(raw.id))
+    assert raw_hit is not None, resp["hits"]
+    assert "cos 1.000" in raw_hit["reason"], (
+        f"a NaN vector must defer to the server-side embed, never flatten "
+        f"the head: {raw_hit['reason']}"
+    )

@@ -98,6 +98,15 @@ def cmd_build_native(args: argparse.Namespace) -> int:
 def cmd_migrate(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     from iai_mcp.store import MemoryStore
+    if bool(getattr(args, "reembed_from_text", False)) and bool(
+        getattr(args, "reembed_to_configured_provider", False)
+    ):
+        print(
+            "error: --reembed-from-text and --reembed-to-configured-provider "
+            "are mutually exclusive; run one migration at a time",
+            file=_cli.sys.stderr,
+        )
+        return 2
     store = MemoryStore()
     verbose = bool(getattr(args, "verbose", False))
 

@@ -145,18 +145,30 @@ def recall(
     k_anti: int = 3,
     mode: str = "verbatim",
 ) -> RecallResponse:
-    # A missing or all-zero cue vector must be embedded HERE, not searched:
-    # the SLEEP/exception fallback dispatchers pad an absent cue_embedding
-    # with zeros, and ranking by distance to the zero vector returns
-    # cue-IRRELEVANT memories — the hippocampus must answer correctly on
-    # every path, not just the primary one. Embed failure keeps the caller's
-    # vector (degraded, never a crash into recall).
-    if cue_text and (not cue_embedding or not any(cue_embedding)):
+    # A missing, zero, wrong-dim or non-finite cue vector must be embedded
+    # HERE, not searched: the SLEEP/exception fallback dispatchers pad an
+    # absent cue_embedding with zeros, and ranking by distance to a zero or
+    # garbage vector returns cue-IRRELEVANT memories — the hippocampus must
+    # answer correctly on every path, not just the primary one. Embed
+    # failure keeps the caller's vector (degraded, never a crash into
+    # recall).
+    from iai_mcp.embed import _valid_cue_vec
+
+    _dim = getattr(store, "embed_dim", None) or len(cue_embedding or [])
+    _vec = _valid_cue_vec(cue_embedding, _dim)
+    if _vec is not None:
+        cue_embedding = _vec
+    elif cue_text:
+        from iai_mcp.embed import EmbedderConfigError, EmbedIdentityMismatch
         try:
             from iai_mcp.embed import embed_query, embedder_for_store
             # Full cue, same as the primary path — the encoder truncates at
             # its own token limit; a char slice here would rank differently.
             cue_embedding = list(embed_query(embedder_for_store(store), cue_text))
+        except (EmbedderConfigError, EmbedIdentityMismatch):
+            # A vector-space refusal must surface — searching with the
+            # caller's (possibly zero) vector silently serves garbage.
+            raise
         except Exception as exc:  # noqa: BLE001 -- degraded beats dead
             log.warning("recall cue re-embed failed, using caller vector: %s", exc)
 
@@ -648,6 +660,15 @@ def _make_graph_sync_hook(graph):
                 "pinned": bool(record.pinned),
                 "tags": list(getattr(record, "tags", []) or []),
                 "language": str(getattr(record, "language", "en") or "en"),
+                # Rank inputs: without these the graph-pool lane scores every
+                # record with an empty anchor index, a fresh timestamp and
+                # default stability — the aaak and age terms go dead.
+                "aaak_index": str(getattr(record, "aaak_index", "") or ""),
+                "created_at": (
+                    record.created_at.isoformat()
+                    if getattr(record, "created_at", None) else ""
+                ),
+                "stability": float(getattr(record, "stability", 0.5) or 0.5),
             }
             if nid_str not in graph._node_payload:
                 graph.add_node(
@@ -1143,6 +1164,9 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "pinned": bool(payload.get("pinned", False)),
                 "tags": list(payload.get("tags") or []),
                 "language": str(payload.get("language", "en") or "en"),
+                "aaak_index": str(payload.get("aaak_index", "") or ""),
+                "created_at": str(payload.get("created_at", "") or ""),
+                "stability": float(payload.get("stability", 0.5) or 0.5),
             })
         node_payload_for_cache = cached_node_payload
     else:
@@ -1164,6 +1188,9 @@ def _build_runtime_graph_impl(store: MemoryStore):
             "pinned",
             "tags_json",
             "language",
+            "aaak_index",
+            "created_at",
+            "stability",
         ]
         # Stream only ACTIVE records — tombstoned (deleted) records are not graph
         # nodes. This matches the active-records predicate used everywhere else
@@ -1232,6 +1259,11 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 community_id=community_id,
                 embedding=embedding,
             )
+            _rank_fields = {
+                "aaak_index": str(row.get("aaak_index") or ""),
+                "created_at": str(row.get("created_at") or ""),
+                "stability": float(row.get("stability") or 0.5),
+            }
             graph.set_node_payload(rid, {
                 "embedding": list(embedding),
                 "surface": str(literal_raw),
@@ -1240,6 +1272,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "pinned": pinned,
                 "tags": list(tags_list),
                 "language": language,
+                **_rank_fields,
             })
             node_payload_for_cache[str(rid)] = {
                 "embedding": list(embedding),
@@ -1249,6 +1282,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "pinned": pinned,
                 "tags": list(tags_list),
                 "language": language,
+                **_rank_fields,
             }
 
         if decrypt_fail_events > 0:
@@ -1548,6 +1582,9 @@ def build_runtime_graph_incremental(store: MemoryStore):
                 "pinned": bool(payload.get("pinned", False)),
                 "tags": list(payload.get("tags") or []),
                 "language": str(payload.get("language", "en") or "en"),
+                "aaak_index": str(payload.get("aaak_index", "") or ""),
+                "created_at": str(payload.get("created_at", "") or ""),
+                "stability": float(payload.get("stability", 0.5) or 0.5),
             })
         node_payload_for_cache = dict(cached_node_payload)
         cached_ids = set(node_payload_for_cache.keys())
@@ -1568,6 +1605,9 @@ def build_runtime_graph_incremental(store: MemoryStore):
             "pinned",
             "tags_json",
             "language",
+            "aaak_index",
+            "created_at",
+            "stability",
             "updated_at",
             "tombstoned_at",
         ]
@@ -1645,6 +1685,9 @@ def build_runtime_graph_incremental(store: MemoryStore):
                 "pinned": pinned,
                 "tags": list(tags_list),
                 "language": language,
+                "aaak_index": str(row.get("aaak_index") or ""),
+                "created_at": str(row.get("created_at") or ""),
+                "stability": float(row.get("stability") or 0.5),
             }
             graph.add_node(rid, community_id=community_id, embedding=embedding)
             graph.set_node_payload(rid, payload)

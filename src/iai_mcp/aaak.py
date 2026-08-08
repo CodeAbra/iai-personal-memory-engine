@@ -31,7 +31,7 @@ def _room_from_community(record: "MemoryRecord") -> str:
 
 
 def _entities_from_tags(tags: list[str]) -> str:
-    ents = [t[len("entity:"):] for t in tags if t.startswith("entity:")][:10]
+    ents = [t[len("entity:"):] for t in tags if t.startswith("entity:")][:16]
     if not ents:
         return "-"
     return ",".join(ents)

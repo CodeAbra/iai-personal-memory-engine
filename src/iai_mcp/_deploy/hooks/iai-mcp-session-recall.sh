@@ -69,17 +69,18 @@ else
   echo "$ts cache-miss absent" >> "$log" 2>/dev/null
 fi
 
-# Locate the CLI. Lookup order:
+# Locate the CLI. Same resolution order as the capture half of the hook
+# pair — the two halves must agree or a stock install captures but never
+# recalls. Lookup order:
 #   1. IAI_MCP_SESSION_RECALL_CLI environment variable (developer override
 #      for non-standard install locations; export in your shell init).
-#   2. ~/.iai-mcp/.cli-path cache file (auto-populated below once the
-#      lookup finds a working binary).
+#   2. ~/.iai-mcp/.cli-path cache file (auto-populated on first successful
+#      resolution).
 #   3. `command -v iai-mcp` — PATH lookup; picks up pyenv shims, pipx
 #      wrappers, and any other PATH-managed install transparently.
-#   4. Generic install locations in the candidates array, checked when PATH
-#      has no entry.
-# Only generic install paths are baked into the source; developer-specific
-# paths belong in the env var or the cache, never here.
+#   4. Baked-in candidate list — checked when PATH has no entry.
+# Only generic $HOME-relative or system paths belong here; install-specific
+# paths belong in the env var or the cache.
 cli_cache="$HOME/.iai-mcp/.cli-path"
 iai_cli=""
 if [ -n "${IAI_MCP_SESSION_RECALL_CLI:-}" ] && [ -x "$IAI_MCP_SESSION_RECALL_CLI" ]; then

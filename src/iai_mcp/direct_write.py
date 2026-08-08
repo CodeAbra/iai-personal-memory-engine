@@ -243,7 +243,7 @@ def _write_sidecar(root: Path, record_id: str, embedding: list[float], db: Any) 
 
     try:
         npy_tmp.write_bytes(blob)
-        json_tmp.write_text(json.dumps({"uuid": record_id, "vec_label": vec_label}))
+        json_tmp.write_text(json.dumps({"uuid": record_id, "vec_label": vec_label}), encoding="utf-8")
         os.replace(npy_tmp, npy_final)
         os.replace(json_tmp, json_final)
     except OSError as exc:

@@ -7,10 +7,13 @@ from uuid import UUID, uuid4
 
 from iai_mcp.claude_cli import (
     BudgetTracker,
-    invoke_claude_once,
     verify_credentials_subscription,
 )
 from iai_mcp.daemon_state import load_state
+from iai_mcp.reflection_provider import (
+    configured_reflection_provider,
+    invoke_reflection_once,
+)
 from iai_mcp.events import query_events, write_event
 from iai_mcp.schema import induce_schemas_tier0
 from iai_mcp.tz import load_user_tz
@@ -102,31 +105,44 @@ def _gather_surprise(store) -> tuple[str, list[UUID]]:
 
 
 async def generate_overnight_insight(store, session_id: str) -> dict:
-    creds = verify_credentials_subscription()
-    if not creds.get("ok"):
+    try:
+        provider = configured_reflection_provider()
+    except ValueError as exc:
         return {
             "ok": False,
-            "reason": "credentials_check_failed",
+            "reason": f"reflection_provider_invalid: {exc}",
             "text": None,
-            "details": creds,
         }
 
-    state = await asyncio.to_thread(load_state)
-    tracker = BudgetTracker(state)
-
-    try:
-        tz = load_user_tz()
-    except Exception:  # noqa: BLE001 -- tz lookup never crashes the call path
-        tz = timezone.utc
-
     now = datetime.now(timezone.utc)
-    tracker.reset_if_new_day(now, tz)
+    tracker = None
+    # Credential check and token budget are Anthropic machinery — they
+    # gate the claude subscription only, never another vendor's CLI.
+    if provider == "claude":
+        creds = verify_credentials_subscription()
+        if not creds.get("ok"):
+            return {
+                "ok": False,
+                "reason": "credentials_check_failed",
+                "text": None,
+                "details": creds,
+            }
 
-    if tracker.claude_disabled_after_billing_event():
-        return {"ok": False, "reason": "claude_disabled_c3", "text": None}
+        state = await asyncio.to_thread(load_state)
+        tracker = BudgetTracker(state)
 
-    if not tracker.can_spend(PROMPT_ESTIMATE_TOKENS):
-        return {"ok": False, "reason": "budget_exceeded", "text": None}
+        try:
+            tz = load_user_tz()
+        except Exception:  # noqa: BLE001 -- tz lookup never crashes the call path
+            tz = timezone.utc
+
+        tracker.reset_if_new_day(now, tz)
+
+        if tracker.claude_disabled_after_billing_event():
+            return {"ok": False, "reason": "claude_disabled_c3", "text": None}
+
+        if not tracker.can_spend(PROMPT_ESTIMATE_TOKENS):
+            return {"ok": False, "reason": "budget_exceeded", "text": None}
 
     patterns, pattern_sources = _gather_patterns(store)
     surprise, surprise_sources = _gather_surprise(store)
@@ -154,11 +170,11 @@ async def generate_overnight_insight(store, session_id: str) -> dict:
         surprise=surprise,
     )
 
-    result = await invoke_claude_once(prompt, model="haiku")
+    result = await invoke_reflection_once(prompt, model="haiku", provider=provider)
 
     tokens_in = int(result.get("tokens_in", 0) or 0)
     tokens_out = int(result.get("tokens_out", 0) or 0)
-    if tokens_in + tokens_out > 0:
+    if tracker is not None and tokens_in + tokens_out > 0:
         tracker.record(tokens_in, tokens_out, now)
 
     if not result.get("ok"):

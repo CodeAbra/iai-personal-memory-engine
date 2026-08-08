@@ -13,6 +13,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# No unit test of the stop verb may ever signal a real daemon on the
+# development host — the sweep honors this before touching psutil. Tests
+# that exercise the sweep against their own decoy children delete it.
+os.environ.setdefault("IAI_MCP_DISABLE_ORPHAN_SWEEP", "1")
+
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
@@ -75,6 +80,9 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(_real_cache / "hub"))
 
     monkeypatch.setenv("HOME", str(base))
+    # The operator's real IAI_MCP_STORE (e.g. after `iai lang add`) must never
+    # leak model selection into hermetic tests.
+    monkeypatch.delenv("IAI_MCP_STORE", raising=False)
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(fake_root / ".daemon.sock"))
     # Hermetic tests never probe PyPI: the notify-only version check honors
     # this kill switch everywhere (daemon tick, doctor, self-update).
@@ -186,6 +194,27 @@ def _isolate_process_globals(_lilli_fast_fsync, _crypto_passphrase_env):
         pass
 
     gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_profile_state():
+    """Snapshot the shared knob dict at setup and restore it at teardown.
+
+    Tests that write knobs straight into ``core._profile_state`` (rather than
+    through monkeypatch.setitem) would otherwise leak the value into every
+    later test in the process; a leaked knob shifts near-tie rankings, so the
+    same file can pass or fail on collection order alone.
+    """
+    try:
+        from iai_mcp import core as _core
+    except Exception:  # noqa: BLE001 -- env without iai_mcp installed yet
+        yield
+        return
+
+    snapshot = dict(_core._profile_state)
+    yield
+    _core._profile_state.clear()
+    _core._profile_state.update(snapshot)
 
 
 _AUTOFLUSH_OPT_OUT_ENV = "IAI_MCP_TEST_NO_AUTOFLUSH"
@@ -408,3 +437,15 @@ def _nx_graph_to_memory_graph(nx_g):
             w = 1.0
         mg.add_edge(node_to_uuid[u], node_to_uuid[v], weight=w)
     return mg
+
+
+@pytest.fixture(autouse=True)
+def _clear_crisis_state_cache():
+    """The crisis-state cache is process-global with a 1s TTL — an entry
+    left by one test can flip the next test's recall into the crisis tier."""
+    yield
+    try:
+        from iai_mcp import core as _core
+    except ImportError:
+        return
+    _core._CRISIS_STATE_CACHE.clear()

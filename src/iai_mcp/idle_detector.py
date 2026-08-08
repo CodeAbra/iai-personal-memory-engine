@@ -31,6 +31,10 @@ _PMSET_DEFAULT_WINDOW_MIN = 5
 
 _HID_IDLE_THRESHOLD_SEC = 30 * 60
 
+#: Distinguishes "no precomputed idle passed" from a passed None (source
+#: reachable but not idle, or source absent).
+_UNSET = object()
+
 _PMSET_TS_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+([+-]\d{4})"
 )
@@ -229,11 +233,17 @@ class IdleDetector:
         return None, None
 
 
-    def sleep_eligible(self, heartbeat_idle_30min: bool) -> bool:
+    def sleep_eligible(
+        self, heartbeat_idle_30min: bool, os_idle_sec: "int | None | object" = _UNSET,
+    ) -> bool:
+        # os_idle_sec lets the caller reuse one os_idle_time_sec() read for
+        # the whole decision — two reads per tick can disagree mid-decision.
         if heartbeat_idle_30min:
             return True
 
-        idle_sec, _source = self.os_idle_time_sec()
+        idle_sec = os_idle_sec
+        if idle_sec is _UNSET:
+            idle_sec, _source = self.os_idle_time_sec()
         if idle_sec is not None and idle_sec >= _HID_IDLE_THRESHOLD_SEC:
             return True
 

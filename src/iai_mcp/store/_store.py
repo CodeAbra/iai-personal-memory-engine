@@ -630,7 +630,30 @@ class MemoryStore:
                 f"records decrypt failed for id={record_id}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+        except Exception as exc:  # noqa: BLE001 -- AEAD failures carry no message
+            from cryptography.exceptions import InvalidTag
 
+            if not isinstance(exc, InvalidTag):
+                raise
+            # A record under a different key generation (e.g. after a partial
+            # rotation) must surface as a named, actionable error — never a
+            # bare empty-message InvalidTag traceback.
+            raise HippoIntegrityError(
+                f"records decrypt failed for id={record_id}: InvalidTag "
+                "(wrong key generation? run `iai-mcp crypto recover-prior-key` "
+                "with the retained .crypto.key.pre-rotate file)"
+            ) from exc
+
+    def _decrypt_for_record_or_none(
+        self, record_id: UUID, value: str
+    ) -> str | None:
+        """None when the ciphertext opens under no available key — redaction
+        and recovery paths classify such rows; they must never die on them,
+        whatever exception taxonomy _decrypt_for_record adopts."""
+        try:
+            return self._decrypt_for_record(record_id, value)
+        except HippoIntegrityError:
+            return None
 
     def register_graph_sync_hook(
         self, hook: Callable[[str, MemoryRecord], None] | None
@@ -1728,6 +1751,25 @@ class MemoryStore:
         from iai_mcp.hippo._table import _upsert_record_tags
         with self.db._conn_lock:
             _upsert_record_tags(self.db._conn, str(record_id), tags_json)
+        return True
+
+    def set_aaak_index(self, record_id: UUID, aaak_index: str) -> bool:
+        """Persist a regenerated AAAK index. Plaintext column; the generic
+        ``update()`` does not carry it, and the current value is read as a
+        bare column — a full ``get()`` here would decrypt the record just
+        to compare plaintext. Returns True when the value changed."""
+        with self.db._conn_lock:
+            row = self.db._conn.execute(
+                f"SELECT aaak_index FROM {RECORDS_TABLE}"
+                " WHERE id = ? AND tombstoned_at IS NULL",
+                (_uuid_literal(record_id),),
+            ).fetchone()
+        if row is None or str(row["aaak_index"] or "") == str(aaak_index):
+            return False
+        self.db.open_table(RECORDS_TABLE).update(
+            where=f"id = '{_uuid_literal(record_id)}'",
+            values={"aaak_index": str(aaak_index)},
+        )
         return True
 
     def remove_tags(self, record_id: UUID, tags: "list[str]") -> bool:

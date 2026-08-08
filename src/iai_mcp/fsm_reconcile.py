@@ -17,7 +17,7 @@ def _read_canonical(path: Path) -> str | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
@@ -30,7 +30,7 @@ def _read_legacy(path: Path) -> str | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
@@ -55,7 +55,7 @@ def _auto_correct_legacy(legacy_path: Path, canonical_state: str) -> bool:
     try:
         raw: dict = {}
         if legacy_path.exists():
-            raw = json.loads(legacy_path.read_text())
+            raw = json.loads(legacy_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raw = {}
     except (OSError, json.JSONDecodeError):

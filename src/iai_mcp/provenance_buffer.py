@@ -33,7 +33,7 @@ def defer_provenance(
             "cue": cue,
             "session_id": session_id,
         }))
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -72,7 +72,7 @@ def flush_deferred_provenance(store: MemoryStore) -> int:
             return 0
 
     try:
-        path.write_text("")
+        path.write_text("", encoding="utf-8")
     except OSError:
         pass
     return len(pairs)

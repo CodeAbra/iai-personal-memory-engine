@@ -76,7 +76,7 @@ def install_hermes_hooks() -> int:
     existing = ""
     if config.exists():
         try:
-            existing = config.read_text()
+            existing = config.read_text(encoding="utf-8")
         except OSError as e:
             print(f"ERROR: cannot read {config}: {e}")
             return 1
@@ -94,7 +94,7 @@ def install_hermes_hooks() -> int:
     else:
         config.parent.mkdir(parents=True, exist_ok=True)
         joiner = "" if (not existing or existing.endswith("\n")) else "\n"
-        config.write_text(existing + joiner + block)
+        config.write_text(existing + joiner + block, encoding="utf-8")
         print(f"patched: {config} (hooks block appended)")
 
     print(
@@ -120,7 +120,7 @@ def uninstall_hermes_hooks() -> int:
         print(f"(not present) {config}")
         return 0
     try:
-        existing = config.read_text()
+        existing = config.read_text(encoding="utf-8")
     except OSError as e:
         print(f"ERROR: cannot read {config}: {e}")
         return 1
@@ -129,7 +129,7 @@ def uninstall_hermes_hooks() -> int:
         return 0
     block = _hooks_block(_hermes_paths()[0])
     if block in existing:
-        config.write_text(existing.replace(block, "", 1))
+        config.write_text(existing.replace(block, "", 1), encoding="utf-8")
         print(f"patched: {config} (hooks block removed)")
         return 0
     print(
@@ -156,7 +156,7 @@ def status_hermes_hooks() -> int:
     wired = False
     if config.exists():
         try:
-            wired = _MARKER in config.read_text()
+            wired = _MARKER in config.read_text(encoding="utf-8")
         except OSError:
             wired = False
     print(f"Hermes config.yaml ({_MARKER}): {'WIRED' if wired else 'NOT WIRED'}")

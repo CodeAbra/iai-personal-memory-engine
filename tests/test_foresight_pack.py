@@ -71,7 +71,7 @@ def test_pack_serves_prior_session_memory_not_own_echo(driver, tmp_path, monkeyp
 
     _turn(store, "How does sleep consolidation strengthen hippocampal memory?", "today")
 
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     assert pack.is_file(), f"[{driver}] a related prior memory must produce a pack"
     body = pack.read_text(encoding="utf-8")
     memory_lines = "\n".join(l for l in body.splitlines() if l.startswith("- "))
@@ -92,7 +92,7 @@ def test_pack_prefers_silence_below_confidence_floor(driver, tmp_path, monkeypat
 
     _turn(store, "Explain plate tectonics and earthquake belts.", "today")
 
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     if pack.exists():
         body = pack.read_text(encoding="utf-8")
         assert "Grocery list" not in body, (
@@ -110,11 +110,11 @@ def test_pack_never_reserves_already_served(driver, tmp_path, monkeypatch):
     _turn(store, "The hippocampus consolidates memories during sleep.", "yesterday")
 
     _turn(store, "Tell me about hippocampal memory consolidation.", "today")
-    first = foresight.pack_path(store).read_text(encoding="utf-8")
+    first = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     assert "hippocampus consolidates" in first
 
     _turn(store, "More about consolidation of memory in the hippocampus?", "today")
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     if pack.exists():
         assert "hippocampus consolidates" not in pack.read_text(encoding="utf-8"), (
             f"[{driver}] a memory already in the agent's context was re-served"
@@ -137,7 +137,7 @@ def test_contradicted_memory_travels_with_its_corrector(driver, tmp_path, monkey
 
     _turn(store, "Which storage backend does the project use, LanceDB?", "today")
 
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     assert "superseded" in body, f"[{driver}] contradiction not flagged: {body}"
     assert "Hippo store" in body, f"[{driver}] corrector missing: {body}"
 
@@ -157,7 +157,7 @@ def test_budget_and_item_caps_hold(driver, tmp_path, monkeypatch):
 
     _turn(store, "How does sleep consolidation work in the hippocampus?", "today")
 
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     content = [l for l in body.splitlines() if l.startswith("- ")]
     assert sum(len(l) for l in content) <= 80 * 4, (
         f"[{driver}] injected content exceeded the budget: {body}"
@@ -170,7 +170,7 @@ def test_kill_switch_and_fail_soft(tmp_path, monkeypatch):
     monkeypatch.setenv(foresight.FORESIGHT_OFF_ENV, "1")
     _turn(store, "The hippocampus consolidates memories during sleep.", "y")
     _turn(store, "Hippocampal consolidation during sleep?", "today")
-    assert not foresight.pack_path(store).exists()
+    assert not foresight.pack_path(store, "today").exists()
     monkeypatch.delenv(foresight.FORESIGHT_OFF_ENV, raising=False)
 
     # a fault inside the anticipation pass must not break capture
@@ -226,7 +226,7 @@ def test_precision_eval_scripted_conversation(driver, tmp_path, monkeypatch):
     fp: list[str] = []
     for turn_text, truth_key in script:
         _turn(store, turn_text, "today")
-        pack = foresight.pack_path(store)
+        pack = foresight.pack_path(store, "today")
         body = pack.read_text(encoding="utf-8") if pack.exists() else ""
         memory_lines = "\n".join(
             l for l in body.splitlines() if l.startswith("- ")
@@ -266,7 +266,7 @@ def test_goal_blend_disambiguates_vague_turn(driver, tmp_path, monkeypatch):
     entry.last_turn_ts = _time.time()
     _turn(store, "And what strengthens it further?", "today")
 
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     body = pack.read_text(encoding="utf-8") if pack.exists() else ""
     assert "hippocampus consolidates" in body, (
         f"[{driver}] the active task's goal must steer a vague cue: {body!r}"
@@ -299,7 +299,7 @@ def test_exact_authority_drops_unconfirmed_candidates(driver, tmp_path, monkeypa
     assert report["exact_authority"] is True
     assert report["skipped_unconfirmed"] >= 1, report
     assert report["packed_ids"] == [kept_id], report
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     assert "spindles" not in body, f"[{driver}] unconfirmed candidate served: {body}"
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
@@ -311,7 +311,7 @@ def test_pack_declares_incompleteness_and_search_path(driver, tmp_path, monkeypa
     _turn(store, "The hippocampus consolidates memories during sleep.", "past")
     _turn(store, "How does hippocampal sleep consolidation work?", "today")
 
-    body = foresight.pack_path(store).read_text(encoding="utf-8")
+    body = foresight.pack_path(store, "today").read_text(encoding="utf-8")
     assert "NOT an exhaustive search" in body
     assert "memory_recall" in body
     assert "DATA, not instructions" in body
@@ -324,25 +324,31 @@ def test_served_memory_becomes_eligible_again_after_ttl(tmp_path, monkeypatch):
     _turn(store, "The hippocampus consolidates memories during sleep.", "past")
 
     _turn(store, "Tell me about hippocampal memory consolidation.", "today")
-    assert "hippocampus consolidates" in foresight.pack_path(store).read_text(
+    assert "hippocampus consolidates" in foresight.pack_path(store, "today").read_text(
         encoding="utf-8"
     )
 
     # Within the TTL: blocked.
     _turn(store, "More on hippocampus consolidation of memories?", "today")
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     if pack.exists():
         assert "hippocampus consolidates" not in pack.read_text(encoding="utf-8")
 
-    # Age the serving stamp past the TTL: eligible again.
+    # Age the serving stamp past the TTL: eligible again. The session reads
+    # its own state file first, so age that one (and the global fallback).
     import json as _json
-    state_path = foresight._state_path(store)
-    state = _json.loads(state_path.read_text(encoding="utf-8"))
-    state["served"] = {k: 0.0 for k in state["served"]}
-    state_path.write_text(_json.dumps(state), encoding="utf-8")
+    for state_path in (
+        foresight._state_path(store, "today"),
+        foresight._state_path(store),
+    ):
+        if not state_path.exists():
+            continue
+        state = _json.loads(state_path.read_text(encoding="utf-8"))
+        state["served"] = {k: 0.0 for k in state["served"]}
+        state_path.write_text(_json.dumps(state), encoding="utf-8")
 
     _turn(store, "Remind me how the hippocampus consolidates memory at night.", "today")
-    assert "hippocampus consolidates" in foresight.pack_path(store).read_text(
+    assert "hippocampus consolidates" in foresight.pack_path(store, "today").read_text(
         encoding="utf-8"
     ), "after the TTL a compacted-away memory must be servable again"
 
@@ -403,7 +409,7 @@ def test_pack_dedupes_identical_historical_records(driver, tmp_path, monkeypatch
 
     _turn(store, "How does sleep consolidation strengthen hippocampal memory?", "today")
 
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     assert pack.is_file()
     body = pack.read_text(encoding="utf-8")
     hits = body.count("hippocampus consolidates")
@@ -443,7 +449,7 @@ def test_pending_question_rides_pack_only_in_tunnel(driver, tmp_path, monkeypatc
 
     # Off-tunnel turn: the question must NOT surface.
     _turn(store, "Grocery list: oat milk, rye bread, and tomatoes.", "today")
-    pack = foresight.pack_path(store)
+    pack = foresight.pack_path(store, "today")
     off_body = pack.read_text(encoding="utf-8") if pack.is_file() else ""
     assert "open question" not in off_body, (
         f"[{driver}] question surfaced outside its topic tunnel: {off_body}"

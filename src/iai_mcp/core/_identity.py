@@ -27,7 +27,7 @@ def _load_l0_identity_seed() -> str:
     )
     if os.path.isfile(config_path):
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             identity = cfg.get("identity", {})
             parts = []

@@ -414,10 +414,11 @@ def _tier0_schema_surfacing(store: MemoryStore) -> list[dict]:
         except (TypeError, json.JSONDecodeError):
             tags = []
         for t in tags:
-            # idem: tags are per-record idempotency hashes; a "pattern" over
-            # one is noise that only surfaces when duplicates/tombstones
+            # idem: tags are per-record idempotency hashes and entity:
+            # tags are per-record name anchors; a "pattern" over either
+            # is noise that only surfaces when duplicates/tombstones
             # inflate its count.
-            if t.startswith(("raw:", "domain:", "idem:")):
+            if t.startswith(("raw:", "domain:", "idem:", "entity:")):
                 continue
             tag_counts[t] = tag_counts.get(t, 0) + 1
     if record_count < CLUSTER_MIN_SIZE:
@@ -581,9 +582,13 @@ def _persist_community_assignment(
 ) -> int:
     """Stamp each clustered record with its community id (id = min member,
     stable across cycles for an unchanged community). Partial-column
-    merge_insert touches ONLY community_id. Returns a read-back-verified
-    count: writes are sample-checked against the table, and a failed sample
+    merge_insert touches ONLY community_id + aaak_index — the stored index
+    embeds the room, so it must be regenerated in the same write or it
+    freezes at R:unknown from mint. Returns a read-back-verified count:
+    writes are sample-checked against the table, and a failed sample
     reports zero rather than claiming the attempt as fact."""
+    from iai_mcp.aaak import generate_aaak_index
+
     updates: list[dict] = []
     for member_ids in clusters:
         community_id = str(min(member_ids))
@@ -592,7 +597,12 @@ def _persist_community_assignment(
             if rec is None:
                 continue
             if str(rec.community_id or "") != community_id:
-                updates.append({"id": str(rid), "community_id": community_id})
+                rec.community_id = community_id
+                updates.append({
+                    "id": str(rid),
+                    "community_id": community_id,
+                    "aaak_index": generate_aaak_index(rec),
+                })
     if not updates:
         return 0
     tbl = store.db.open_table("records")

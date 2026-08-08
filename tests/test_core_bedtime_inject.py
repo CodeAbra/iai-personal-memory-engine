@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -243,10 +243,9 @@ def test_force_wake_timeout_is_fifteen_minutes() -> None:
 
 
 def _window_covering_now() -> tuple[int, int]:
-    from iai_mcp.tz import load_user_tz
-
-    tz = load_user_tz()
-    now_local = datetime.now(timezone.utc).astimezone(tz)
+    # Same clock as the consumer: the gate reads system-local time (the
+    # clock the presence buckets are produced in), not the config tz.
+    now_local = datetime.now().astimezone()
     cur_bucket = (now_local.hour * 60 + now_local.minute) // 30
     start = (cur_bucket - 2) % 48
     return (start, 8)
@@ -289,11 +288,50 @@ def test_inject_sleep_suggestion_no_phrase(
 def test_inject_sleep_suggestion_no_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # No learned window: the night default applies (never dark). Force the
+    # effective window deterministically away from now, then over it.
     monkeypatch.setattr("iai_mcp.daemon_state.load_state", lambda: {})
 
+    now_local = datetime.now().astimezone()
+    away = now_local + timedelta(hours=4)
+    away_end = now_local + timedelta(hours=6)
+    monkeypatch.setenv(
+        "IAI_MCP_CONSOLIDATION_WINDOW",
+        f"{away.hour:02d}:00-{away_end.hour:02d}:00",
+    )
     response: dict = {"hits": [], "anti_hits": []}
     core._inject_sleep_suggestion(response, cue="good night", language="en")
     assert "sleep_suggestion" not in response
+
+    covering = now_local - timedelta(hours=1)
+    covering_end = now_local + timedelta(hours=2)
+    monkeypatch.setenv(
+        "IAI_MCP_CONSOLIDATION_WINDOW",
+        f"{covering.hour:02d}:00-{covering_end.hour:02d}:00",
+    )
+    response2: dict = {"hits": [], "anti_hits": []}
+    core._inject_sleep_suggestion(response2, cue="good night", language="en")
+    assert "sleep_suggestion" in response2
+
+
+def test_inject_sleep_suggestion_ignores_config_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A store config seeded with a different tz than the system must not
+    # suppress the suggestion: producer and consumer share one clock.
+    fake_state = {"quiet_window": _window_covering_now()}
+    monkeypatch.setattr(
+        "iai_mcp.daemon_state.load_state", lambda: dict(fake_state),
+    )
+
+    def _boom():
+        raise AssertionError("config tz must not be consulted")
+
+    monkeypatch.setattr("iai_mcp.tz.load_user_tz", _boom)
+
+    response: dict = {"hits": [], "anti_hits": []}
+    core._inject_sleep_suggestion(response, cue="good night", language="en")
+    assert "sleep_suggestion" in response
 
 
 def test_inject_sleep_suggestion_detector_raises_is_silent(

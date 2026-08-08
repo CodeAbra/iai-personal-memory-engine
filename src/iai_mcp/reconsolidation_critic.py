@@ -84,21 +84,30 @@ def evaluate_batch_reconsolidation(
     expected_ids = {rid for rid, _ in pool}
 
     try:
-        from iai_mcp.claude_cli import (
-            invoke_claude_sync,
-            verify_credentials_subscription,
+        from iai_mcp.claude_cli import verify_credentials_subscription
+        from iai_mcp.reflection_provider import (
+            configured_reflection_provider,
+            invoke_reflection_sync,
         )
     except ImportError:
         return {}
 
-    creds = verify_credentials_subscription()
-    if not creds.get("ok"):
+    try:
+        provider = configured_reflection_provider()
+    except ValueError as exc:
+        logger.info("reconsolidation critic: %s", exc)
         return {}
+
+    # The credential check gates the Anthropic subscription only.
+    if provider == "claude":
+        creds = verify_credentials_subscription()
+        if not creds.get("ok"):
+            return {}
 
     prompt = _build_batch_prompt(pool)
 
     try:
-        result = invoke_claude_sync(prompt, model="haiku")
+        result = invoke_reflection_sync(prompt, model="haiku", provider=provider)
     except Exception as exc:  # noqa: BLE001 -- critic must never raise into REM
         logger.debug("reconsolidation critic subprocess raised: %s", exc)
         return {}
@@ -115,7 +124,15 @@ def evaluate_batch_reconsolidation(
     if isinstance(data, dict):
         raw_text = str(data.get("result") or data.get("text") or "")
 
-    return _parse_batch_response(raw_text, expected_ids)
+    scores = _parse_batch_response(raw_text, expected_ids)
+    if not scores and raw_text.strip():
+        # Distinguish "provider returned prose we cannot parse" from
+        # "nothing was labile" — a silent {} hides a broken provider.
+        logger.warning(
+            "reconsolidation critic output unparseable (provider=%s, %d chars)",
+            provider, len(raw_text),
+        )
+    return scores
 
 
 PROMPT_TEMPLATE: str = (

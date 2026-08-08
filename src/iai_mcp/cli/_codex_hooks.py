@@ -49,7 +49,7 @@ def _load_hooks_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -104,7 +104,7 @@ def install_codex_hooks() -> int:
 
     if changed or not hooks_json.exists():
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
-        hooks_json.write_text(json.dumps(data, indent=2))
+        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     print(
         "\nNote: Codex reads hooks.json at session start — restart Codex to "
@@ -149,7 +149,7 @@ def uninstall_codex_hooks() -> int:
             changed = True
             print(f"patched: {hooks_json} ({event} entry removed)")
     if changed:
-        hooks_json.write_text(json.dumps(data, indent=2))
+        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
     else:
         print(f"(no hook entry to remove) {hooks_json}")
     return 0

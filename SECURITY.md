@@ -6,9 +6,9 @@ Only the latest tagged release on `main` receives fixes. Older tags are not main
 
 | Version | Supported |
 |---------|-----------|
-| 2.5.x   | Yes (latest) |
-| 2.4.x   | Security fixes only |
-| < 2.4   | No |
+| 3.0.x   | Yes (latest) |
+| 2.8.x   | Security fixes only |
+| < 2.8   | No |
 
 ## Reporting an issue
 

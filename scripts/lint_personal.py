@@ -6,11 +6,13 @@ tests/, bench/, _deploy hooks), repo-root docs (CHANGELOG.md, README.md),
 and — in ``--message`` mode — the commit message itself.
 
 Patterns live in ``scripts/personal_patterns.txt`` (one regex per line,
-``#`` comments) so the deny-list is data, not code. GitHub-style
+``#`` comments) so the deny-list is data, not code. A sibling
+``scripts/personal_allow.txt`` holds full-line regexes exempt from the
+deny-list — the owner's authorship byline is the sanctioned case; a line
+must match an allow regex in full to be exempt. GitHub-style
 ``@handle`` mentions are additionally rejected in Markdown and commit
 messages (prose surfaces), where a handle is an attribution — never in
-code, where ``@decorator`` is legitimate, and never in the release notes,
-where crediting a contributor by handle is the point.
+code, where ``@decorator`` is legitimate.
 
 Exit: 0 clean, 1 on any violation. Stdlib only.
 """
@@ -33,9 +35,6 @@ SCAN_SUFFIXES: tuple[str, ...] = (".py", ".ts", ".sh", ".md", ".toml", ".json")
 # README carries the owner's own byline by choice; CHANGELOG travels
 # into releases and stays gated.
 ROOT_FILES: tuple[str, ...] = ("CHANGELOG.md",)
-#: Release notes credit contributors by handle deliberately; the deny-list
-#: patterns still apply there, only the handle rule stands down.
-HANDLE_EXEMPT_FILES: frozenset[str] = frozenset({"CHANGELOG.md"})
 
 _HANDLE_RE = re.compile(r"(?<![\w.])@[A-Za-z][A-Za-z0-9-]{2,}\b")
 #: Technical tokens that look like handles but are code, not attribution.
@@ -46,6 +45,21 @@ _HANDLE_ALLOW = frozenset({
 _PROSE_SUFFIXES = (".md",)
 
 _PATTERNS_FILE = Path(__file__).resolve().parent / "personal_patterns.txt"
+_ALLOW_FILE = Path(__file__).resolve().parent / "personal_allow.txt"
+
+
+def _load_allow() -> list[re.Pattern]:
+    try:
+        text = _ALLOW_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out: list[re.Pattern] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.append(re.compile(line))
+    return out
 
 
 def _load_patterns() -> list[re.Pattern]:
@@ -66,15 +80,28 @@ def _load_patterns() -> list[re.Pattern]:
     return out
 
 
+#: Repo-relative prose paths where the handle rule stands down: release
+#: notes credit contributors by handle on purpose. The deny-list patterns
+#: still apply. Exact paths, not basenames — a fixture named CHANGELOG.md
+#: deeper in the tree stays checked.
+HANDLE_EXEMPT_FILES: frozenset[str] = frozenset({"CHANGELOG.md"})
+
+
 def scan_text(
-    text: str, *, prose: bool, patterns: list[re.Pattern]
+    text: str, *, prose: bool, patterns: list[re.Pattern],
+    allow: list[re.Pattern] = (),
+    check_handles: "bool | None" = None,
 ) -> list[tuple[int, str, str]]:
+    if check_handles is None:
+        check_handles = prose
     hits: list[tuple[int, str, str]] = []
     for idx, line in enumerate(text.splitlines(), start=1):
+        if any(a.fullmatch(line) for a in allow):
+            continue
         for pat in patterns:
             if pat.search(line):
                 hits.append((idx, pat.pattern, line.strip()[:120]))
-        if prose:
+        if check_handles:
             m = _HANDLE_RE.search(line)
             if m and m.group(0) not in _HANDLE_ALLOW:
                 hits.append((idx, f"handle {m.group(0)}", line.strip()[:120]))
@@ -129,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     patterns = _load_patterns()
+    allow = _load_allow()
     violations = 0
 
     if args.message:
@@ -137,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             print(f"lint_personal: cannot read message: {exc}", file=sys.stderr)
             return 1
-        for line_no, pat, line in scan_text(text, prose=True, patterns=patterns):
+        # Commit messages credit contributors by handle, same as release
+        # notes — the handle rule stands down; deny-list patterns still apply.
+        for line_no, pat, line in scan_text(
+            text, prose=True, patterns=patterns, allow=allow,
+            check_handles=False,
+        ):
             print(f"commit-message:{line_no}: {pat}: {line}", file=sys.stderr)
             violations += 1
         return 1 if violations else 0
@@ -145,12 +178,12 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path.cwd()
     if args.check_staged:
         for rel, added in _staged_added_lines(repo_root).items():
-            prose = (
-                rel.endswith(_PROSE_SUFFIXES) and rel not in HANDLE_EXEMPT_FILES
-            )
+            prose = rel.endswith(_PROSE_SUFFIXES)
+            handles = prose and rel not in HANDLE_EXEMPT_FILES
             for line_no, line in added:
                 for hit_no, pat, text in scan_text(
-                    line, prose=prose, patterns=patterns
+                    line, prose=prose, patterns=patterns, allow=allow,
+                    check_handles=handles,
                 ):
                     print(f"{rel}:{line_no}: {pat}: {text}", file=sys.stderr)
                     violations += 1
@@ -171,12 +204,13 @@ def main(argv: list[str] | None = None) -> int:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        prose = path.suffix in _PROSE_SUFFIXES
         rel = path.relative_to(repo_root) if path.is_absolute() else path
-        prose = (
-            path.suffix in _PROSE_SUFFIXES
-            and str(rel) not in HANDLE_EXEMPT_FILES
-        )
-        for line_no, pat, line in scan_text(text, prose=prose, patterns=patterns):
+        handles = prose and str(rel) not in HANDLE_EXEMPT_FILES
+        for line_no, pat, line in scan_text(
+            text, prose=prose, patterns=patterns, allow=allow,
+            check_handles=handles,
+        ):
             print(f"{rel}:{line_no}: {pat}: {line}", file=sys.stderr)
             violations += 1
     return 1 if violations else 0

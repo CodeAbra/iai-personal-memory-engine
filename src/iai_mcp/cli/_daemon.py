@@ -16,6 +16,107 @@ logger = logging.getLogger(__name__)
 STOP_TERM_TIMEOUT_S: float = 3.0
 STOP_POLL_INTERVAL_S: float = 0.1
 
+#: Emergency disable for the orphan sweep. The test suite sets it in
+#: conftest so no unit test of the stop verb can ever signal a real
+#: daemon on the development host.
+ORPHAN_SWEEP_DISABLE_ENV = "IAI_MCP_DISABLE_ORPHAN_SWEEP"
+
+
+def _matches_daemon_title(cmdline: list[str], target_title: str) -> bool:
+    # The title must BE argv[0] — never an argument and never a substring:
+    # an any-field or containment match fells innocent carriers of the
+    # title (pgrep -f, pkill -f, grep -r) or a sibling store whose path
+    # extends this one. setproctitle rewrites argv into one padded string,
+    # so argv[0] equals the full title on macOS and Linux; without
+    # setproctitle the daemon carries no title and the sweep is inert.
+    if not cmdline:
+        return False
+    return (cmdline[0] or "").strip() == target_title
+
+
+def _sweep_orphan_daemon_processes(
+    exclude_pids: set[int],
+    *,
+    proc_iter=None,
+    term_timeout: float | None = None,
+) -> list[int]:
+    """Fell every daemon process of THIS store that the primary stop missed.
+
+    The platform stop targets only the lifecycle-lock pid; a daemon that
+    lost (or never held) the lock survives every restart, keeps retrying
+    the hippo lock, and floods stderr. Matching is scoped by the
+    store-path-bearing process title, so stopping one store's daemon can
+    never fell another store's.
+    """
+    _disable_raw = os.environ.get(ORPHAN_SWEEP_DISABLE_ENV, "").strip().lower()
+    if _disable_raw in ("1", "true", "yes", "on"):
+        return []
+    try:
+        import psutil
+    except ImportError:
+        return []
+
+    from iai_mcp.lifecycle_lock import daemon_process_title
+    from iai_mcp.tz import store_root
+
+    target_title = daemon_process_title(store_root())
+
+    me = os.getpid()
+    victims = []
+    iterator = (
+        proc_iter
+        if proc_iter is not None
+        else psutil.process_iter(["pid", "name", "cmdline"])
+    )
+    for p in iterator:
+        try:
+            info = getattr(p, "info", None) or {}
+            cmdline = info.get("cmdline")
+            if cmdline is None:
+                cmdline = p.cmdline()
+            pid_val = int(p.pid)
+        except (psutil.Error, ValueError, TypeError):
+            continue
+        if pid_val == me or pid_val in exclude_pids:
+            continue
+        if not _matches_daemon_title([str(x) for x in (cmdline or [])], target_title):
+            continue
+        victims.append(p)
+    if not victims:
+        return []
+
+    swept: list[int] = []
+    for p in victims:
+        try:
+            p.terminate()
+            swept.append(int(p.pid))
+        except psutil.Error:
+            continue
+    if term_timeout is None:
+        term_timeout = _stop_escalation_bound()
+    try:
+        _gone, alive = psutil.wait_procs(victims, timeout=term_timeout)
+    except psutil.Error:
+        alive = [p for p in victims if _safe_is_running(p)]
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.Error:
+            pass
+    if swept:
+        print(
+            f"swept {len(swept)} orphan daemon process(es): {swept}",
+            file=sys.stderr,
+        )
+    return swept
+
+
+def _safe_is_running(p) -> bool:
+    try:
+        return bool(p.is_running())
+    except Exception:  # noqa: BLE001 -- process may vanish mid-check
+        return False
+
 
 def _stop_escalation_bound() -> float:
     raw = os.environ.get("IAI_DAEMON_STOP_TIMEOUT_S")
@@ -47,7 +148,7 @@ def _launchd_template():
 
 def _render_launchd_plist() -> str:
     from iai_mcp import cli as _cli
-    text = _launchd_template().read_text()
+    text = _launchd_template().read_text(encoding="utf-8")
     username = os.environ.get("USER") or Path.home().name
     text = text.replace("/usr/local/bin/python3", _cli.sys.executable)
     text = text.replace("{USERNAME}", username)
@@ -57,7 +158,7 @@ def _render_launchd_plist() -> str:
 def _render_systemd_unit() -> str:
     from iai_mcp import cli as _cli
     tmpl = _res.files("iai_mcp") / "_deploy" / "systemd" / "iai-mcp-daemon.service"
-    text = tmpl.read_text()
+    text = tmpl.read_text(encoding="utf-8")
     text = text.replace("/usr/bin/python3", _cli.sys.executable)
     return text
 
@@ -65,7 +166,7 @@ def _render_systemd_unit() -> str:
 def _render_windows_task_xml() -> str:
     from iai_mcp import cli as _cli
     tmpl = _res.files("iai_mcp") / "_deploy" / "windows" / "iai-mcp-daemon.xml"
-    text = tmpl.read_text()
+    text = tmpl.read_text(encoding="utf-8")
     text = text.replace("{START_CMD}", str(_cli.WINDOWS_START_CMD))
     text = text.replace("{WORK_DIR}", str(Path.home() / ".iai-mcp"))
     return text
@@ -118,7 +219,7 @@ def _record_consent_receipt() -> None:
     safe_ts = ts.replace(":", "").replace("-", "").replace(".", "")
     receipt = state_dir / f".consent-{safe_ts}.json"
     try:
-        receipt.write_text(json.dumps(payload, indent=2))
+        receipt.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.chmod(receipt, 0o600)
     except OSError as exc:
         print(f"warning: could not write consent receipt: {exc}", file=sys.stderr)
@@ -164,7 +265,7 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
         return 0
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
+    target.write_text(content, encoding="utf-8")
     try:
         os.chmod(target, 0o644)
     except OSError:
@@ -407,34 +508,36 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
             check=False, capture_output=True,
         )
 
-        if pid is None:
-            return 0
-
-        if _is_pid_alive(pid):
+        if pid is not None and _is_pid_alive(pid):
             try:
                 os.kill(pid, _signal.SIGTERM)
             except (ProcessLookupError, PermissionError) as exc:
                 logger.debug("SIGTERM to daemon pid=%d failed: %s", pid, exc)
-                return 0
+            else:
+                deadline = _time.monotonic() + _stop_escalation_bound()
+                interval = _stop_poll_interval()
+                while _time.monotonic() < deadline:
+                    if not _is_pid_alive(pid):
+                        break
+                    _time.sleep(interval)
 
-            deadline = _time.monotonic() + _stop_escalation_bound()
-            interval = _stop_poll_interval()
-            while _time.monotonic() < deadline:
-                if not _is_pid_alive(pid):
-                    return 0
-                _time.sleep(interval)
-
-            if _is_pid_alive(pid):
-                try:
-                    os.kill(pid, _signal.SIGKILL)
-                except (ProcessLookupError, PermissionError) as exc:
-                    logger.debug("SIGKILL to daemon pid=%d failed: %s", pid, exc)
+                if _is_pid_alive(pid):
+                    try:
+                        os.kill(pid, _signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError) as exc:
+                        logger.debug(
+                            "SIGKILL to daemon pid=%d failed: %s", pid, exc
+                        )
+        # No exclusions beyond self: if the primary somehow survived both
+        # signals, the sweep is the mechanism that catches it.
+        _sweep_orphan_daemon_processes(set())
         return 0
     elif _cli._is_linux():
         _cli.subprocess.run(
             ["systemctl", "--user", "stop", _cli.SERVICE_NAME],
             check=False,
         )
+        _sweep_orphan_daemon_processes(set())
     elif os.name == "nt":
         # Windows: signals cannot stop the tree — a plain terminate orphans
         # the child that still holds the hippo lock. taskkill /T fells the
@@ -448,6 +551,7 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 check=False, capture_output=True,
             )
+        _sweep_orphan_daemon_processes(set())
     else:
         print(f"Unsupported OS: {platform.system()}", file=sys.stderr)
         return 1
@@ -883,14 +987,20 @@ def cmd_daemon_configure(args: argparse.Namespace) -> int:
             return 2
         mutation = {"cycle_count_override": int(value)}
     elif key == "set-quiet-window":
-        if value is None or "-" not in value:
-            print(
-                "set-quiet-window requires HH:MM-HH:MM format",
-                file=sys.stderr,
-            )
-            return 2
-        start, end = value.split("-", 1)
-        mutation = {"quiet_window_manual_override": [start.strip(), end.strip()]}
+        if value == "auto":
+            mutation = {"quiet_window_manual_override": None}
+        else:
+            from iai_mcp.quiet_window import parse_window_spec
+
+            if value is None or parse_window_spec(value) is None:
+                print(
+                    "set-quiet-window requires HH:MM-HH:MM (non-empty span) "
+                    "or 'auto' to return to the learned window",
+                    file=sys.stderr,
+                )
+                return 2
+            start, end = value.split("-", 1)
+            mutation = {"quiet_window_manual_override": [start.strip(), end.strip()]}
     elif key == "disable-claude":
         mutation = {"claude_enabled": False}
     elif key == "enable-claude":

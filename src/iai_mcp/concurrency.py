@@ -148,6 +148,43 @@ def _validate_socket_message(req: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+def _status_embed_identity(store: Any) -> "dict | None":
+    """runtime-vs-stored vector identity, computed ONCE at daemon boot.
+
+    The status handler serves this from the daemon's state dict — never
+    inline: the status path is the liveness watchdog's signal, and this
+    computation takes _conn_lock, which a consolidating writer can hold
+    for seconds. `match` is True on an unstamped store — protection
+    begins at the first stamp.
+    """
+    try:
+        from iai_mcp.embed import (
+            EMBED_IDENTITY_META_KEY,
+            effective_model_identity,
+            embedder_for_store,
+        )
+
+        runtime_id = effective_model_identity(
+            embedder_for_store(store, allow_identity_mismatch=True)
+        )
+        stored_id = None
+        db = getattr(store, "db", None)
+        if db is not None:
+            with db._conn_lock:
+                row = db._conn.execute(
+                    "SELECT value FROM _hippo_meta WHERE key = ?",
+                    (EMBED_IDENTITY_META_KEY,),
+                ).fetchone()
+            stored_id = row["value"] if row is not None else None
+        return {
+            "runtime": runtime_id,
+            "stored": stored_id,
+            "match": stored_id is None or stored_id == runtime_id,
+        }
+    except Exception as exc:  # noqa: BLE001 -- status must never fail on this
+        return {"error": str(exc)[:160]}
+
+
 async def _dispatch_socket_request(
     req: dict,
     store: Any,
@@ -218,10 +255,20 @@ async def _dispatch_socket_request(
             "fsm_state": fsm_state,
             "last_tick_at": state.get("last_tick_at"),
             "quiet_window": state.get("quiet_window"),
+            "quiet_window_source": state.get("quiet_window_source"),
             "pending_digest": truncated_digest,
             "daemon_started_at": started_at,
             "scheduler_paused": bool(state.get("scheduler_paused", False)),
             "ann_pool_health": state.get("ann_pool_health"),
+            # Coerced to None unless it is a plain dict: a wrong-typed value
+            # (a stray coroutine from a broken boot wire) would make
+            # json.dumps fail OUTSIDE the dispatcher's guard and take every
+            # status reply down with it.
+            "embed_identity": (
+                state.get("embed_identity")
+                if isinstance(state.get("embed_identity"), dict)
+                else None
+            ),
         }
 
     if req_type == "user_initiated_sleep":
@@ -312,9 +359,9 @@ async def _dispatch_socket_request(
     if req_type == "embed_cue":
         cue = str(req.get("cue", ""))
         try:
-            from iai_mcp.embed import embedder_for_store
+            from iai_mcp.embed import embed_query as _embed_query, embedder_for_store
             embedder = embedder_for_store(store)
-            vec = await asyncio.to_thread(embedder.embed, cue)
+            vec = await asyncio.to_thread(_embed_query, embedder, cue)
             if len(vec) != embedder.DIM:
                 return {
                     "ok": False,
@@ -382,7 +429,7 @@ async def serve_control_socket(
             except (OSError, ConnectionError):  # noqa: BLE001 -- cleanup is best-effort
                 pass
 
-    from iai_mcp._ipc import IS_WINDOWS, start_ipc_server, shutdown_ipc
+    from iai_mcp._ipc import IS_WINDOWS, start_ipc_server
     if IS_WINDOWS:
         server, _actual_addr, _needs_cleanup = await start_ipc_server(
             handle, socket_path,

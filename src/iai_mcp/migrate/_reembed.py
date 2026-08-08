@@ -63,7 +63,7 @@ def _progress_read(store: MemoryStore) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
 
@@ -313,6 +313,28 @@ def _validate_and_swap(
                 (str(target_dim),),
             )
     store._embed_dim = target_dim
+
+    # The swapped-in table holds only vectors this embedder produced — restamp
+    # the store identity, or the generation guard would refuse the store its
+    # own operator just migrated correctly.
+    from iai_mcp.embed import (
+        EmbedderConfigError,
+        EmbedIdentityMismatch,
+        stamp_store_embed_identity,
+    )
+
+    try:
+        stamp_store_embed_identity(store, target_embedder)
+    except (EmbedderConfigError, EmbedIdentityMismatch):
+        # A typed stamp refusal means the rewritten vectors CANNOT be
+        # attested — swallowing it would leave the old stamp standing as a
+        # false attestation over a success-shaped result. The swap itself
+        # is complete, so clear the checkpoint: a resume must not re-stage
+        # a finished migration.
+        _progress_clear(store)
+        raise
+    except Exception as exc:  # noqa: BLE001 -- stamp fault must never undo the swap
+        log.error("reembed dim-migration identity stamp failed: %s", exc)
 
     _progress_clear(store)
 

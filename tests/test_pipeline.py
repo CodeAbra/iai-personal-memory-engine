@@ -88,7 +88,7 @@ def test_aaak_overlap_jaccard_over_content_fields() -> None:
     assert _aaak_overlap("x", "") == 0.0
     assert _aaak_overlap("alice bob", "W:E/R:abc/E:alice,bob/T:capture") == 1.0
     assert abs(
-        _aaak_overlap("alice carol", "W:E/R:abc/E:alice,bob/T:capture") - 1 / 3
+        _aaak_overlap("alice carol", "W:E/R:abc/E:alice,bob/T:capture") - 1 / 2
     ) < 1e-9
 
 def test_aaak_overlap_case_insensitive_on_entities() -> None:

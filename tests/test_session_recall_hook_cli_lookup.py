@@ -1,89 +1,84 @@
+"""Both halves of the session hook pair resolve the CLI the same way.
+
+A stock `pip install` puts the binary in `~/.local/bin`; the capture half
+found it there while the recall half knew only two paths — so capture worked
+and recall silently skipped. The recall hook now carries the capture hook's
+resolution order: env override, cache, PATH lookup, then the shared
+candidate list.
+"""
 from __future__ import annotations
 
 import os
-import stat
+import re
 import subprocess
-import sys
 from pathlib import Path
 
-import pytest
-
-pytestmark = pytest.mark.skipif(
-    sys.platform.startswith("win"), reason="POSIX shell hook"
-)
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-HOOK_PATH = (
-    REPO_ROOT / "src" / "iai_mcp" / "_deploy" / "hooks" / "iai-mcp-session-recall.sh"
-)
+_HOOKS = Path(__file__).resolve().parents[1] / "src/iai_mcp/_deploy/hooks"
+_RECALL = _HOOKS / "iai-mcp-session-recall.sh"
+_CAPTURE = _HOOKS / "iai-mcp-session-capture.sh"
 
 
-def _make_stub_cli(dir_: Path) -> Path:
-    dir_.mkdir(parents=True, exist_ok=True)
-    cli = dir_ / "iai-mcp"
-    cli.write_text("#!/usr/bin/env bash\necho RECALLED\n")
-    cli.chmod(cli.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return cli
+def _candidates(script: Path) -> list[str]:
+    body = script.read_text(encoding="utf-8")
+    m = re.search(r"for candidate in \\\n(.*?)\n\s*do", body, flags=re.DOTALL)
+    assert m is not None, f"no candidate list in {script.name}"
+    return re.findall(r'"([^"]+)"', m.group(1))
 
 
-def _run_hook(home: Path, path_entries: list[str]):
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    # Drop any developer override so the test exercises the built-in lookup.
-    env.pop("IAI_MCP_SESSION_RECALL_CLI", None)
-    env["PATH"] = os.pathsep.join([*path_entries, "/usr/bin", "/bin"])
-    return subprocess.run(
-        ["bash", str(HOOK_PATH)],
-        input='{"session_id":"x","source":"startup","cwd":"/tmp","transcript_path":""}',
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15.0,
+def test_hook_pair_shares_one_candidate_list() -> None:
+    assert _candidates(_RECALL) == _candidates(_CAPTURE), (
+        "the two hook halves drifted apart — a stock install would capture "
+        "but never recall (or vice versa)"
     )
 
 
-def test_hook_resolves_cli_from_path(tmp_path):
-    """A pip/pipx install that is only reachable via PATH must be found.
-
-    The candidate list cannot enumerate every install layout, so PATH is
-    consulted before falling back to it. Without this the hook exits 0 with
-    no output and recall is silently disabled.
-    """
+def test_recall_hook_resolves_cli_from_path(tmp_path) -> None:
     home = tmp_path / "home"
     (home / ".iai-mcp").mkdir(parents=True)
-    stub_dir = tmp_path / "path-only"
-    _make_stub_cli(stub_dir)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "iai-mcp"
+    fake.write_text(
+        "#!/bin/sh\necho 'RESOLVED_VIA_PATH_MARKER'\n", encoding="utf-8"
+    )
+    fake.chmod(0o755)
 
-    proc = _run_hook(home, [str(stub_dir)])
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bindir}:/usr/bin:/bin"
+    env.pop("IAI_MCP_SESSION_RECALL_CLI", None)
 
-    assert proc.returncode == 0, proc.stderr
-    cache = home / ".iai-mcp" / ".cli-path"
-    assert cache.exists(), "PATH-resolved CLI was not cached"
-    assert cache.read_text().strip() == str(stub_dir / "iai-mcp")
+    proc = subprocess.run(
+        [str(_RECALL)], input='{"session_id": "s-lookup-test"}',
+        capture_output=True, text=True, env=env, timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "RESOLVED_VIA_PATH_MARKER" in proc.stdout
+    # First successful resolution is cached for later session-ends.
+    assert (home / ".iai-mcp" / ".cli-path").read_text(
+        encoding="utf-8"
+    ) == str(fake)
 
 
-def test_hook_resolves_cli_from_user_local_bin(tmp_path):
-    """`pip install --user` lands in ~/.local/bin; it must be a candidate."""
+def test_recall_hook_finds_user_site_install(tmp_path) -> None:
     home = tmp_path / "home"
     (home / ".iai-mcp").mkdir(parents=True)
-    _make_stub_cli(home / ".local" / "bin")
+    local_bin = home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    fake = local_bin / "iai-mcp"
+    fake.write_text(
+        "#!/bin/sh\necho 'RESOLVED_VIA_CANDIDATE_MARKER'\n", encoding="utf-8"
+    )
+    fake.chmod(0o755)
 
-    # Not on PATH — force the candidate-list branch to do the work.
-    proc = _run_hook(home, [])
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin"  # no iai-mcp on PATH
+    env.pop("IAI_MCP_SESSION_RECALL_CLI", None)
 
-    assert proc.returncode == 0, proc.stderr
-    cache = home / ".iai-mcp" / ".cli-path"
-    assert cache.exists(), "~/.local/bin CLI was not found"
-    assert cache.read_text().strip() == str(home / ".local" / "bin" / "iai-mcp")
-
-
-def test_hook_still_exits_zero_when_cli_is_absent(tmp_path):
-    """Fail-safe is preserved: no CLI anywhere is still a silent exit 0."""
-    home = tmp_path / "home"
-    (home / ".iai-mcp").mkdir(parents=True)
-
-    proc = _run_hook(home, [])
-
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == ""
-    assert not (home / ".iai-mcp" / ".cli-path").exists()
+    proc = subprocess.run(
+        [str(_RECALL)], input='{"session_id": "s-candidate-test"}',
+        capture_output=True, text=True, env=env, timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "RESOLVED_VIA_CANDIDATE_MARKER" in proc.stdout

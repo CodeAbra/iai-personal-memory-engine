@@ -15,7 +15,7 @@ class Embedder:
     relationships from these dotted names so a single stub file can describe
     the sub-module tree consumed at runtime.
     """
-    def __new__(cls,): ...
+    def __new__(cls, model_id:str | None=None, revision:str | None=None, pool:str | None=None): ...
     def encode(self, text:str) -> list[float]:
         r"""
         Encode a single text string to a 384-dim L2-normalized vector.

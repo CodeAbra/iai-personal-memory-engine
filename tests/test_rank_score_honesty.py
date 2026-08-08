@@ -61,6 +61,90 @@ def test_aaak_overlap_bookkeeping_tags_never_bias_by_role() -> None:
     assert _aaak_overlap("capture the assistant reply", assistant_rec) == 0.0
 
 
+def test_every_record_view_construction_carries_rank_fields() -> None:
+    # SimpleRecordView defaults every rank column (empty index, now(),
+    # 0.5): a construction site that omits them silently kills the aaak,
+    # age and stability terms for every recall it serves — and the
+    # printed reason stays arithmetically consistent with the wrong
+    # inputs. Every site must pass all three explicitly.
+    import inspect
+    import re
+
+    from iai_mcp import core, pipeline, retrieve, runtime_graph_cache
+
+    def _call_text(src: str, start: int) -> str:
+        depth = 0
+        for i in range(start - 1, len(src)):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return src[start - 1:i]
+        return src[start - 1:]
+
+    for mod in (pipeline, retrieve):
+        src = inspect.getsource(mod)
+        for m in re.finditer(r"SimpleRecordView\(", src):
+            call = _call_text(src, m.end())
+            for field_name in ("aaak_index=", "created_at=", "stability="):
+                assert field_name in call, (
+                    f"{mod.__name__}: SimpleRecordView construction misses "
+                    f"{field_name} — rank term goes silently dead:\n{call[:300]}"
+                )
+
+    # Same contract for every full node-payload dict: any dict literal
+    # carrying "surface" must carry the rank columns too, in every module
+    # that feeds the recall graph (the daemon warm path included). The
+    # scan targets DICT LITERALS, not set_node_payload calls — a payload
+    # built into a variable and passed by name must not escape it.
+    def _dict_text(src: str, brace_start: int) -> str:
+        depth = 0
+        for i in range(brace_start, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[brace_start:i]
+        return src[brace_start:]
+
+    payload_dicts = 0
+    for mod in (pipeline, retrieve, core, runtime_graph_cache):
+        src = inspect.getsource(mod)
+        for m in re.finditer(r"\{", src):
+            body = _dict_text(src, m.start())
+            if '"surface"' not in body or '"embedding"' not in body:
+                continue
+            payload_dicts += 1
+            if "**_rank_fields" in body:
+                continue
+            for key in ('"aaak_index"', '"created_at"', '"stability"'):
+                assert key in body, (
+                    f"{mod.__name__}: node payload dict misses {key} — "
+                    f"rank term goes silently dead:\n{body[:300]}"
+                )
+    assert payload_dicts >= 6, (
+        f"guard self-check: expected to scan at least 6 payload dicts, "
+        f"saw {payload_dicts} — the scan pattern went stale"
+    )
+
+
+def test_aaak_overlap_matches_inflected_name_forms() -> None:
+    from iai_mcp.pipeline import _aaak_overlap
+
+    # The anchor is stored as it appeared in text — often an inflected
+    # form. The nominative cue must still match it, and vice versa.
+    idx = "W:E/R:0057543b/E:зефирбота,parse_kits/T:capture"
+    assert _aaak_overlap("зефирбот", idx) == 1.0
+    assert _aaak_overlap("parse_kit", idx) == 1.0
+    assert _aaak_overlap("что умеет зефирбот?", idx) > 0.0
+    # A short stem must not fuzzy-match: "бот" is not "ботлнек".
+    assert _aaak_overlap("бот", "W:E/R:x/E:ботлнек/T:capture") == 0.0
+    # Nor may a long tail ride a shared prefix.
+    assert _aaak_overlap("зефир", idx) == 0.0
+
+
 def test_flat_cosine_pool_does_not_let_degree_decide(tmp_path, monkeypatch):
     from iai_mcp.pipeline import _recall_core
 
@@ -137,6 +221,78 @@ def test_flat_cosine_guard_zeroes_degree_on_a_fully_flat_pool(tmp_path, monkeypa
     assert gap_guarded < 0.5 * gap_unguarded, (
         f"the guard must dampen the degree advantage on a flat pool: "
         f"unguarded {gap_unguarded:.4f} vs guarded {gap_guarded:.4f}"
+    )
+
+
+def _flat_boosted_run(tmp_path, dirname: str):
+    from iai_mcp.pipeline import _recall_core
+
+    store, graph, recs = _build_store_and_graph(tmp_path / dirname, n=8)
+    embedder = _FakeEmbedder()
+    flat_vec = list(embedder.embed("cue"))
+    # One record carries a doc tag: on a flat head the knowledge boost is
+    # its ONLY advantage.
+    boosted = recs[0]
+    for rec in recs:
+        rec.embedding = list(flat_vec)
+        store.update(rec)
+        graph.add_node(rec.id, community_id=None, embedding=list(flat_vec))
+        graph.set_node_payload(rec.id, {
+            "embedding": list(flat_vec),
+            "surface": rec.literal_surface,
+            "centrality": 0.0,
+            "tier": rec.tier,
+            "tags": ["doc:notes.md"] if rec is boosted else [],
+            "language": "en",
+        })
+    result = _recall_core(
+        store=store, graph=graph, assignment=_flat_assignment(recs),
+        rich_club=[], embedder=embedder,
+        cue="uncovered topic", session_id=f"s-boost-{dirname}",
+        mode="concept",
+    )
+    return boosted, result
+
+
+def test_flat_head_damps_knowledge_boost(tmp_path, monkeypatch):
+    monkeypatch.setenv("IAI_MCP_COMMUNITY_BIAS", "0.2")
+
+    def _boosted_gap(dirname: str) -> float:
+        boosted, result = _flat_boosted_run(tmp_path, dirname)
+        hits = {h.record_id: h.score for h in result.scored_hits}
+        others = [s for rid, s in hits.items() if rid != boosted.id]
+        return hits[boosted.id] - max(others)
+
+    monkeypatch.setenv("IAI_MCP_COS_SPREAD_MIN", "0")
+    gap_unguarded = _boosted_gap("off")
+    monkeypatch.delenv("IAI_MCP_COS_SPREAD_MIN")
+    gap_guarded = _boosted_gap("on")
+
+    assert gap_unguarded > 1e-3, (
+        "fixture must give the doc-tagged record a real boost advantage"
+    )
+    assert gap_guarded < 0.5 * gap_unguarded, (
+        "the knowledge boost must not decide a flat head: "
+        f"unguarded {gap_unguarded:.4f} vs guarded {gap_guarded:.4f}"
+    )
+
+
+def test_flat_head_silences_community_bias(tmp_path, monkeypatch):
+    # The community term is constant across a single-community flat pool,
+    # so a score-gap assertion cannot see it — the served reasons can:
+    # the term must vanish from every reason when the guard dampens it.
+    monkeypatch.setenv("IAI_MCP_COMMUNITY_BIAS", "0.2")
+
+    monkeypatch.setenv("IAI_MCP_COS_SPREAD_MIN", "0")
+    _, unguarded = _flat_boosted_run(tmp_path, "comm-off")
+    monkeypatch.delenv("IAI_MCP_COS_SPREAD_MIN")
+    _, guarded = _flat_boosted_run(tmp_path, "comm-on")
+
+    assert any("community" in h.reason for h in unguarded.scored_hits), (
+        "fixture must make the community bias contribute when unguarded"
+    )
+    assert not any("community" in h.reason for h in guarded.scored_hits), (
+        "community bias must not contribute to a fully flat head"
     )
 
 

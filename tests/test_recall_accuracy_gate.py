@@ -1085,7 +1085,11 @@ class TestDispatchPathRepresentativeness:
             rng = np.random.default_rng(0)
             cue_vec = _perturb_vec(target_vec, rng, noise_fraction=0.15)
 
-            shim = _VectorInjectionEmbedder(embedder_for_store(store))
+            try:
+                real_embedder = embedder_for_store(store)
+            except ValueError:
+                real_embedder = None  # synthetic dim: sentinel-only embeds
+            shim = _VectorInjectionEmbedder(real_embedder)
             sentinel = shim.register(str(target_id), cue_vec.tolist())
 
             with _inject_embedder_into_dispatch(shim):
@@ -1124,7 +1128,11 @@ class TestDispatchPathRepresentativeness:
             target_id, target_vec = next(iter(id_to_vec.items()))
             rng = np.random.default_rng(1)
             cue_vec = _perturb_vec(target_vec, rng, noise_fraction=0.15)
-            shim = _VectorInjectionEmbedder(embedder_for_store(store))
+            try:
+                real_embedder = embedder_for_store(store)
+            except ValueError:
+                real_embedder = None  # synthetic dim: sentinel-only embeds
+            shim = _VectorInjectionEmbedder(real_embedder)
             sentinel = shim.register(str(target_id), cue_vec.tolist())
             with _inject_embedder_into_dispatch(shim):
                 resp = core.dispatch(

@@ -78,7 +78,7 @@ def test_drain_consumes_jsonl_and_deletes_file(iai_home):
 
     deferred_dir = iai_home / ".iai-mcp" / ".deferred-captures"
     events = [
-        _make_event("Alice said: drain test event one — must be at least 12 chars"),
+        _make_event("alice said: drain test event one — must be at least 12 chars"),
         _make_event("assistant reply with sufficient length to pass MIN_CAPTURE", role="assistant"),
         _make_event("third event for the round-trip drain count assertion"),
     ]
@@ -391,13 +391,21 @@ def test_daemon_main_drain_does_not_crash_on_bad_file(tmp_path, monkeypatch):
             f"poll_status={proc.poll()}"
         )
 
-        time.sleep(2.0)
+        # The socket binds BEFORE the embedder builds and the startup drain
+        # runs — socket-up no longer implies boot work done. Poll with a
+        # deadline instead of a fixed sleep.
+        deadline = time.monotonic() + 60.0
+        while bad.exists() and time.monotonic() < deadline:
+            assert proc.poll() is None, (
+                f"daemon exited unexpectedly with code {proc.returncode} — "
+                f"startup-drain probably propagated an exception"
+            )
+            time.sleep(0.25)
 
         assert proc.poll() is None, (
             f"daemon exited unexpectedly with code {proc.returncode} — "
             f"startup-drain probably propagated an exception"
         )
-
         assert not bad.exists(), (
             "malformed file should have been renamed away by drain"
         )

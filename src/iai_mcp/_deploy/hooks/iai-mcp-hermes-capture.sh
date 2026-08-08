@@ -6,7 +6,11 @@
 # turns to the deferred spool in the exact record shape the core
 # turn-capture hook writes. A per-session watermark on the last message id
 # keeps re-runs from duplicating. Fail-safe: exit 0 on any error.
+# At-rest contract: stages PLAINTEXT at 0600; the daemon encrypts staged
+# lines on its next drain pass.
 set -u
+# Spool files must never be world-readable.
+umask 077
 input=$(cat 2>/dev/null || true)
 PY_SCRIPT='
 import json, os, sqlite3, sys, time

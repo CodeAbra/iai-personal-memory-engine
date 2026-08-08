@@ -110,7 +110,9 @@ def _l0_segment(store: MemoryStore) -> str:
     rec = _fetch_record(store, L0_RECORD_UUID)
     if rec is None:
         return ""
-    aaak = rec.aaak_index or generate_aaak_index(rec)
+    # Regenerate at display: the stored index freezes the room at mint
+    # time, while community stamping may have landed since.
+    aaak = generate_aaak_index(rec)
     cleaned = _clean_surface(rec.literal_surface)[:200]
     return f"{aaak}\n{cleaned}"
 
@@ -230,7 +232,13 @@ def _rich_club_segment_with_budget(
         cleaned = _clean_surface(rec.literal_surface)
         if not cleaned:
             continue
-        aaak = rec.aaak_index or generate_aaak_index(rec)
+        # Regenerate at display: the stored index freezes the room at mint
+        # time, while community stamping may have landed since.
+        aaak = generate_aaak_index(rec)
+        # Entity anchors can triple the index length; the session-start pack
+        # trades anchor completeness for record count.
+        if len(aaak) > 88:
+            aaak = aaak[:88] + "…"
         age = age_label(rec.created_at, now)
         age_part = f" ({age})" if age else ""
         line = f"{aaak}{age_part}: {cleaned[:60]}"
@@ -240,6 +248,35 @@ def _rich_club_segment_with_budget(
         lines.append(line)
         running += cost + 1
     return "\n".join(lines)
+
+
+def _origin_label(rec: object) -> str:
+    # Ambient feeds mix every session and project; an unlabeled line reads as
+    # "my recent work" and a parallel session's thread gets adopted as this
+    # one's. The label names the origin so the model can attribute, not guess.
+    try:
+        prov = getattr(rec, "provenance", None) or []
+        cwd = ""
+        for entry in prov:
+            if isinstance(entry, dict) and entry.get("cwd"):
+                cwd = str(entry["cwd"])
+                break
+        if cwd:
+            import os as _os
+
+            return f"[{_os.path.basename(cwd.rstrip('/')) or cwd}] "
+        sid = ""
+        for entry in prov:
+            if isinstance(entry, dict) and entry.get("session_id"):
+                sid = str(entry["session_id"])
+                break
+        if not sid:
+            sid = str(getattr(rec, "session_id", "") or "")
+        if sid and sid != "-":
+            return f"[s:{sid[:6]}] "
+    except Exception:  # noqa: BLE001 -- labels must never break the payload
+        pass
+    return ""
 
 
 def _recent_thread_segment(
@@ -301,7 +338,8 @@ def _recent_thread_segment(
             continue
         age = age_label(r.created_at, now)
         prefix = f"({age}) " if age else ""
-        lines.append(f"- {prefix}{cleaned[:120]}")
+        origin = _origin_label(r)
+        lines.append(f"- {prefix}{origin}{cleaned[:120]}")
     return "\n".join(lines)
 
 
@@ -485,7 +523,10 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
     if l0:
         blocks.append(f"## Identity\n{l0}")
     if recent_thread:
-        blocks.append(f"## Most recent work\n{recent_thread}")
+        blocks.append(
+            "## Most recent work (all sessions/projects; [labels] mark origin)\n"
+            f"{recent_thread}"
+        )
     if l1:
         blocks.append(f"## Critical facts\n{l1}")
     for seg in l2:

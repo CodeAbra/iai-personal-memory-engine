@@ -146,7 +146,7 @@ def _consolidation_intent_is_stale(intent_path: Path) -> bool:
     True and the caller removes the orphan and proceeds.
     """
     try:
-        raw = intent_path.read_text()
+        raw = intent_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return False
     except OSError:

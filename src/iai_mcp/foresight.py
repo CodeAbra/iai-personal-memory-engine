@@ -74,28 +74,73 @@ def _f(env: str, default: float) -> float:
         return default
 
 
-def pack_path(store: Any) -> Path:
+def pack_path(store: Any, session_id: "str | None" = None) -> Path:
+    # One pack per conversation: parallel sessions each keep their own file,
+    # so a refresh for one session can no longer starve every other session
+    # of anticipation. The unsuffixed path stays for hosts with no session id.
+    # Session ids are external input becoming a path component — allowlist,
+    # never trust; the sanitizer must match the reading hook's exactly.
+    from iai_mcp.working_tier import _sanitize_session_id
+
+    if session_id and session_id != "-":
+        sid = _sanitize_session_id(session_id)
+        return Path(store.root) / f".next-turn-pack.{sid}.cached.md"
     return Path(store.root) / ".next-turn-pack.cached.md"
 
 
-def _state_path(store: Any) -> Path:
+def _state_path(store: Any, session_id: "str | None" = None) -> Path:
+    from iai_mcp.working_tier import _sanitize_session_id
+
+    if session_id and session_id != "-":
+        sid = _sanitize_session_id(session_id)
+        return Path(store.root) / f".next-turn-pack.{sid}.state.json"
     return Path(store.root) / ".next-turn-pack.state.json"
+
+
+_PACK_GC_MAX_AGE_SEC = 3 * 24 * 3600
+
+
+def _gc_stale_session_packs(store: Any) -> None:
+    # Bounded sweep: per-session packs of finished conversations age out; the
+    # glob cannot match the unsuffixed global pack (its name has one dot
+    # segment fewer).
+    import time as _time
+
+    now = _time.time()
+    root = Path(store.root)
+    for pattern in (".next-turn-pack.*.cached.md", ".next-turn-pack.*.state.json"):
+        for p in root.glob(pattern):
+            try:
+                if now - p.stat().st_mtime > _PACK_GC_MAX_AGE_SEC:
+                    p.unlink()
+            except OSError:
+                continue
+
+
+def _normalized_served(state: dict) -> dict:
+    served = state.get("served")
+    if not isinstance(served, dict):
+        # A `served` value that is a plain id list (not a dict): treat
+        # those ids as served-now so the TTL applies from here on.
+        import time as _time
+
+        served = {str(i): _time.time() for i in (state.get("injected") or [])}
+    return dict(served)
 
 
 def _load_state(store: Any, session_id: str) -> dict:
     try:
+        state = json.loads(
+            _state_path(store, session_id).read_text(encoding="utf-8")
+        )
+        return {"session_id": session_id, "served": _normalized_served(state)}
+    except (OSError, ValueError):
+        pass
+    # The legacy global state file counts only when it belongs to this session.
+    try:
         state = json.loads(_state_path(store).read_text(encoding="utf-8"))
         if state.get("session_id") == session_id:
-            served = state.get("served")
-            if not isinstance(served, dict):
-                # A `served` value that is a plain id list (not a dict): treat
-                # those ids as served-now so the TTL applies from here on.
-                import time as _time
-
-                served = {
-                    str(i): _time.time() for i in (state.get("injected") or [])
-                }
-            return {"session_id": session_id, "served": dict(served)}
+            return {"session_id": session_id, "served": _normalized_served(state)}
     except (OSError, ValueError):
         pass
     return {"session_id": session_id, "served": {}}
@@ -143,7 +188,14 @@ def _save_state(store: Any, state: dict) -> None:
     if len(served) > _STATE_INJECTED_CAP:
         keep = sorted(served.items(), key=lambda kv: kv[1])[-_STATE_INJECTED_CAP:]
         state["served"] = dict(keep)
-    _atomic_publish(_state_path(store), json.dumps(state))
+    # Same ownership rule as the pack: a sid-carrying session writes only its
+    # own state file; the global pair belongs to id-less writers alone.
+    body = json.dumps(state)
+    sid = state.get("session_id")
+    if sid and sid != "-":
+        _atomic_publish(_state_path(store, str(sid)), body)
+    else:
+        _atomic_publish(_state_path(store), body)
 
 
 def _record_session(rec: Any) -> str:
@@ -298,7 +350,7 @@ def _tunnel_question_line(
     """
     try:
         from iai_mcp.curiosity import get_pending_questions_cached
-        from iai_mcp.embed import embedder_for_store
+        from iai_mcp.embed import embed_query as _embed_query, embedder_for_store
 
         questions = get_pending_questions_cached(store, limit=5)
         if not questions:
@@ -314,7 +366,7 @@ def _tunnel_question_line(
             if qv is None:
                 if embedder is None:
                     embedder = embedder_for_store(store)
-                qv = list(embedder.embed(q_cue))
+                qv = list(_embed_query(embedder, q_cue))
                 if len(_question_cue_vecs) >= _QUESTION_CUE_VEC_CAP:
                     _question_cue_vecs.clear()
                 _question_cue_vecs[q_cue] = qv
@@ -531,17 +583,28 @@ def refresh_pack(
                 f"memory_recall(\"{cue_hint}\") may find more\n"
             )
 
-        path = pack_path(store)
+        # A session with an id owns exactly its per-session file; ONLY id-less
+        # writers touch the unsuffixed global pack. A sid-carrying refresh
+        # writing both would race a parallel session on the (global pack,
+        # global state) pair — the two files publish independently, and a torn
+        # pair lets the hook's sid gate approve another session's pack.
+        if session_id and session_id != "-":
+            paths = [pack_path(store, session_id)]
+        else:
+            paths = [pack_path(store)]
         if not lines:
             if suggest_line:
                 body = PACK_HEADER + "\n" + suggest_line + PACK_FOOTER + "\n"
-                _atomic_publish(path, body)
+                for path in paths:
+                    _atomic_publish(path, body)
                 report["written"] = True
             else:
                 # A silent turn is a valid answer: remove any stale pack so
                 # the hook never serves yesterday's relevance.
-                path.unlink(missing_ok=True)
+                for path in paths:
+                    path.unlink(missing_ok=True)
             _save_state(store, state)
+            _gc_stale_session_packs(store)
             return report
 
         body = (
@@ -550,7 +613,9 @@ def refresh_pack(
             + suggest_line
             + PACK_FOOTER + "\n"
         )
-        _atomic_publish(path, body)
+        for path in paths:
+            _atomic_publish(path, body)
+        _gc_stale_session_packs(store)
         for rid in packed_ids:
             served[rid] = now_ts
         _save_state(store, state)

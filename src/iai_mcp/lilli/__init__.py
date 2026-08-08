@@ -8,6 +8,8 @@ Public API:
 """
 from __future__ import annotations
 
+__author__ = "Areg Noya"
+
 from iai_mcp.lilli.brain import Brain
 from iai_mcp.lilli.tier_info import tier_info, list_tiers
 from iai_mcp.lilli.crossmodal.embed_to_hv import from_embedding, to_embedding_neighbors

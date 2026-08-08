@@ -29,7 +29,7 @@ def export_jsonl(output: Path | None = None) -> Path:
 
     records = store.all_records()
     count = 0
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         for rec in records:
             entry = {
                 "id": str(rec.id),
@@ -64,6 +64,10 @@ def backup(output: Path | None = None) -> Path:
 
     for name in [
         ".crypto.key",
+        # Retained pre-rotation generations: restoring a backup taken during
+        # an outstanding partial rotation without this file strands exactly
+        # the rows it exists to save.
+        ".crypto.key.pre-rotate",
         "config.json",
         "lifecycle_state.json",
         ".daemon-state.json",
@@ -133,6 +137,10 @@ def restore(archive: Path, target: Path | None = None) -> Path:
                 member_path.parent.mkdir(parents=True, exist_ok=True)
                 with tar.extractfile(member) as src, open(member_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                if member_path.name.startswith(".crypto.key"):
+                    # Key material lands 0600 regardless of the process
+                    # umask — the file-key reader refuses insecure modes.
+                    os.chmod(member_path, 0o600)
 
     logger.info("Restored brain from %s to %s", archive, target)
     return target

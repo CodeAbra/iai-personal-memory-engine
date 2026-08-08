@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import shutil
 from iai_mcp import _sqlite_stdlib
 import tempfile
@@ -441,8 +442,33 @@ def _plant_keys_for_recall(
             os.write(fd, crypto_key)
         finally:
             os.close(fd)
+        if not hasattr(os, "fchmod"):
+            _restrict_windows_acl(path)
         created.append(path)
     return created
+
+
+def _restrict_windows_acl(path: Path) -> None:
+    # Key material must never sit under default ACLs: strip inheritance and
+    # grant only the current user. A failed restriction is a loud warning —
+    # a warning is posture, silence is a hole.
+    import subprocess
+
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 -- the warning IS the handling
+        print(
+            f"WARNING: could not restrict ACL on key file {path}: {exc} — "
+            "the file may be readable by other accounts",
+            file=sys.stderr,
+        )
 
 
 def _unplant_keys(created: list[Path]) -> None:

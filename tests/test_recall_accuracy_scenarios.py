@@ -527,6 +527,9 @@ def test_dc_recall_path_stays_working_tier_free(tmp_path, monkeypatch, driver):
     store = MemoryStore(path=tmp_path / f"dc-store-{driver}")
     try:
         cue_vec = _seeded_vec(51)
+        # The synthetic-dim store has no real embedder; the supplied
+        # cue_embedding drives recall and the stub hosts the dispatch.
+        _stub_embedder_for_store(monkeypatch, cue_vec)
         store.insert(_make_rec(uuid4(), "reference content for D-C recall no-op probe", cue_vec))
         flush_record_buffer(store)
 

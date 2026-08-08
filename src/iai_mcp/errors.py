@@ -41,3 +41,11 @@ class DataError(DatabaseError):
 
 class InterfaceError(Error):
     pass
+
+
+#: JSON-RPC error code for embedder-selection refusals (foreign vector
+#: space, misconfigured model, identity mismatch). Shared wire contract:
+#: the daemon socket classifies the refusal under this code, and the
+#: recall CLI and the MCP wrapper key on it first; the message-prose
+#: hint survives only as a fallback for a daemon predating the code.
+ERR_EMBEDDER_REFUSAL = -32011

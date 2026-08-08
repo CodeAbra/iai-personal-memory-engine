@@ -87,9 +87,12 @@ def test_pypdf_declared_in_pyproject():
     .pdf branch lazy-imports it at runtime.
     """
     text = _PYPROJECT_PATH.read_text(encoding="utf-8")
-    # Find the [project] dependencies array.
+    # Find the [project] dependencies array. A bare `dependencies =` key
+    # exists only in the [project] table (optional-dependencies tables use
+    # named extras), so anchoring on the key alone stays correct even when
+    # earlier [project] keys hold inline tables/arrays (authors = [{...}]).
     m = re.search(
-        r"^\[project\][^\[]*?^dependencies\s*=\s*\[(?P<arr>.*?)^\]",
+        r"^dependencies\s*=\s*\[(?P<arr>.*?)^\]",
         text,
         flags=re.MULTILINE | re.DOTALL,
     )

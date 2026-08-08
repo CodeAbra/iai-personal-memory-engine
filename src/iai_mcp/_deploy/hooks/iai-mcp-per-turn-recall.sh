@@ -16,7 +16,9 @@
 
 set -u
 
-IAI_ROOT="${IAI_MCP_ROOT:-$HOME/.iai-mcp}"
+# IAI_MCP_STORE is the canonical store-root variable; IAI_MCP_ROOT is kept
+# as a legacy fallback for environments installed before the rename.
+IAI_ROOT="${IAI_MCP_STORE:-${IAI_MCP_ROOT:-$HOME/.iai-mcp}}"
 FRESH_SEC="${IAI_MCP_WORKING_TIER_FRESH_SEC:-7200}"
 PACK="${IAI_MCP_FORESIGHT_PACK:-$IAI_ROOT/.next-turn-pack.cached.md}"
 PACK_STATE="${PACK%.cached.md}.state.json"
@@ -29,6 +31,19 @@ json_field() {
     printf '%s' "$2" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
+# The hook stdin carries the USER PROMPT next to session_id; the greedy sed
+# above takes the LAST occurrence on the line, so pasted text containing a
+# "session_id" key could redirect pack selection. Parse real JSON for the
+# session id; the sed stays as fallback for our own trusted state files.
+SESS_IN=$(printf '%s' "$STDIN_JSON" | /usr/bin/python3 -c '
+import json, sys
+try:
+    print(str(json.load(sys.stdin).get("session_id", "") or ""))
+except Exception:
+    print("")
+' 2>/dev/null)
+[ -n "$SESS_IN" ] || SESS_IN=$(json_field session_id "$STDIN_JSON")
+
 file_age() {
     case "$(uname)" in
         Darwin) m=$(stat -f %m "$1" 2>/dev/null || echo 0) ;;
@@ -38,11 +53,21 @@ file_age() {
 }
 
 emit_foresight() {
+    # This session's own pack wins over the shared global one: parallel
+    # sessions each read their own anticipation instead of racing for the
+    # last writer's. An explicit env pack bypasses the per-session layout.
+    sess_in="$SESS_IN"
+    if [ -z "${IAI_MCP_FORESIGHT_PACK:-}" ] && [ -n "$sess_in" ]; then
+        sid=$(printf '%s' "$sess_in" | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
+        if [ -n "$sid" ] && [ -f "$IAI_ROOT/.next-turn-pack.$sid.cached.md" ]; then
+            PACK="$IAI_ROOT/.next-turn-pack.$sid.cached.md"
+            PACK_STATE="$IAI_ROOT/.next-turn-pack.$sid.state.json"
+        fi
+    fi
     [ -f "$PACK" ] || return 0
     [ "$(file_age "$PACK")" -le "$PACK_FRESH_SEC" ] || return 0
     # Session scope: a pack anticipated for one conversation must not leak
     # into another running in parallel. Unknown on either side -> fail open.
-    sess_in=$(json_field session_id "$STDIN_JSON")
     if [ -n "$sess_in" ] && [ -f "$PACK_STATE" ]; then
         sess_pack=$(json_field session_id "$(head -c 4096 "$PACK_STATE")")
         if [ -n "$sess_pack" ] && [ "$sess_pack" != "$sess_in" ]; then
@@ -78,7 +103,7 @@ emit_working_tier() {
     if [ -n "${IAI_MCP_WORKING_TIER_CACHE:-}" ]; then
         cache="$IAI_MCP_WORKING_TIER_CACHE"
     else
-        sess_in=$(json_field session_id "$STDIN_JSON")
+        sess_in="$SESS_IN"
         [ -n "$sess_in" ] || return 0
         sid=$(printf '%s' "$sess_in" | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
         [ -n "$sid" ] || return 0

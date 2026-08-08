@@ -67,7 +67,7 @@ def creds_ok(monkeypatch):
 def mock_claude_ok(monkeypatch, creds_ok, isolated_state):
     calls: list[dict] = []
 
-    async def fake_invoke(prompt: str, *, model: str = "haiku"):
+    async def fake_invoke(prompt: str, *, model: str = "haiku", **_kw):
         calls.append({"prompt": prompt, "model": model})
         return {
             "ok": True,
@@ -77,7 +77,7 @@ def mock_claude_ok(monkeypatch, creds_ok, isolated_state):
             "cost_usd": 0.0,
         }
 
-    monkeypatch.setattr("iai_mcp.insight.invoke_claude_once", fake_invoke)
+    monkeypatch.setattr("iai_mcp.insight.invoke_reflection_once", fake_invoke)
     return calls
 
 
@@ -253,11 +253,11 @@ def test_budget_gate_blocks(tmp_path, monkeypatch, creds_ok, isolated_state):
 
     calls: list = []
 
-    async def fake_invoke(prompt, *, model="haiku"):
+    async def fake_invoke(prompt, *, model="haiku", **_kw):
         calls.append(1)
         return {"ok": True, "data": {"result": "x"}, "tokens_in": 1, "tokens_out": 1, "cost_usd": 0.0}
 
-    monkeypatch.setattr("iai_mcp.insight.invoke_claude_once", fake_invoke)
+    monkeypatch.setattr("iai_mcp.insight.invoke_reflection_once", fake_invoke)
 
     daily_cap = int(DAILY_QUOTA_BUDGET_PCT * ESTIMATED_DAILY_TOKEN_CEILING)
     save_state({BUDGET_STATE_KEY: {
@@ -283,11 +283,11 @@ def test_claude_disabled_blocks(tmp_path, monkeypatch, creds_ok, isolated_state)
 
     calls: list = []
 
-    async def fake_invoke(prompt, *, model="haiku"):
+    async def fake_invoke(prompt, *, model="haiku", **_kw):
         calls.append(1)
         return {"ok": True, "data": {"result": "x"}, "tokens_in": 1, "tokens_out": 1, "cost_usd": 0.0}
 
-    monkeypatch.setattr("iai_mcp.insight.invoke_claude_once", fake_invoke)
+    monkeypatch.setattr("iai_mcp.insight.invoke_reflection_once", fake_invoke)
     save_state({BUDGET_STATE_KEY: {
         "daily_used_tokens": 0,
         "weekly_buffer_used_tokens": 0,
@@ -308,11 +308,11 @@ def test_credentials_gate_blocks(tmp_path, monkeypatch, isolated_state):
     store = _fresh_store(tmp_path, monkeypatch)
     calls: list = []
 
-    async def fake_invoke(prompt, *, model="haiku"):
+    async def fake_invoke(prompt, *, model="haiku", **_kw):
         calls.append(1)
         return {"ok": True}
 
-    monkeypatch.setattr("iai_mcp.insight.invoke_claude_once", fake_invoke)
+    monkeypatch.setattr("iai_mcp.insight.invoke_reflection_once", fake_invoke)
     monkeypatch.setattr(
         "iai_mcp.insight.verify_credentials_subscription",
         lambda: {"ok": False, "reason": "not_subscription"},
@@ -346,7 +346,7 @@ def test_api_billing_detected_no_store(tmp_path, monkeypatch, creds_ok, isolated
     real_insert = store.insert
     monkeypatch.setattr(store, "insert", lambda r: inserted.append(r) or real_insert(r))
 
-    async def fake_invoke(prompt, *, model="haiku"):
+    async def fake_invoke(prompt, *, model="haiku", **_kw):
         return {
             "ok": False,
             "reason": "api_billing_detected",
@@ -356,7 +356,7 @@ def test_api_billing_detected_no_store(tmp_path, monkeypatch, creds_ok, isolated
             "tokens_out": 20,
         }
 
-    monkeypatch.setattr("iai_mcp.insight.invoke_claude_once", fake_invoke)
+    monkeypatch.setattr("iai_mcp.insight.invoke_reflection_once", fake_invoke)
 
     result = asyncio.run(generate_overnight_insight(store, "sess-A"))
     assert result["ok"] is False

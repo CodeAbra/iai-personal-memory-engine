@@ -7,7 +7,7 @@
 <h3 align="center">Give your coding agent a brain that remembers exactly what you said — forever, on your machine.</h3>
 <p align="center"><b>The best open-source personal memory engine for AI coding assistants.</b><br>Pays for itself in tokens: an injected memory pack costs ≈88% less than the agent search it displaces.<br>Every claim ships with the harness that proves it — run the benchmarks yourself.</p>
 
-<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi&v=281" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v2.8.1-1f6feb?style=flat-square" alt="Release v2.8.1"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
+<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi&v=281" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v3.0.0-1f6feb?style=flat-square" alt="Release v3.0.0"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
 <p align="center"><img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962"> <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000"> <img src="https://img.shields.io/badge/memory_pack-%E2%89%8888%25_cheaper_than_search-2ea043?style=flat-square" alt="An injected memory pack costs ≈88% less than the agent search it displaces"> <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM"> <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry"> <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible"> <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a></p>
 <p align="center"><a href="#quick-start"><b>Quick start</b></a> · <a href="#benchmarks"><b>Benchmarks</b></a> · <a href="#watch-it-think"><b>Dashboard</b></a> · <a href="https://github.com/CodeAbra/iai-personal-memory-engine/discussions"><b>Discussions</b></a> · <a href="./README_zh-CN.md"><b>中文</b></a></p>
 
@@ -362,7 +362,7 @@ Recall combines three signals: semantic similarity, graph-link strength, and rec
 <p align="center"><img src="docs/assets/slides/slide-06.jpg" width="850" alt="iai-pme"></p>
 <p align="center"><img src="docs/assets/slides/slide-07.jpg" width="850" alt="iai-pme"></p>
 
-All records are encrypted at rest with AES-256-GCM. The key lives in `~/.iai-mcp/.key` (mode 0600). Back it up. Lose the key, lose the memories.
+All records are encrypted at rest with AES-256-GCM. The key lives in `~/.iai-mcp/.crypto.key` (mode 0600). Back it up. Lose the key, lose the memories.
 
 Everything lives at `~/.iai-mcp/`.
 
@@ -410,7 +410,7 @@ Every recall response carries `budget_tokens` (default `1500`), a `cue_mode` (`c
 - Episodic records are append-only. No update path exists in the schema — a correction is a new record plus an edge, never an overwrite.
 - `memory_contradict` writes the contradiction edge and closes `valid_to` on the superseded record. Both versions stay queryable; benchmarks for this are `Rescue@10` and historical-verbatim, both `1.000`.
 - Idempotency key per capture (`idem:<sha256>`), so replayed transcripts do not duplicate.
-- Encrypted insert is the only insert. Plaintext never reaches disk.
+- Encrypted insert is the only insert.
 - `memory_reinforce` bumps edge weights on the retrieval path; unreinforced edges decay on the nightly pass.
 
 ### Token and context budget
@@ -440,7 +440,7 @@ Every recall response carries `budget_tokens` (default `1500`), a `cue_mode` (`c
 
 ### Ingestion
 
-`iai upload` / dashboard drop accepts `.txt .md .markdown .rst .tex .bib .csv .pdf .docx .pptx .xlsx .rtf .epub`. Office containers are parsed as zip+XML with no heavyweight dependency; `pypdf` is the only optional parser and loads lazily. Chunking is followed by dedup against the existing store and a recall verification pass that reports the delta.
+`iai upload` / dashboard drop accepts prose (`.txt .md .markdown .rst .tex .bib .csv .pdf`), Office and e-book containers (`.docx .pptx .xlsx .rtf .epub`), and source files — `.py .rs .ts .tsx .js .jsx .mjs .sh .bash .zsh .go .java .c .h .cpp .hpp .rb .php .swift .kt .sql .toml .yaml .yml .json .ini .cfg .html .css .scss .xml .proto`, so a codebase or a config tree can go in as readily as a document. Office containers are parsed as zip+XML with no heavyweight dependency; `pypdf` is the only optional parser and loads lazily. Chunking is followed by dedup against the existing store and a recall verification pass that reports the delta.
 
 ### CLI
 
@@ -449,16 +449,20 @@ iai        recall · temporal-recall · search · ask · capture · teach · upl
 iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,pause,resume,stats,configure}
            crypto {init,status,rotate,migrate-to-file,recover-with-prior-key,redact-undecryptable}
            maintenance {compact-hippo,compact-records,idem-dedup,edge-backfill,schema-cleanup,sleep-cycle}
+           entity-backfill · blob-quarantine
            capture-hooks {install,uninstall,status} · cowork · lifecycle · migrate · build-native · audit
 ```
+
+`entity-backfill` derives `entity:` anchor tags from records captured before anchoring shipped, so names in old turns become matchable; `--refresh` recomputes the whole corpus. `blob-quarantine` tombstones machine-notification blobs that drown real records on any cue sharing their vocabulary. Both are dry-run by default and journal every change when applied.
 
 `doctor` runs 27 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
 
 ### Deployment surface
 
 - MCP transport is a Unix domain socket. No TCP listener, no bind address, no auth surface to misconfigure.
-- Store at `~/.iai-mcp/`, AES-256-GCM per record, key at `.key` mode `0600`, rotation and prior-key recovery supported.
+- Store at `~/.iai-mcp/`, AES-256-GCM per record, key at `.crypto.key` mode `0600`, rotation and prior-key recovery supported.
 - Embedder is swappable: `IAI_MCP_EMBED_PROVIDER=http` disables the native BGE model entirely (not constructed, not downloaded) and routes to a loopback endpoint — the path to other languages without adding a Python ML stack. Protocol in [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
+- The store records which embedder produced its vectors — model id, revision, pooling, dimension, text-prefix setting — and refuses to open under a different one. Two 384-dimension models pass a dimension check and still write vectors that read as noise against each other, which is a silently dead semantic lane. If the daemon refuses to start with `refusing to mix vector generations`, the service environment changed the embedder out from under the store: fix the environment, or run `iai-mcp migrate --reembed-from-text` to move the store to the new model.
 - Recall concurrency is bounded (`IAI_MCP_RECALL_CONCURRENCY`, default `2`); overflow returns `_degraded: recall_busy` rather than queueing unboundedly.
 - Dashboard ships as a local web UI and as a Tauri desktop build (`desktop/`, macOS and Linux).
 - macOS and Linux supported, Windows in beta. MIT, no telemetry, no network calls outside the model call your assistant was already making.
@@ -598,6 +602,7 @@ What it checks:
 | v | native Rust embedder | The Rust embedder is built and produces vectors |
 | w | no permanent-failed captures | No capture is stuck after exhausting its retries |
 | x | timestamps not collapsed | Record timestamps span a real range, not all-identical |
+| y | RSS 24h plateau | Resident memory has settled rather than climbing across the last day |
 | z | AVX2 CPU support | CPU supports the instructions the native libs need |
 | + | update available | A newer release is on PyPI (checked once a day, silently skipped offline) |
 

@@ -15,14 +15,14 @@ from uuid import UUID
 import numpy as np
 
 from iai_mcp.community import CommunityAssignment
-from iai_mcp.embed import Embedder, embed_query
+from iai_mcp.embed import Embedder, _valid_cue_vec, embed_query
 from iai_mcp.events import TELEMETRY_EMBED_NATIVE_FAILURE, write_event
 from iai_mcp.exceptions import (
     NativeError,
 )
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
-from iai_mcp.types import MemoryHit, RecallResponse
+from iai_mcp.types import EMBED_DIM, MemoryHit, RecallResponse
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +39,24 @@ class SimpleRecordView:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    stability: float = 0.5
     profile_modulation_gain: dict = field(default_factory=dict)
     structure_hv: bytes = b""
     provenance: list = field(default_factory=list)
     tags: list = field(default_factory=list)
     language: str = "en"
+
+
+def _payload_created_at(raw: object) -> datetime:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = datetime.fromisoformat(raw)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
 
 
 def _read_record_payload(graph, rid: UUID, store: MemoryStore):
@@ -67,6 +80,9 @@ def _read_record_payload(graph, rid: UUID, store: MemoryStore):
                 tier=str(node.get("tier", "episodic")),
                 tags=list(node.get("tags") or []),
                 language=str(node.get("language", "en") or "en"),
+                aaak_index=str(node.get("aaak_index", "") or ""),
+                created_at=_payload_created_at(node.get("created_at")),
+                stability=float(node.get("stability", 0.5) or 0.5),
             )
     try:
         return store.get(rid)
@@ -301,10 +317,32 @@ def _aaak_overlap(cue_text: str, aaak_index: str) -> float:
         key, sep, value = tag.partition(":")
         if sep and key.lower() in _AAAK_CONTENT_TAG_KEYS and value.strip():
             meaningful.add(value.lower().strip())
-    cue_set = set(cue_text.lower().replace("/", " ").split())
+    # Cue tokens get the same edge-punctuation strip as anchors do at
+    # extraction — "zephyrbot?" must match the anchor "zephyrbot".
+    cue_set = {
+        tok
+        for raw in cue_text.lower().replace("/", " ").split()
+        if (tok := raw.strip(" \t\r\n.,;:!?()[]{}\"'«»"))
+    }
     if not cue_set or not meaningful:
         return 0.0
-    return len(cue_set & meaningful) / len(cue_set | meaningful)
+    # Cue-normalized containment: a record with many anchors must not be
+    # penalized for having them — only the cue's coverage matters. A cue
+    # token also matches an anchor when one is a prefix of the other with
+    # at most 3 trailing characters of difference and a stem of at least
+    # 5 — inflected forms of the same name (Russian case endings, English
+    # plurals) must not defeat an exact-name lane.
+    matched = 0
+    for tok in cue_set:
+        if tok in meaningful:
+            matched += 1
+            continue
+        for anchor in meaningful:
+            short, long_ = (tok, anchor) if len(tok) <= len(anchor) else (anchor, tok)
+            if len(short) >= 5 and len(long_) - len(short) <= 3 and long_.startswith(short):
+                matched += 1
+                break
+    return matched / len(cue_set)
 
 
 def _has_doc_tag(rec) -> bool:
@@ -820,6 +858,7 @@ def _recall_core(
     cue_intent: str | None = None,
     contradicts_outgoing: dict[str, list[str]] | None = None,
     trace_mark: Callable[[str], None] | None = None,
+    cue_embedding: "list[float] | None" = None,
 ) -> _RecallCoreResult:
     profile_state = profile_state or {}
 
@@ -887,20 +926,29 @@ def _recall_core(
                 budget_used=budget_used_l0,
             )
 
-    try:
-        cue_emb = embed_query(embedder, cue)
-    except Exception as exc:
-        write_event(
-            store,
-            TELEMETRY_EMBED_NATIVE_FAILURE,
-            {
-                "op_type": "recall_cue",
-                "backend": "rust",
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            },
-        )
-        raise NativeError(f"recall cue encode failed: {exc}") from exc
+    # Tool-schema contract: the cue is embedded server-side UNLESS the caller
+    # supplied a usable cue_embedding (validated: finite, per-store dim,
+    # nonzero norm -- see _valid_cue_vec).
+    cue_emb = _valid_cue_vec(
+        cue_embedding, getattr(store, "embed_dim", None) or EMBED_DIM,
+    )
+    if cue_emb is None:
+        if cue_embedding is not None:
+            logger.debug("cue_embedding_rejected: server-side embed used")
+        try:
+            cue_emb = embed_query(embedder, cue)
+        except Exception as exc:
+            write_event(
+                store,
+                TELEMETRY_EMBED_NATIVE_FAILURE,
+                {
+                    "op_type": "recall_cue",
+                    "backend": "rust",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise NativeError(f"recall cue encode failed: {exc}") from exc
 
     records_cache: dict[UUID, "object"] = {}
     try:
@@ -916,6 +964,9 @@ def _recall_core(
                 tier=str(node.get("tier", "episodic")),
                 tags=list(node.get("tags") or []),
                 language=str(node.get("language", "en") or "en"),
+                aaak_index=str(node.get("aaak_index", "") or ""),
+                created_at=_payload_created_at(node.get("created_at")),
+                stability=float(node.get("stability", 0.5) or 0.5),
             )
     except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
         logger.debug("records_cache_graph_build_failed: %s", exc)
@@ -1321,7 +1372,7 @@ def _recall_core(
         trace_mark("cleanup_attractor")
 
     flat_cosine_pool = False
-    if reachable_indices.size >= 3 and effective_w_degree > 0.0:
+    if reachable_indices.size >= 3:
         # Spread is measured over the competing HEAD of the pool: a single
         # distant graph- or lexical-reached candidate must not mask that the
         # slot-winning candidates are cosine-indistinguishable.
@@ -1331,7 +1382,13 @@ def _recall_core(
         _spread_min = _env_weight("IAI_MCP_COS_SPREAD_MIN", COS_SPREAD_MIN)
         _damp = _flat_cosine_damp(_cos_spread, _spread_min)
         if _damp < 1.0:
+            # Degree, community bias and the knowledge boost are dampened
+            # together: with the head flat, any of them would decide the
+            # ranking exactly the way degree used to. The age penalty
+            # survives deliberately — recency is the honest tie-breaker
+            # when similarity carries no signal.
             effective_w_degree *= _damp
+            mode_bias *= _damp
             flat_cosine_pool = True
 
     # Each entry carries the served reason string, assembled DURING scoring
@@ -1339,6 +1396,8 @@ def _recall_core(
     # — the printed arithmetic must reconcile with the served number.
     scored: list[tuple[float, UUID, str]] = []
     tier_boost = _tier_knowledge_boost()
+    if flat_cosine_pool:
+        tier_boost = 1.0 + (tier_boost - 1.0) * _damp
     w_spread_act = _env_weight("IAI_MCP_W_SPREAD_ACT", W_SPREAD_ACT)
     spread_act_decay = _env_weight("IAI_MCP_SPREAD_ACT_DECAY", SPREAD_ACT_DECAY)
     temporal_boost = _env_weight("IAI_MCP_TEMPORAL_BOOST", TEMPORAL_MATCH_BOOST)
@@ -1589,9 +1648,9 @@ def _recall_core(
             "source_ids": [],
             "text": (
                 "candidate cosines are near-identical for this cue — the "
-                "ranking carries no similarity signal; the degree term was "
-                "dampened and this ordering should be treated as low "
-                "confidence"
+                "ranking carries no similarity signal; degree, community "
+                "bias and the knowledge boost were dampened and this "
+                "ordering should be treated as low confidence"
             ),
         })
     return _RecallCoreResult(
@@ -1795,6 +1854,7 @@ def recall_for_response(
     arousal_state: dict | None = None,
     tv_maps: "tuple[dict, dict] | None" = None,
     trace_mark: Callable[[str], None] | None = None,
+    cue_embedding: "list[float] | None" = None,
 ) -> RecallResponse:
     import time as _time
     global _last_recall_latency_ms
@@ -1839,6 +1899,7 @@ def recall_for_response(
         cue_intent=_cue_intent,
         contradicts_outgoing=_tv_outgoing,
         trace_mark=trace_mark,
+        cue_embedding=cue_embedding,
     )
 
     # store is passed for the bounded hit-timestamp fill: the maps carry only
@@ -2098,9 +2159,13 @@ def merge_authority_hits(
                 h.adjacent_suggestions = list(displaced.adjacent_suggestions)
             if displaced.score > h.score:
                 # The authority hit keeps its identity but serves the higher
-                # pipeline score — the reason must carry both provenances.
+                # pipeline score — the reason must carry both provenances,
+                # and the downweight state must travel WITH the score or a
+                # later stale pass halves an already-halved number.
                 h.score = displaced.score
                 h.reason += f" | score from pipeline rank: {displaced.reason}"
+                if getattr(displaced, "_stale_downweighted", False):
+                    h._stale_downweighted = True
     head_ids = {h.record_id for h in authority_hits}
     tail = [h for h in pipeline_hits if h.record_id not in head_ids]
     union = list(authority_hits) + tail
@@ -2133,6 +2198,7 @@ def recall_for_benchmark(
     mode: str = "concept",
     *,
     knobs_applied: dict | None = None,
+    cue_embedding: "list[float] | None" = None,
 ) -> RecallResponse:
     from iai_mcp.cue_router import _classify_cue
     from iai_mcp.retrieve import (
@@ -2153,6 +2219,7 @@ def recall_for_benchmark(
         knobs_applied=knobs_applied,
         cue_intent=_cue_intent,
         contradicts_outgoing=_tv_outgoing,
+        cue_embedding=cue_embedding,
     )
     if (
         len(core.scored_hits) == 1

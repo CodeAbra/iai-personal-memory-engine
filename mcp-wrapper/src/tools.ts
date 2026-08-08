@@ -1,6 +1,9 @@
 
 import type { PythonCoreBridge } from "./bridge.js";
 
+// Wire contract with the daemon socket (iai_mcp.errors.ERR_EMBEDDER_REFUSAL).
+export const ERR_EMBEDDER_REFUSAL = -32011;
+
 import { spawn, type SpawnOptions } from "node:child_process";
 
 export const BANK_FALLBACK_LIMIT = 20;
@@ -101,6 +104,10 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
         hints: { type: "array", items: { type: "object" } },
         cue_mode: { type: "string", enum: ["verbatim", "concept"] },
         patterns_observed: { type: "array", items: { type: "object" } },
+        ann_path_used: { type: "boolean" },
+        exact_authority_used: { type: "boolean" },
+        overnight_digest: { type: ["object", "null"] },
+        pask_teachback: { type: ["object", "null"] },
       },
     },
     annotations: {
@@ -376,6 +383,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
       type: "object",
       properties: {
         schemas: { type: "array", items: { type: "object" } },
+        total: { type: "integer" },
       },
     },
     annotations: {
@@ -776,7 +784,7 @@ export async function runDirectRecall(
         : 10,
   );
   const spawnArgs: string[] = ["recall", "--json", "--limit", limit, cue];
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
     const proc = spawnFn(cli, spawnArgs, opts);
     let stdout = "";
@@ -796,6 +804,21 @@ export async function runDirectRecall(
     proc.on("close", (code: number | null) => {
       clearTimeout(t);
       if (code !== 0) {
+        // The CLI child reports a refusal as a JSON error document on a
+        // non-zero exit — silently discarding it would relabel a store
+        // misconfiguration as an empty degraded rail. Keyed on the typed
+        // error_code, never the exit status (argparse also exits 2).
+        try {
+          const doc = JSON.parse(stdout) as Record<string, unknown>;
+          if (doc["error_code"] === ERR_EMBEDDER_REFUSAL) {
+            const refusal = new Error(
+              String(doc["error"] ?? "embedder refused"),
+            ) as Error & { code?: number };
+            refusal.code = ERR_EMBEDDER_REFUSAL;
+            reject(refusal);
+            return;
+          }
+        } catch {  }
         resolve(null);
         return;
       }
@@ -1021,6 +1044,13 @@ export async function invokeTool(
       try {
         return await bridge.call("memory_recall", args);
       } catch (err) {
+        // An embedder refusal (typed wire code from the daemon socket) is
+        // store misconfiguration, not availability — the degraded rails
+        // cannot answer it either, so relabeling it as an unreachable
+        // daemon hides the repair the operator must run.
+        if ((err as { code?: number })?.code === ERR_EMBEDDER_REFUSAL) {
+          throw err;
+        }
         const direct = await runDirectRecall(args, spawnFn);
         if (direct !== null) {
           return direct;
@@ -1101,6 +1131,9 @@ export async function invokeTool(
       try {
         return await bridge.call("memory_temporal_recall", args);
       } catch (err) {
+        if ((err as { code?: number })?.code === ERR_EMBEDDER_REFUSAL) {
+          throw err;
+        }
         const direct = await runDirectTemporal(args, spawnFn);
         if (direct !== null) {
           return direct;

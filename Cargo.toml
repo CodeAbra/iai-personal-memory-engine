@@ -13,6 +13,7 @@ members = [
 
 [workspace.package]
 edition    = "2021"
+authors    = ["Areg Noya"]
 license    = "MIT OR Apache-2.0"
 repository = "https://github.com/CodeAbra/iai-personal-memory-engine"
 

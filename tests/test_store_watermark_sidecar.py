@@ -142,7 +142,7 @@ def test_drain_stashes_anchor_and_wake_refreshes_the_pack(tmp_path):
         assert foresight.refresh_from_anchor(store, embedder_for_store(store))
         assert getattr(store, "_foresight_anchor", None) is None, "anchor is consumed"
 
-        pack = foresight.pack_path(store)
+        pack = foresight.pack_path(store, "live-sess")
         assert pack.is_file(), "the wake pass must refresh the next-turn pack"
         assert "hippocampus consolidates" in pack.read_text(encoding="utf-8")
     finally:

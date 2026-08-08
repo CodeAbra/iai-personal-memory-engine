@@ -91,6 +91,39 @@ def test_save_creates_json_file(store):
     assert "rich_club" in data
     assert "key" in data
 
+def test_rank_columns_survive_cache_round_trip(store):
+    # Every rank column the payload carries must survive save->load with a
+    # NON-EMPTY value: the serializer whitelists keys, and a key missing
+    # there silently kills the matching rank term (aaak overlap, age
+    # decay, stability) for every cache-served recall until a rebuild.
+    assignment = _make_assignment()
+    nid = uuid4()
+    payload = {
+        str(nid): {
+            "embedding": [0.1] * 4,
+            "surface": "notes on zephyrbot rollout",
+            "centrality": 0.3,
+            "tier": "episodic",
+            "pinned": False,
+            "tags": ["capture", "entity:zephyrbot"],
+            "language": "en",
+            "aaak_index": "W:E/R:abc12345/E:zephyrbot/T:capture",
+            "created_at": "2026-07-01T00:00:00+00:00",
+            "stability": 0.83,
+        }
+    }
+    assert runtime_graph_cache.save(
+        store, assignment, [nid], node_payload=payload
+    )
+    loaded = runtime_graph_cache.try_load(store)
+    assert loaded is not None
+    node_payload = loaded[2]
+    got = node_payload[str(nid)]
+    assert got["aaak_index"] == "W:E/R:abc12345/E:zephyrbot/T:capture"
+    assert got["created_at"] == "2026-07-01T00:00:00+00:00"
+    assert got["stability"] == pytest.approx(0.83)
+
+
 def test_try_load_round_trip_on_unchanged_store(store):
     assignment = _make_assignment()
     rich_club = [uuid4() for _ in range(3)]

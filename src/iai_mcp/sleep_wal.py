@@ -97,7 +97,7 @@ class SleepWAL:
             return []
         entries: dict[str, WALEntry] = {}
         try:
-            with open(self.path) as f:
+            with open(self.path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -119,7 +119,7 @@ class SleepWAL:
         kept: list[str] = []
         removed = 0
         try:
-            with open(self.path) as f:
+            with open(self.path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -134,7 +134,7 @@ class SleepWAL:
                         continue
                     kept.append(line)
             if removed > 0:
-                self.path.write_text("\n".join(kept) + "\n" if kept else "")
+                self.path.write_text("\n".join(kept) + "\n" if kept else "", encoding="utf-8")
         except OSError:
             pass
         return removed
@@ -142,7 +142,7 @@ class SleepWAL:
     def _append(self, entry: WALEntry) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "a") as f:
+            with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry.to_dict()) + "\n")
         except OSError as exc:
             logger.warning("WAL write failed: %s", exc)

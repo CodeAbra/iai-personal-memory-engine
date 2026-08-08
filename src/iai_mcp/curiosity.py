@@ -184,9 +184,9 @@ def _fresh_topic_scan(
     so a failed scan means no question, never a stale one.
     """
     try:
-        from iai_mcp.embed import embedder_for_store
+        from iai_mcp.embed import embed_query, embedder_for_store
 
-        vec = list(embedder_for_store(store).embed(cue))
+        vec = list(embed_query(embedder_for_store(store), cue))
         pairs = store.exact_top_k(vec, k=10)
         ids = [rid for rid, _ in pairs[:5]]
         if not ids:

@@ -26,6 +26,16 @@ def _reset_topology_cache():
     with core._topology_state_lock:
         core._topology_cache = None
         core._topology_cache_at = 0.0
+        core._topology_cache_key = None
+
+
+def _warm_topology_cache_for(store, snapshot) -> None:
+    from iai_mcp import core
+
+    with core._topology_state_lock:
+        core._topology_cache = snapshot
+        core._topology_cache_at = time.monotonic()
+        core._topology_cache_key = core._topology_store_key(store)
 
 
 def _fake_snapshot(n: int = 42) -> dict:
@@ -56,12 +66,10 @@ def test_status_light_serves_cached_regime():
     from iai_mcp import core
 
     _reset_topology_cache()
-    with core._topology_state_lock:
-        core._topology_cache = _fake_snapshot()
-        core._topology_cache_at = time.monotonic()
-
     store = MagicMock()
     store.active_records_count.return_value = 42
+    _warm_topology_cache_for(store, _fake_snapshot())
+
     result = core.dispatch(store, "status_light", {})
     assert result["regime"] == "healthy"
     assert result["sigma"] == 1.3
@@ -76,9 +84,7 @@ def test_topology_serves_fresh_cache_without_recompute():
     store = MagicMock()
     store.active_records_count.return_value = 42
 
-    with core._topology_state_lock:
-        core._topology_cache = _fake_snapshot()
-        core._topology_cache_at = time.monotonic()
+    _warm_topology_cache_for(store, _fake_snapshot())
 
     with patch.object(core.retrieve, "build_runtime_graph") as build:
         result = core.dispatch(store, "topology", {})
@@ -229,3 +235,19 @@ def test_apsl_helper_routes_by_component_size():
             indptr_large, indices, n_large, seed=1
         )
     assert calls == ["exact"]
+
+
+def test_status_light_never_serves_foreign_store_cache():
+    from iai_mcp import core
+
+    _reset_topology_cache()
+    owner = MagicMock()
+    owner.active_records_count.return_value = 42
+    _warm_topology_cache_for(owner, _fake_snapshot())
+
+    other = MagicMock()
+    other.active_records_count.return_value = 7
+    result = core.dispatch(other, "status_light", {})
+    assert result["topology_cached"] is False
+    assert result["regime"] == "unknown"
+    _reset_topology_cache()

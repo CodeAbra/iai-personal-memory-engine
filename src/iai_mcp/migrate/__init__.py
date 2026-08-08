@@ -25,7 +25,7 @@ STAGING_TABLE = "records_v_new"
 OLD_TABLE_PREFIX = "records_old_"
 PROGRESS_FILE = "migration_progress.json"
 CRYPTO_RECOVER_STAGING = "records_crypto_recover_stage"
-REDACT_UNDECRYPTABLE_MARKER = "<REDACTED: pre-2026-04-30 key rotation>"
+REDACT_UNDECRYPTABLE_MARKER = "<REDACTED: undecryptable ciphertext>"
 
 
 def _db_table_names_set(db) -> set[str]:
@@ -139,6 +139,7 @@ from iai_mcp.migrate._crypto_mig import (  # noqa: E402
     migrate_encryption_v2_to_v3,
     migrate_crypto_recover_prior_key,
     migrate_redact_undecryptable_records,
+    migrate_redact_undecryptable_events,
     _encrypt_or_passthrough,
     _decrypt_field_try_keys,
     _memory_record_from_raw_row_multikey,
@@ -187,6 +188,7 @@ __all__ = [
     "migrate_encryption_v2_to_v3",
     "migrate_crypto_recover_prior_key",
     "migrate_redact_undecryptable_records",
+    "migrate_redact_undecryptable_events",
     "migrate_hd_vector_to_structure_hv_v3_to_v4",
     "migrate_codec_metadata_v4_to_v5",
     "cleanup_idem_duplicates",

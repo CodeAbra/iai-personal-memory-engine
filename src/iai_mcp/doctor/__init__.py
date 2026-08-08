@@ -89,6 +89,24 @@ async def _socket_status_probe(socket_path: Path, timeout: float) -> dict | None
 def check_f_hippo_readable() -> CheckResult:
     from iai_mcp.hippo import HippoLockHeldError
 
+    from iai_mcp.doctor._storage_checks import _store_file_present
+
+    if not _store_file_present():
+        try:
+            from iai_mcp import store as _store_mod
+
+            _root = str(
+                os.environ.get("IAI_MCP_STORE") or _store_mod.DEFAULT_STORAGE_PATH
+            )
+        except Exception:  # noqa: BLE001 -- naming the path is best-effort
+            _root = "the configured store root"
+        return CheckResult(
+            "(f) hippo storage readable",
+            True,
+            f"no store yet at {_root} — nothing to read",
+            status="WARN",
+        )
+
     _s = None
     try:
         from iai_mcp.store import MemoryStore
@@ -328,6 +346,7 @@ def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
         check_t_hippo_compacted_freshness(),
         check_u_recall_centrality_regression(),
         check_v_native_embedder(),
+        check_ii_embed_identity(),
         check_w_no_permanent_failed(),
         check_x_no_collapsed_timestamps(),
         check_y_rss_24h_plateau(),
@@ -906,9 +925,18 @@ def _stamp_auto_run() -> None:
 def _execute_action(action: RepairAction) -> tuple[bool, str, int]:
     ok, msg, ms = action.execute()
     try:
+        from iai_mcp.doctor._storage_checks import _store_file_present
         from iai_mcp.events import write_event
         from iai_mcp.store import MemoryStore
 
+        if not _store_file_present():
+            # The audit trail is best-effort; minting a store to hold it
+            # is worse than skipping it.
+            logger.debug(
+                "doctor heal audit skipped: no store yet (action=%s)",
+                action.label,
+            )
+            return ok, msg, ms
         with MemoryStore() as _audit_store:
             write_event(
                 _audit_store,
@@ -1053,6 +1081,7 @@ from iai_mcp.doctor._lifecycle_checks import (
 from iai_mcp.doctor._storage_checks import (
     check_h_crypto_file_state,
     check_i_hippo_db_size,
+    check_ii_embed_identity,
     check_p_anthropic_sdk_absent,
     check_r_hippo_hnsw_loadable,
     check_s_hippo_schema_version,

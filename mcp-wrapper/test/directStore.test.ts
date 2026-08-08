@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import { EventEmitter } from "node:events";
 
-import { invokeTool, handleToolCall, runDirectRecency } from "../src/tools.js";
+import { invokeTool, handleToolCall, runDirectRecency, runDirectRecall, ERR_EMBEDDER_REFUSAL } from "../src/tools.js";
 import type { PythonCoreBridge } from "../src/bridge.js";
 
 
@@ -450,5 +450,101 @@ describe("index.ts buildServer CallToolRequest memory_recall — start rejects �
       } catch { return undefined; }
     })();
     assert.equal(source, "direct-store", "_source must be 'direct-store' in the response payload");
+  });
+});
+
+describe("invokeTool memory_recall embedder refusal → surfaced, never relabeled", () => {
+  it("re-throws a re-embedding-migration refusal without spawning any fallback", async () => {
+    const { spawnFn, calls } = makeMockSpawnFn(DIRECT_RECALL_PAYLOAD);
+
+    const refusal = new Error(
+      "store vector space refused",
+    ) as Error & { code?: number };
+    refusal.code = ERR_EMBEDDER_REFUSAL;
+    const mockBridge = {
+      call: async () => { throw refusal; },
+    } as unknown as PythonCoreBridge;
+
+    await assert.rejects(
+      invokeTool(mockBridge, "memory_recall", { cue: "probe" }, spawnFn as any),
+      /vector space refused/,
+    );
+    assert.equal(calls.length, 0, "no direct/bank fallback may run on a refusal");
+  });
+});
+
+describe("invokeTool memory_temporal_recall embedder refusal → surfaced", () => {
+  it("re-throws the wire code without spawning the temporal fallback", async () => {
+    const { spawnFn, calls } = makeMockSpawnFn(DIRECT_RECALL_PAYLOAD);
+    const refusal = new Error("refused") as Error & { code?: number };
+    refusal.code = ERR_EMBEDDER_REFUSAL;
+    const mockBridge = {
+      call: async () => { throw refusal; },
+    } as unknown as PythonCoreBridge;
+
+    await assert.rejects(
+      invokeTool(mockBridge, "memory_temporal_recall", { cue: "probe" }, spawnFn as any),
+      /refused/,
+    );
+    assert.equal(calls.length, 0, "no temporal fallback may run on a refusal");
+  });
+});
+
+describe("runDirectRecall child refusal channel", () => {
+  it("rejects with the wire code when the CLI child exits non-zero with an error_code doc", async () => {
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const spawnFn = ((cmd: string, args: ReadonlyArray<string>) => {
+      calls.push({ cmd, args: [...args] });
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter & { setEncoding: (enc: string) => void };
+        stderr: EventEmitter;
+        kill: () => void;
+      };
+      const stdout = new EventEmitter() as EventEmitter & {
+        setEncoding: (enc: string) => void;
+      };
+      stdout.setEncoding = () => {};
+      proc.stdout = stdout;
+      proc.stderr = new EventEmitter();
+      proc.kill = () => {};
+      setImmediate(() => {
+        stdout.emit("data", JSON.stringify({
+          error: "embedder refused: vector space mismatch",
+          error_code: ERR_EMBEDDER_REFUSAL,
+          hits: [],
+          count: 0,
+        }));
+        proc.emit("close", 2);
+      });
+      return proc;
+    }) as any;
+
+    await assert.rejects(
+      runDirectRecall({ cue: "probe" }, spawnFn as any),
+      (err: Error & { code?: number }) =>
+        err.code === ERR_EMBEDDER_REFUSAL && /embedder refused/.test(err.message),
+    );
+  });
+
+  it("resolves null on a non-zero exit WITHOUT an error_code doc (argparse exits)", async () => {
+    const spawnFn = ((cmd: string, args: ReadonlyArray<string>) => {
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter & { setEncoding: (enc: string) => void };
+        stderr: EventEmitter;
+        kill: () => void;
+      };
+      const stdout = new EventEmitter() as EventEmitter & {
+        setEncoding: (enc: string) => void;
+      };
+      stdout.setEncoding = () => {};
+      proc.stdout = stdout;
+      proc.stderr = new EventEmitter();
+      proc.kill = () => {};
+      setImmediate(() => { proc.emit("close", 2); });
+      return proc;
+    }) as any;
+
+    const result = await runDirectRecall({ cue: "probe" }, spawnFn as any);
+    assert.equal(result, null);
   });
 });

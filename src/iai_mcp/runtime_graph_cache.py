@@ -1526,6 +1526,12 @@ def save(
                 "pinned": bool(v.get("pinned", False)),
                 "tags": [str(t) for t in raw_tags if t is not None],
                 "language": str(v.get("language", "en") or "en"),
+                # Rank columns: dropping any of these silently kills the
+                # matching rank term for every cache-served recall (aaak
+                # overlap, age decay, stability) until the next rebuild.
+                "aaak_index": str(v.get("aaak_index", "") or ""),
+                "created_at": str(v.get("created_at", "") or ""),
+                "stability": float(v.get("stability", 0.5) or 0.5),
             }
             centrality_map[str(k)] = node_centrality
         payload_record_count = len(encoded_node_payload)

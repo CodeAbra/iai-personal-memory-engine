@@ -5,6 +5,7 @@ import concurrent.futures
 import faulthandler
 import json
 import logging
+import math
 import os
 
 # resource exists only on POSIX; used solely for the fd-limit raise, which is
@@ -13,6 +14,7 @@ try:
     import resource
 except ImportError:  # Windows
     resource = None  # type: ignore[assignment]
+import shutil
 import signal
 import sys
 import threading
@@ -41,9 +43,11 @@ from iai_mcp.quiet_window import (
     BUCKET_COUNT,
     BUCKET_MINUTES,
     effective_consolidation_window,
-    learn_quiet_window,
+    learn_quiet_window_from_presence,
+    prune_presence_masks,
     should_bootstrap_trigger,
     should_relearn,
+    stamp_presence_mask,
     within_window,
 )
 from iai_mcp.hippo import AccessMode
@@ -52,7 +56,6 @@ from iai_mcp.native_guard import _require_native
 from iai_mcp.sleep_wal import SleepWAL
 from iai_mcp.socket_server import SocketServer
 from iai_mcp.store import MemoryStore
-from iai_mcp.tz import load_user_tz
 
 
 STATE_WAKE: str = "WAKE"
@@ -290,6 +293,181 @@ def _sleep_cooldown_active(
     return (now - last_clean_cycle_mono) < _sleep_cycle_cooldown_sec()
 
 
+#: Heartbeat-idle age past which a tick may consider SLEEP entry.
+SLEEP_HEARTBEAT_IDLE_SEC: float = float(
+    os.environ.get("LIFECYCLE_SLEEP_HEARTBEAT_IDLE_SEC", "1800")
+)
+
+#: Minutes of continuous OS-level input idle (HID/logind) past which a
+#: starved daemon may consolidate outside the window; <=0 disables.
+DEEP_IDLE_OVERRIDE_ENV = "IAI_MCP_DEEP_IDLE_OVERRIDE_MIN"
+
+#: The override arms only after this long without a clean sleep cycle —
+#: it is a starvation backstop, not an everyday entry path.
+DEEP_IDLE_STARVATION_SEC = 48 * 3600.0
+
+
+def _deep_idle_override(
+    os_idle_sec: "float | None", last_clean_cycle_wall: float
+) -> bool:
+    # os_idle_sec must be the OS-level input idle: heartbeat idle only says
+    # no Claude session is running, which is true on most working machines
+    # most of the day and must never put the pipeline on a machine in use.
+    if os_idle_sec is None:
+        return False
+    raw = os.environ.get(DEEP_IDLE_OVERRIDE_ENV, "")
+    try:
+        minutes = float(raw) if raw else 90.0
+    except (TypeError, ValueError):
+        minutes = 90.0
+    if not math.isfinite(minutes):
+        minutes = 90.0
+    if minutes <= 0:
+        return False
+    # Unknown last-cycle time reads as NOT starved: the override must never
+    # fire on ignorance, only on a demonstrated 48h gap.
+    if last_clean_cycle_wall <= 0.0:
+        return False
+    if (time.time() - last_clean_cycle_wall) < DEEP_IDLE_STARVATION_SEC:
+        return False
+    return float(os_idle_sec) >= minutes * 60.0
+
+
+#: Below this idle age a tick stamps the current half-hour bucket as busy.
+PRESENCE_BUSY_IDLE_SEC = 300.0
+
+
+def _effective_os_idle(
+    os_idle_raw: "int | float | None", os_idle_source: "str | None"
+) -> "float | None":
+    # Tri-state: a reachable source that reports "not idle" (logind
+    # IdleHint=false) means the user is active NOW — idle 0, never a
+    # fallback to the wrapper heartbeat. Only a truly absent source
+    # (both None) may fall back.
+    if os_idle_raw is not None:
+        return float(os_idle_raw)
+    if os_idle_source is not None:
+        return 0.0
+    return None
+
+
+def _stamp_activity_presence(
+    state: dict,
+    idle_elapsed_sec: float,
+    *,
+    os_idle_sec: "float | None",
+) -> bool:
+    """Stamp the current half-hour bucket for the quiet-window learner.
+
+    Busy is judged by OS-level input idle (HID/logind) when the source is
+    reachable; the wrapper-heartbeat idle is only the fallback. Returns
+    True when the masks changed (bucket newly busy or old days pruned) —
+    the caller persists only then, at most ~48 writes a day plus the
+    daily prune.
+    """
+    masks = state.get("activity_presence")
+    if not isinstance(masks, dict):
+        masks = {}
+        state["activity_presence"] = masks
+    idle = (
+        float(os_idle_sec) if os_idle_sec is not None else float(idle_elapsed_sec)
+    )
+    now_local = datetime.now().astimezone()
+    changed = stamp_presence_mask(
+        masks, now_local, busy=idle < PRESENCE_BUSY_IDLE_SEC
+    )
+    changed = prune_presence_masks(masks, now_local) or changed
+    return changed
+
+
+def _reset_unsourced_quiet_window(state: dict) -> bool:
+    """Drop a stored window that the presence learner did not produce.
+
+    The night default applies until the learner has enough observed days.
+    Returns True when the window was reset.
+    """
+    if state.get("quiet_window") is None:
+        return False
+    if state.get("quiet_window_source") == "presence":
+        return False
+    state["quiet_window"] = None
+    state["quiet_window_source"] = None
+    return True
+
+
+def _may_enter_sleep(
+    idle_elapsed_sec: float,
+    sleep_eligible: bool,
+    daemon_state: "dict | None",
+    *,
+    os_idle_sec: "float | None",
+    last_clean_cycle_wall: float,
+) -> bool:
+    # Night-only consolidation: idle alone never enters SLEEP outside the
+    # effective window, except under the deep-idle starvation override.
+    return (
+        idle_elapsed_sec >= SLEEP_HEARTBEAT_IDLE_SEC
+        and sleep_eligible
+        and (
+            _in_consolidation_window(daemon_state)
+            or _deep_idle_override(os_idle_sec, last_clean_cycle_wall)
+        )
+    )
+
+
+def _must_leave_sleep(
+    daemon_state: "dict | None",
+    *,
+    os_idle_sec: "float | None",
+    last_clean_cycle_wall: float,
+) -> bool:
+    # Symmetric with entry: a sleep entered under the override must not be
+    # kicked awake by the same window the override outranked.
+    return not _in_consolidation_window(daemon_state) and not _deep_idle_override(
+        os_idle_sec, last_clean_cycle_wall
+    )
+
+
+#: Label -> (LifecycleEvent name, dispatch reason, extra kwargs). One table
+#: for the tick's idle transitions so the decision function's outputs and
+#: the dispatched events cannot drift apart unpinned.
+TRANSITION_DISPATCH: "dict[str, tuple[str, str, dict]]" = {
+    "wake_refresh": ("HEARTBEAT_REFRESH", "heartbeat_refresh_active_wrapper", {}),
+    "sleep": ("IDLE_30MIN", "sleep_on_idle_30min", {"sleep_eligible": True}),
+    "drowsy": ("IDLE_5MIN", "drowsy_on_idle_5min", {}),
+}
+
+
+def _idle_transition_event(
+    scanner_active: bool,
+    idle_elapsed_sec: float,
+    sleep_eligible: bool,
+    daemon_state: "dict | None",
+    *,
+    os_idle_sec: "float | None",
+    last_clean_cycle_wall: float,
+    drowsy_after_sec: float,
+) -> "str | None":
+    """The tick's idle-transition decision as one pure function.
+
+    The tick maps the returned label to an FSM dispatch; keeping the whole
+    branch here lets the truth table be tested without assembling a tick.
+    """
+    if scanner_active:
+        return "wake_refresh"
+    if _may_enter_sleep(
+        idle_elapsed_sec,
+        sleep_eligible,
+        daemon_state,
+        os_idle_sec=os_idle_sec,
+        last_clean_cycle_wall=last_clean_cycle_wall,
+    ):
+        return "sleep"
+    if idle_elapsed_sec >= drowsy_after_sec:
+        return "drowsy"
+    return None
+
+
 def _in_consolidation_window(daemon_state: "dict | None") -> bool:
     """May consolidation run right now?
 
@@ -326,7 +504,10 @@ def _in_consolidation_window(daemon_state: "dict | None") -> bool:
                         return True
                 except (ValueError, TypeError):
                     pass
-        window = effective_consolidation_window(daemon_state.get("quiet_window"))
+        window = effective_consolidation_window(
+            daemon_state.get("quiet_window"),
+            manual=daemon_state.get("quiet_window_manual_override"),
+        )
         local = datetime.now().astimezone()
         return within_window(window, local, local.tzinfo)
     except Exception:  # noqa: BLE001 -- gate errors must never stop consolidation
@@ -417,6 +598,9 @@ def _run_bounded_capture_queue_drain(store, *, write_event_fn) -> None:
                 tier=record.get("tier", "episodic"),
                 session_id=record.get("session_id", "-"),
                 role=record.get("role", "user"),
+                provenance_extra=(
+                    {"cwd": record["cwd"]} if record.get("cwd") else None
+                ),
             )
 
         ingested = queue.ingest_pending(
@@ -870,12 +1054,6 @@ async def _tick_body(
         return
 
     now = datetime.now(timezone.utc)
-    try:
-        tz = load_user_tz()
-    except (OSError, ValueError, KeyError) as exc:
-        log.debug("load_user_tz failed, using UTC: %s", exc)
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo("UTC")
 
     last_learned_raw = state.get("quiet_window_learned_at")
     last_learned_dt: datetime | None = None
@@ -885,15 +1063,21 @@ async def _tick_body(
         except (TypeError, ValueError):
             last_learned_dt = None
     if should_relearn(last_learned_dt, now):
+        # Until the presence masks cover enough observed days, the
+        # learner returns None and the fixed night default applies.
         try:
-            window = await asyncio.to_thread(learn_quiet_window, store, now, tz)
-        except (OSError, ValueError, RuntimeError) as exc:
-            log.debug("learn_quiet_window failed: %s", exc)
+            window = learn_quiet_window_from_presence(
+                state.get("activity_presence")
+            )
+        except (TypeError, ValueError) as exc:
+            log.debug("learn_quiet_window_from_presence failed: %s", exc)
             window = None
         state["quiet_window"] = list(window) if window else None
+        state["quiet_window_source"] = "presence" if window else None
         state["quiet_window_learned_at"] = now.isoformat()
         await asyncio.to_thread(
-            _persist_keys, state, "quiet_window", "quiet_window_learned_at",
+            _persist_keys, state,
+            "quiet_window", "quiet_window_source", "quiet_window_learned_at",
         )
 
 
@@ -1027,11 +1211,20 @@ def _install_warm_embedder_override(store) -> tuple[object, bool]:
     orig_efs = _embed_mod.embedder_for_store
     try:
         warm = orig_efs(store)
-        def _held_embedder_for_store(_store):
+        def _held_embedder_for_store(_store, **_kwargs):
+            # The held embedder already passed the identity guard at boot;
+            # kwargs (allow_identity_mismatch) are accepted for signature
+            # parity with the real embedder_for_store.
             return warm
 
         _embed_mod.embedder_for_store = _held_embedder_for_store
         return orig_efs, True
+    except _embed_mod.EmbedIdentityMismatch:
+        # Identity-guard refusal: the store's vectors belong to a different
+        # embedder. Serving would answer every recall with cross-generation
+        # noise while looking healthy — refuse to boot instead. Every other
+        # embed-layer ValueError keeps the prewarm degrade path below.
+        raise
     except Exception as exc:  # noqa: BLE001 -- prewarm/hold failure is non-fatal
         log.warning("embedder prewarm/hold failed: %s", exc, exc_info=True)
         try:
@@ -1052,16 +1245,72 @@ def _restore_embedder_funnel(orig_efs: object, installed: bool) -> None:
         log.debug("embedder funnel restore failed", exc_info=True)
 
 
-def _set_process_title(title: str = "iai lilli (iai_mcp.daemon)") -> None:
+def _set_process_title() -> None:
+    # The store-scoped title is what the stop verb's orphan sweep matches
+    # by equality; setproctitle absence leaves the sweep inert for this
+    # process, never wrong.
     try:
         from setproctitle import setproctitle as _setproctitle
-        _setproctitle(title)
+
+        from iai_mcp.lifecycle_lock import daemon_process_title
+        from iai_mcp.tz import store_root
+
+        _setproctitle(daemon_process_title(store_root()))
     except Exception:  # noqa: BLE001
         pass
 
 
+STDERR_LOG_CAP_ENV = "IAI_MCP_STDERR_LOG_CAP_MB"
+
+
+def _rotate_launchd_stderr(log_path: "Path | None" = None) -> bool:
+    """Cap the append-only service stderr log at boot.
+
+    launchd holds an O_APPEND fd to a fixed path, so rename-rotation would
+    keep future writes going into the renamed file — the only rotation that
+    works is copying the content aside and truncating the original in place.
+    """
+    # The WHOLE body is fail-soft: rotation is a hygiene step and no
+    # failure in it — parsing, path resolution, copy, truncate, or the
+    # notice write — may ever take the boot down.
+    try:
+        import math
+
+        raw = os.environ.get(STDERR_LOG_CAP_ENV, "")
+        try:
+            cap_mb = float(raw) if raw else 5.0
+        except (TypeError, ValueError):
+            cap_mb = 5.0
+        # Guard the PRODUCT, not just the input: a huge finite cap (1e308)
+        # overflows to inf at the multiply and would crash at int().
+        cap_product = cap_mb * 1024 * 1024
+        if not math.isfinite(cap_product) or cap_product <= 0:
+            return False
+        cap_bytes = int(cap_product)
+        if log_path is None:
+            base = os.environ.get("IAI_MCP_STORE")
+            root = Path(base) if base else Path.home() / ".iai-mcp"
+            log_path = root / "logs" / "launchd-stderr.log"
+        if not log_path.exists() or log_path.stat().st_size <= cap_bytes:
+            return False
+        rotated = log_path.parent / (log_path.name + ".1")
+        shutil.copyfile(log_path, rotated)
+        os.truncate(log_path, 0)
+        sys.stderr.write(
+            f"stderr log exceeded {cap_mb:g} MB; rotated to {rotated.name}\n"
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        try:
+            log.debug("stderr log rotation failed: %s", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 async def main() -> int:
     _set_process_title()
+    _rotate_launchd_stderr()
     _require_native()
     _raise_fd_limit()
     # kill -USR2 <pid> dumps every thread's stack to stderr — the sanctioned
@@ -1173,8 +1422,8 @@ async def main() -> int:
         sys.stderr.write(f"daemon already running: {exc}\n")
         return 1
 
-    _orig_efs, _override_installed = _install_warm_embedder_override(store)
-
+    # The warm-embedder override installs AFTER the socket binds (below):
+    # a cold model build must never make a healthy process read as dead.
     try:
         try:
             from iai_mcp.daemon_state import daemon_state_path as _drp_daemon_state_path
@@ -1216,8 +1465,16 @@ async def main() -> int:
             d.setdefault("fsm_state", STATE_WAKE)
             d["daemon_started_at"] = datetime.now(timezone.utc).isoformat()
             d["daemon_pid"] = os.getpid()
+            if _reset_unsourced_quiet_window(d):
+                log.info(
+                    "quiet window reset to the night default: the stored one "
+                    "was not learned from presence data",
+                )
 
         state = await asyncio.to_thread(update_state, _boot_stamp)
+        # Served by the status handler while the embedder is still building;
+        # replaced with the real identity block right after the build.
+        state["embed_identity"] = {"state": "warming"}
         global _daemon_started_monotonic
         _daemon_started_monotonic = time.monotonic()
         write_event(store, "daemon_started", {"state": state["fsm_state"]})
@@ -1247,6 +1504,9 @@ async def main() -> int:
                     "tier": record.get("tier", "episodic"),
                     "session_id": record.get("session_id", "-"),
                     "role": record.get("role", "user"),
+                    "provenance_extra": (
+                        {"cwd": record["cwd"]} if record.get("cwd") else None
+                    ),
                 }
                 _capture_turn(store, **kwargs)
 
@@ -1371,31 +1631,6 @@ async def main() -> int:
                     exc_info=True,
                 )
 
-        # Warm the first-dispatch surface (imports, embedder model, structural
-        # decode) BEFORE the socket appears: a recall can arrive the instant
-        # the socket binds, and racing it against a cold dispatch surface puts
-        # one-time process warm-up on that first awake read. Bounded so a
-        # pathological store cannot stall the boot; on timeout the socket
-        # still comes up and the background warm-up finishes the job.
-        try:
-            from iai_mcp.daemon._boot_warmup import warm_dispatch_surface
-
-            # Shield keeps the worker alive after the bounded pre-bind wait:
-            # asyncio cannot cancel a running thread, and retaining the task
-            # makes that continuation explicit and observable until shutdown.
-            _wds_task = asyncio.create_task(
-                asyncio.to_thread(warm_dispatch_surface, store)
-            )
-            _wds_summary = await asyncio.wait_for(
-                asyncio.shield(_wds_task), timeout=20.0,
-            )
-            log.info(
-                "dispatch surface warmed pre-bind in %.0fms",
-                _wds_summary.get("elapsed_ms", -1.0),
-            )
-        except Exception:  # noqa: BLE001 -- pre-bind warm-up must never block boot
-            log.debug("pre-bind dispatch surface warm-up failed", exc_info=True)
-
         mcp_socket = SocketServer(store, state=state)
         # Demand baseline for the HIBERNATION exit check: captured BEFORE
         # serve() is scheduled — last_activity_ts starts at construction
@@ -1404,6 +1639,51 @@ async def main() -> int:
         _boot_socket_activity_mono: list[float] = [mcp_socket.last_activity_ts]
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
         await asyncio.sleep(0.05)
+
+        # The socket is live before any model construction: liveness must
+        # never wait on a cold embedder build. An identity mismatch still
+        # refuses boot (the await re-raises and the process exits), and a
+        # recall arriving during the build pays the same single-flight cold
+        # cost it always paid — with an honest "up, warming" status instead
+        # of every surface reporting the daemon dead.
+        _orig_efs, _override_installed = await asyncio.to_thread(
+            _install_warm_embedder_override, store,
+        )
+        # Computed ONCE at boot, after the warm funnel install, and served
+        # from state by the status handler: the status path is the liveness
+        # watchdog's signal and must never block on _conn_lock behind a
+        # consolidating writer.
+        try:
+            from iai_mcp.concurrency import _status_embed_identity
+
+            state["embed_identity"] = await asyncio.to_thread(
+                _status_embed_identity, store
+            )
+        except Exception:  # noqa: BLE001 -- diagnostic block must not fail boot
+            log.debug("boot embed_identity compute failed", exc_info=True)
+            state["embed_identity"] = None
+
+        # Warm the remaining first-dispatch surface (imports, structural
+        # decode; the embedder is already warm through the override).
+        # Bounded so a pathological store cannot stall the boot tail.
+        try:
+            from iai_mcp.daemon._boot_warmup import warm_dispatch_surface
+
+            # Shield keeps the worker alive after the bounded wait: asyncio
+            # cannot cancel a running thread, and retaining the task makes
+            # that continuation explicit and observable until shutdown.
+            _wds_task = asyncio.create_task(
+                asyncio.to_thread(warm_dispatch_surface, store)
+            )
+            _wds_summary = await asyncio.wait_for(
+                asyncio.shield(_wds_task), timeout=20.0,
+            )
+            log.info(
+                "dispatch surface warmed in %.0fms",
+                _wds_summary.get("elapsed_ms", -1.0),
+            )
+        except Exception:  # noqa: BLE001 -- warm-up must never block boot
+            log.debug("dispatch surface warm-up failed", exc_info=True)
 
         try:
             from iai_mcp.daemon._boot_warmup import run_boot_warmup
@@ -1628,9 +1908,6 @@ async def main() -> int:
         HIBERNATE_AFTER_SEC: float = float(
             os.environ.get("LIFECYCLE_HIBERNATE_AFTER_SEC", "7200")
         )
-        SLEEP_HEARTBEAT_IDLE_SEC: float = float(
-            os.environ.get("LIFECYCLE_SLEEP_HEARTBEAT_IDLE_SEC", "1800")
-        )
         PENDING_EMBED_FLOOR_SEC: float = float(
             os.environ.get("IAI_MCP_PENDING_EMBED_FLOOR_SEC", "300")
         )
@@ -1649,6 +1926,16 @@ async def main() -> int:
         _sleep_fail_backoff_until: list[float] = [0.0]
         _last_clean_cycle_mono: list[float] = [0.0]
         _last_clean_cycle_wall: list[float] = [0.0]
+        # Seed the starvation clock from persisted state: process-local zero
+        # would otherwise read as "never completed" after every restart.
+        try:
+            _lcc_raw = state.get("last_clean_cycle_at")
+            if _lcc_raw:
+                _last_clean_cycle_wall[0] = datetime.fromisoformat(
+                    str(_lcc_raw)
+                ).timestamp()
+        except (TypeError, ValueError):
+            pass
         _last_pending_embed_mono: list[float] = [0.0]
         _pending_embed_inflight: list[bool] = [False]
 
@@ -1762,12 +2049,43 @@ async def main() -> int:
                     heartbeat_idle = await asyncio.to_thread(
                         _heartbeat_scanner.heartbeat_idle_30min,
                     )
+                    # One OS-idle read per tick: sleep_eligible and the
+                    # presence stamp must judge the same instant.
+                    _os_idle_raw: "int | None" = None
+                    _os_idle_source: "str | None" = None
+                    try:
+                        _os_idle_raw, _os_idle_source = await asyncio.to_thread(
+                            _idle_detector.os_idle_time_sec,
+                        )
+                    except Exception:  # noqa: BLE001 -- idle source is best-effort
+                        _os_idle_raw, _os_idle_source = None, None
+                    os_idle_sec = _effective_os_idle(_os_idle_raw, _os_idle_source)
                     sleep_eligible = await asyncio.to_thread(
-                        _idle_detector.sleep_eligible, heartbeat_idle,
+                        _idle_detector.sleep_eligible,
+                        heartbeat_idle,
+                        _os_idle_raw,
                     )
 
                     now_mono = time.monotonic()
                     idle_elapsed = now_mono - _last_active_monotonic[0]
+
+                    try:
+                        if _stamp_activity_presence(
+                            state, idle_elapsed, os_idle_sec=os_idle_sec,
+                        ):
+                            # Snapshot: the live masks dict keeps mutating on
+                            # the loop while the writer thread serialises.
+                            await asyncio.to_thread(
+                                _persist_keys,
+                                {
+                                    "activity_presence": dict(
+                                        state["activity_presence"]
+                                    )
+                                },
+                                "activity_presence",
+                            )
+                    except Exception:  # noqa: BLE001 -- presence is advisory
+                        log.debug("activity presence stamp failed", exc_info=True)
 
                     _ds: dict = {}
                     try:
@@ -1838,38 +2156,35 @@ async def main() -> int:
                     except Exception:  # noqa: BLE001 -- reconcile is best-effort
                         pass
 
-                    if scanner_active:
-                        _last_active_monotonic[0] = now_mono
-                        try:
-                            await _state_machine.dispatch(
-                                _LifecycleEvent.HEARTBEAT_REFRESH,
-                                reason="heartbeat_refresh_active_wrapper",
+                    transition = _idle_transition_event(
+                        scanner_active,
+                        idle_elapsed,
+                        sleep_eligible,
+                        _ds,
+                        os_idle_sec=os_idle_sec,
+                        last_clean_cycle_wall=_last_clean_cycle_wall[0],
+                        drowsy_after_sec=DROWSY_AFTER_SEC,
+                    )
+                    if transition is not None:
+                        if transition == "wake_refresh":
+                            _last_active_monotonic[0] = now_mono
+                        dispatch_row = TRANSITION_DISPATCH.get(transition)
+                        if dispatch_row is None:
+                            # An unlisted label must not crash the tick loop.
+                            log.error(
+                                "no dispatch entry for transition %r — "
+                                "skipping this tick", transition,
                             )
-                        except (S2OscillationConflict, S2OscillationBlocked):
-                            pass
-                    elif (
-                        idle_elapsed >= SLEEP_HEARTBEAT_IDLE_SEC
-                        and sleep_eligible
-                        # Night-only consolidation: idle alone never puts the
-                        # daemon to sleep outside the (learned) quiet window.
-                        and _in_consolidation_window(None)
-                    ):
-                        try:
-                            await _state_machine.dispatch(
-                                _LifecycleEvent.IDLE_30MIN,
-                                reason="sleep_on_idle_30min",
-                                sleep_eligible=True,
-                            )
-                        except (S2OscillationConflict, S2OscillationBlocked):
-                            pass
-                    elif idle_elapsed >= DROWSY_AFTER_SEC:
-                        try:
-                            await _state_machine.dispatch(
-                                _LifecycleEvent.IDLE_5MIN,
-                                reason="drowsy_on_idle_5min",
-                            )
-                        except (S2OscillationConflict, S2OscillationBlocked):
-                            pass
+                        else:
+                            ev_name, reason, extra = dispatch_row
+                            try:
+                                await _state_machine.dispatch(
+                                    getattr(_LifecycleEvent, ev_name),
+                                    reason=reason,
+                                    **extra,
+                                )
+                            except (S2OscillationConflict, S2OscillationBlocked):
+                                pass
 
                     current = _state_machine.current_state
                     if _should_drain_on_drowsy_edge(_prev_lifecycle_state[0], current):
@@ -1983,7 +2298,11 @@ async def main() -> int:
                         log.debug(
                             "lifecycle_tick: SLEEP pipeline skipped (scheduler_paused)",
                         )
-                    elif current is _LifecycleState.SLEEP and not _in_consolidation_window(_ds):
+                    elif current is _LifecycleState.SLEEP and _must_leave_sleep(
+                        _ds,
+                        os_idle_sec=os_idle_sec,
+                        last_clean_cycle_wall=_last_clean_cycle_wall[0],
+                    ):
                         # Night-only consolidation: outside the (learned) quiet
                         # window no cycle starts, whatever the idle state, and a
                         # daemon that finds itself in SLEEP out of hours (boot
@@ -2147,6 +2466,18 @@ async def main() -> int:
                         ):
                             _last_clean_cycle_mono[0] = time.monotonic()
                             _last_clean_cycle_wall[0] = time.time()
+                            try:
+                                state["last_clean_cycle_at"] = datetime.now(
+                                    timezone.utc
+                                ).isoformat()
+                                await asyncio.to_thread(
+                                    _persist_keys, state, "last_clean_cycle_at",
+                                )
+                            except Exception:  # noqa: BLE001 -- clock persist is advisory
+                                log.debug(
+                                    "last_clean_cycle_at persist failed",
+                                    exc_info=True,
+                                )
                             still_idle_now = await asyncio.to_thread(
                                 _heartbeat_scanner.heartbeat_idle_30min,
                             )
