@@ -23,10 +23,10 @@ DEBUG_MARKERS = ('print("DEBUG', "print(f\"DEBUG", 'print("TRACEBACK', "tracebac
 # purpose: the diagnostics are its output, not scaffolding left behind.
 DEBUG_ROOTS = ("src/", "mcp-wrapper/src/")
 
-DEBUG_EXEMPT = {
-    # names the markers in order to forbid them
-    "tests/test_source_text_encoding.py",
-}
+# This file spells out every pattern it forbids, so it must exempt itself from
+# all three scans. Until it is committed `git ls-files` does not list it, which
+# means a green run before the first commit says nothing about this case.
+DETECTORS = {"tests/test_source_text_encoding.py"}
 
 
 def _tracked_text_files() -> list[Path]:
@@ -50,6 +50,8 @@ def test_the_scan_sees_a_real_tree() -> None:
 
 @pytest.mark.parametrize("path", TRACKED, ids=lambda p: str(p.relative_to(REPO)))
 def test_no_mojibake(path: Path) -> None:
+    if str(path.relative_to(REPO)) in DETECTORS:
+        return
     text = path.read_bytes().decode("utf-8", errors="replace")
     for marker in MOJIBAKE:
         assert marker not in text, (
@@ -61,6 +63,8 @@ def test_no_mojibake(path: Path) -> None:
 @pytest.mark.parametrize("path", TRACKED, ids=lambda p: str(p.relative_to(REPO)))
 def test_no_unexpected_byte_order_mark(path: Path) -> None:
     if path.suffix in BOM_ALLOWED_SUFFIXES:
+        return
+    if str(path.relative_to(REPO)) in DETECTORS:
         return
     assert not path.read_bytes().startswith(b"\xef\xbb\xbf"), (
         f"{path.relative_to(REPO)} starts with a byte-order mark"
@@ -79,7 +83,7 @@ def test_no_unexpected_byte_order_mark(path: Path) -> None:
 )
 def test_no_debug_scaffolding(path: Path) -> None:
     rel = str(path.relative_to(REPO))
-    if rel in DEBUG_EXEMPT:
+    if rel in DETECTORS:
         return
     text = path.read_text(encoding="utf-8")
     for marker in DEBUG_MARKERS:
