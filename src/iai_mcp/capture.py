@@ -1,4 +1,4 @@
-﻿
+
 from __future__ import annotations
 
 import hashlib
@@ -861,6 +861,18 @@ def _parse_transcript_obj(
             text = "\n".join(p for p in parts if p).strip()
         else:
             text = str(content or "").strip()
+            
+        tool_calls = payload.get("tool_calls", [])
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    func = tc.get("function", {})
+                    name = func.get("name", "tool")
+                    args = func.get("arguments", "")
+                    args_str = json.dumps(args, indent=2, ensure_ascii=False) if isinstance(args, dict) else str(args)
+                    text += f"\n\n```tool_call\n{name}\n{args_str}\n```"
+        text = text.strip()
+
         if not text or text.lstrip().startswith("<environment_context>"):
             return None
         if _is_noise(text):
@@ -877,6 +889,16 @@ def _parse_transcript_obj(
         else:
             return None
         text = str(obj.get("content") or "").strip()
+        tool_calls = obj.get("tool_calls", [])
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    name = tc.get("name") or tc.get("function", {}).get("name") or "tool"
+                    args = tc.get("args") or tc.get("function", {}).get("arguments") or ""
+                    args_str = json.dumps(args, indent=2, ensure_ascii=False) if isinstance(args, dict) else str(args)
+                    text += f"\n\n```tool_call\n{name}\n{args_str}\n```"
+        text = text.strip()
+        
         if not text or _is_noise(text):
             return None
         return role, text, None, obj.get("created_at")
@@ -888,12 +910,18 @@ def _parse_transcript_obj(
         return None
     content = msg.get("content", "")
     if isinstance(content, list):
-        parts = [
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        text = "\n".join(parts).strip()
+        parts = []
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                parts.append(b.get("text", ""))
+            elif b.get("type") == "tool_use":
+                name = b.get("name", "tool")
+                inp = b.get("input", "")
+                inp_str = json.dumps(inp, indent=2, ensure_ascii=False) if isinstance(inp, dict) else str(inp)
+                parts.append(f"```tool_call\n{name}\n{inp_str}\n```")
+        text = "\n\n".join(parts).strip()
     else:
         text = str(content).strip()
     if not text:
