@@ -33,6 +33,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      # The suite builds real embedders. The cache must live under the home
+      # directory the test fixtures point HF_HOME at, or the fetch happens
+      # mid-run instead: tests guarded on a cached model skip, and the rest
+      # depend on a network fetch succeeding between assertions.
+      - name: Cache embedding models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embed-bge-small-en-v1.5-e5-small-614241f6
+      - name: Warm the embedding model cache
+        run: |
+          python -c "from iai_mcp.embed import Embedder; Embedder(); Embedder(model_key='multilingual-e5-small')"
       - name: Correctness gate
         run: pytest --timeout=600 -m "not perf and not slow and not live"
       - name: Build wheel
