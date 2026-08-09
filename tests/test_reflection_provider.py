@@ -401,6 +401,11 @@ def test_cancellation_terminates_the_vendor_child(fake_path, monkeypatch) -> Non
     import iai_mcp.claude_cli as claude_cli
     import iai_mcp.reflection_provider as rp
 
+    # Resolution happens before the spawn, so without a fake on the path the
+    # call refuses as provider_cli_missing and never reaches the cancellation
+    # under test -- passing only on a host that has the real CLI installed.
+    _fake_bin(fake_path, "gemini", "cat - >/dev/null")
+
     killed: list = []
 
     class _StubProc:
