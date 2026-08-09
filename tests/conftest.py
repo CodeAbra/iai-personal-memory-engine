@@ -217,6 +217,47 @@ def _isolate_profile_state():
     _core._profile_state.update(snapshot)
 
 
+@pytest.fixture(scope="session")
+def _pristine_embedder_funnel():
+    try:
+        from iai_mcp import embed as _embed_mod
+    except Exception:  # noqa: BLE001 -- env without iai_mcp installed yet
+        return None
+    return _embed_mod.embedder_for_store
+
+
+@pytest.fixture(autouse=True)
+def _isolate_embedder_funnel(_pristine_embedder_funnel):
+    """Restore ``embed.embedder_for_store`` to the pristine function at teardown.
+
+    The daemon's warm-embedder override swaps this module-level function for
+    one that returns a single held instance. A test that installs it -- or
+    that boots a daemon which does -- and does not restore it leaves every
+    later test resolving through that instance: a patched ``Embedder`` is
+    never constructed, the identity guard never sees the store's configured
+    model, and a refusal that must raise returns a vector instead.
+
+    The baseline is the session's pristine function, not whatever was in place
+    when this test started: the override is installed from a daemon worker
+    thread, so it can land between two tests, and a per-test snapshot would
+    then adopt the swapped function as its own baseline and pin it there for
+    the rest of the run.
+    """
+    if _pristine_embedder_funnel is None:
+        yield
+        return
+
+    from iai_mcp import embed as _embed_mod
+
+    # Both ends: the worker thread can land the override after a teardown has
+    # already run, so the test that follows must not inherit it either.
+    if _embed_mod.embedder_for_store is not _pristine_embedder_funnel:
+        _embed_mod.embedder_for_store = _pristine_embedder_funnel
+    yield
+    if _embed_mod.embedder_for_store is not _pristine_embedder_funnel:
+        _embed_mod.embedder_for_store = _pristine_embedder_funnel
+
+
 _AUTOFLUSH_OPT_OUT_ENV = "IAI_MCP_TEST_NO_AUTOFLUSH"
 
 
