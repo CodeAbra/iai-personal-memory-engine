@@ -707,8 +707,17 @@ def check_o_subscription_credentials() -> CheckResult:
 
 def check_q_iai_cli_reachable() -> CheckResult:
     import shutil
+    import os
+    import sys
 
     iai_path = shutil.which("iai")
+    if iai_path is None:
+        bin_dir = os.path.dirname(sys.executable)
+        exe_name = "iai.exe" if sys.platform == "win32" else "iai"
+        fallback = os.path.join(bin_dir, exe_name)
+        if os.path.exists(fallback):
+            iai_path = fallback
+
     if iai_path is None:
         return CheckResult(
             name="(q) iai CLI reachable",

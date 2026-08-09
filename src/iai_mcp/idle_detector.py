@@ -207,6 +207,27 @@ class IdleDetector:
         return min(idle_times)
 
 
+    def _windows_idle_time_sec(self) -> int | None:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            class LASTINPUTINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.UINT),
+                    ("dwTime", wintypes.DWORD)
+                ]
+            
+            lastInputInfo = LASTINPUTINFO()
+            lastInputInfo.cbSize = ctypes.sizeof(lastInputInfo)
+            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lastInputInfo)):
+                tickCount = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+                millis = (tickCount - lastInputInfo.dwTime) & 0xFFFFFFFF
+                return millis // 1000
+        except Exception:
+            pass
+        return None
+
     def os_idle_time_sec(self) -> tuple[int | None, str | None]:
         """Platform dispatcher for OS-level idle time.
 
@@ -230,6 +251,9 @@ class IdleDetector:
             if not session_paths:
                 return None, None
             return self._logind_aggregate_idle(session_paths), "logind"
+        if system == "Windows":
+            idle_sec = self._windows_idle_time_sec()
+            return idle_sec, ("GetLastInputInfo" if idle_sec is not None else None)
         return None, None
 
 
@@ -299,9 +323,10 @@ class IdleDetector:
             )
             return detail, "PASS"
         if "logind" in status.available_signals:
-            detail = (
-                f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
-            )
+            detail = f"logind: {idle_str('unavailable')}, available: {signals_str}"
+            return detail, "PASS"
+        if "GetLastInputInfo" in status.available_signals:
+            detail = f"GetLastInputInfo: {idle_str('unavailable')}, available: {signals_str}"
             return detail, "PASS"
         detail = (
             f"HIDIdleTime: {idle_str('unavailable')}, pmset: {pmset_str}, "
