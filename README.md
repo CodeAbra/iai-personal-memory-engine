@@ -34,6 +34,7 @@
 - [Built our own](#built-our-own)
 - [Benchmarks](#benchmarks)
 - [Configuration](#configuration)
+- [Languages](#languages)
 - [Doctor](#doctor)
 - [Staying up to date](#staying-up-to-date)
 - [FAQ](#faq)
@@ -461,7 +462,8 @@ iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,paus
 
 - MCP transport is a Unix domain socket. No TCP listener, no bind address, no auth surface to misconfigure.
 - Store at `~/.iai-mcp/`, AES-256-GCM per record, key at `.crypto.key` mode `0600`, rotation and prior-key recovery supported.
-- Embedder is swappable: `IAI_MCP_EMBED_PROVIDER=http` disables the native BGE model entirely (not constructed, not downloaded) and routes to a loopback endpoint — the path to other languages without adding a Python ML stack. Protocol in [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
+- Thirteen languages beyond English ship as an opt-in pack, one command to turn on (`iai lang add ru`) plus a re-embed. English-only is the default. See [Languages](#languages).
+- Embedder is swappable beyond that: `IAI_MCP_EMBED_PROVIDER=http` disables the native BGE model entirely (not constructed, not downloaded) and routes to a loopback endpoint, for a domain-specific model without a Python ML stack. Protocol in [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
 - The store records which embedder produced its vectors — model id, revision, pooling, dimension, text-prefix setting — and refuses to open under a different one. Two 384-dimension models pass a dimension check and still write vectors that read as noise against each other, which is a silently dead semantic lane. If the daemon refuses to start with `refusing to mix vector generations`, the service environment changed the embedder out from under the store: fix the environment, or run `iai-mcp migrate --reembed-from-text` to move the store to the new model.
 - Recall concurrency is bounded (`IAI_MCP_RECALL_CONCURRENCY`, default `2`); overflow returns `_degraded: recall_busy` rather than queueing unboundedly.
 - Dashboard ships as a local web UI and as a Tauri desktop build (`desktop/`, macOS and Linux).
@@ -553,9 +555,84 @@ Measured on an Apple M2 Max (64 GB). The harnesses are the proof — run them yo
 
 The built-in Rust BGE model remains the zero-configuration default. Setting the
 provider to `http` replaces it completely: the native model is not constructed,
-downloaded, or run. This makes multilingual and domain-specific embedders
-possible without adding a Python ML stack to iai-mcp. See
+downloaded, or run — the way to plug in a domain-specific embedder without
+adding a Python ML stack to iai-mcp. See
 [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md) for the protocol and migration steps.
+For other languages you do not need any of this; see
+[Languages](#languages) below.
+
+---
+
+## Languages
+
+English is the default and stays the default. Thirteen more languages ship as an
+opt-in pack: Czech, German, Spanish, French, Hindi, Indonesian, Italian,
+Japanese, Portuguese, Russian, Thai, Vietnamese, Chinese.
+
+The pack changes which model turns your text into vectors. Nothing is
+translated: what you wrote is stored verbatim either way, and what changes is
+that recall on non-English text stops running through an English-only model.
+
+### Turn a language on
+
+```bash
+iai lang status
+iai lang add ru
+```
+
+`status` prints the active embedder, the languages you have opted into, and the
+full supported list. Adding the first language switches the configured embedder
+to the multilingual model and tells you what to do next, because the switch is
+inert until the store is re-embedded — one store holds exactly one generation of
+vectors:
+
+```bash
+iai-mcp daemon stop
+iai-mcp migrate --reembed-to-configured-provider
+iai-mcp daemon start
+```
+
+Re-embedding rewrites the vector column and nothing else; your text is never
+touched. It stages into a new table and keeps the previous one until cleanup, so
+an interrupted run cannot leave you with a half-converted store.
+
+Adding further languages needs no migration — the embedder is already
+multilingual:
+
+```bash
+iai lang add de
+iai lang add ja
+```
+
+### Turn it off
+
+```bash
+iai lang remove ru
+```
+
+Removing your last language puts the English default back. That is another
+generation change, so re-embed again with the same three commands.
+
+### If the daemon refuses to start
+
+Change the embedder and skip the migration, and the engine says so rather than
+serving noise:
+
+```
+refusing to mix vector generations
+```
+
+The store records which embedder produced its vectors — model id, revision,
+pooling, dimension, text prefix — and refuses to open under a different one.
+Both models here are 384-dimension, so a dimension check would pass while the
+two write vectors that read as noise against each other: a silently dead
+semantic lane. Run the migration, or put the previous language configuration
+back.
+
+Language selection lives in `~/.iai-mcp/config.json` and nowhere else.
+Environment variables deliberately cannot switch the model — a service manager
+carrying a stale override would serve wrong-generation vectors invisibly, and a
+config file is something you can read.
 
 ---
 
@@ -767,4 +844,4 @@ Three lanes where a first PR lands especially well:
 
 1. **Windows** — the runtime is ported; the test suite still needs porting. Every green test is a real contribution.
 2. **Ambient capture for your CLI** — the MCP tools already work on any host; wiring native hooks (Gemini CLI, Cursor, Goose, Zed…) makes capture automatic there. One shipped hook = one new supported host with your name on it.
-3. **Embedder providers** — the `http` provider protocol ([docs/EMBEDDERS.md](docs/EMBEDDERS.md)) makes multilingual and domain-specific embedders pluggable without touching the engine.
+3. **Embedder providers** — thirteen languages ship built in, and the `http` provider protocol ([docs/EMBEDDERS.md](docs/EMBEDDERS.md)) makes domain-specific and self-hosted embedders pluggable without touching the engine.
