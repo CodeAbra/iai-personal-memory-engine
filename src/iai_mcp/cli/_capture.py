@@ -101,7 +101,11 @@ def read_live_fingerprint(session_id: str) -> int | None:
 def write_live_fingerprint(session_id: str, total_size: int) -> None:
     d = Path.home() / ".iai-mcp" / ".capture-state"
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / f"{session_id}.live-fingerprint.tmp"
+    # PID-suffixed tmp name: concurrent hook invocations for the same
+    # session (e.g. UserPromptSubmit and Stop firing close together) must
+    # not share one tmp path, or the second os.replace() raises
+    # FileNotFoundError once the first has already consumed it.
+    tmp = d / f"{session_id}.live-fingerprint.{os.getpid()}.tmp"
     tmp.write_text(str(total_size), encoding="utf-8")
     os.replace(tmp, d / f"{session_id}.live-fingerprint")
 
@@ -161,7 +165,8 @@ def read_watermark(session_id: str) -> str | None:
 def write_watermark(session_id: str, ts: str) -> None:
     d = Path.home() / ".iai-mcp" / ".capture-state"
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / f"{session_id}.watermark.tmp"
+    # PID-suffixed tmp name — see write_live_fingerprint() above for why.
+    tmp = d / f"{session_id}.watermark.{os.getpid()}.tmp"
     tmp.write_text(_utc_iso(ts), encoding="utf-8")
     os.replace(tmp, d / f"{session_id}.watermark")
 
@@ -362,7 +367,13 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
             emitted += 1
 
         new_offset = prev_offset + consumed
-        tmp_path = offset_path.parent / (offset_path.name + ".tmp")
+        # PID-suffixed tmp name: UserPromptSubmit's turn-capture hook and
+        # Stop's session-capture hook (which calls this command) both
+        # maintain the same {session_id}.offset file and can fire close
+        # together for one exchange. A shared tmp path lets whichever
+        # process calls os.replace() second find its source already
+        # consumed by the first — see write_live_fingerprint() above.
+        tmp_path = offset_path.parent / f"{offset_path.name}.{os.getpid()}.tmp"
         # fsync before the rename: a crash between them must never publish an
         # empty offset file — a zero offset replays the whole transcript.
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

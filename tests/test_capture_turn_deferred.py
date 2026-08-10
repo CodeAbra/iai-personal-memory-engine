@@ -26,6 +26,19 @@ def _build_args(session_id: str, transcript_path: Path, max_turns: int = 200) ->
     )
 
 
+def _race_worker(home: str, session_id: str, transcript_path: str, q) -> None:
+    """Module-level (picklable under macOS's spawn start method) worker for
+    the concurrent-capture regression test below."""
+    import os as _os
+    _os.environ["HOME"] = home
+    from iai_mcp.cli import cmd_capture_turn_deferred
+    try:
+        rc = cmd_capture_turn_deferred(_build_args(session_id, Path(transcript_path)))
+        q.put(("ok", rc))
+    except Exception as exc:  # the pre-fix bug surfaces here
+        q.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
 def test_first_call_writes_header_and_one_event(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     from iai_mcp.cli import cmd_capture_turn_deferred
@@ -169,3 +182,45 @@ def test_max_turns_per_call_cap(tmp_path, monkeypatch):
 
     offset = int((tmp_path / ".iai-mcp" / ".capture-state" / "S7.offset").read_text().strip())
     assert offset == 3
+
+
+def test_concurrent_calls_do_not_race_on_shared_tmp_path(tmp_path, monkeypatch):
+    """UserPromptSubmit's turn-capture and Stop's session-capture (which also
+    calls this command) can fire close together for one exchange, both
+    touching the same {session_id}.offset file. Before the fix, both writers
+    shared one {session_id}.offset.tmp path, so whichever called os.replace()
+    second raised FileNotFoundError once the first had already consumed it.
+    Regression test: run genuinely concurrent OS processes (not threads —
+    the fix keys uniqueness off os.getpid(), which threads would share) and
+    assert none of them ever hit that error."""
+    import multiprocessing as mp
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        _make_transcript_line("user", "concurrent race regression turn one")
+        + _make_transcript_line("assistant", "concurrent race regression turn two")
+    )
+    session_id = "RACE1"
+
+    ctx = mp.get_context("spawn" if platform.system() != "Linux" else "fork")
+    q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_race_worker, args=(str(tmp_path), session_id, str(transcript), q))
+        for _ in range(10)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+
+    results = [q.get(timeout=5) for _ in procs]
+    errors = [r for r in results if r[0] == "error"]
+    assert not errors, f"concurrent capture-turn-deferred calls raised: {errors}"
+
+    offset_path = tmp_path / ".iai-mcp" / ".capture-state" / f"{session_id}.offset"
+    assert offset_path.exists()
+    assert int(offset_path.read_text().strip()) == 2, "offset must land on the real turn count"
+
+    leftover_tmp = list((tmp_path / ".iai-mcp" / ".capture-state").glob(f"{session_id}.offset*.tmp"))
+    assert not leftover_tmp, f"orphaned tmp files left behind: {leftover_tmp}"

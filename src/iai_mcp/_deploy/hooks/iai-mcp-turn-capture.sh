@@ -115,7 +115,12 @@ if prev > total:
     # Transcript is shorter than the stored offset — it was rotated or
     # replaced.  Preserve the existing offset and skip capture to avoid
     # re-emitting old turns or clobbering a valid large offset.
-    tmp = state_dir / f"{session_id}.offset.tmp"
+    # PID-suffixed tmp name: this hook and the Stop hook capture-turn-
+    # deferred call both touch {session_id}.offset and can fire close
+    # together for one exchange. A shared tmp path lets whichever
+    # process replaces second find its source already consumed by the
+    # first (FileNotFoundError).
+    tmp = state_dir / f"{session_id}.offset.{os.getpid()}.tmp"
     tmp.write_text(str(prev))
     os.replace(tmp, offset)
     sys.exit(0)
@@ -276,7 +281,8 @@ if total > prev:
             emitted += 1
 
 new_offset = prev + consumed
-tmp = state_dir / f"{session_id}.offset.tmp"
+# PID-suffixed tmp name — see the rotated-transcript branch above for why.
+tmp = state_dir / f"{session_id}.offset.{os.getpid()}.tmp"
 with open(tmp, "w") as _f:
     _f.write(str(new_offset))
     _f.flush()
@@ -353,7 +359,8 @@ try:
     def _gate_write_watermark(sid, ts):
         d = home / ".iai-mcp" / ".capture-state"
         d.mkdir(parents=True, exist_ok=True)
-        tmp_wm = d / f"{sid}.watermark.tmp"
+        # PID-suffixed tmp name — see the offset-write above for why.
+        tmp_wm = d / f"{sid}.watermark.{os.getpid()}.tmp"
         tmp_wm.write_text(_gate_utc_iso(ts))
         os.replace(tmp_wm, d / f"{sid}.watermark")
 
@@ -394,7 +401,8 @@ try:
     def _gate_write_fingerprint(sid, total_sz):
         d = home / ".iai-mcp" / ".capture-state"
         d.mkdir(parents=True, exist_ok=True)
-        tmp_fp = d / f"{sid}.live-fingerprint.tmp"
+        # PID-suffixed tmp name — see the offset-write above for why.
+        tmp_fp = d / f"{sid}.live-fingerprint.{os.getpid()}.tmp"
         tmp_fp.write_text(str(total_sz))
         os.replace(tmp_fp, d / f"{sid}.live-fingerprint")
 
