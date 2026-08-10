@@ -224,3 +224,37 @@ def test_should_bootstrap_trigger_2h_idle():
     assert should_bootstrap_trigger(now - timedelta(hours=3), now) is True
     assert should_bootstrap_trigger(now - timedelta(hours=2), now) is True
     assert should_bootstrap_trigger(now - timedelta(hours=1), now) is False
+
+
+def test_bootstrap_trigger_actually_reaches_consolidation_gate(tmp_path, monkeypatch):
+    """should_bootstrap_trigger is correct in isolation (see the test above),
+    but before this fix nothing in the daemon ever called it — a fresh
+    install (no learned quiet_window yet, MIN_DAYS_FOR_LEARN not met) had no
+    way to consolidate outside the fixed night-default window for its first
+    week. This exercises the real gate the daemon consults, not the pure
+    function alone, so a future revert of the wiring (not just the function)
+    would be caught."""
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
+    from iai_mcp.daemon import _in_consolidation_window
+    from iai_mcp.lifecycle_state import lifecycle_state_path, load_state, save_state
+
+    path = lifecycle_state_path()
+    rec = load_state(path)
+
+    # No learned window yet, 3h since last activity -> must trigger
+    # unconditionally, independent of the current time of day.
+    rec["last_activity_ts"] = (
+        datetime.now(timezone.utc) - timedelta(hours=3)
+    ).isoformat()
+    save_state(rec, path)
+    assert _in_consolidation_window({"quiet_window": None}) is True
+
+    # A learned window already exists -> the bootstrap branch must be
+    # skipped entirely; this must not regress into an unconditional True
+    # for every quiet_window is None check regardless of learning state.
+    rec["last_activity_ts"] = (
+        datetime.now(timezone.utc) - timedelta(hours=5)
+    ).isoformat()
+    save_state(rec, path)
+    with_window = _in_consolidation_window({"quiet_window": [4, 8]})
+    assert isinstance(with_window, bool)

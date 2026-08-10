@@ -504,6 +504,29 @@ def _in_consolidation_window(daemon_state: "dict | None") -> bool:
                         return True
                 except (ValueError, TypeError):
                     pass
+        # Bootstrap fallback: before a quiet window has been learned (needs
+        # MIN_DAYS_FOR_LEARN days of history), the fixed night default still
+        # applies below, but a fresh install can go that many days without
+        # ever landing in it. should_bootstrap_trigger allows consolidation
+        # after BOOTSTRAP_IDLE_HOURS of inactivity in the meantime, regardless
+        # of time of day — same fail-open contract as the rest of this gate.
+        if daemon_state.get("quiet_window") is None:
+            try:
+                from iai_mcp.lifecycle_state import (
+                    lifecycle_state_path as _boot_lc_path,
+                    load_state as _boot_lc_load,
+                )
+                _lc_rec = _boot_lc_load(_boot_lc_path())
+                _last_activity_raw = (_lc_rec or {}).get("last_activity_ts")
+                _last_activity_dt = None
+                if _last_activity_raw:
+                    _last_activity_dt = datetime.fromisoformat(str(_last_activity_raw))
+                    if _last_activity_dt.tzinfo is None:
+                        _last_activity_dt = _last_activity_dt.replace(tzinfo=_tz.utc)
+                if should_bootstrap_trigger(_last_activity_dt, now_utc):
+                    return True
+            except Exception:
+                log.debug("bootstrap consolidation trigger check failed", exc_info=True)
         window = effective_consolidation_window(
             daemon_state.get("quiet_window"),
             manual=daemon_state.get("quiet_window_manual_override"),
