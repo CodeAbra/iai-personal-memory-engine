@@ -167,8 +167,16 @@ if [ -n "$session_id" ]; then
   fi
 fi
 
+# THEN the light per-response consolidation tick: FSRS decay/reinforcement
+# for records touched in the last hour (run_light_consolidation via the
+# session_exit RPC). Cheap, daemon-side, best-effort — the CLI command has
+# its own internal 3s/15s timeouts, no external `timeout` wrapper needed.
+exit_result=$("$iai_cli" session-exit --session-id "$session_id" 2>&1)
+exit_rc=$?
+
 {
   echo "$ts rc=$rc result=$result"
+  echo "$ts session-exit rc=$exit_rc result=$exit_result"
 } >> "$log" 2>/dev/null
 
 exit 0

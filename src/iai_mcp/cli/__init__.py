@@ -309,6 +309,7 @@ from ._capture import (
     cmd_session_refresh_if_stale,
     cmd_capture_transcript,
     cmd_capture_turn_deferred,
+    cmd_session_exit,
     _capture_hook_paths,
     _turn_hook_paths,
     _resolve_wrapper_path,
@@ -677,6 +678,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ssp.add_argument("--session-id", default="-", help="session id for provenance")
     ssp.set_defaults(func=cmd_session_start)
+
+    sse = sub.add_parser(
+        "session-exit",
+        help=(
+            "notify the daemon a session ended: triggers the light FSRS "
+            "decay/reinforcement tick (run_light_consolidation) for records "
+            "touched in the last hour. Stop-hook backend."
+        ),
+    )
+    sse.add_argument("--session-id", default="-", help="session id for provenance")
+    sse.set_defaults(func=cmd_session_exit)
 
     sris = sub.add_parser(
         "session-refresh-if-stale",

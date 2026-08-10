@@ -62,6 +62,25 @@ def cmd_session_start(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_session_exit(args: argparse.Namespace) -> int:
+    """Notify the daemon that a session ended, triggering the light FSRS
+    decay/reinforcement tick (run_light_consolidation) for records touched
+    in the last hour. Stop-hook backend; fail-safe like every other hook
+    command here — a daemon that is asleep or unreachable is not an error."""
+    from iai_mcp import cli as _cli
+
+    try:
+        session_id = getattr(args, "session_id", "-") or "-"
+        _cli._send_jsonrpc_request(
+            "session_exit", {"session_id": session_id},
+            connect_timeout=3.0, read_timeout=15.0,
+        )
+        return 0
+    except Exception as exc:
+        logger.error("session-exit failed: %s", exc)
+        return 0
+
+
 def get_other_sessions_live_size(session_id: str) -> int:
     try:
         deferred_dir = Path.home() / ".iai-mcp" / ".deferred-captures"
