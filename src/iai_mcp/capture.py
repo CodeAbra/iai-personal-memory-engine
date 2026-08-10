@@ -630,6 +630,16 @@ def capture_turn(
         except Exception as exc:  # noqa: BLE001 -- anticipation is additive
             log.debug("foresight refresh skipped: %s", exc)
 
+        # Feed the camouflaging_relaxation weekly pass (AUTIST-13): scores
+        # this turn's formality and logs a formality_score_weekly event.
+        # Only live, non-replayed user turns count toward the trend, or a
+        # historical backfill would skew weeks that never happened live.
+        try:
+            from iai_mcp.camouflaging import record_user_formality
+            record_user_formality(store, text, lang="en")
+        except Exception as exc:  # noqa: BLE001 -- signal collection is additive
+            log.debug("formality signal recording skipped: %s", exc)
+
     return {"status": "inserted", "record_id": str(rec.id), "reason": f"tier={tier}"}
 
 

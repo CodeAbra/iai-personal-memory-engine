@@ -758,6 +758,17 @@ def run_heavy_consolidation(
 
     decay_result = _decay_edges(store)
 
+    # AUTIST-13 (camouflaging_relaxation): aggregate the week's collected
+    # formality_score_weekly events and relax the register if a sustained
+    # over-formal trend is detected. Gates internally on sample count and
+    # trend thresholds, so calling every heavy pass rather than strictly
+    # weekly is harmless — it is a no-op until enough evidence exists.
+    try:
+        from iai_mcp.camouflaging import run_weekly_pass
+        run_weekly_pass(store)
+    except Exception:  # noqa: BLE001 -- procedural learning is additive
+        pass
+
     llm_ok, _llm_reason = should_call_llm(
         budget=budget,
         rate=rate,

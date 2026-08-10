@@ -607,3 +607,57 @@ def test_capture_turn_embeds_content_not_cue(iai_home, monkeypatch):
         f"embedder was handed the cue label {cue_label!r}; this collapses the "
         f"stored vector space and breaks semantic recall."
     )
+
+
+def test_live_user_capture_records_formality_signal(iai_home):
+    """AUTIST-13 (camouflaging_relaxation) has a complete detection pipeline
+    in iai_mcp.camouflaging: record_user_formality collects a per-turn
+    signal, run_weekly_pass aggregates it and relaxes the register. Before
+    this fix, capture_turn never called record_user_formality, so the
+    formality_score_weekly event stream that run_weekly_pass depends on
+    stayed permanently empty regardless of how much the pipeline was used.
+    This exercises the actual capture path, not the collector in isolation
+    (already covered by tests/lilli/test_camouflaging_detection.py)."""
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.events import query_events
+
+    store = _open_store()
+
+    before = query_events(store, kind="formality_score_weekly", limit=50)
+
+    result = capture_turn(
+        store,
+        cue="formality signal wiring check",
+        text=(
+            "I would be most grateful if you could kindly assist me with "
+            "this matter at your earliest convenience."
+        ),
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+        live_turn=True,
+    )
+    assert result["status"] == "inserted", result
+
+    after = query_events(store, kind="formality_score_weekly", limit=50)
+    assert len(after) == len(before) + 1, (
+        "capture_turn did not record a formality signal for a live user turn"
+    )
+
+    # A replayed/bulk-imported turn (live_turn=False) must NOT count toward
+    # the trend -- a historical backfill would otherwise skew weeks that
+    # never happened live.
+    result2 = capture_turn(
+        store,
+        cue="replay should not record formality",
+        text="I would be most grateful if you could kindly assist me again.",
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+        live_turn=False,
+    )
+    assert result2["status"] == "inserted", result2
+    after_replay = query_events(store, kind="formality_score_weekly", limit=50)
+    assert len(after_replay) == len(after), (
+        "a replayed (live_turn=False) turn must not record a formality signal"
+    )

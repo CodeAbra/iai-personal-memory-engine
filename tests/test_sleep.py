@@ -248,6 +248,50 @@ def test_run_heavy_consolidation_creates_consolidated_from_edges(tmp_path):
     cf = edges_df[edges_df["edge_type"] == "consolidated_from"]
     assert len(cf) >= 3
 
+def test_run_heavy_consolidation_relaxes_camouflaging_register(tmp_path):
+    """AUTIST-13 (camouflaging_relaxation): run_weekly_pass aggregates the
+    collected formality_score_weekly events and relaxes the register on a
+    detected over-formal trend (see tests/lilli/test_camouflaging_detection.py
+    for the pure-function coverage of run_weekly_pass itself). Before this
+    fix, nothing ever called run_weekly_pass, so a sustained trend never
+    reached the knob no matter how many nights the daemon consolidated.
+    This exercises the real nightly pass, not the collector in isolation."""
+    from iai_mcp.events import write_event
+    from iai_mcp.guard import BudgetLedger, RateLimitLedger
+    from iai_mcp.sleep import SleepConfig, run_heavy_consolidation
+    from iai_mcp.store import MemoryStore
+    import iai_mcp.core as core
+
+    store = MemoryStore(path=tmp_path)
+    core._profile_state["camouflaging_relaxation"] = 0.0
+
+    base = datetime.now(timezone.utc) - timedelta(days=35)
+    for i, score in enumerate([0.4, 0.55, 0.65, 0.75, 0.85]):
+        write_event(
+            store,
+            kind="formality_score_weekly",
+            data={
+                "score": score,
+                "lang": "en",
+                "week_iso": (base + timedelta(days=7 * i)).isoformat(),
+                "samples": 10,
+            },
+            severity="info",
+        )
+
+    cfg = SleepConfig(llm_enabled=False)
+    budget = BudgetLedger(store)
+    rate = RateLimitLedger(store)
+    run_heavy_consolidation(
+        store, session_id="s-camouflaging", config=cfg, budget=budget, rate=rate,
+        has_api_key=False,
+    )
+
+    assert core._profile_state["camouflaging_relaxation"] > 0.0, (
+        "run_heavy_consolidation did not relax camouflaging_relaxation despite "
+        "a clear over-formal trend in the seeded weekly events"
+    )
+
 def test_run_heavy_consolidation_mem01_preserves_sources(tmp_path):
     from iai_mcp.guard import BudgetLedger, RateLimitLedger
     from iai_mcp.sleep import SleepConfig, run_heavy_consolidation
