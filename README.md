@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2FCodeAbra%2Fiai-personal-memory-engine.svg)](https://mcptoplist.com/server/glama%2FCodeAbra%2Fiai-personal-memory-engine)
+
 **English** | [中文](./README_zh-CN.md)
 
 <p align="center">
