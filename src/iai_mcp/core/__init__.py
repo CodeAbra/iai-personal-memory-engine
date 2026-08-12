@@ -1252,6 +1252,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         }
 
     if method == "session_exit":
+        from datetime import timedelta
+        from pathlib import Path
+
         from iai_mcp.sleep import run_light_consolidation
         from iai_mcp.trajectory import (
             compute_session_metrics_snapshot,
@@ -1259,10 +1262,53 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         )
 
         sid = params.get("session_id", "-")
+
+        # Stop fires after every assistant response, not at session end, so
+        # a long session would otherwise call run_light_consolidation --
+        # and its unconditional per-record FSRS stability boost -- on every
+        # single turn. Dedupe in time rather than trying to detect a real
+        # session boundary: skip if this session's light pass ran within
+        # the cooldown window. 5 minutes matches the wrapper's own idle
+        # threshold for the WAKE -> DROWSY edge elsewhere in this project,
+        # so a burst of quick turns collapses to one tick per idle-sized
+        # gap instead of one per response.
+        LIGHT_CONSOLIDATION_COOLDOWN_SEC = 300
+        cooldown_path = (
+            Path.home() / ".iai-mcp" / ".capture-state"
+            / f"{sid}.light-consolidation-last"
+        )
+        now = datetime.now(timezone.utc)
+        last_run = None
+        try:
+            if cooldown_path.exists():
+                last_run = datetime.fromisoformat(cooldown_path.read_text().strip())
+        except (OSError, ValueError):
+            last_run = None
+        if (
+            last_run is not None
+            and (now - last_run) < timedelta(seconds=LIGHT_CONSOLIDATION_COOLDOWN_SEC)
+        ):
+            return {
+                "mode": "light",
+                "deduped": True,
+                "cooldown_remaining_sec": (
+                    LIGHT_CONSOLIDATION_COOLDOWN_SEC - (now - last_run).total_seconds()
+                ),
+            }
+
         result = run_light_consolidation(store, session_id=sid)
         snapshot = compute_session_metrics_snapshot(store, sid)
         record_session_metrics(store, session_id=sid, metrics=snapshot)
         result["trajectory_metrics_emitted"] = len(snapshot)
+
+        try:
+            cooldown_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cooldown_path.parent / f"{sid}.light-consolidation-last.{os.getpid()}.tmp"
+            tmp.write_text(now.isoformat())
+            os.replace(tmp, cooldown_path)
+        except OSError:
+            pass
+
         return result
 
     if method == "s5_propose":
