@@ -320,6 +320,142 @@ def test_daemon_boot_holds_one_embedder_singleton(
     assert _embed_mod.embedder_for_store(store) is not held
 
 
+def _fresh_holder() -> dict:
+    from iai_mcp.daemon import _new_efs_holder
+
+    return _new_efs_holder()
+
+
+def test_daemon_install_populates_holder_before_swap(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """The caller's finally restores from the holder, never from the return
+    tuple: a cancelled await loses the tuple while the executor thread still
+    swaps the funnel."""
+    import iai_mcp.embed as _embed_mod
+    from iai_mcp import daemon as daemon_mod
+
+    holder: dict = _fresh_holder()
+
+    def _fake_funnel(store):
+        assert holder["orig"] is _fake_funnel, "orig must be set before the build"
+        assert holder["installed"] is False, "installed must not precede the build"
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _fake_funnel)
+
+    class _StubStore:
+        embed_dim = 384
+
+    daemon_mod._install_warm_embedder_override(_StubStore(), holder)
+
+    assert holder["orig"] is _fake_funnel
+    assert holder["installed"] is True
+    assert _embed_mod.embedder_for_store is not _fake_funnel
+
+    daemon_mod._restore_embedder_funnel(holder["orig"], holder["installed"])
+    assert _embed_mod.embedder_for_store is _fake_funnel
+
+
+def test_daemon_install_failure_leaves_holder_uninstalled(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    import iai_mcp.embed as _embed_mod
+    from iai_mcp import daemon as daemon_mod
+
+    def _raising_funnel(store):
+        raise RuntimeError("simulated construct failure")
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _raising_funnel)
+
+    class _StubStore:
+        embed_dim = 384
+        root = tmp_path
+
+    holder: dict = _fresh_holder()
+    daemon_mod._install_warm_embedder_override(_StubStore(), holder)
+
+    assert holder["orig"] is _raising_funnel
+    assert holder["installed"] is False
+    daemon_mod._restore_embedder_funnel(holder["orig"], holder["installed"])
+    assert _embed_mod.embedder_for_store is _raising_funnel
+
+
+def test_daemon_abandoned_holder_forbids_the_swap(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """A build finishing after the caller's finally must never swap: the
+    finally marks the holder abandoned, the thread checks it under the lock."""
+    import iai_mcp.embed as _embed_mod
+    from iai_mcp import daemon as daemon_mod
+
+    holder: dict = _fresh_holder()
+
+    def _fake_funnel(store):
+        # The caller's finally runs while this build is still in flight.
+        with holder["lock"]:
+            holder["abandoned"] = True
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _fake_funnel)
+
+    class _StubStore:
+        embed_dim = 384
+
+    _, installed = daemon_mod._install_warm_embedder_override(
+        _StubStore(), holder
+    )
+
+    assert installed is False
+    assert holder["installed"] is False
+    assert _embed_mod.embedder_for_store is _fake_funnel, (
+        "an abandoned install must leave the funnel untouched"
+    )
+
+
+def test_daemon_abandon_races_a_real_install_thread(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """Cross-thread pin of the mutual exclusion: the caller abandons while
+    the build is genuinely in flight on another thread (Event-gated, no
+    sleeps), then the finished build must not swap."""
+    import threading
+
+    import iai_mcp.embed as _embed_mod
+    from iai_mcp import daemon as daemon_mod
+
+    holder: dict = _fresh_holder()
+    build_entered = threading.Event()
+    may_finish = threading.Event()
+
+    def _fake_funnel(store):
+        build_entered.set()
+        assert may_finish.wait(5)
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _fake_funnel)
+
+    class _StubStore:
+        embed_dim = 384
+
+    t = threading.Thread(
+        target=daemon_mod._install_warm_embedder_override,
+        args=(_StubStore(), holder),
+    )
+    t.start()
+    assert build_entered.wait(5)
+    with holder["lock"]:
+        holder["abandoned"] = True
+        installed = holder["installed"]
+    may_finish.set()
+    t.join(5)
+    assert not t.is_alive()
+
+    assert installed is False
+    assert holder["installed"] is False
+    assert _embed_mod.embedder_for_store is _fake_funnel
+
+
 def test_daemon_prewarm_failure_is_non_fatal(
     tmp_path, monkeypatch, _restore_embedder_funnel_after
 ):

@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] — 2026-08-12
+
+Six defects found by running the engine at production scale on a live box rather
+than by testing it. Four of them ended with a dead daemon, and every one of them
+reported green on every health surface we had. Upgrade with
+`pip install -U iai-pme` and restart the daemon; nothing to migrate.
+
+### Fixed
+
+- **The MCP wrapper was terminating a healthy daemon.** `ensureDaemonAlive()`
+  runs on every wrapper start — every session, every sub-agent — and probed the
+  socket once with a one-second timeout. A daemon grinding a consolidation step
+  at full CPU misses that without being dead, and the miss ran
+  `launchctl kickstart -k`, which kills the running instance first. So opening a
+  session during consolidation killed the daemon and lost the step. The kill flag
+  is gone (a plain kickstart leaves a live service alone), one miss is no longer
+  evidence — three probes, three seconds each — and before any restart the
+  wrapper verifies the recorded pid actually identifies as this store's daemon.
+- **Two more ways to kill the wrong daemon, both in the CLI.** `stop` signalled
+  whatever pid the lifecycle lock named, so a stale record could fell a recycled
+  pid or another store's daemon. `start` ran `launchctl bootout`
+  unconditionally, which SIGTERMs a live instance — and `start` is what the
+  unattended doctor repair invokes. Both now require the pid to identify as this
+  store's daemon first.
+- **The daemon killed itself on large stores.** Every node embedding in the
+  memory graph was held as a list of boxed floats: about 15.6 KB per
+  384-dimension vector against 1.5 KB as a contiguous float32 buffer, paid once
+  per record and again in the community-detection child, the record cache and
+  the candidate pool. At production shape (31k records, 114k edges) that was
+  754 MB, now 144 MB, and the memory watchdog stopped firing. Stored vectors are
+  unchanged on disk, so no ranking, centroid or community result moves.
+- **Nightly consolidation could never start on an agent workload.** Sleep entry
+  required 30 minutes of session silence, which an always-open assistant session
+  never provides, and a live session scanner outranked the starvation backstop —
+  which itself could not arm, because it measured from a timestamp only a
+  completed cycle writes. On one live store nothing had consolidated in ten days
+  while every check reported healthy. Entry now keys on operating-system input
+  idle inside the window instead of session silence, with symmetric exit when
+  you come back, and the entry reason is recorded so a quiet night can be told
+  apart from a gated one.
+- **The nightly insight never fired on macOS Keychain logins**, which is the
+  default for anyone who signed in through the desktop app. Three stacked
+  failures: the CLI's bare mode cannot see Keychain credentials, the service
+  environment carries no user identity for the OAuth refresh to find the
+  Keychain item, and the CLI's own error text sits behind a large usage block
+  where a truncated read never reached it. A zero exit code carrying an error
+  flag also used to pass as success, which could have stored the error text as
+  the night's insight.
+- **The crisis reclustering step could not finish.** Its updates fell back to a
+  whole-table scan per statement, so a fragmented partition meant thousands of
+  scans and hours of work that any foreground recall reset to zero. Now one
+  bulk transaction per chunk: 31k rows in about two seconds.
+
+### Added
+
+- **A nightly self-heal for degraded embeddings.** Two bounded, resumable scans
+  during sleep: one finds records whose stored vector is all zeros, the other
+  re-embeds a rotating sample and flags rows that have drifted from what their
+  own text embeds to. Flagged rows are re-embedded from their intact text, and
+  the encryption and verbatim boundaries are never touched. It refuses to act on
+  a systemic signal: if a large fraction of the sample looks wrong, that reads as
+  "the embedder changed", so it reports and waits for you rather than rewriting
+  good vectors. Runs only while asleep, never on the read path.
+- **The doctor alarms when the nightly insight stops being produced**, including
+  the case where one mint succeeded earlier the same day and a later attempt
+  failed. It reads history through the daemon socket while the daemon holds the
+  store, and falls back to a read-only open when the daemon is down. The check
+  list is now 30 rows.
+
+### Changed
+
+- The storage engine serves an `UPDATE` through a secondary index for
+  `WHERE id IN (...)`, `WHERE col IN (...)` and `WHERE col = <literal>`, not only
+  a single-id match. Those shapes previously scanned the whole table per
+  statement. Results are identical, only faster.
+- Several doctor checks now read through the daemon socket instead of blindly
+  waiting on a lock the daemon already holds, with a direct read-only fallback
+  when the daemon is down.
+
 ## [3.0.0] — 2026-08-08
 
 **Upgrading takes three steps.** The capture hooks and the engine must agree on

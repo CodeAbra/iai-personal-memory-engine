@@ -72,16 +72,20 @@ def test_get_embedding_reads_from_sidecar() -> None:
     nid = uuid4()
     real_emb = [0.7] + [0.0] * 383
     graph.add_node(nid, community_id=None, embedding=real_emb)
-    assert graph.get_embedding(nid) == real_emb
+    assert np.array_equal(
+        graph.get_embedding(nid), np.asarray(real_emb, dtype=np.float32)
+    )
 
     graph._attrs[nid]["embedding"] = [0.0] * 384
-    assert graph.get_embedding(nid) == real_emb, (
-        "get_embedding must read sidecar; _attrs writes have no effect"
-    )
+    assert np.array_equal(
+        graph.get_embedding(nid), np.asarray(real_emb, dtype=np.float32)
+    ), "get_embedding must read sidecar; _attrs writes have no effect"
 
     new_emb = [0.1] * 384
     graph.set_node_payload(nid, {"embedding": new_emb})
-    assert graph.get_embedding(nid) == new_emb
+    assert np.array_equal(
+        graph.get_embedding(nid), np.asarray(new_emb, dtype=np.float32)
+    )
 
     assert graph.get_embedding(uuid4()) is None
 

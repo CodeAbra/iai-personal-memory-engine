@@ -84,3 +84,24 @@ def test_backup_warns_when_no_database_present(tmp_path, monkeypatch, caplog):
     assert any("no database file found" in r.message for r in caplog.records), (
         "a database-less backup must be loudly flagged, never silent"
     )
+
+
+def test_restore_rejects_sibling_prefix_escape(tmp_path):
+    """A member resolving to a SIBLING of the target whose path shares the
+    target string prefix (store -> store-evil) must be rejected: the guard
+    is containment, not string comparison."""
+    import io
+
+    archive = tmp_path / "evil.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        payload = b"evil"
+        info = tarfile.TarInfo(name="../store-evil/evil.txt")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+
+    target = tmp_path / "store"
+    with pytest.raises(ValueError, match="Path traversal"):
+        restore(archive, target=target)
+    assert not (tmp_path / "store-evil").exists(), (
+        "nothing may be written outside the restore target"
+    )

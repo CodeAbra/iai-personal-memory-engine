@@ -196,7 +196,7 @@ def test_edge_dense_centrality_nonzero_and_seed_parity(tmp_path):
     )
 
     # Pool order mirrors the pipeline (graph.iter_nodes() with present embeddings).
-    pool_ids = [nid for nid in nodes if graph.get_embedding(nid)]
+    pool_ids = [nid for nid in nodes if graph.get_embedding(nid) is not None]
     assert pool_ids, "no pooled embeddings on the connected corpus"
 
     # Resolved arm: read centrality straight from the build-resolved map.

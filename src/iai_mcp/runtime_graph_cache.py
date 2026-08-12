@@ -413,8 +413,11 @@ def _stream_graph_to_child(parent_conn, graph) -> None:
     import numpy as np
 
     node_chunk: list = []
+    empty = np.zeros(0, dtype=np.float32)
     for uid in sorted(graph.iter_nodes(), key=lambda u: u.bytes):
-        emb = graph.get_embedding(uid) or []
+        emb = graph.get_embedding(uid)
+        if emb is None:
+            emb = empty
         node_chunk.append(
             (str(uid), np.asarray(emb, dtype=np.float32).tobytes())
         )
@@ -1515,7 +1518,12 @@ def save(
         for k, v in node_payload.items():
             if not isinstance(v, dict):
                 continue
-            raw_emb = v.get("embedding") or []
+            # The cache is JSON, so the vector must be encoded as a list here.
+            # A caller may hand over graph-owned payloads, whose vectors are
+            # float32 buffers — a bare truth test on one raises.
+            raw_emb = v.get("embedding")
+            if raw_emb is None:
+                raw_emb = []
             raw_tags = v.get("tags") or []
             node_centrality = float(v.get("centrality") or 0.0)
             encoded_node_payload[str(k)] = {

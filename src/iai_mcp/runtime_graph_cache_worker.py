@@ -104,7 +104,10 @@ def _worker_entry(conn) -> None:
                 return
             elif kind == "nodes":
                 for id_str, emb_blob in payload:
-                    emb = np.frombuffer(emb_blob, dtype=np.float32).tolist()
+                    # Keep the buffer compact: .tolist() boxes every float and
+                    # a corpus-scale graph in this child is what the memory
+                    # watchdog kills. The frame is reused, so copy.
+                    emb = np.frombuffer(emb_blob, dtype=np.float32).copy()
                     nodes_buf.append((UUID(id_str), None, emb, {}))
                 node_chunks_received += 1
                 if crash_after is not None and node_chunks_received >= crash_after:
@@ -340,7 +343,10 @@ def _community_only_worker_entry(conn) -> None:
                 return
             elif kind == "nodes":
                 for id_str, emb_blob in payload:
-                    emb = np.frombuffer(emb_blob, dtype=np.float32).tolist()
+                    # Keep the buffer compact: .tolist() boxes every float and
+                    # a corpus-scale graph in this child is what the memory
+                    # watchdog kills. The frame is reused, so copy.
+                    emb = np.frombuffer(emb_blob, dtype=np.float32).copy()
                     nodes_buf.append((UUID(id_str), None, emb, {}))
             elif kind == "nodes_topology":
                 # Topology-only node stream: ids only, no embedding blobs.

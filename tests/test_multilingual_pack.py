@@ -139,6 +139,24 @@ def test_lang_add_refuses_unsupported(tmp_path, monkeypatch, capsys) -> None:
     assert not (tmp_path / "config.json").exists()
 
 
+def test_lang_add_creates_missing_store_root(tmp_path, monkeypatch) -> None:
+    fresh = tmp_path / "not-yet" / "store"
+    monkeypatch.setenv("IAI_MCP_STORE", str(fresh))
+    assert _run_lang(["lang", "add", "ru"]) == 0
+    cfg = json.loads((fresh / "config.json").read_text(encoding="utf-8"))
+    assert cfg["embed"]["model_key"] == MULTILINGUAL_MODEL_KEY
+
+
+def test_lang_add_unusable_store_path_is_an_error_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory must go", encoding="utf-8")
+    monkeypatch.setenv("IAI_MCP_STORE", str(blocker / "store"))
+    assert _run_lang(["lang", "add", "ru"]) == 1
+    assert "cannot write config" in capsys.readouterr().err
+
+
 def test_lang_add_preserves_other_config(tmp_path, monkeypatch) -> None:
     (tmp_path / "config.json").write_text(
         json.dumps({"user": {"timezone": "UTC"}}), encoding="utf-8"

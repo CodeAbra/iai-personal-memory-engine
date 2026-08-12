@@ -115,7 +115,7 @@ def test_ha_refuted_large_transcript_advances_offset():
         assert new_offset == 1520, f"expected 1520, got {new_offset}"
         assert elapsed < 4.0, f"took {elapsed:.2f}s — unexpected timeout risk"
 
-def test_hd_shorter_transcript_must_not_clobber_offset():
+def test_hd_shorter_transcript_restarts_at_the_new_stream():
     py_script = _extract_py_script()
     sid = "test-hd-short-transcript"
 
@@ -135,14 +135,17 @@ def test_hd_shorter_transcript_must_not_clobber_offset():
         assert rc == 0
         final_offset = _read_offset(state_dir, sid)
 
-        assert final_offset >= 1324, (
-            f"offset was clobbered: stored 1324, final {final_offset}. "
-            f"Shorter transcript reset prev=0 and rewrote old turns."
+        # Unified rotation policy: a stream shorter than the stored offset
+        # is a new stream — restart at zero and capture it, never hold the
+        # dead offset until the new stream outgrows it (that is silent
+        # capture loss); replays land on the same idempotency keys.
+        assert final_offset == 50, (
+            f"expected a full re-walk of the new 50-line stream, "
+            f"final offset {final_offset}"
         )
-
         live_turns = _count_live_turns(deferred_dir, sid)
-        assert live_turns == 0, (
-            f"re-emitted {live_turns} old turns as new events (clobber bug)"
+        assert live_turns > 0, (
+            "the new stream must be captured immediately after rotation"
         )
 
 def test_normal_growing_transcript_advances_and_writes_turns():
@@ -205,7 +208,7 @@ def test_stale_path_scan_fallback_captures_turns():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-dev-Desktop-Project"
+        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
         project_dir.mkdir(parents=True, exist_ok=True)
         real_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript(real_transcript, 12)
@@ -257,7 +260,7 @@ def test_present_but_empty_stdin_uses_canonical_and_writes_nonce():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-dev-Desktop-Project"
+        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
         project_dir.mkdir(parents=True, exist_ok=True)
         canonical_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript_with_nonce(canonical_transcript, 35, nonce)
@@ -292,7 +295,7 @@ def test_present_but_wrong_session_stdin_uses_canonical_not_stdin():
         deferred_dir = home / ".iai-mcp" / ".deferred-captures"
         deferred_dir.mkdir(parents=True, exist_ok=True)
 
-        project_dir = home / ".claude" / "projects" / "-Users-dev-Desktop-Project"
+        project_dir = home / ".claude" / "projects" / "-Users-areg-Desktop-Claude"
         project_dir.mkdir(parents=True, exist_ok=True)
         canonical_transcript = project_dir / f"{sid}.jsonl"
         _make_transcript_with_nonce(canonical_transcript, 35, nonce)
@@ -314,3 +317,318 @@ def test_present_but_wrong_session_stdin_uses_canonical_not_stdin():
         assert final_offset == 35, (
             f"offset should be 35 (canonical line count), got {final_offset}"
         )
+
+
+def test_codex_rollout_captured_with_tool_trailer(tmp_path):
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = tmp_path / "rollout.jsonl"
+    rows = [
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "tighten the rollout parser please"}]}},
+        {"type": "response_item", "payload": {"type": "function_call",
+         "call_id": "c1", "name": "shell", "arguments": "{}"}},
+        {"type": "response_item", "payload": {"type": "function_call_output",
+         "call_id": "c1", "output": "ok"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "Parser tightened and checks pass."}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    rc, _ = _run_py_script(py_script, "s-codex-hook", transcript, home)
+    assert rc == 0, f"hook exited {rc}"
+
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    state_dir = home / ".iai-mcp" / ".capture-state"
+    assert _read_offset(state_dir, "s-codex-hook") == 4
+    assert _count_live_turns(deferred_dir, "s-codex-hook") == 2, (
+        "codex rollout dialogue must be captured, not silently consumed"
+    )
+    assert _live_contains_text(deferred_dir, "s-codex-hook", "[tools: shell]")
+
+
+def test_trailer_survives_two_hook_fires(tmp_path):
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = tmp_path / "t.jsonl"
+    first = [
+        {"type": "user", "message": {"role": "user", "content": "run the suite please"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {}, "id": "t1"}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(r) for r in first) + "\n")
+    rc, _ = _run_py_script(py_script, "s-straddle-hook", transcript, home)
+    assert rc == 0
+
+    with transcript.open("a") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant",
+            "content": [{"type": "text", "text": "The suite is green after the fix."}]}}) + "\n")
+    rc, _ = _run_py_script(py_script, "s-straddle-hook", transcript, home)
+    assert rc == 0
+
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    assert _live_contains_text(deferred_dir, "s-straddle-hook", "[tools: Bash]"), (
+        "pending tool names must persist across hook fires beside the offset"
+    )
+
+
+def test_codex_event_msg_never_double_captures(tmp_path):
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = tmp_path / "rollout.jsonl"
+    rows = [
+        {"type": "event_msg", "payload": {"type": "user_message",
+         "message": "duplicate of the prompt zebra91"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "the real prompt zebra91"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "Answer to the zebra91 prompt."}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    rc, _ = _run_py_script(py_script, "s-codex-dup", transcript, home)
+    assert rc == 0
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    assert _count_live_turns(deferred_dir, "s-codex-dup") == 2, (
+        "event_msg mirrors of user turns must not double-capture"
+    )
+
+
+def test_codex_filtered_user_turn_clears_pending_in_hook(tmp_path):
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = tmp_path / "rollout.jsonl"
+    rows = [
+        {"type": "response_item", "payload": {"type": "function_call",
+         "call_id": "c1", "name": "shell", "arguments": "{}"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text",
+                      "text": "<environment_context>x</environment_context>"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text",
+                      "text": "Totally unrelated later answer."}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    rc, _ = _run_py_script(py_script, "s-codex-clear", transcript, home)
+    assert rc == 0
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    assert _live_contains_text(deferred_dir, "s-codex-clear", "unrelated later answer")
+    assert not _live_contains_text(deferred_dir, "s-codex-clear", "[tools:"), (
+        "a filtered user turn must clear pending tool names in the hook too"
+    )
+
+
+def test_matching_fingerprint_never_resets_a_growing_stream(tmp_path):
+    """The false-positive direction: a snapshot carrying the CORRECT fp of
+    a stream that merely grew must continue from the stored offset with
+    zero re-emission of already-captured lines."""
+    import hashlib
+
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    state_dir = home / ".iai-mcp" / ".capture-state"
+    state_dir.mkdir(parents=True)
+
+    rows = [
+        {"type": "user", "message": {"role": "user",
+         "content": f"same stream captured line {i}"}}
+        for i in range(3)
+    ]
+    transcript = tmp_path / "t.jsonl"
+    body = "\n".join(json.dumps(r) for r in rows) + "\n"
+    transcript.write_text(body)
+    first_raw = body.splitlines(keepends=True)[0].encode("utf-8")
+    (state_dir / "s-grow.turnstate.json").write_text(json.dumps({
+        "offset": 3,
+        "pending": [],
+        "fp": hashlib.sha256(first_raw).hexdigest()[:16],
+    }))
+    (state_dir / "s-grow.offset").write_text("3")
+
+    transcript.write_text(body + json.dumps(
+        {"type": "user", "message": {"role": "user",
+         "content": "fresh growth line only this must emit"}}
+    ) + "\n")
+
+    rc, _ = _run_py_script(py_script, "s-grow", transcript, home)
+    assert rc == 0
+    assert _read_offset(state_dir, "s-grow") == 4
+
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    assert _live_contains_text(deferred_dir, "s-grow", "fresh growth line")
+    assert not _live_contains_text(deferred_dir, "s-grow", "captured line 0"), (
+        "a matching fingerprint must never trigger a re-walk"
+    )
+
+
+def test_hook_then_cli_share_one_fingerprint(tmp_path, monkeypatch):
+    """Cross-carrier pin: the hook publishes the fp, the deferred CLI reads
+    it back on the SAME stream — the offset must advance monotonically with
+    zero re-emission (a decode-skewed fingerprint would reset every
+    alternation and replay the whole transcript each time)."""
+    import argparse
+
+    from iai_mcp.cli import cmd_capture_turn_deferred
+
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    rows = [
+        {"type": "user", "message": {"role": "user",
+         "content": f"один общий поток строка {i} с не-ASCII"}}
+        for i in range(2)
+    ]
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    rc, _ = _run_py_script(py_script, "s-xc", transcript, home)
+    assert rc == 0
+    state_dir = home / ".iai-mcp" / ".capture-state"
+    assert _read_offset(state_dir, "s-xc") == 2
+
+    transcript.write_text(
+        transcript.read_text(encoding="utf-8") + json.dumps(
+            {"type": "user", "message": {"role": "user",
+             "content": "хвост потока для второго носителя"}},
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        session_id="s-xc", transcript_path=str(transcript),
+        max_turns_per_call=200,
+    )
+    assert cmd_capture_turn_deferred(args) == 0
+    assert _read_offset(state_dir, "s-xc") == 3, (
+        "the CLI must continue from the hook offset, never reset on its "
+        "own fingerprint of the same stream"
+    )
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    live = deferred_dir / "s-xc.live.jsonl"
+    body = live.read_text(encoding="utf-8") if live.exists() else ""
+    assert body.count("строка 0") <= 1, "re-emission across carriers"
+
+
+def test_py_script_heredoc_contains_no_apostrophes():
+    """The PY_SCRIPT block lives in a single-quoted shell heredoc: one
+    apostrophe anywhere inside terminates the quoting and bash executes the
+    remainder as shell. This has broken the hook once; the extraction finds
+    the same terminator the shell does."""
+    py_script = _extract_py_script()
+    assert py_script.strip(), "PY_SCRIPT block must extract non-empty"
+    # The extraction regex is non-greedy: an end-of-line apostrophe inside
+    # the script would truncate the match and the scan below would pass on
+    # the clean prefix. Anchoring the real final lines makes truncation
+    # fail loudly first.
+    assert py_script.rstrip().endswith("except Exception:\n    pass"), (
+        "PY_SCRIPT extraction truncated - an apostrophe ended a line early"
+    )
+    offenders = [
+        (i + 1, line)
+        for i, line in enumerate(py_script.splitlines())
+        if chr(39) in line
+    ]
+    assert not offenders, f"apostrophes inside PY_SCRIPT: {offenders[:5]}"
+
+
+def test_rotate_and_regrow_past_old_offset_is_caught_by_fingerprint(tmp_path):
+    """The length fence is blind when the replacement stream already grew
+    past the dead offset: only the first-line fingerprint distinguishes the
+    streams, and without it the first lines of the new stream are silently
+    lost while stale pending survives."""
+    import hashlib
+
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    state_dir = home / ".iai-mcp" / ".capture-state"
+    state_dir.mkdir(parents=True)
+
+    old_first = json.dumps(
+        {"type": "user", "message": {"role": "user", "content": "old stream head"}}
+    ) + "\n"
+    (state_dir / "s-fp.turnstate.json").write_text(json.dumps({
+        "offset": 3,
+        "pending": ["StaleToolFromDeadStream"],
+        "fp": hashlib.sha256(old_first.encode("utf-8")).hexdigest()[:16],
+    }))
+    (state_dir / "s-fp.offset").write_text("3")
+
+    rows = [
+        {"type": "user", "message": {"role": "user",
+         "content": f"replacement stream line {i} well past the old offset"}}
+        for i in range(5)
+    ] + [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "reply on the replacement stream."}]}},
+    ]
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    rc, _ = _run_py_script(py_script, "s-fp", transcript, home)
+    assert rc == 0
+    assert _read_offset(state_dir, "s-fp") == 6
+
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    assert _live_contains_text(deferred_dir, "s-fp", "replacement stream line 0"), (
+        "the head of the replacement stream must be captured, not skipped "
+        "by the dead offset"
+    )
+    assert not _live_contains_text(deferred_dir, "s-fp", "[tools:"), (
+        "pending from the dead stream must not trail a replacement-stream turn"
+    )
+
+
+def test_rotation_clears_stale_pending_from_dead_stream(tmp_path):
+    py_script = _extract_py_script()
+    home = tmp_path / "home"
+    home.mkdir()
+    state_dir = home / ".iai-mcp" / ".capture-state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "s-rot.turnstate.json").write_text(
+        json.dumps({"offset": 5, "pending": ["OldBashCall"]})
+    )
+    (state_dir / "s-rot.offset").write_text("5")
+
+    transcript = tmp_path / "t.jsonl"
+    rows = [
+        {"type": "user", "message": {"role": "user", "content": f"short line {i}"}}
+        for i in range(2)
+    ]
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    rc, _ = _run_py_script(py_script, "s-rot", transcript, home)
+    assert rc == 0
+    # Unified rotation policy: the shrunken stream is a NEW stream — capture
+    # restarts at zero and walks it, never waits for it to outgrow the dead
+    # offset (silent loss); replays land on the same idempotency keys.
+    assert _read_offset(state_dir, "s-rot") == 2
+
+    rows = [
+        {"type": "user", "message": {"role": "user",
+         "content": f"regrown line {i} of the new stream"}}
+        for i in range(5)
+    ] + [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "assistant reply on the new stream."}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    rc, _ = _run_py_script(py_script, "s-rot", transcript, home)
+    assert rc == 0
+
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    assert _live_contains_text(deferred_dir, "s-rot", "new stream")
+    assert not _live_contains_text(deferred_dir, "s-rot", "[tools:"), (
+        "pending from a dead transcript must never trail a new-stream turn"
+    )

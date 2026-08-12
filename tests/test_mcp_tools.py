@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import psutil
 import pytest
@@ -193,6 +194,62 @@ def test_wrapper_profile_get_returns_live_knobs(built_wrapper: Path, daemon_sock
         assert payload["live"]["scene_construction_scaffold"] is True
         assert len(payload["live"]) == 11
         assert len(payload["deferred"]) == 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_wrapper_memory_capture_recall_round_trip(built_wrapper: Path, daemon_sock: Path) -> None:
+    proc = _spawn_wrapper(built_wrapper, daemon_sock)
+    try:
+        _initialize(proc, 1)
+        nonce = uuid4().hex
+        capture_text = f"alice deployment token {nonce}"
+
+        resp = _mcp_call(
+            proc,
+            "tools/call",
+            {
+                "name": "memory_capture",
+                "arguments": {"text": capture_text, "cue": capture_text, "tier": "episodic"},
+            },
+            2,
+        )
+        assert "result" in resp, f"memory_capture error: {resp}"
+        capture_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert capture_payload.get("status") in ("inserted", "reinforced"), capture_payload
+
+        # Bounded poll: capture may land as a pending row before its
+        # embedding fills in; recall must still surface it via the recency
+        # union. Not an unbounded wait -- hard cap ~10s.
+        rpc_id = 3
+        deadline = time.monotonic() + 10.0
+        hit_found = False
+        last_payload: "dict | None" = None
+        while time.monotonic() < deadline:
+            recall_resp = _mcp_call(
+                proc,
+                "tools/call",
+                {"name": "memory_recall", "arguments": {"cue": capture_text}},
+                rpc_id,
+            )
+            rpc_id += 1
+            assert "result" in recall_resp, f"memory_recall error: {recall_resp}"
+            recall_payload = json.loads(recall_resp["result"]["content"][0]["text"])
+            last_payload = recall_payload
+            hits = recall_payload.get("hits", [])
+            if any(nonce in (h.get("literal_surface") or "") for h in hits):
+                hit_found = True
+                break
+            time.sleep(0.5)
+
+        assert hit_found, (
+            f"nonce {nonce!r} never surfaced in memory_recall hits through "
+            f"the wrapper; last recall payload={last_payload!r}"
+        )
     finally:
         proc.terminate()
         try:

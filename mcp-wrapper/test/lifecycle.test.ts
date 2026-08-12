@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { WrapperLifecycle } from "../src/lifecycle.js";
+import {
+  WrapperLifecycle,
+  kickstartArgs,
+  titleIsDaemonOfStore,
+} from "../src/lifecycle.js";
 
 async function makeTmp(prefix: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), `iai-mcp-lifecycle-${prefix}-`));
@@ -56,6 +60,8 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
         heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
         platform: "darwin",
         socketReachable: async () => false,
+        probeAttempts: 1,
+        probeDelayMs: 0,
         spawnKickstart: async () => {
           kickstarts += 1;
           try {
@@ -91,6 +97,8 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
         heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
         platform: "darwin",
         socketReachable: async () => false,
+        probeAttempts: 1,
+        probeDelayMs: 0,
         spawnKickstart: async () => {
           throw new Error("kickstart simulated failure");
         },
@@ -118,6 +126,8 @@ describe("WrapperLifecycle.ensureDaemonAlive", () => {
         heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
         platform: "linux",
         socketReachable: async () => false,
+        probeAttempts: 1,
+        probeDelayMs: 0,
         spawnKickstart: async () => {
           kickstarts += 1;
         },
@@ -144,6 +154,8 @@ describe("WrapperLifecycle.scheduleAutoHeal", () => {
         heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
         platform: "darwin",
         socketReachable: async () => false,
+        probeAttempts: 1,
+        probeDelayMs: 0,
         spawnKickstart: async () => {},
         spawnDoctorAuto: async () => {
           doctorSpawns += 1;
@@ -194,6 +206,8 @@ describe("WrapperLifecycle.scheduleAutoHeal", () => {
         heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
         platform: "darwin",
         socketReachable: async () => false,
+        probeAttempts: 1,
+        probeDelayMs: 0,
         spawnKickstart: async () => {},
         spawnDoctorAuto: async () => {
           doctorSpawns += 1;
@@ -373,6 +387,128 @@ describe("WrapperLifecycle security invariants", () => {
       forbidden,
       [],
       `Forbidden subprocess pattern in mcp-wrapper/src/: ${JSON.stringify(forbidden, null, 2)}`,
+    );
+  });
+});
+
+describe("WrapperLifecycle death evidence", () => {
+  it("retries the probe before declaring the daemon dead", async () => {
+    const tmp = await makeTmp("retry");
+    try {
+      let probes = 0;
+      let kickstarts = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        // A daemon grinding a consolidation step at full CPU misses the
+        // first accept and answers the next one; one miss is not death.
+        socketReachable: async () => {
+          probes += 1;
+          return probes > 1;
+        },
+        daemonPidAlive: async () => false,
+        spawnKickstart: async () => {
+          kickstarts += 1;
+        },
+        probeAttempts: 3,
+        probeDelayMs: 0,
+      });
+      await lifecycle.ensureDaemonAlive();
+      assert.equal(probes, 2, "the probe must be retried after a single miss");
+      assert.equal(kickstarts, 0, "a busy daemon must never be kickstarted");
+      await assert.rejects(
+        stat(join(tmp, "wake.signal")),
+        "no wake signal is needed for a daemon that answered",
+      );
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
+  it("never kickstarts while the recorded daemon pid is alive", async () => {
+    const tmp = await makeTmp("pidalive");
+    try {
+      let kickstarts = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => false,
+        daemonPidAlive: async () => true,
+        spawnKickstart: async () => {
+          kickstarts += 1;
+        },
+        probeAttempts: 2,
+        probeDelayMs: 0,
+      });
+      await lifecycle.ensureDaemonAlive();
+      assert.equal(
+        kickstarts,
+        0,
+        "an unreachable but LIVE daemon is busy or booting, never dead",
+      );
+      const sigStat = await stat(join(tmp, "wake.signal"));
+      assert.ok(sigStat.isFile(), "the wake signal is the whole intervention");
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
+  it("kickstarts only when both the socket and the pid are gone", async () => {
+    const tmp = await makeTmp("bothgone");
+    try {
+      let kickstarts = 0;
+      const lifecycle = new WrapperLifecycle({
+        socketPath: join(tmp, "daemon.sock"),
+        wakeSignalPath: join(tmp, "wake.signal"),
+        heartbeatPath: join(tmp, "wrappers", "heartbeat-1-x.json"),
+        platform: "darwin",
+        socketReachable: async () => false,
+        daemonPidAlive: async () => false,
+        spawnKickstart: async () => {
+          kickstarts += 1;
+        },
+        probeAttempts: 2,
+        probeDelayMs: 0,
+      });
+      await lifecycle.ensureDaemonAlive();
+      assert.equal(kickstarts, 1);
+    } finally {
+      await cleanupTmp(tmp);
+    }
+  });
+
+  it("kickstart argv carries no -k: a wake must never terminate", () => {
+    const args = kickstartArgs(501);
+    assert.deepEqual(args, ["kickstart", "gui/501/com.iai-mcp.daemon"]);
+    assert.ok(!args.includes("-k"), "-k SIGTERMs the running instance");
+  });
+
+  it("pid identity: strict when the title names a store, lenient without", () => {
+    const store = "/Users/alice/.iai-mcp";
+    assert.equal(
+      titleIsDaemonOfStore(`iai lilli (iai_mcp.daemon) store=${store}\n`, store),
+      true,
+    );
+    assert.equal(
+      titleIsDaemonOfStore(
+        `iai lilli (iai_mcp.daemon) store=/tmp/other-store\n`,
+        store,
+      ),
+      false,
+      "another store's daemon on a recycled pid must not suppress the wake",
+    );
+    assert.equal(
+      titleIsDaemonOfStore("python -m iai_mcp.daemon\n", store),
+      true,
+      "a daemon whose setproctitle failed must still count as alive",
+    );
+    assert.equal(
+      titleIsDaemonOfStore("/usr/bin/some-other-process\n", store),
+      false,
     );
   });
 });

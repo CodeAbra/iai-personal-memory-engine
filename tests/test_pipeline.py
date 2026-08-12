@@ -11,9 +11,11 @@ from iai_mcp.pipeline import (
     W_COSINE,
     W_DEGREE,
     _aaak_overlap,
+    _collect_graph_pool,
     _community_gate,
     _cosine,
     _pick_seeds,
+    _read_record_payload,
     recall_for_response,
 )
 from iai_mcp.provenance_buffer import flush_deferred_provenance
@@ -357,3 +359,67 @@ def test_pipeline_empty_gate_falls_back_to_all_nodes(tmp_path) -> None:
         session_id="s",
     )
     assert len(resp.hits) == 1
+
+
+class _NoStore:
+    embed_dim = EMBED_DIM
+
+    def get_batch(self, ids):
+        return {}
+
+    def get(self, rid):
+        return None
+
+
+def _graph_with_payload(vec: "list[float]"):
+    graph = MemoryGraph()
+    rid = uuid4()
+    graph.add_node(rid, community_id=None, embedding=vec)
+    graph.set_node_payload(
+        rid,
+        {
+            "embedding": vec,
+            "surface": "a stored surface",
+            "centrality": 0.0,
+            "tier": "episodic",
+            "tags": [],
+            "language": "en",
+            "aaak_index": "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "stability": 0.5,
+        },
+    )
+    return graph, rid
+
+
+def test_record_view_aliases_the_graph_vector() -> None:
+    # A corpus-scale records_cache that copied instead of aliasing would hold a
+    # second full set of vectors for the whole graph.
+    vec = [0.5] + [0.0] * (EMBED_DIM - 1)
+    graph, rid = _graph_with_payload(vec)
+
+    view = _read_record_payload(graph, rid, _NoStore())
+
+    assert view is not None
+    assert view.embedding is graph.get_embedding(rid)
+
+
+def test_pool_build_mixes_graph_arrays_with_store_lists() -> None:
+    import numpy as np
+
+    vec = [0.5] + [0.0] * (EMBED_DIM - 1)
+    graph, rid = _graph_with_payload(vec)
+    absent = uuid4()
+    graph.add_node(absent, community_id=None, embedding=None)
+    fallback = _make([0.25] + [0.0] * (EMBED_DIM - 1))
+
+    class _OneRowStore(_NoStore):
+        def get_batch(self, ids):
+            return {absent: fallback}
+
+    pool_ids, pool_embs = _collect_graph_pool(graph, {}, _OneRowStore())
+
+    assert set(pool_ids) == {rid, absent}
+    assert pool_embs.shape == (2, EMBED_DIM)
+    assert pool_embs.dtype == np.float32
+    assert float(pool_embs[pool_ids.index(absent), 0]) == 0.25

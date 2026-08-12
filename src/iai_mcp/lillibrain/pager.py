@@ -11,6 +11,7 @@ replays before-images into the DB file before any reads are served.
 """
 from __future__ import annotations
 
+import errno
 import logging
 import mmap
 import os
@@ -509,8 +510,19 @@ class Pager:
 
         try:
             journal_data = journal_path.read_bytes()
-        except OSError:
-            # Journal unreadable — treat as if absent.
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                # Vanished between the exists() check and the read (rare TOCTOU) —
+                # treat as genuinely absent.
+                return
+            # A present-but-unreadable journal leaves the interrupted transaction
+            # unrolled; surface it instead of opening over half-written pages.
+            logger.warning(
+                "rollback journal unreadable, interrupted transaction NOT rolled "
+                "back: %s: %s",
+                journal_path,
+                exc,
+            )
             return
 
         if len(journal_data) < _JOURNAL_HEADER_SIZE:

@@ -792,7 +792,7 @@ def capture_transcript(
 
     counts = {"inserted": 0, "reinforced": 0, "skipped": 0, "errors": 0}
     seen = 0
-    pending_tools: list[str] = []
+    trailers = _ToolTrailerState()
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             if seen >= max_turns:
@@ -804,36 +804,13 @@ def capture_transcript(
                 log.debug("capture_transcript_json_parse_failed: %s", exc)
                 counts["errors"] += 1
                 continue
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-            obj_role = obj.get("type") or msg.get("role") or obj.get("role", "")
-            tools = (
-                _tool_names(msg.get("content", ""))
-                if obj_role == "assistant" else []
-            )
-            parsed = _parse_transcript_obj(obj)
+            if not isinstance(obj, dict):
+                counts["errors"] += 1
+                continue
+            parsed = trailers.feed(obj, _parse_transcript_obj(obj))
             if parsed is None:
-                # Action-only assistant entries carry the mechanics of the
-                # episode; their tool names ride the response's next text
-                # turn. A user entry clears them ONLY when it is dialogue —
-                # tool-result-only user entries are plumbing, not a boundary.
-                if tools:
-                    pending_tools.extend(tools)
-                elif obj_role == "user" and _has_conversational_text(
-                    msg.get("content", "")
-                ):
-                    pending_tools = []
                 continue
             role, text, src_uuid, ts = parsed
-            if role == "assistant":
-                # Floor on the BARE text: the trailer must never turn an
-                # otherwise-skipped stub into a record.
-                if len(text.strip()) >= MIN_CAPTURE_LEN:
-                    text = text + _tools_trailer(pending_tools + tools)
-                    pending_tools = []
-                else:
-                    pending_tools.extend(tools)
-            else:
-                pending_tools = []
             result = capture_turn(
                 store,
                 cue=f"session {session_id} turn {seen}",
@@ -892,11 +869,12 @@ def _tools_trailer(names: "list[str]") -> str:
 def _tool_names(content: "list | str") -> "list[str]":
     if not isinstance(content, list):
         return []
-    return [
-        str(b.get("name") or "")
+    names = [
+        _clean_tool_name(b.get("name"))
         for b in content
         if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name")
     ]
+    return [n for n in names if n]
 
 
 def _has_conversational_text(content: "list | str") -> bool:
@@ -909,6 +887,111 @@ def _has_conversational_text(content: "list | str") -> bool:
             for b in content
         )
     return bool(str(content or "").strip())
+
+
+def _clean_tool_name(value: object) -> "str | None":
+    # Tool names are third-party-controlled text (MCP servers name their own
+    # tools). Non-strings are dropped, never coerced to a repr; the trailer's
+    # own delimiters and non-printables are stripped and length is bounded so
+    # a hostile name cannot forge trailer structure in stored text.
+    if not isinstance(value, str):
+        return None
+    name = "".join(
+        ch for ch in value if ch.isprintable() and ch not in ",[]"
+    ).strip()
+    return name[:80].strip() or None
+
+
+def _tool_names_for_obj(obj: dict, msg: dict, obj_role: str) -> "list[str]":
+    """Per-host tool-name extraction; Hermes rows carry no tool data."""
+    if obj.get("type") == "response_item":
+        payload = obj.get("payload")
+        if isinstance(payload, dict) and payload.get("type") == "function_call":
+            name = _clean_tool_name(payload.get("name"))
+            return [name] if name else []
+        return []
+    if "step_index" in obj and "source" in obj:
+        if obj.get("source") == "MODEL" and obj.get("type") == "PLANNER_RESPONSE":
+            calls = obj.get("tool_calls")
+            if isinstance(calls, list):
+                names = [
+                    _clean_tool_name(c.get("name"))
+                    for c in calls
+                    if isinstance(c, dict)
+                ]
+                return [n for n in names if n]
+        return []
+    if obj_role == "assistant":
+        return _tool_names(msg.get("content", ""))
+    return []
+
+
+def _is_user_boundary(obj: dict, msg: dict, obj_role: str) -> bool:
+    # Host-aware twin of the extractor above. A user turn must clear pending
+    # tool names even when its text is filtered out of capture — otherwise a
+    # later answer inherits a trailer for tools it never ran.
+    if obj.get("type") == "response_item":
+        payload = obj.get("payload")
+        return (
+            isinstance(payload, dict)
+            and payload.get("type") == "message"
+            and payload.get("role") == "user"
+        )
+    if "step_index" in obj and "source" in obj:
+        # Any explicit-user-sourced step (live input OR a replayed user turn)
+        # is user activity: clearing too eagerly loses a trailer, clearing
+        # too lazily fabricates one.
+        return obj.get("source") == "USER_EXPLICIT"
+    return obj_role == "user" and _has_conversational_text(
+        msg.get("content", "")
+    )
+
+
+class _ToolTrailerState:
+    """Rides action-only tool names onto the response's next substantive
+    assistant text as a [tools: ...] trailer. One instance per transcript
+    walk; every consumer of _parse_transcript_obj must route each line
+    through feed() or tool names silently vanish from that carrier."""
+
+    def __init__(self, pending: "list[str] | None" = None) -> None:
+        self._pending: "list[str]" = [
+            n for n in (pending or []) if isinstance(n, str) and n
+        ]
+
+    @property
+    def pending(self) -> "list[str]":
+        return list(self._pending)
+
+    def feed(
+        self,
+        obj: dict,
+        parsed: "tuple[str, str, str | None, str | None] | None",
+    ) -> "tuple[str, str, str | None, str | None] | None":
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+        obj_role = obj.get("type") or msg.get("role") or obj.get("role", "")
+        tools = _tool_names_for_obj(obj, msg, obj_role)
+        if parsed is None:
+            # Action-only assistant entries carry the mechanics of the
+            # episode; their tool names ride the response's next text
+            # turn. A user entry clears them ONLY when it is dialogue —
+            # tool-result-only user entries are plumbing, not a boundary.
+            if tools:
+                self._pending.extend(tools)
+            elif _is_user_boundary(obj, msg, obj_role):
+                self._pending = []
+            return None
+        role, text, src_uuid, ts = parsed
+        if role == "assistant":
+            # Floor on the BARE text: the trailer must never turn an
+            # otherwise-skipped stub into a record.
+            if len(text.strip()) >= MIN_CAPTURE_LEN:
+                text = text + _tools_trailer(self._pending + tools)
+                self._pending = []
+            else:
+                self._pending.extend(tools)
+        else:
+            self._pending = []
+        return role, text, src_uuid, ts
 
 
 def _parse_transcript_line(
@@ -1013,6 +1096,77 @@ def _spool_root() -> Path:
 
 def deferred_captures_dir() -> Path:
     return _spool_root() / ".deferred-captures"
+
+
+def capture_state_dir() -> Path:
+    return _spool_root() / ".capture-state"
+
+
+CAPTURE_STATE_STALE_SEC = 30 * 86400
+
+CAPTURE_STATE_TMP_STALE_SEC = 86400
+
+_CAPTURE_STATE_SUFFIXES = (
+    ".offset",
+    ".turnstate.json",
+    ".watermark",
+    ".live-fingerprint",
+    ".refresh-cooldown",
+    ".pending-tools",
+    ".drain-offset",
+)
+
+
+def sweep_capture_state(*, apply: bool, now: "float | None" = None) -> dict:
+    """Count — and with apply=True remove — capture-state files no writer
+    will return to.
+
+    Session state mutates on every hook fire, so a file untouched for a
+    month belongs to a session that is gone; losing its offset costs only
+    a re-walk of a transcript that no longer grows (deduped by source-uuid
+    idempotency keys where the host provides them, absorbed by the cosine
+    gate for text-keyed hosts; the Antigravity scanner gates on the offset
+    mtime and will schedule that one re-walk itself). tmp names carry a
+    writer pid, and a day is far past any writer lifetime. Lock files are
+    NEVER swept: flock acquisition does not touch mtime, so a held lock
+    can look arbitrarily old, and unlinking it would split the mutual
+    exclusion across two inodes. Names outside the known suffix set are
+    never touched.
+    """
+    state_dir = capture_state_dir()
+    out = {"stale": 0, "tmp": 0, "removed": 0, "kept": 0}
+    if not state_dir.exists():
+        return out
+    now_ts = time.time() if now is None else now
+    try:
+        entries = list(os.scandir(state_dir))
+    except OSError:
+        return out
+    for entry in entries:
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            age = now_ts - entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+        if re.search(r"\.tmp\d*$", entry.name):
+            bucket, limit = "tmp", CAPTURE_STATE_TMP_STALE_SEC
+        elif entry.name.endswith(_CAPTURE_STATE_SUFFIXES):
+            bucket, limit = "stale", CAPTURE_STATE_STALE_SEC
+        else:
+            out["kept"] += 1
+            continue
+        if age < limit:
+            out["kept"] += 1
+            continue
+        out[bucket] += 1
+        if apply:
+            try:
+                os.unlink(entry.path)
+                out["removed"] += 1
+            except OSError:
+                pass
+    return out
 
 
 def _spool_key() -> bytes | None:
@@ -1410,6 +1564,7 @@ def write_deferred_captures(
         path = Path(transcript_path).expanduser()
         if path.exists():
             seen = 0
+            trailers = _ToolTrailerState()
             with path.open(encoding="utf-8") as src:
                 for line in src:
                     if seen >= max_turns:
@@ -1419,7 +1574,9 @@ def write_deferred_captures(
                         obj = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
-                    parsed = _parse_transcript_obj(obj)
+                    if not isinstance(obj, dict):
+                        continue
+                    parsed = trailers.feed(obj, _parse_transcript_obj(obj))
                     if parsed is None:
                         continue
                     role, text, src_uuid, ts = parsed
@@ -2183,19 +2340,25 @@ def drain_permanent_failed_files(
                         file_dropped += 1
             else:
                 raw_session_id = "-"
+                trailers = _ToolTrailerState()
                 for ln in lines:
                     try:
                         ln = _decode_spool_line(ln)
                     except ValueError:
                         file_dropped += 1
                         continue
+                    obj: dict = {}
                     try:
-                        obj = json.loads(ln)
-                        if isinstance(obj, dict) and "session_id" in obj:
-                            raw_session_id = obj.get("session_id") or "-"
+                        decoded = json.loads(ln)
+                        if isinstance(decoded, dict):
+                            obj = decoded
+                            if "session_id" in obj:
+                                raw_session_id = obj.get("session_id") or "-"
                     except (json.JSONDecodeError, ValueError):
                         pass
-                    parsed = _parse_transcript_line(ln)
+                    parsed = trailers.feed(
+                        obj, _parse_transcript_obj(obj) if obj else None
+                    )
                     if parsed is None:
                         file_dropped += 1
                         continue
@@ -2263,6 +2426,7 @@ def drain_active_live_captures(
         "events_inserted": 0,
         "events_reinforced": 0,
         "events_skipped": 0,
+        "files_corrupt": 0,
     }
     if not deferred_dir.exists():
         return counts
@@ -2290,6 +2454,10 @@ def drain_active_live_captures(
             # Leave the file AND its offset untouched for a keyed pass.
             continue
         except (json.JSONDecodeError, ValueError):
+            counts["files_corrupt"] += 1
+            log.warning(
+                "corrupt spool header, skipping this drain pass: %s", fpath.name
+            )
             continue
         if header.get("version", 0) > 1:
             continue

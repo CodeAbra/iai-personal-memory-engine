@@ -669,9 +669,17 @@ def _patch_stop_collaborators(
     *,
     pid,
     alive_sequence,
+    serves_this_store: bool = True,
 ):
     import signal as _signal
     import iai_mcp.lifecycle_lock as lifecycle_lock
+    from iai_mcp.cli import _daemon as daemon_mod
+
+    # Identity is asserted separately (see the identity-guard tests); these
+    # cases pin the signal ORDER, so the identity answer is supplied.
+    monkeypatch.setattr(
+        daemon_mod, "_pid_serves_this_store", lambda _pid: serves_this_store,
+    )
 
     calls: list = []
 
@@ -861,3 +869,115 @@ def test_start_rebootstraps_booted_out_job(
         i for i, c in enumerate(calls) if "kickstart" in c
     )
     assert bootstrap_idx < kickstart_idx, calls
+
+
+def test_stop_refuses_pid_that_is_not_this_stores_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lock pid is a claim, not proof: a stale record can name a
+    recycled pid or another store's daemon, and signalling on that claim
+    alone is how a stop for one store fells another."""
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    calls, sig = _patch_stop_collaborators(
+        monkeypatch, pid=9191, alive_sequence=[True], serves_this_store=False,
+    )
+    rc = cli_mod.cmd_daemon_stop(object())
+    assert rc == 0
+
+    assert any(c[0] == "run" and "bootout" in c[1] for c in calls), calls
+    assert not any(c[0] == "kill" for c in calls), (
+        f"a foreign/recycled pid must never be signalled: {calls}"
+    )
+
+
+def test_start_does_not_bootout_a_live_daemon_of_this_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bootout SIGTERMs the running instance — a heal-driven start (the
+    unattended doctor reflex) must not tear down a daemon that is merely
+    busy."""
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    from iai_mcp.cli import _daemon as daemon_mod
+
+    calls: list = []
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        daemon_mod, "_live_daemon_pid_for_this_store", lambda: 4242,
+    )
+
+    rc = cli_mod.cmd_daemon_start(object())
+    assert rc == 0
+    assert not any("bootout" in c for c in calls), calls
+    # bootstrap does NOT signal a live instance, and skipping it would
+    # leave the job uninstalled whenever a daemon outlives its job.
+    assert any("bootstrap" in c for c in calls), calls
+    assert any("kickstart" in c for c in calls), calls
+
+
+def test_start_bootstraps_when_no_live_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    from iai_mcp.cli import _daemon as daemon_mod
+
+    calls: list = []
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        daemon_mod, "_live_daemon_pid_for_this_store", lambda: None,
+    )
+
+    rc = cli_mod.cmd_daemon_start(object())
+    assert rc == 0
+    assert any("bootout" in c for c in calls), calls
+    assert any("bootstrap" in c for c in calls), calls
+    assert any("kickstart" in c for c in calls), calls
+
+
+def test_pid_serves_this_store_matches_title_by_equality(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from iai_mcp.cli import _daemon as daemon_mod
+    from iai_mcp.lifecycle_lock import daemon_process_title
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    mine = daemon_process_title(tmp_path)
+    other = daemon_process_title(tmp_path / "other-store")
+
+    import psutil
+
+    class _P:
+        def __init__(self, title):
+            self._title = title
+
+        def cmdline(self):
+            return [self._title]
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: _P(mine))
+    assert daemon_mod._pid_serves_this_store(111) is True
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: _P(other))
+    assert daemon_mod._pid_serves_this_store(111) is False
+
+    def _boom(_pid):
+        raise psutil.NoSuchProcess(111)
+
+    monkeypatch.setattr(psutil, "Process", _boom)
+    assert daemon_mod._pid_serves_this_store(111) is False

@@ -23,12 +23,8 @@ flushing.  The explicit ``flush_record_buffer`` / ``flush_edge_buffer`` call in
 step 3 of each window test then becomes the ONLY flush — the one whose
 invalidation behaviour the test measures.
 
-Cache-absent fallback
----------------------
-When no persistent cross-read count cache is present, ``_count_memo`` is
-``None`` outside a ``count_memo()`` scope, so each call to the three count
-methods re-runs the filtered SQL COUNT.  Tests that assert "warm cache ==
-live count" are trivially true in that mode (no cache diverges from live).
+The corpus count cache is unconditional: ``MemoryStore.__init__`` sets
+``store._corpus_count_cache`` for every store.
 
 The tests that exercise the cache use one of two mechanisms:
 
@@ -459,13 +455,8 @@ def test_cached_count_never_raises_and_degrades_to_filtered_count(store):
         "corpus must have tombstoned or pending rows so filtered != unfiltered"
     )
 
-    if not _has_count_cache(store):
-        pytest.skip("count cache not present in this build")
-
     # Force-inject an exception into the cache get path
-    cache = getattr(store, "_corpus_count_cache", None)
-    if cache is None:
-        pytest.skip("count cache attribute not found")
+    cache = store._corpus_count_cache
 
     original_get = cache.get
 
@@ -1083,8 +1074,6 @@ def test_count_recompute_loses_to_concurrent_invalidate(store):
     fresh value rather than serving the stale one.
     """
     _seed_corpus(store, n_active=4)
-    if not _has_count_cache(store):
-        pytest.skip("count cache not present in this build")
 
     cache = store._corpus_count_cache
     cache.clear()  # cold cache: force a recompute on the next call
@@ -1127,8 +1116,6 @@ def test_concurrent_writer_invalidate_never_caches_stale(store):
     cache is empty, and a single clean recompute must then equal the live count.
     """
     _seed_corpus(store, n_active=6)
-    if not _has_count_cache(store):
-        pytest.skip("count cache not present in this build")
 
     cache = store._corpus_count_cache
     stop = threading.Event()

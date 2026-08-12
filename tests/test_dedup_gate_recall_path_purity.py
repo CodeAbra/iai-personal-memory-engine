@@ -99,12 +99,6 @@ def test_recall_path_unaffected_by_exact_authority_raising(driver, tmp_path, mon
     _select_driver(driver, monkeypatch)
     _monkeypatch_env(monkeypatch, tmp_path)
 
-    if not hasattr(MemoryStore, _EXACT_NEAR_DUP_TARGET_SYMBOL):
-        pytest.skip(
-            f"MemoryStore.{_EXACT_NEAR_DUP_TARGET_SYMBOL} not yet added — "
-            f"behavioural guard arms once the symbol exists"
-        )
-
     def _boom_target(*args, **kwargs):
         raise AssertionError(
             f"{_EXACT_NEAR_DUP_TARGET_SYMBOL} called during memory_recall dispatch"

@@ -88,6 +88,13 @@ def _yield_to_event_loop() -> None:
     time.sleep(0)
 
 
+def _payload_embedding(payload: dict) -> list:
+    # Graph-owned payloads carry a float32 buffer, which has no truth value; a
+    # bare `or []` on one raises instead of falling back.
+    emb = payload.get("embedding")
+    return [] if emb is None else list(emb)
+
+
 def _drift_tolerance(cached_count: int) -> int:
     """Largest corpus/cache count delta the cached graph may absorb without a
     full rebuild.
@@ -1154,10 +1161,10 @@ def _build_runtime_graph_impl(store: MemoryStore):
             graph.add_node(
                 UUID(nid),
                 community_id=None,
-                embedding=list(payload.get("embedding") or []),
+                embedding=_payload_embedding(payload),
             )
             graph.set_node_payload(nid, {
-                "embedding": list(payload.get("embedding") or []),
+                "embedding": _payload_embedding(payload),
                 "surface": payload.get("surface", ""),
                 "centrality": float(payload.get("centrality") or 0.0),
                 "tier": payload.get("tier", "episodic"),
@@ -1572,10 +1579,10 @@ def build_runtime_graph_incremental(store: MemoryStore):
             graph.add_node(
                 UUID(nid),
                 community_id=None,
-                embedding=list(payload.get("embedding") or []),
+                embedding=_payload_embedding(payload),
             )
             graph.set_node_payload(nid, {
-                "embedding": list(payload.get("embedding") or []),
+                "embedding": _payload_embedding(payload),
                 "surface": payload.get("surface", ""),
                 "centrality": float(payload.get("centrality") or 0.0),
                 "tier": payload.get("tier", "episodic"),

@@ -25,7 +25,7 @@ def test_row_f_hippo_readable_clean_store(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "iai_mcp.store.MemoryStore",
-        lambda: None,
+        lambda *a, **kw: None,
     )
     result = check_f_hippo_readable()
     assert result.status == "PASS"
@@ -65,7 +65,7 @@ def test_row_f_hippo_readable_open_error_fails(tmp_path, monkeypatch):
     assert "open failed" in result.detail
 
 
-def _raise_runtime_error():
+def _raise_runtime_error(*_a, **_kw):
     raise RuntimeError("simulated open failure")
 
 
@@ -255,25 +255,21 @@ def test_row_s_db_absent_pass(tmp_path, monkeypatch):
 
 
 def test_row_t_hippo_compaction_fresh_pass(tmp_path, monkeypatch):
-    (tmp_path / "hippo").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    """Regression witness for the fromisoformat-on-datetime fix: a real
+    store event carries a real ``datetime`` ``ts`` (``query_events`` never
+    returns a string). Before the fix this TypeErrors and always degrades
+    to WARN "timestamp unparseable"; after the fix it PASSes with the age
+    string in the detail."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
-    from datetime import datetime, timezone
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
 
-    recent_ts = datetime.now(timezone.utc).isoformat()
-    fake_event = {"kind": "hippo_compacted", "ts": recent_ts}
+    from iai_mcp.events import flush_event_buffer, write_event
+    from iai_mcp.store import MemoryStore
 
-    import iai_mcp.store as _store
-    import iai_mcp.events as _events
-
-    class _FakeStore:
-        pass
-
-    monkeypatch.setattr(_store, "MemoryStore", _FakeStore)
-    monkeypatch.setattr(
-        _events, "query_events",
-        lambda store, kind=None, limit=1: [fake_event],
-    )
+    store = MemoryStore(path=tmp_path)
+    write_event(store, kind="hippo_compacted", data={"phase": "sleep_cycle"})
+    flush_event_buffer(store)
+    store.close()
 
     from iai_mcp.doctor import check_t_hippo_compacted_freshness
 
@@ -281,32 +277,47 @@ def test_row_t_hippo_compaction_fresh_pass(tmp_path, monkeypatch):
     assert result.status == "PASS"
     assert result.passed is True
     assert "hippo_compacted" in result.name
-    assert "0.0h ago" in result.detail
+    assert "h ago" in result.detail
 
 
 def test_row_t_hippo_compaction_stale_warn(tmp_path, monkeypatch):
-    (tmp_path / "hippo").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
+    """Backdates a real event via a direct row insert (``write_event`` always
+    stamps ``now()``) and asserts the age-string detail — not status alone,
+    since the empty-events branch also WARNs and would false-green a
+    status-only assertion."""
+    from datetime import datetime, timedelta, timezone
+    import json
+    from uuid import uuid4
+
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
 
-    import iai_mcp.store as _store
-    import iai_mcp.events as _events
+    from iai_mcp.crypto import encrypt_field
+    from iai_mcp.store import EVENTS_TABLE, MemoryStore
 
-    class _FakeStore:
-        pass
-
-    monkeypatch.setattr(_store, "MemoryStore", _FakeStore)
-    monkeypatch.setattr(
-        _events, "query_events",
-        lambda store, kind=None, limit=1: [],
+    store = MemoryStore(path=tmp_path)
+    old_ts = datetime.now(timezone.utc) - timedelta(hours=48)
+    event_id = uuid4()
+    data_ct = encrypt_field(
+        json.dumps({"phase": "sleep_cycle"}),
+        store._key(),
+        associated_data=str(event_id).encode("ascii"),
     )
+    row = {
+        "id": str(event_id), "kind": "hippo_compacted", "severity": "",
+        "domain": "", "ts": old_ts, "data_json": data_ct, "session_id": "-",
+        "source_ids_json": "[]",
+    }
+    store.db.open_table(EVENTS_TABLE).add([row])
+    store.close()
 
     from iai_mcp.doctor import check_t_hippo_compacted_freshness
 
     result = check_t_hippo_compacted_freshness()
     assert result.status == "WARN"
     assert result.passed is True
-    assert "no hippo_compacted event" in result.detail
+    assert "h ago" in result.detail
+    assert "compact-hippo" in result.detail
 
 
 @_skip_on_lilli
@@ -315,8 +326,8 @@ def test_doctor_total_row_count(tmp_path, monkeypatch):
     from iai_mcp.doctor import run_diagnosis
 
     results = run_diagnosis()
-    assert len(results) == 28, (
-        f"expected 28 rows; got {len(results)}: {[r.name for r in results]}"
+    assert len(results) == 30, (
+        f"expected 30 rows; got {len(results)}: {[r.name for r in results]}"
     )
 
 

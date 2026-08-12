@@ -88,7 +88,12 @@ def flush_record_buffer(store: "MemoryStore") -> int:
                     if int(_item.get("embedding_pending", 0) or 0) == 1:
                         continue
                     _feed_exact(_item["id"], _item["embedding"])
-                except Exception:  # noqa: BLE001 -- exact-index feed MUST NOT crash flush
+                except Exception as exc:  # noqa: BLE001 -- exact-index feed MUST NOT crash flush
+                    logger.debug(
+                        "exact-index feed failed for %s: %s",
+                        _item.get("id") if isinstance(_item, dict) else None,
+                        type(exc).__name__,
+                    )
                     continue
         # The lexical postings were fed at insert time (plaintext lives only
         # in the in-memory record); the generation restamp belongs HERE,

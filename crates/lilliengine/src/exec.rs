@@ -3253,9 +3253,11 @@ fn scan_conflict(
 }
 
 /// Execute an UPDATE: bind SET then WHERE in textual order, select matching rows
-/// (full scan + three-valued WHERE, or the `id = '<lit>'` point-lookup fast path
-/// when an id-index is available), apply the SET assignments, and report the
-/// affected row count.
+/// (a full scan + three-valued WHERE, or an index fast path when the WHERE is
+/// `id = '<lit>'` / `id IN (...)` via the id-index or `col = <lit>` / `col IN
+/// (...)` via a col-index — each fast path re-applies the full bound predicate to
+/// its candidate superset, so the selection is byte-identical to the scan), apply
+/// the SET assignments, and report the affected row count.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_update(
     stmt: &UpdateStmt,
@@ -3297,12 +3299,21 @@ pub fn execute_update(
     binder.finish()?;
 
     let mut to_update: Vec<(i64, Row)> = Vec::new();
-    let mut used_fast_path = false;
+    // `skip_scan` gates the full-scan fallback: every fast-path branch sets it.
+    // `resolved_via_id_index` is the SEPARATE, stricter fact "the id-index maps
+    // this UPDATE's rows and stays trustworthy" — set ONLY by the id-eq / id-IN
+    // branches. A col-index selection sets `skip_scan` but leaves
+    // `resolved_via_id_index` false, so the tail invalidates the id-index exactly
+    // as the scan path does (a col branch never marks a stale id-index valid).
+    let mut skip_scan = false;
+    let mut resolved_via_id_index = false;
     let mut id_index = id_index;
+    let mut col_index = col_index;
 
     if let (Some(w), Some(idx)) = (&bound_where, id_index.as_deref_mut()) {
         if let Some(id_val) = extract_id_eq(w) {
-            used_fast_path = true;
+            skip_scan = true;
+            resolved_via_id_index = true;
             idx.ensure_built(&tree, &col_names)?;
             if let Some(row_key) = idx.lookup(&id_val) {
                 if let Some(payload) = tree.get(row_key).map_err(store_err)? {
@@ -3321,7 +3332,101 @@ pub fn execute_update(
         }
     }
 
-    if !used_fast_path {
+    // `id IN ('<lit>', ...)` fast path (mirror the SELECT id-IN path): resolve
+    // each id to its row-key by an O(1) id-index probe, re-apply the FULL bound
+    // predicate to every decoded candidate, and — on a key the tree no longer
+    // holds (a stale index entry) — fall back to the per-id safe scan so a
+    // consistency lapse never silently drops a matched row.
+    if !skip_scan {
+        if let (Some(w), Some(idx)) = (&bound_where, id_index.as_deref_mut()) {
+            if let Some(id_vals) = extract_id_in(w) {
+                idx.ensure_built(&tree, &col_names)?;
+                skip_scan = true;
+                resolved_via_id_index = true;
+                let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                for id_val in &id_vals {
+                    match idx.lookup(id_val) {
+                        Some(row_key) => {
+                            if !seen.insert(row_key) {
+                                continue;
+                            }
+                            match tree.get(row_key).map_err(store_err)? {
+                                Some(payload) => {
+                                    let row = decode_to_row(&payload, &col_names)?;
+                                    if eval_predicate(w, &row) == Some(true) {
+                                        to_update.push((row_key, row));
+                                    }
+                                }
+                                // Stale index entry: per-id safe scan rather than
+                                // dropping a real row. `first_id_match_by_scan`
+                                // threads ROWKEY, so the write loop gets the key.
+                                None => {
+                                    for row in
+                                        first_id_match_by_scan(store, root, &col_names, id_val, w)?
+                                    {
+                                        let matched_key = match row.get(ROWKEY) {
+                                            Some(Value::Int(k)) => Some(*k),
+                                            _ => None,
+                                        };
+                                        if let Some(k) = matched_key {
+                                            if seen.insert(k) {
+                                                to_update.push((k, row));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // An id absent from the index yields no candidate (a genuine miss).
+                        None => {}
+                    }
+                }
+                to_update.sort_by_key(|(k, _)| *k);
+            }
+        }
+    }
+
+    // `col IN (...)` / `col = <lit>` fast path (mirror the SELECT col-IN path):
+    // probe the ColIndex for a candidate superset, then re-apply the FULL bound
+    // predicate to every decoded candidate (so an AND / OR tail is honored). On
+    // any stale posting — a candidate key the tree no longer holds — invalidate
+    // the index and fall through to the scan for this statement, never a silent
+    // partial write. Sets `skip_scan` only: a col selection carries no id-index
+    // fact, so `resolved_via_id_index` stays false and the tail invalidates the
+    // id-index exactly as the scan path does.
+    if !skip_scan {
+        if let (Some(w), Some(cidx)) = (&bound_where, col_index.as_deref_mut()) {
+            if let Some(in_cols) = indexed_in_columns(w, cidx) {
+                cidx.ensure_built(&tree, &col_names)?;
+                let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                let mut candidate_keys: Vec<i64> = Vec::new();
+                for (col, value) in &in_cols {
+                    for &k in cidx.probe(col, value) {
+                        if seen.insert(k) {
+                            candidate_keys.push(k);
+                        }
+                    }
+                }
+                candidate_keys.sort_unstable();
+                let fetched = tree.get_many(&candidate_keys).map_err(store_err)?;
+                if fetched.len() != candidate_keys.len() {
+                    // The index disagrees with the tree: drop it and let the scan
+                    // below select the rows (the next read rebuilds the index).
+                    cidx.invalidate();
+                } else {
+                    skip_scan = true;
+                    for (key, payload) in fetched {
+                        let row = decode_to_row(&payload, &col_names)?;
+                        if eval_predicate(w, &row) == Some(true) {
+                            to_update.push((key, row));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !skip_scan {
         for (key, payload) in tree.full_scan().map_err(store_err)? {
             let row = decode_to_row(&payload, &col_names)?;
             let pass = match &bound_where {
@@ -3418,7 +3523,7 @@ pub fn execute_update(
     // stayed at the same key under the same id), so it is not invalidated there.
     let touched_id = bound_set.iter().any(|(c, _)| c.eq_ignore_ascii_case("id"));
     if let Some(idx) = id_index {
-        if !used_fast_path || touched_id {
+        if !resolved_via_id_index || touched_id {
             idx.invalidate();
         }
     }

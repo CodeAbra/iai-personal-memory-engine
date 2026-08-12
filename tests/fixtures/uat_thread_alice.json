@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "turns": [
+    {
+      "turn": 1,
+      "role": "user",
+      "text": "alice pinned the deploy token to slot 7"
+    },
+    {
+      "turn": 2,
+      "role": "assistant",
+      "text": "understood, the deploy token rotation will read from that slot going forward"
+    },
+    {
+      "turn": 3,
+      "role": "user",
+      "text": "also set the rotation cadence to monthly starting next sprint"
+    },
+    {
+      "turn": 4,
+      "role": "assistant",
+      "text": "monthly rotation cadence is configured starting next sprint"
+    }
+  ],
+  "final_cue": "which slot did alice pin the deploy token to"
+}

@@ -324,6 +324,10 @@ def _deep_idle_override(
         minutes = 90.0
     if minutes <= 0:
         return False
+    # Floor at the sleep_eligible HID threshold: an override armed below it
+    # would suppress the wrapper scanner while sleep stays structurally
+    # ineligible — a DROWSY dead end with every exit dropped.
+    minutes = max(minutes, 30.0)
     # Unknown last-cycle time reads as NOT starved: the override must never
     # fire on ignorance, only on a demonstrated 48h gap.
     if last_clean_cycle_wall <= 0.0:
@@ -331,6 +335,129 @@ def _deep_idle_override(
     if (time.time() - last_clean_cycle_wall) < DEEP_IDLE_STARVATION_SEC:
         return False
     return float(os_idle_sec) >= minutes * 60.0
+
+
+#: Minutes of continuous OS-level input idle past which the nightly window
+#: admits SLEEP while agent sessions keep the wrapper heartbeat fresh;
+#: <=0 disables. Night-only: this arm never fires outside the effective
+#: consolidation window.
+WINDOW_DEEP_IDLE_ENV = "IAI_MCP_WINDOW_DEEP_IDLE_MIN"
+
+
+def _window_membership_core(daemon_state: "dict | None") -> bool:
+    """Membership in the effective consolidation window.
+
+    The ONE holder of the window-key contract shared by the fail-open and
+    fail-closed predicates; raises on a gate error so each caller applies
+    its own failure contract.
+    """
+    if daemon_state is None:
+        from iai_mcp.daemon_state import load_state as _gate_load
+        daemon_state = _gate_load()
+    if not isinstance(daemon_state, dict):
+        raise TypeError("daemon_state must be a dict")
+    window = effective_consolidation_window(
+        daemon_state.get("quiet_window"),
+        manual=daemon_state.get("quiet_window_manual_override"),
+    )
+    local = datetime.now().astimezone()
+    return within_window(window, local, local.tzinfo)
+
+
+def _window_membership(daemon_state: "dict | None") -> bool:
+    """Window membership, fail-CLOSED.
+
+    Unlike _in_consolidation_window this carries no force-request clauses
+    and reads any gate error as "outside": its callers suppress the live
+    wrapper scanner, and a broken gate must never suppress it in daytime.
+    """
+    try:
+        return _window_membership_core(daemon_state)
+    except Exception:  # noqa: BLE001 -- fail-closed, see docstring
+        return False
+
+
+def _force_consolidation_active(daemon_state: "dict | None") -> bool:
+    """An explicit force admits consolidation: a pending request, or one
+    honored within the last two hours so an in-flight forced cycle is
+    never cut off mid-run. Malformed stamps read as no force."""
+    if not isinstance(daemon_state, dict):
+        return False
+    now_utc = datetime.now(timezone.utc)
+    for req_key in ("force_rem_request", "user_sleep_request"):
+        req = daemon_state.get(req_key)
+        if not isinstance(req, dict):
+            continue
+        if req.get("pending"):
+            return True
+        honored_raw = req.get("honored_at")
+        if honored_raw:
+            try:
+                honored = datetime.fromisoformat(str(honored_raw))
+                if honored.tzinfo is None:
+                    honored = honored.replace(tzinfo=timezone.utc)
+                if (now_utc - honored) <= timedelta(hours=2):
+                    return True
+            except (ValueError, TypeError):
+                pass
+    return False
+
+
+def _window_deep_idle_arm(
+    os_idle_sec: "float | None", daemon_state: "dict | None"
+) -> bool:
+    # Same source discipline as the starvation override: only OS-level
+    # input idle proves the human is away — heartbeat idle merely says no
+    # Claude session is open, and open sessions are exactly what this arm
+    # exists to see past. Unknown idle reads as present.
+    if os_idle_sec is None:
+        return False
+    raw = os.environ.get(WINDOW_DEEP_IDLE_ENV, "")
+    try:
+        minutes = float(raw) if raw else 30.0
+    except (TypeError, ValueError):
+        minutes = 30.0
+    if not math.isfinite(minutes):
+        minutes = 30.0
+    if minutes <= 0:
+        return False
+    # Floor at the sleep_eligible HID threshold — armed below it would
+    # suppress the scanner while sleep stays structurally ineligible.
+    minutes = max(minutes, 30.0)
+    if float(os_idle_sec) < minutes * 60.0:
+        return False
+    return _window_membership(daemon_state)
+
+
+def _seed_starvation_clock(state: dict) -> "tuple[float, str | None]":
+    """Wall-clock reference the deep-idle starvation gate measures from.
+
+    Fallback chain, all real completion evidence: the last recorded clean
+    cycle, else the last overnight digest shown, else a baseline stamped at
+    the first boot that finds neither — the gate then arms only a full
+    starvation period after that boot, never on pure ignorance. Returns
+    (wall_ts, fresh_baseline_iso); the iso is non-None only when the caller
+    must persist the newly minted baseline.
+    """
+    for key in (
+        "last_clean_cycle_at",
+        "last_digest_shown_at",
+        "sleep_cycle_baseline_at",
+    ):
+        raw = state.get(key)
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            continue
+        # Older state files circulate tz-naive stamps; every sibling reader
+        # of these keys normalizes to UTC before comparing.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp(), None
+    now = datetime.now(timezone.utc)
+    return now.timestamp(), now.isoformat()
 
 
 #: Below this idle age a tick stamps the current half-hour bucket as busy.
@@ -403,15 +530,27 @@ def _may_enter_sleep(
     os_idle_sec: "float | None",
     last_clean_cycle_wall: float,
 ) -> bool:
+    # A starved daemon on a human-idle machine may consolidate even while
+    # agent sessions keep the wrapper heartbeat fresh — those sessions are
+    # exactly what starves the pipeline, readers are isolated from the
+    # sleeping writer by the RO pool, and per-step interrupt checks yield
+    # to foreground demand. Gating the override on heartbeat idle would
+    # make the backstop unreachable on an always-driven machine.
+    if _deep_idle_override(os_idle_sec, last_clean_cycle_wall):
+        return sleep_eligible
+    # Inside the nightly window a human-idle machine may consolidate even
+    # while open sessions keep the wrapper heartbeat fresh — the wrapper
+    # refreshes it on a timer, so heartbeat idle proves nothing about the
+    # human. Same isolation argument as the starvation override, but
+    # night-only and without the starvation precondition.
+    if _window_deep_idle_arm(os_idle_sec, daemon_state):
+        return sleep_eligible
     # Night-only consolidation: idle alone never enters SLEEP outside the
-    # effective window, except under the deep-idle starvation override.
+    # effective window.
     return (
         idle_elapsed_sec >= SLEEP_HEARTBEAT_IDLE_SEC
         and sleep_eligible
-        and (
-            _in_consolidation_window(daemon_state)
-            or _deep_idle_override(os_idle_sec, last_clean_cycle_wall)
-        )
+        and _in_consolidation_window(daemon_state)
     )
 
 
@@ -421,11 +560,24 @@ def _must_leave_sleep(
     os_idle_sec: "float | None",
     last_clean_cycle_wall: float,
 ) -> bool:
-    # Symmetric with entry: a sleep entered under the override must not be
-    # kicked awake by the same window the override outranked.
-    return not _in_consolidation_window(daemon_state) and not _deep_idle_override(
-        os_idle_sec, last_clean_cycle_wall
-    )
+    # Symmetric with entry: a sleep entered under the starvation override
+    # must not be kicked awake by the same window the override outranked.
+    if _deep_idle_override(os_idle_sec, last_clean_cycle_wall):
+        return False
+    if not _in_consolidation_window(daemon_state):
+        return True
+    # In-window, the human back at the keyboard ends the nap: entry needed
+    # the human away, so exit honors the same evidence — an interrupted
+    # cycle otherwise resumes every tick until the window closes, paying
+    # the lock-escalate dance against a live user. An explicit force is
+    # the user's own request and keeps the machine; unknown idle reads as
+    # away (never kick on ignorance). WAL resume finishes the cycle on
+    # the next entry.
+    if _force_consolidation_active(
+        daemon_state if isinstance(daemon_state, dict) else None
+    ):
+        return False
+    return os_idle_sec is not None and float(os_idle_sec) < PRESENCE_BUSY_IDLE_SEC
 
 
 #: Label -> (LifecycleEvent name, dispatch reason, extra kwargs). One table
@@ -434,7 +586,18 @@ def _must_leave_sleep(
 TRANSITION_DISPATCH: "dict[str, tuple[str, str, dict]]" = {
     "wake_refresh": ("HEARTBEAT_REFRESH", "heartbeat_refresh_active_wrapper", {}),
     "sleep": ("IDLE_30MIN", "sleep_on_idle_30min", {"sleep_eligible": True}),
+    # The reason strings are persisted (s2_transition_attempt events) and are
+    # the morning-after evidence of WHICH path admitted the entry — an armed
+    # entry happens with the wrapper heartbeat FRESH, so labeling it
+    # idle_30min would be a lie the events log repeats forever.
+    "sleep_starved": (
+        "IDLE_30MIN", "sleep_on_starvation_override", {"sleep_eligible": True},
+    ),
+    "sleep_window": (
+        "IDLE_30MIN", "sleep_on_window_deep_idle", {"sleep_eligible": True},
+    ),
     "drowsy": ("IDLE_5MIN", "drowsy_on_idle_5min", {}),
+    "drowsy_armed": ("IDLE_5MIN", "drowsy_on_armed_entry", {}),
 }
 
 
@@ -447,13 +610,26 @@ def _idle_transition_event(
     os_idle_sec: "float | None",
     last_clean_cycle_wall: float,
     drowsy_after_sec: float,
+    current_state: "Any | None" = None,
 ) -> "str | None":
     """The tick's idle-transition decision as one pure function.
 
     The tick maps the returned label to an FSM dispatch; keeping the whole
     branch here lets the truth table be tested without assembling a tick.
     """
-    if scanner_active:
+    # A live wrapper heartbeat must not hold an ARMED entry hostage. Two
+    # arms suppress it: the starvation backstop (48h without a clean cycle,
+    # any hour), and the nightly-window arm (inside the effective window
+    # with the human demonstrably away by OS input idle) — the wrapper
+    # refreshes its heartbeat on a timer, so an open-but-idle session
+    # would otherwise block sleep every night. Outside both arms the
+    # scanner keeps its priority — and it is suppressed ONLY when the arm
+    # can actually lead somewhere: armed with sleep_eligible False would
+    # strand the daemon in DROWSY with every exit dropped.
+    _override = _deep_idle_override(os_idle_sec, last_clean_cycle_wall)
+    _window_armed = _window_deep_idle_arm(os_idle_sec, daemon_state)
+    _armed = _override or _window_armed
+    if scanner_active and not (_armed and sleep_eligible):
         return "wake_refresh"
     if _may_enter_sleep(
         idle_elapsed_sec,
@@ -462,6 +638,21 @@ def _idle_transition_event(
         os_idle_sec=os_idle_sec,
         last_clean_cycle_wall=last_clean_cycle_wall,
     ):
+        # The FSM accepts IDLE_30MIN only from DROWSY: a sleep decision
+        # taken while still in WAKE must climb one rung first or the
+        # dispatched event is dropped and the entry never happens — under
+        # an armed entry the heartbeat may never age, so the ladder cannot
+        # be left to the drowsy branch below. Compared by enum NAME:
+        # identity breaks when a test reloads the lifecycle modules and
+        # two class objects coexist. Label precedence mirrors
+        # _may_enter_sleep's branch order so the persisted reason names
+        # the path that actually admitted the entry.
+        if getattr(current_state, "name", None) == "WAKE":
+            return "drowsy_armed" if _armed else "drowsy"
+        if _override:
+            return "sleep_starved"
+        if _window_armed:
+            return "sleep_window"
         return "sleep"
     if idle_elapsed_sec >= drowsy_after_sec:
         return "drowsy"
@@ -479,37 +670,15 @@ def _in_consolidation_window(daemon_state: "dict | None") -> bool:
     Fail-open on any error: a broken gate must not stop consolidation
     forever.
     """
-    from datetime import datetime, timedelta, timezone as _tz
-
     try:
         if daemon_state is None:
             from iai_mcp.daemon_state import load_state as _gate_load
             daemon_state = _gate_load()
         if not isinstance(daemon_state, dict):
             return True
-        now_utc = datetime.now(_tz.utc)
-        for req_key in ("force_rem_request", "user_sleep_request"):
-            req = daemon_state.get(req_key)
-            if not isinstance(req, dict):
-                continue
-            if req.get("pending"):
-                return True
-            honored_raw = req.get("honored_at")
-            if honored_raw:
-                try:
-                    honored = datetime.fromisoformat(str(honored_raw))
-                    if honored.tzinfo is None:
-                        honored = honored.replace(tzinfo=_tz.utc)
-                    if (now_utc - honored) <= timedelta(hours=2):
-                        return True
-                except (ValueError, TypeError):
-                    pass
-        window = effective_consolidation_window(
-            daemon_state.get("quiet_window"),
-            manual=daemon_state.get("quiet_window_manual_override"),
-        )
-        local = datetime.now().astimezone()
-        return within_window(window, local, local.tzinfo)
+        if _force_consolidation_active(daemon_state):
+            return True
+        return _window_membership_core(daemon_state)
     except Exception:  # noqa: BLE001 -- gate errors must never stop consolidation
         log.debug("consolidation window gate failed; allowing", exc_info=True)
         return True
@@ -773,6 +942,15 @@ def _update_pending_digest(state: dict, cycle_result: dict) -> None:
     if cycle_result.get("claude_call_used"):
         digest["claude_call_used"] = True
         digest["main_insight_text"] = cycle_result.get("main_insight_text")
+        # A success supersedes any earlier cycle's skip reason — leaving it
+        # would present a used call and a skip explanation side by side.
+        digest.pop("insight_skip_reason", None)
+    elif cycle_result.get("insight_skip_reason"):
+        # A digest that says only claude_call_used=false is indistinguishable
+        # from a gated night — the WHY must survive the fold.
+        digest["insight_skip_reason"] = str(
+            cycle_result.get("insight_skip_reason")
+        )[:200]
     if cycle_result.get("timed_out"):
         digest["timed_out_cycles"] = int(digest.get("timed_out_cycles", 0)) + 1
     state["pending_digest"] = digest
@@ -1205,10 +1383,33 @@ def _clear_user_shutdown_sentinel(state: dict) -> None:
     state.pop(_USER_SHUTDOWN_FLAG, None)
 
 
-def _install_warm_embedder_override(store) -> tuple[object, bool]:
+def _new_efs_holder() -> dict:
+    # The one owner of the holder shape shared between main() and the
+    # install thread; construct it only here so a malformed hand-built
+    # dict cannot silently disable the warm hold.
+    return {
+        "orig": None,
+        "installed": False,
+        "abandoned": False,
+        "lock": threading.Lock(),
+    }
+
+
+def _install_warm_embedder_override(store, holder: dict | None = None) -> tuple[object, bool]:
     import iai_mcp.embed as _embed_mod
 
     orig_efs = _embed_mod.embedder_for_store
+    # This runs on an executor thread and a cancelled await never receives
+    # the return tuple — the caller's finally restores from the holder.
+    # holder["orig"] must be set before the warm build; the swap happens
+    # under holder["lock"] and is skipped once the caller has marked the
+    # holder abandoned, so a cancel during the build can never leak an
+    # unrestorable swap landing after the finally already ran.
+    if holder is not None:
+        holder["orig"] = orig_efs
+        # Outside the try below: a holder without a lock is a programming
+        # error and must fail loudly, never degrade into the prewarm path.
+        _holder_lock = holder["lock"]
     try:
         warm = orig_efs(store)
         def _held_embedder_for_store(_store, **_kwargs):
@@ -1217,6 +1418,13 @@ def _install_warm_embedder_override(store) -> tuple[object, bool]:
             # parity with the real embedder_for_store.
             return warm
 
+        if holder is not None:
+            with _holder_lock:
+                if holder.get("abandoned"):
+                    return orig_efs, False
+                holder["installed"] = True
+                _embed_mod.embedder_for_store = _held_embedder_for_store
+            return orig_efs, True
         _embed_mod.embedder_for_store = _held_embedder_for_store
         return orig_efs, True
     except _embed_mod.EmbedIdentityMismatch:
@@ -1308,6 +1516,47 @@ def _rotate_launchd_stderr(log_path: "Path | None" = None) -> bool:
         return False
 
 
+def _install_boot_signal_trace() -> None:
+    """Record a termination signal that lands before the graceful handlers.
+
+    The handler restores the default disposition and re-raises, so the exit
+    semantics are exactly what they were; the only change is that the death
+    stops being anonymous.
+    """
+    from iai_mcp.daemon._watchdog import _watchdog_log_path
+
+    # Resolved at install time: the handler should be syscalls only.
+    try:
+        path = _watchdog_log_path()
+    except Exception:  # noqa: BLE001 -- no breadcrumb path, no trace
+        return
+
+    def _trace(signum, _frame):  # noqa: ANN001 -- signal handler signature
+        try:
+            line = (
+                f"{datetime.now(timezone.utc).isoformat()} "
+                f"daemon_boot_window_signal signal={signum} pid={os.getpid()}\n"
+            ).encode()
+            fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
+        except Exception:  # noqa: BLE001 -- tracing must never mask the signal
+            pass
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        except Exception:  # noqa: BLE001 -- re-raise is best-effort
+            os._exit(128 + int(signum))
+
+    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(_sig, _trace)
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 async def main() -> int:
     _set_process_title()
     _rotate_launchd_stderr()
@@ -1319,6 +1568,15 @@ async def main() -> int:
         faulthandler.register(signal.SIGUSR2, all_threads=True)
     except (AttributeError, ValueError, OSError):
         pass
+
+    # Boot-window signal trace: the graceful handlers are installed only
+    # after the store opens and the embedder warms, a window that spans
+    # minutes at prod scale. A termination signal arriving in it would kill
+    # the process under the default disposition and leave NO evidence — no
+    # stamp, no breadcrumb, an unexplained exit code. This handler records
+    # who asked and when, then restores the default so the semantics are
+    # unchanged; the graceful handlers replace it once they exist.
+    _install_boot_signal_trace()
 
     store = await _open_exclusive_store_with_backoff(
         lambda: MemoryStore(
@@ -1410,8 +1668,12 @@ async def main() -> int:
     _load_dmn_config()
     _load_pask_config()
 
-    _orig_efs: object = None
-    _override_installed = False
+    # Shared with the install thread: asyncio cannot stop a running
+    # executor thread and a cancelled await loses the return tuple, so the
+    # finally below restores from this holder — and first marks it
+    # abandoned under the lock, which forbids a still-running build from
+    # swapping the funnel after the restore already happened.
+    _efs_holder = _new_efs_holder()
 
     from iai_mcp.lifecycle_lock import LifecycleLock, LifecycleLockConflict
 
@@ -1646,8 +1908,8 @@ async def main() -> int:
         # recall arriving during the build pays the same single-flight cold
         # cost it always paid — with an honest "up, warming" status instead
         # of every surface reporting the daemon dead.
-        _orig_efs, _override_installed = await asyncio.to_thread(
-            _install_warm_embedder_override, store,
+        await asyncio.to_thread(
+            _install_warm_embedder_override, store, _efs_holder,
         )
         # Computed ONCE at boot, after the warm funnel install, and served
         # from state by the status handler: the status path is the liveness
@@ -1927,15 +2189,28 @@ async def main() -> int:
         _last_clean_cycle_mono: list[float] = [0.0]
         _last_clean_cycle_wall: list[float] = [0.0]
         # Seed the starvation clock from persisted state: process-local zero
-        # would otherwise read as "never completed" after every restart.
-        try:
-            _lcc_raw = state.get("last_clean_cycle_at")
-            if _lcc_raw:
-                _last_clean_cycle_wall[0] = datetime.fromisoformat(
-                    str(_lcc_raw)
-                ).timestamp()
-        except (TypeError, ValueError):
-            pass
+        # would otherwise read as "never completed" after every restart —
+        # and a store that never recorded a clean cycle would leave the
+        # deep-idle backstop unarmed forever on exactly the machine that
+        # starves it.
+        # Two clocks with different meanings: _last_clean_cycle_wall is a
+        # REAL completion only (the cooldown gate treats it as one), while
+        # the starvation reference may be a digest timestamp or a minted
+        # boot baseline and feeds ONLY the deep-idle gate.
+        _seeded_wall, _new_baseline_iso = _seed_starvation_clock(state)
+        _starvation_ref_wall: list[float] = [_seeded_wall]
+        if _new_baseline_iso is not None:
+            state["sleep_cycle_baseline_at"] = _new_baseline_iso
+            try:
+                from iai_mcp.daemon_state import update_state as _upd_baseline
+
+                _upd_baseline(
+                    lambda s: s.__setitem__(
+                        "sleep_cycle_baseline_at", _new_baseline_iso
+                    )
+                )
+            except Exception:  # noqa: BLE001 -- baseline persist is best-effort
+                log.debug("sleep_cycle_baseline_at persist failed", exc_info=True)
         _last_pending_embed_mono: list[float] = [0.0]
         _pending_embed_inflight: list[bool] = [False]
 
@@ -2162,8 +2437,9 @@ async def main() -> int:
                         sleep_eligible,
                         _ds,
                         os_idle_sec=os_idle_sec,
-                        last_clean_cycle_wall=_last_clean_cycle_wall[0],
+                        last_clean_cycle_wall=_starvation_ref_wall[0],
                         drowsy_after_sec=DROWSY_AFTER_SEC,
+                        current_state=_state_machine.current_state,
                     )
                     if transition is not None:
                         if transition == "wake_refresh":
@@ -2301,7 +2577,7 @@ async def main() -> int:
                     elif current is _LifecycleState.SLEEP and _must_leave_sleep(
                         _ds,
                         os_idle_sec=os_idle_sec,
-                        last_clean_cycle_wall=_last_clean_cycle_wall[0],
+                        last_clean_cycle_wall=_starvation_ref_wall[0],
                     ):
                         # Night-only consolidation: outside the (learned) quiet
                         # window no cycle starts, whatever the idle state, and a
@@ -2466,6 +2742,7 @@ async def main() -> int:
                         ):
                             _last_clean_cycle_mono[0] = time.monotonic()
                             _last_clean_cycle_wall[0] = time.time()
+                            _starvation_ref_wall[0] = _last_clean_cycle_wall[0]
                             try:
                                 state["last_clean_cycle_at"] = datetime.now(
                                     timezone.utc
@@ -2648,7 +2925,10 @@ async def main() -> int:
                 lifecycle_lock.release()
         except (OSError, RuntimeError) as exc:
             log.debug("outer lifecycle-lock release failed: %s", exc)
-        _restore_embedder_funnel(_orig_efs, _override_installed)
+        with _efs_holder["lock"]:
+            _efs_holder["abandoned"] = True
+            _efs_installed = _efs_holder["installed"]
+        _restore_embedder_funnel(_efs_holder["orig"], _efs_installed)
     return 0
 
 

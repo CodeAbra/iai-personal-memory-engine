@@ -504,7 +504,7 @@ def test_ba_n5000_m5_modularity_above_threshold() -> None:
         f"unexpected backend {assignment.backend}"
     )
     if assignment.backend == "flat":
-        pytest.skip(
+        pytest.fail(
             "BA n=5000 m=5 fell back to flat -- partition has 1 community; "
             "modularity-threshold test does not apply. This is a regression "
             "signal to investigate."

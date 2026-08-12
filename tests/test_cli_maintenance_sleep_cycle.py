@@ -73,6 +73,7 @@ def _patch_pipeline_steps_to_noop(
         (SleepStep.RECALL_INDEX_REBUILD, "_step_recall_index_rebuild"),
     (SleepStep.ENTITY_LINK, "_step_entity_link"),
         (SleepStep.CURIOSITY_MINE, "_step_curiosity_mine"),
+        (SleepStep.EMBEDDING_INTEGRITY, "_step_embedding_integrity"),
     ]:
         def _make_noop(s=step):
             def _impl(self, _interrupt_check):
@@ -102,21 +103,22 @@ def test_happy_path_runs_pipeline_and_prints_progress(
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sleep cycle started." in out
-    assert "[1/15] schema_mine" in out
-    assert "[2/15] knob_tune" in out
-    assert "[3/15] optimize_hippo" in out
-    assert "[4/15] hippo_cleanup" in out
-    assert "[5/15] dream_decay" in out
-    assert "[6/15] erasure_agent" in out
-    assert "[7/15] cluster_replay" in out
-    assert "[8/15] reconsolidation" in out
-    assert "[9/15] user_model_update" in out
-    assert "[10/15] dmn_reflection" in out
-    assert "[11/15] crisis_recluster" in out
-    assert "[12/15] cluster_summary" in out
-    assert "[13/15] recall_index_rebuild" in out
-    assert "[14/15] entity_link" in out
-    assert "[15/15] curiosity_mine" in out
+    assert "[1/16] schema_mine" in out
+    assert "[2/16] knob_tune" in out
+    assert "[3/16] optimize_hippo" in out
+    assert "[4/16] hippo_cleanup" in out
+    assert "[5/16] dream_decay" in out
+    assert "[6/16] erasure_agent" in out
+    assert "[7/16] cluster_replay" in out
+    assert "[8/16] reconsolidation" in out
+    assert "[9/16] user_model_update" in out
+    assert "[10/16] dmn_reflection" in out
+    assert "[11/16] crisis_recluster" in out
+    assert "[12/16] cluster_summary" in out
+    assert "[13/16] recall_index_rebuild" in out
+    assert "[14/16] entity_link" in out
+    assert "[15/16] curiosity_mine" in out
+    assert "[16/16] embedding_integrity" in out
     assert "Sleep cycle complete" in out
 
 
@@ -170,8 +172,8 @@ def test_force_runs_pipeline_when_quarantined(
     rc = cmd_maintenance_sleep_cycle(_make_args(force=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[13/15] recall_index_rebuild" in out
-    assert "[14/15] entity_link" in out
+    assert "[13/16] recall_index_rebuild" in out
+    assert "[14/16] entity_link" in out
     assert "Sleep cycle complete" in out
 
     record_after = load_state(LIFECYCLE_STATE_PATH)
@@ -242,9 +244,9 @@ def test_failure_returns_nonzero_with_error_in_stderr(
     rc = cmd_maintenance_sleep_cycle(_make_args())
     assert rc == 1
     captured = capsys.readouterr()
-    assert "[1/15] schema_mine" in captured.out
-    assert "[2/15] knob_tune" in captured.out
-    assert "[3/15] optimize_hippo ... FAILED" in captured.err
+    assert "[1/16] schema_mine" in captured.out
+    assert "[2/16] knob_tune" in captured.out
+    assert "[3/16] optimize_hippo ... FAILED" in captured.err
     assert "synthetic optimize failure" in captured.err
 
 

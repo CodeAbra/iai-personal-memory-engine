@@ -568,13 +568,19 @@ def test_recall_index_rebuild_step_position():
         f"CLUSTER_SUMMARY (index={idx_cluster}) in _STEP_ORDER"
     )
     # The rebuild must follow every RECORD-mutating step: the vector index
-    # must contain the summaries minted this cycle. Edges-only steps may
-    # trail it (they never touch the vector index), and new steps append at
-    # the tail so WAL-recovery positions stay frozen.
-    edges_only = {SleepStep.ENTITY_LINK, SleepStep.CURIOSITY_MINE}
+    # must contain the summaries minted this cycle. A trailing step may either
+    # touch only edges (never the vector index) or feed the vector index
+    # INCREMENTALLY per row (needing no full rebuild); new steps append at the
+    # tail so WAL-recovery positions stay frozen.
+    may_trail = {
+        SleepStep.ENTITY_LINK,
+        SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
+    }
     trailing = set(step_order[idx_rebuild + 1:])
-    assert trailing <= edges_only, (
-        f"steps after RECALL_INDEX_REBUILD must be edges-only, got {trailing}"
+    assert trailing <= may_trail, (
+        f"steps after RECALL_INDEX_REBUILD must be edges-only or "
+        f"incremental-index feeders, got {trailing}"
     )
 
 def test_recall_index_rebuild_step_stamps_fresh_generation(tmp_path, monkeypatch):

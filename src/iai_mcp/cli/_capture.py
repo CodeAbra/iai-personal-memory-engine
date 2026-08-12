@@ -7,10 +7,28 @@ import importlib.resources as _res
 import json
 import logging
 import os
+import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_LOCK_POLL_TRIES = 50
+_LOCK_POLL_INTERVAL = 0.2
+
+
+def _write_state_file(path: Path, body: str) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        f = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with f:
+        f.write(body)
+        f.flush()
+        os.fsync(f.fileno())
 
 _HOOK_TRUNCATION_TRAILER = "[... payload truncated to fit Claude Code 10000-char limit ...]"
 
@@ -101,7 +119,7 @@ def read_live_fingerprint(session_id: str) -> int | None:
 def write_live_fingerprint(session_id: str, total_size: int) -> None:
     d = Path.home() / ".iai-mcp" / ".capture-state"
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / f"{session_id}.live-fingerprint.tmp"
+    tmp = d / f"{session_id}.live-fingerprint.tmp{os.getpid()}"
     tmp.write_text(str(total_size), encoding="utf-8")
     os.replace(tmp, d / f"{session_id}.live-fingerprint")
 
@@ -161,7 +179,7 @@ def read_watermark(session_id: str) -> str | None:
 def write_watermark(session_id: str, ts: str) -> None:
     d = Path.home() / ".iai-mcp" / ".capture-state"
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / f"{session_id}.watermark.tmp"
+    tmp = d / f"{session_id}.watermark.tmp{os.getpid()}"
     tmp.write_text(_utc_iso(ts), encoding="utf-8")
     os.replace(tmp, d / f"{session_id}.watermark")
 
@@ -273,13 +291,11 @@ def cmd_capture_transcript(args: argparse.Namespace) -> int:
 def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
     import sys as _sys
 
+    _lock_fd = -1
     try:
         from iai_mcp.capture import (
-            MIN_CAPTURE_LEN,
-            _has_conversational_text,
-            _parse_transcript_line,
-            _tool_names,
-            _tools_trailer,
+            _parse_transcript_obj,
+            _ToolTrailerState,
             write_deferred_event,
         )
         import json as _json
@@ -288,30 +304,118 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         if not transcript.exists():
             return 0
 
+        # Session id is host-controlled text that lands in file paths.
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", str(args.session_id)):
+            logger.warning("capture-turn-deferred: invalid session_id, skipping")
+            return 0
+
         state_dir = Path.home() / ".iai-mcp" / ".capture-state"
         state_dir.mkdir(parents=True, exist_ok=True)
         offset_path = state_dir / f"{args.session_id}.offset"
+        # Offset and pending tool names live in ONE snapshot file published
+        # by a single atomic rename: any crash or carrier race can only ever
+        # surface an older coherent pair. Its replay is deterministic, and
+        # lines carrying native identity (uuid or timestamp) land on the
+        # same idem keys; the cosine dedup gate absorbs the rest. Two
+        # separate files can pair a fresh offset with stale pending and
+        # fabricate a trailer.
+        turnstate_path = state_dir / f"{args.session_id}.turnstate.json"
 
-        prev_offset = 0
+        from iai_mcp import _flock as _fcntl
+
+        _lock_fd = os.open(
+            str(state_dir / f"{args.session_id}.capture.lock"),
+            os.O_WRONLY | os.O_CREAT, 0o600,
+        )
+        # Bounded wait, not skip-on-contention: the Stop hook rotates the
+        # live spool unconditionally after this call, so skipping would
+        # orphan the transcript tail. Bounded, because the holder may be
+        # walking a large transcript and non-Claude hosts give this process
+        # no external wall-clock cap. Only contention retries — any other
+        # lock failure must surface, not burn the budget silently.
+        acquired = False
+        for _ in range(_LOCK_POLL_TRIES):
+            try:
+                _fcntl.flock(_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                time.sleep(_LOCK_POLL_INTERVAL)
+        if not acquired:
+            logger.warning(
+                "capture-turn-deferred: session lock still contended after "
+                "bounded wait, skipping this pass"
+            )
+            os.close(_lock_fd)
+            _lock_fd = -1
+            return 0
+
+        snap_offset = -1
+        prev_pending: list = []
+        snap_fp = ""
+        if turnstate_path.exists():
+            try:
+                snap = _json.loads(turnstate_path.read_text(encoding="utf-8"))
+                if isinstance(snap, dict):
+                    snap_offset = int(snap.get("offset", 0))
+                    loaded = snap.get("pending")
+                    if isinstance(loaded, list):
+                        prev_pending = loaded[:256]
+                    loaded_fp = snap.get("fp")
+                    if isinstance(loaded_fp, str):
+                        snap_fp = loaded_fp
+            except (ValueError, TypeError, OSError):
+                snap_offset = -1
+                prev_pending = []
+                snap_fp = ""
+
+        legacy_offset = 0
         if offset_path.exists():
             try:
-                prev_offset = int(offset_path.read_text(encoding="utf-8").strip() or "0")
+                legacy_offset = int(
+                    offset_path.read_text(encoding="utf-8").strip() or "0"
+                )
             except ValueError:
-                prev_offset = 0
+                legacy_offset = 0
+
+        if snap_offset >= legacy_offset:
+            prev_offset = max(snap_offset, 0)
+        else:
+            # A writer that knows only the legacy offset advanced past the
+            # snapshot: adopt its position and drop pending — trailer loss,
+            # never fabrication.
+            prev_offset = legacy_offset
+            prev_pending = []
 
         with transcript.open(encoding="utf-8") as fh:
             all_lines = fh.readlines()
         total = len(all_lines)
 
-        if prev_offset > total:
+        import hashlib as _hashlib
+
+        # Fingerprint the RAW first-line bytes: the fp is shared between
+        # carriers through the snapshot, and hashing a decoded string would
+        # couple it to each carrier's decode settings.
+        with transcript.open("rb") as fh_raw:
+            first_raw = fh_raw.readline()
+        stream_fp = (
+            _hashlib.sha256(first_raw).hexdigest()[:16] if first_raw else ""
+        )
+        # A changed first line means a different stream at the same path:
+        # the stored offset and pending belong to a dead transcript, even
+        # when the new one has already regrown past the old length — the
+        # length fence below stays as the backstop for fingerprint-less
+        # legacy snapshots and same-stream truncation.
+        if (snap_fp and stream_fp and snap_fp != stream_fp) or prev_offset > total:
             prev_offset = 0
+            prev_pending = []
 
         new_lines = all_lines[prev_offset:]
         consumed = 0
         emitted = 0
         max_emit = int(getattr(args, "max_turns_per_call", 200))
         cwd = os.getcwd()
-        pending_tools: list = []
+        trailers = _ToolTrailerState(prev_pending)
         for line in new_lines:
             if emitted >= max_emit:
                 break
@@ -320,39 +424,14 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
                 _obj = _json.loads(line)
             except (ValueError, TypeError):
                 _obj = {}
-            _msg = (
-                _obj.get("message")
-                if isinstance(_obj.get("message"), dict) else _obj
+            if not isinstance(_obj, dict):
+                _obj = {}
+            parsed = trailers.feed(
+                _obj, _parse_transcript_obj(_obj) if _obj else None
             )
-            _role = _obj.get("type") or _msg.get("role") or _obj.get("role", "")
-            tools = (
-                _tool_names(_msg.get("content", ""))
-                if _role == "assistant" else []
-            )
-            parsed = _parse_transcript_line(line)
             if parsed is None:
-                # Action-only assistant entries carry the mechanics of the
-                # episode; their tool names ride the next text turn. A user
-                # entry clears them ONLY when it is dialogue — tool-result
-                # entries are plumbing, not a boundary.
-                if tools:
-                    pending_tools.extend(tools)
-                elif _role == "user" and _has_conversational_text(
-                    _msg.get("content", "")
-                ):
-                    pending_tools = []
                 continue
             role, text, src_uuid, src_ts = parsed
-            if role == "assistant":
-                # Floor on the BARE text: the trailer must never turn an
-                # otherwise-skipped stub into a record.
-                if len(text.strip()) >= MIN_CAPTURE_LEN:
-                    text = text + _tools_trailer(pending_tools + tools)
-                    pending_tools = []
-                else:
-                    pending_tools.extend(tools)
-            else:
-                pending_tools = []
             write_deferred_event(
                 args.session_id, role, text,
                 cwd=cwd,
@@ -362,16 +441,39 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
             emitted += 1
 
         new_offset = prev_offset + consumed
-        tmp_path = offset_path.parent / (offset_path.name + ".tmp")
-        # fsync before the rename: a crash between them must never publish an
-        # empty offset file — a zero offset replays the whole transcript.
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Snapshot first, legacy offset second: a crash between them leaves
+        # the legacy offset older, and the snapshot (>=) stays authoritative.
+        snap_tmp = turnstate_path.parent / (
+            f"{turnstate_path.name}.tmp{os.getpid()}"
+        )
+        snap_body = _json.dumps(
+            {
+                "offset": new_offset,
+                "pending": trailers.pending[:256],
+                "fp": stream_fp,
+            }
+        )
+        _write_state_file(snap_tmp, snap_body)
+        os.replace(snap_tmp, turnstate_path)
+
+        # A pre-snapshot reader pairs the mirrored offset with the split
+        # pending file and can fabricate a trailer from it — remove it
+        # BEFORE the offset publish, so a reader that sees the fresh offset
+        # can never find it.
         try:
-            os.write(fd, str(new_offset).encode("ascii"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            (state_dir / f"{args.session_id}.pending-tools").unlink()
+        except OSError:
+            pass
+
+        tmp_path = offset_path.parent / (f"{offset_path.name}.tmp{os.getpid()}")
+        _write_state_file(tmp_path, str(new_offset))
         os.replace(tmp_path, offset_path)
+        # Rename durability needs the directory entry flushed too.
+        dfd = os.open(str(state_dir), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
         return 0
     except Exception as e:
         logger.error("capture-turn-deferred failed: %s", e)
@@ -380,6 +482,12 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
             file=_sys.stderr,
         )
         return 0
+    finally:
+        if _lock_fd >= 0:
+            try:
+                os.close(_lock_fd)
+            except OSError:
+                pass
 
 
 def _capture_hook_paths() -> tuple:
@@ -913,14 +1021,28 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     src_recall, dst_recall, _ = _session_recall_hook_paths()
     pt_src, pt_dst = _per_turn_recall_hook_paths()
 
+    def _installed_state(template, installed) -> str:
+        # PRESENT alone hides a stale install: an old hook body silently
+        # lacks the features the daemon expects until reinstall.
+        if not installed.exists():
+            return "MISSING"
+        if not template.exists():
+            return "PRESENT"
+        try:
+            if installed.read_bytes() == Path(str(template)).read_bytes():
+                return "PRESENT (matches template)"
+        except OSError:
+            return "PRESENT (unreadable)"
+        return "STALE (differs from packaged template — rerun capture-hooks install)"
+
     print(f"Stop template:        {src}  {'PRESENT' if src.exists() else 'MISSING'}")
-    print(f"Stop installed:       {dst}  {'PRESENT' if dst.exists() else 'MISSING'}")
+    print(f"Stop installed:       {dst}  {_installed_state(src, dst)}")
     print(f"Turn template:        {turn_src}  {'PRESENT' if turn_src.exists() else 'MISSING'}")
-    print(f"Turn installed:       {turn_dst}  {'PRESENT' if turn_dst.exists() else 'MISSING'}")
+    print(f"Turn installed:       {turn_dst}  {_installed_state(turn_src, turn_dst)}")
     print(f"Recall template:      {src_recall}  {'PRESENT' if src_recall.exists() else 'MISSING'}")
-    print(f"Recall installed:     {dst_recall}  {'PRESENT' if dst_recall.exists() else 'MISSING'}")
+    print(f"Recall installed:     {dst_recall}  {_installed_state(src_recall, dst_recall)}")
     print(f"Per-turn template:    {pt_src}  {'PRESENT' if pt_src.exists() else 'MISSING'}")
-    print(f"Per-turn installed:   {pt_dst}  {'PRESENT' if pt_dst.exists() else 'MISSING'}")
+    print(f"Per-turn installed:   {pt_dst}  {_installed_state(pt_src, pt_dst)}")
 
     data = _load_settings(settings)
     stop_list = data.get("hooks", {}).get("Stop", [])

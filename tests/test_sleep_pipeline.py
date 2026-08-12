@@ -115,6 +115,10 @@ def _patch_steps_to_noop(
         pipeline, "_step_curiosity_mine",
         _make_step(SleepStep.CURIOSITY_MINE),
     )
+    monkeypatch.setattr(
+        pipeline, "_step_embedding_integrity",
+        _make_step(SleepStep.EMBEDDING_INTEGRITY),
+    )
     return calls
 
 def test_pipeline_runs_9_steps_in_order(
@@ -140,6 +144,7 @@ def test_pipeline_runs_9_steps_in_order(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
     assert result["completed_steps"] == calls
     assert result["failed_step"] is None
@@ -167,8 +172,8 @@ def test_pipeline_emits_started_and_completed_events(
     events = event_log.read_all()
     started = [e for e in events if e["event"] == "sleep_step_started"]
     completed = [e for e in events if e["event"] == "sleep_step_completed"]
-    assert len(started) == 15
-    assert len(completed) == 15
+    assert len(started) == 16
+    assert len(completed) == 16
     assert [e["step"] for e in started] == [
         s.name for s in (
             SleepStep.SCHEMA_MINE, SleepStep.KNOB_TUNE,
@@ -183,6 +188,7 @@ def test_pipeline_emits_started_and_completed_events(
             SleepStep.RECALL_INDEX_REBUILD,
             SleepStep.ENTITY_LINK,
             SleepStep.CURIOSITY_MINE,
+            SleepStep.EMBEDDING_INTEGRITY,
         )
     ]
 
@@ -219,6 +225,7 @@ def test_pipeline_resume_from_step_N(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
 
 def test_pipeline_resume_after_cycle_complete_treated_as_fresh(
@@ -254,6 +261,7 @@ def test_pipeline_resume_after_cycle_complete_treated_as_fresh(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
 
 def _patch_step_to_raise(
@@ -409,6 +417,7 @@ def test_pipeline_quarantine_auto_recovery_after_ttl(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
     record_after = load_state(state_path)
     assert record_after["quarantine"] is None
@@ -469,7 +478,7 @@ def test_pipeline_force_run_ignores_quarantine(
     result = pipeline.force_run()
 
     assert result["quarantine_triggered"] is False
-    assert len(calls) == 15
+    assert len(calls) == 16
     record_after = load_state(state_path)
     assert record_after["quarantine"] is not None
 
@@ -588,6 +597,7 @@ def test_pipeline_resumes_after_deferral(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
 
 def test_pipeline_deferral_does_not_increment_attempt(
@@ -752,6 +762,7 @@ def test_pipeline_legacy_last_completed_step_field_migrated(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
 
     calls2: list[SleepStep] = []
@@ -773,6 +784,7 @@ def test_pipeline_legacy_last_completed_step_field_migrated(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]
 
 def test_pipeline_legacy_last_completed_step_zero_starts_fresh(
@@ -808,4 +820,5 @@ def test_pipeline_legacy_last_completed_step_zero_starts_fresh(
         SleepStep.RECALL_INDEX_REBUILD,
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     ]

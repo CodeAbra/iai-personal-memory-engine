@@ -744,6 +744,89 @@ class HippoTable:
             with _txn(self._conn):
                 self._conn.execute(stmt, list(encoded_values.values()))
 
+    def update_many_by_id(self, rows: "list[tuple[str, dict[str, Any]]]") -> int:
+        """Update many rows by id under ONE durable commit.
+
+        Every statement is `... WHERE id = ?` because each row carries a
+        distinct SET payload (heterogeneous per-row values), which no
+        set-based UPDATE can express; the id-keyed statement rides the
+        engine's id-index point lookup, and the single wrapping transaction
+        pays one fsync for the whole batch instead of one per statement.
+        Encryption semantics match
+        update(): encrypted columns are AAD-bound to the row id. Column
+        names are validated against the table's real column set BEFORE the
+        transaction opens — the engine silently accepts an unknown SET
+        column, and at bulk scale that would be a silently-empty batch
+        reporting full success. `embedding` is refused: this seam performs
+        no ANN index maintenance, and a bulk write through it would desync
+        the vector index.
+
+        Returns the sum of engine-reported matched-row counts; a driver
+        without a usable rowcount degrades the sum to a per-statement
+        upper bound.
+        """
+        from iai_mcp.hippo import _txn, _ENCRYPTED_RECORD_COLUMNS, _ENCRYPTED_EVENTS_COLUMNS
+        if not rows:
+            return 0
+
+        enc_cols: tuple[str, ...] = ()
+        if self._db is not None and self._db._crypto_key_provider is not None:
+            if self._name == "records":
+                enc_cols = _ENCRYPTED_RECORD_COLUMNS
+            elif self._name == "events":
+                enc_cols = _ENCRYPTED_EVENTS_COLUMNS
+
+        known_cols = {f.name for f in self.schema}
+        requested_cols: set[str] = set()
+        for _rid, values in rows:
+            requested_cols.update(values)
+        unknown = sorted(requested_cols - known_cols)
+        if unknown:
+            raise ValueError(
+                f"update_many_by_id: unknown column(s) {unknown!r} for table "
+                f"{self._name!r}"
+            )
+        if "embedding" in requested_cols:
+            raise ValueError(
+                "update_many_by_id refuses 'embedding': the bulk seam does "
+                "no ANN index maintenance"
+            )
+
+        prefix = (
+            self._sql["update_prefix"]
+            if self._sql is not None
+            else "UPDATE " + self._name + " SET "
+        )
+        prepared: list[tuple[str, str, list[Any]]] = []
+        for rid, values in rows:
+            if not values:
+                continue
+            encoded: dict[str, Any] = {}
+            for col, val in values.items():
+                if col in enc_cols:
+                    val = self._db._encrypt_for_uuid(str(rid), val)
+                encoded[col] = val
+            _validate_columns(list(encoded))
+            set_clause = ", ".join(col + "=?" for col in encoded)
+            prepared.append(
+                (str(rid), prefix + set_clause + " WHERE id = ?", list(encoded.values()))
+            )
+        if not prepared:
+            return 0
+
+        matched = 0
+        _lock_m3 = self._db._conn_lock if self._db is not None else contextlib.nullcontext()
+        with _lock_m3:
+            with _txn(self._conn):
+                for rid, stmt, vals in prepared:
+                    cur = self._conn.execute(stmt, [*vals, rid])
+                    rc = getattr(cur, "rowcount", -1)
+                    if rc is None or rc < 0:
+                        matched += 1
+                    else:
+                        matched += int(rc)
+        return matched
+
     def delete(self, where: str) -> None:
         from iai_mcp.hippo import _txn
         if self._name == "records" and self._db is not None:

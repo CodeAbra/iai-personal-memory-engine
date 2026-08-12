@@ -72,6 +72,7 @@ def test_centrality_row_warn_when_no_events(monkeypatch, tmp_path) -> None:
     (tmp_path / "hippo").mkdir(parents=True)
     (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 
@@ -90,6 +91,7 @@ def test_centrality_row_warn_when_median_above_threshold(monkeypatch, tmp_path) 
     (tmp_path / "hippo").mkdir(parents=True)
     (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 
@@ -115,6 +117,7 @@ def test_centrality_row_pass_when_median_below_threshold(monkeypatch, tmp_path) 
     (tmp_path / "hippo").mkdir(parents=True)
     (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 
@@ -138,6 +141,7 @@ def test_centrality_row_emits_health_concern_when_warn(monkeypatch, tmp_path) ->
     (tmp_path / "hippo").mkdir(parents=True)
     (tmp_path / "hippo" / "brain.sqlite3").write_bytes(b"x")
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no.sock"))
     from iai_mcp import doctor as _doctor
     import iai_mcp.events as _events
 

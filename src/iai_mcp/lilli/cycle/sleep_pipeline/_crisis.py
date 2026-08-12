@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from iai_mcp.exceptions import StoreError
@@ -9,10 +10,36 @@ from iai_mcp.lilli.cycle.sleep_pipeline import SleepStep
 
 logger = logging.getLogger(__name__)
 
+#: Community ids per clear UPDATE: large enough to keep the statement count
+#: low, small enough to keep each bound IN-list bounded.
+_UPDATE_BATCH = 500
+
+#: Row ids per single-commit transaction of the reassignment updates. Each
+#: commit is an F_FULLFSYNC on macOS, so the reassignment batches its
+#: distinct-per-row community writes under one commit per chunk, and the
+#: chunk boundary is where interrupt checks keep the step deferrable.
+_TXN_CHUNK = 2000
+
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
 
 def step_crisis_recluster(
     self, interrupt_check: Callable[[], bool] | None,
 ) -> tuple[bool, dict[str, Any]]:
+    """Drop the smallest community quartile and re-run Leiden.
+
+    Deferral note: a resumed pass re-runs from the top against the mutated
+    landscape and drops another (shrinking) quartile — bounded and
+    non-corrupting (community_id is derived data a completed pass fully
+    rewrites), but repeated defers erode communities faster than one pass
+    would. The drop phase nulls each dropped community's members per batch;
+    a record assigned to a dropped community after its batch keeps its
+    community_id until the reassignment (or the next pass) rewrites it —
+    same derived-data argument, no corruption.
+    """
     if self._check_interrupt(
         SleepStep.CRISIS_RECLUSTER, 0, interrupt_check,
     ):
@@ -60,18 +87,47 @@ def step_crisis_recluster(
     if size_rows:
         total_communities = len(size_rows)
         n_to_drop = int(total_communities * drop_quartile)
-        drop_ids = [row[0] for row in size_rows[:n_to_drop]]
-        communities_dropped = n_to_drop
+        # Non-UUID community ids never reach a WHERE clause, and the count
+        # reports only what a real pass would actually null.
+        drop_ids = [
+            row[0] for row in size_rows[:n_to_drop]
+            if _UUID_RE.fullmatch(str(row[0]))
+        ]
+        communities_dropped = len(drop_ids)
 
         if drop_ids and not dry_run:
-            for cid in drop_ids:
+            # Null each dropped community's members with one bound-parameter
+            # IN-UPDATE per batch. The engine serves `community_id IN (?, ...)`
+            # through the col-index, so no resolve-then-point-update round trip
+            # is needed; each batch commits under one transaction and the batch
+            # boundary is where the interrupt check keeps the step deferrable.
+            from iai_mcp.hippo import _txn
+            chunk_idx = 1
+            for i in range(0, len(drop_ids), _UPDATE_BATCH):
+                if self._check_interrupt(
+                    SleepStep.CRISIS_RECLUSTER, chunk_idx, interrupt_check,
+                ):
+                    return False, {}
+                chunk_idx += 1
+                batch = drop_ids[i:i + _UPDATE_BATCH]
+                placeholders = ", ".join("?" for _ in batch)
+                stmt = (
+                    "UPDATE records SET community_id = NULL "
+                    f"WHERE community_id IN ({placeholders})"
+                )
+                params = [str(c) for c in batch]
+                lock = tbl._db._conn_lock if tbl._db is not None else None
                 try:
-                    tbl.update(
-                        where=f"community_id = '{str(cid)}'",
-                        values={"community_id": None},
-                    )
-                except (OSError, ValueError, RuntimeError, StoreError):
-                    pass
+                    if lock is not None:
+                        with lock:
+                            with _txn(tbl._conn):
+                                tbl._conn.execute(stmt, params)
+                    else:
+                        with _txn(tbl._conn):
+                            tbl._conn.execute(stmt, params)
+                except (OSError, ValueError, RuntimeError, StoreError) as exc:
+                    logger.debug("crisis_recluster drop clear failed: %s", exc)
+                    continue
 
         if not dry_run:
             tbl = self._store.db.open_table(RECORDS_TABLE)
@@ -131,19 +187,47 @@ def step_crisis_recluster(
                         _uuid_to_int[_comm_uuid] = _next_int
                         _next_int += 1
                     partition[_node_uuid] = _uuid_to_int[_comm_uuid]
+                # Id point-lookup updates in chunked single-commit
+                # transactions (see _TXN_CHUNK) — chunks cross community
+                # boundaries, so a fragmented partition of thousands of
+                # small communities costs the same as a compact one.
+                # Interrupt checks between chunks keep the step deferrable —
+                # and a FAILING interrupt bookkeeping must defer too, never
+                # fall into the broad Leiden handler and report a completed
+                # pass over a half-reassigned corpus.
                 new_uuids: dict[int, str] = {}
+                pairs: list[tuple[str, str]] = []
                 for node, lbl in partition.items():
                     if lbl not in new_uuids:
                         new_uuids[lbl] = str(_uuid.uuid4())
-                    new_cid = new_uuids[lbl]
+                    pairs.append((str(node), new_uuids[lbl]))
+                chunk_idx = 1000
+                interrupted = False
+                for i in range(0, len(pairs), _TXN_CHUNK):
                     try:
-                        tbl.update(
-                            where=f"id = '{str(node)}'",
-                            values={"community_id": new_cid},
+                        _stop = self._check_interrupt(
+                            SleepStep.CRISIS_RECLUSTER, chunk_idx,
+                            interrupt_check,
                         )
-                        records_reassigned += 1
+                    except Exception:  # noqa: BLE001 -- bookkeeping failure defers
+                        logger.warning(
+                            "crisis_recluster interrupt bookkeeping "
+                            "failed", exc_info=True,
+                        )
+                        _stop = True
+                    if _stop:
+                        interrupted = True
+                        break
+                    chunk_idx += 1
+                    chunk = pairs[i:i + _TXN_CHUNK]
+                    try:
+                        records_reassigned += tbl.update_many_by_id(
+                            [(rid, {"community_id": cid}) for rid, cid in chunk]
+                        )
                     except (OSError, ValueError, RuntimeError, StoreError):
                         continue
+                if interrupted:
+                    return False, {}
                 new_community_count = len(new_uuids)
             except Exception as exc:  # noqa: BLE001 -- Leiden/graph rebuild
                 logger.warning("crisis_recluster Leiden rebuild failed: %s", exc, exc_info=True)

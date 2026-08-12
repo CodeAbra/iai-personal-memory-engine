@@ -219,38 +219,48 @@ def _isolate_profile_state():
 
 @pytest.fixture(scope="session")
 def _pristine_embedder_funnel():
+    """Session-scoped baseline of ``embed.embedder_for_store``.
+
+    Session scope is load-bearing: a per-test snapshot taken after a leaked
+    swap would adopt the swapped function as its baseline and pin the leak
+    for the rest of the run.
+    """
     try:
         from iai_mcp import embed as _embed_mod
-    except Exception:  # noqa: BLE001 -- env without iai_mcp installed yet
+    except ImportError:
+        import warnings
+
+        warnings.warn(
+            "embedder-funnel isolation disabled: iai_mcp.embed unimportable",
+            stacklevel=1,
+        )
         return None
     return _embed_mod.embedder_for_store
 
 
 @pytest.fixture(autouse=True)
 def _isolate_embedder_funnel(_pristine_embedder_funnel):
-    """Restore ``embed.embedder_for_store`` to the pristine function at teardown.
+    """Restore the module-level embedder funnel at setup AND teardown.
 
-    The daemon's warm-embedder override swaps this module-level function for
-    one that returns a single held instance. A test that installs it -- or
-    that boots a daemon which does -- and does not restore it leaves every
-    later test resolving through that instance: a patched ``Embedder`` is
-    never constructed, the identity guard never sees the store's configured
-    model, and a refusal that must raise returns a vector instead.
-
-    The baseline is the session's pristine function, not whatever was in place
-    when this test started: the override is installed from a daemon worker
-    thread, so it can land between two tests, and a per-test snapshot would
-    then adopt the swapped function as its own baseline and pin it there for
-    the rest of the run.
+    Two production paths swap ``embed.embedder_for_store`` for a closure: the
+    daemon boot warm-hold (from a worker thread — the swap can land after the
+    booting test's teardown already ran) and the semantic-recall degraded
+    fallback (try/finally, same module global).  A leaked swap makes every
+    later test resolve an embedder it did not choose: patched classes never
+    constructed, identity guard with nothing to refuse, cosine over foreign
+    vectors.  Setup-side restore is load-bearing for the worker-thread case:
+    the swap can land between two tests.
     """
     if _pristine_embedder_funnel is None:
         yield
         return
 
+    # keep this on the setup side and in from-import form: a test poisons
+    # sys.modules["iai_mcp.embed"] with None inside its body, so an
+    # import-as on the teardown side would raise while the
+    # package-attribute path survives.
     from iai_mcp import embed as _embed_mod
 
-    # Both ends: the worker thread can land the override after a teardown has
-    # already run, so the test that follows must not inherit it either.
     if _embed_mod.embedder_for_store is not _pristine_embedder_funnel:
         _embed_mod.embedder_for_store = _pristine_embedder_funnel
     yield

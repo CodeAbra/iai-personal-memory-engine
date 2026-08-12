@@ -169,3 +169,55 @@ def test_max_turns_per_call_cap(tmp_path, monkeypatch):
 
     offset = int((tmp_path / ".iai-mcp" / ".capture-state" / "S7.offset").read_text().strip())
     assert offset == 3
+
+
+def test_invalid_session_id_never_touches_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from iai_mcp.cli import cmd_capture_turn_deferred
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        _make_transcript_line("user", "long enough text for capture here")
+    )
+    rc = cmd_capture_turn_deferred(_build_args("../evil", transcript))
+    assert rc == 0
+    assert not (tmp_path / ".iai-mcp" / ".deferred-captures").exists()
+
+
+def test_contended_lock_gives_up_without_consuming(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from iai_mcp import _flock
+    from iai_mcp.cli import _capture as capmod
+    from iai_mcp.cli import cmd_capture_turn_deferred
+
+    monkeypatch.setattr(capmod, "_LOCK_POLL_TRIES", 2)
+    monkeypatch.setattr(capmod, "_LOCK_POLL_INTERVAL", 0.01)
+
+    state_dir = tmp_path / ".iai-mcp" / ".capture-state"
+    state_dir.mkdir(parents=True)
+    holder = os.open(
+        str(state_dir / "S9.capture.lock"), os.O_WRONLY | os.O_CREAT, 0o600
+    )
+    _flock.flock(holder, _flock.LOCK_EX | _flock.LOCK_NB)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        _make_transcript_line("user", "long enough text for capture here")
+    )
+    try:
+        rc = cmd_capture_turn_deferred(_build_args("S9", transcript))
+        assert rc == 0
+        assert not (
+            tmp_path / ".iai-mcp" / ".deferred-captures" / "S9.live.jsonl"
+        ).exists()
+        assert not (state_dir / "S9.offset").exists()
+    finally:
+        _flock.flock(holder, _flock.LOCK_UN)
+        os.close(holder)
+
+    rc = cmd_capture_turn_deferred(_build_args("S9", transcript))
+    assert rc == 0
+    assert (
+        tmp_path / ".iai-mcp" / ".deferred-captures" / "S9.live.jsonl"
+    ).exists()

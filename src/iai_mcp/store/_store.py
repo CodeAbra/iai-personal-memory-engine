@@ -1314,8 +1314,12 @@ class MemoryStore:
                 feed_working(rec)
                 try:
                     feed_exact(str(rec.id), rec.embedding)
-                except Exception:  # noqa: BLE001 -- hook isolation
-                    pass
+                except Exception as exc:  # noqa: BLE001 -- hook isolation
+                    logger.debug(
+                        "exact-index feed failed on flush for %s: %s",
+                        getattr(rec, "id", None),
+                        type(exc).__name__,
+                    )
 
         queue = AsyncWriteQueue(
             adapter,
@@ -2319,8 +2323,12 @@ class MemoryStore:
         """
         try:
             self._exact_index.upsert(record_id, vec)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "exact-index upsert failed for %s: %s",
+                record_id,
+                type(exc).__name__,
+            )
 
     def invalidate_exact_index(self) -> None:
         """Mark the resident exact-cosine matrix cold; no-raise.
@@ -3021,6 +3029,7 @@ class MemoryStore:
                 uniq.append(id_str)
 
         out: dict[UUID, MemoryRecord] = {}
+        skipped = 0
         with self.db.ro_conn() as conn:
             for start in range(0, len(uniq), self._GET_BATCH_CHUNK):
                 chunk = uniq[start : start + self._GET_BATCH_CHUNK]
@@ -3035,8 +3044,18 @@ class MemoryStore:
                     try:
                         rec = self._from_row(row_dict)
                         out[rec.id] = rec
-                    except Exception:  # noqa: BLE001 — skip corrupt rows, never crash
+                    except Exception as exc:  # noqa: BLE001 — skip corrupt rows, never crash
+                        skipped += 1
+                        logger.debug(
+                            "skipping undeserializable record %s: %s",
+                            row_dict.get("id"),
+                            type(exc).__name__,
+                        )
                         continue
+        if skipped:
+            logger.warning(
+                "skipped %d undeserializable record(s) in get_batch", skipped
+            )
         return out
 
     def _recency_marker_to_record(self, marker) -> "MemoryRecord":
@@ -3084,6 +3103,7 @@ class MemoryStore:
         because it decodes every candidate row including its embedding BLOB.
         """
         seen: dict[UUID, "MemoryRecord"] = {}
+        skipped = 0
 
         with self.db._conn_lock:
             rows_a = self.db._conn.execute(
@@ -3096,7 +3116,13 @@ class MemoryStore:
                 rec = self._from_row(row_dict)
                 if rec.id not in seen:
                     seen[rec.id] = rec
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                skipped += 1
+                logger.debug(
+                    "skipping undeserializable record %s: %s",
+                    row_dict.get("id"),
+                    type(exc).__name__,
+                )
                 continue
 
         # Over-fetch by rowid before the created_at re-rank below: the final
@@ -3114,11 +3140,22 @@ class MemoryStore:
             row_dict = self._decode_raw_row(dict(raw))
             try:
                 rec = self._from_row(row_dict)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                skipped += 1
+                logger.debug(
+                    "skipping undeserializable record %s: %s",
+                    row_dict.get("id"),
+                    type(exc).__name__,
+                )
                 continue
             if rec.id not in seen:
                 seen[rec.id] = rec
 
+        if skipped:
+            logger.warning(
+                "skipped %d undeserializable record(s) in _recent_pending_markers_sql",
+                skipped,
+            )
         candidates = list(seen.values())
         candidates.sort(
             key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc),

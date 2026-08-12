@@ -203,6 +203,27 @@ class BudgetTracker:
         )
 
 
+def _ensure_user_identity(env: dict[str, str]) -> dict[str, str]:
+    """Fill USER/LOGNAME when the service-manager environment lacks them:
+    the claude CLI's OAuth refresh needs the user identity to reach the
+    login-Keychain credential item, and a launchd child without it fails
+    every call with a login/refresh error."""
+    if env.get("USER") and env.get("LOGNAME"):
+        return env
+    try:
+        import pwd
+
+        # Keychain ACLs grade against the EFFECTIVE uid.
+        name = pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:  # noqa: BLE001 -- identity fill is best-effort (non-POSIX)
+        return env
+    if not env.get("USER"):
+        env["USER"] = name
+    if not env.get("LOGNAME"):
+        env["LOGNAME"] = name
+    return env
+
+
 def _scrubbed_env() -> dict[str, str]:
     result: dict[str, str] = {}
     for key, value in os.environ.items():
@@ -211,7 +232,7 @@ def _scrubbed_env() -> dict[str, str]:
         result[key] = value
     for hostile in ENV_DENY_LIST:
         result.pop(hostile, None)
-    return result
+    return _ensure_user_identity(result)
 
 
 def _bare_mode_enabled() -> bool:
@@ -255,10 +276,17 @@ def _resolve_claude_bin() -> str:
     return "claude"
 
 
-def _build_cmd(prompt: str, model: str) -> list[str]:
+def _build_cmd(prompt: str, model: str, *, bare: "bool | None" = None) -> list[str]:
+    if bare is None:
+        bare = _bare_mode_enabled()
     cmd = [_resolve_claude_bin()]
-    if _bare_mode_enabled():
+    if bare:
         cmd.append("--bare")
+    else:
+        # Without --bare the CLI runs the user's hooks; a daemon call must
+        # never fire them — a Stop hook feeding captures back into the
+        # store turns every nightly call into a memory write.
+        cmd += ["--settings", json.dumps({"disableAllHooks": True})]
     cmd += [
         "-p",
         prompt,
@@ -273,6 +301,36 @@ def _build_cmd(prompt: str, model: str) -> list[str]:
         model,
     ]
     return cmd
+
+
+_NOT_LOGGED_IN_MARKER = "Not logged in"
+
+
+def _error_result_detail(stdout: bytes) -> str:
+    """The CLI's error text from a failed invocation's stdout JSON.
+
+    The real payload front-loads a large usage block, so a fixed-size
+    prefix of raw stdout can end before the result field — the error text
+    must come from the parsed field, not a truncation.
+    """
+    try:
+        data = json.loads(stdout or b"")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("result", ""))[:200]
+    return ""
+
+
+def _bare_login_failure(result: dict) -> bool:
+    """A --bare invocation that cannot see the login (macOS Keychain
+    credentials) — the one failure shape the non-bare retry can cure."""
+    if result.get("ok"):
+        return False
+    blob = " ".join(
+        str(result.get(k, "")) for k in ("stderr", "stdout", "detail")
+    )
+    return _NOT_LOGGED_IN_MARKER in blob
 
 
 async def _terminate_then_kill(proc, grace_sec: float) -> None:
@@ -299,8 +357,25 @@ async def invoke_claude_once(
     *,
     model: str = "haiku",
 ) -> dict:
+    """One claude call; a --bare attempt that reports "Not logged in"
+    (Keychain-credential setups never authenticate under --bare) retries
+    once without the flag — hooks stay disabled via --settings there."""
+    bare = _bare_mode_enabled()
+    result = await _invoke_claude_attempt(prompt, model, bare=bare)
+    if bare and _bare_login_failure(result):
+        result = await _invoke_claude_attempt(prompt, model, bare=False)
+        result["bare_fallback_used"] = True
+    return result
+
+
+async def _invoke_claude_attempt(
+    prompt: str,
+    model: str,
+    *,
+    bare: bool,
+) -> dict:
     env = _scrubbed_env()
-    cmd = _build_cmd(prompt, model)
+    cmd = _build_cmd(prompt, model, bare=bare)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -341,6 +416,8 @@ async def invoke_claude_once(
             "reason": "nonzero_exit",
             "exit_code": proc.returncode,
             "stderr": stderr.decode("utf-8", errors="replace")[:500],
+            "stdout": (stdout or b"").decode("utf-8", errors="replace")[:500],
+            "detail": _error_result_detail(stdout),
             "cost_usd": 0.0,
             "tokens_in": 0,
             "tokens_out": 0,
@@ -352,6 +429,18 @@ async def invoke_claude_once(
         return {
             "ok": False,
             "reason": "unparseable_output",
+            "cost_usd": 0.0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+        }
+
+    if data.get("is_error"):
+        # A zero-exit error result must never flow onward as a success —
+        # its result text would be minted as a stored insight.
+        return {
+            "ok": False,
+            "reason": "error_result",
+            "detail": str(data.get("result", ""))[:200],
             "cost_usd": 0.0,
             "tokens_in": 0,
             "tokens_out": 0,
@@ -394,8 +483,28 @@ def invoke_claude_sync(
     model: str = "haiku",
     timeout_sec: float | None = None,
 ) -> dict:
+    """Synchronous variant; same --bare login fallback as invoke_claude_once."""
+    bare = _bare_mode_enabled()
+    result = _invoke_claude_attempt_sync(
+        prompt, model, timeout_sec=timeout_sec, bare=bare,
+    )
+    if bare and _bare_login_failure(result):
+        result = _invoke_claude_attempt_sync(
+            prompt, model, timeout_sec=timeout_sec, bare=False,
+        )
+        result["bare_fallback_used"] = True
+    return result
+
+
+def _invoke_claude_attempt_sync(
+    prompt: str,
+    model: str,
+    *,
+    timeout_sec: float | None,
+    bare: bool,
+) -> dict:
     env = _scrubbed_env()
-    cmd = _build_cmd(prompt, model)
+    cmd = _build_cmd(prompt, model, bare=bare)
     wall = timeout_sec if timeout_sec is not None else CLAUDE_TIMEOUT_SEC
 
     try:
@@ -423,6 +532,8 @@ def invoke_claude_sync(
             "reason": "nonzero_exit",
             "exit_code": completed.returncode,
             "stderr": completed.stderr.decode("utf-8", errors="replace")[:500],
+            "stdout": (completed.stdout or b"").decode("utf-8", errors="replace")[:500],
+            "detail": _error_result_detail(completed.stdout),
             "cost_usd": 0.0,
             "tokens_in": 0,
             "tokens_out": 0,
@@ -434,6 +545,18 @@ def invoke_claude_sync(
         return {
             "ok": False,
             "reason": "unparseable_output",
+            "cost_usd": 0.0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+        }
+
+    if data.get("is_error"):
+        # A zero-exit error result must never flow onward as a success —
+        # its result text would be minted as a stored insight.
+        return {
+            "ok": False,
+            "reason": "error_result",
+            "detail": str(data.get("result", ""))[:200],
             "cost_usd": 0.0,
             "tokens_in": 0,
             "tokens_out": 0,

@@ -53,14 +53,8 @@ def test_schema_migration_already_idempotent(tmp_path):
 
 
 def _try_role_migrator(store):
-    """Run the role migrator if it exists; skip the caller if not yet present."""
-    try:
-        from iai_mcp.migrate import migrate_role_column  # type: ignore[attr-defined]
-    except (ImportError, AttributeError):
-        pytest.skip(
-            "migrate_role_column not yet present in iai_mcp.migrate — "
-            "this case turns GREEN after the role column implementation ships the migrator"
-        )
+    """Run the role migrator."""
+    from iai_mcp.migrate import migrate_role_column  # type: ignore[attr-defined]
     return migrate_role_column(store)
 
 
@@ -71,8 +65,6 @@ def test_role_column_migration_idempotency_and_index_presence(tmp_path):
     - The ``role`` column must be present exactly once in PRAGMA table_info.
     - The ``idx_records_role`` index must exist.
     - A second migrator run reports zero updated rows (idempotent).
-
-    On HEAD this test skips (the role column and migrator do not exist yet).
     """
     from iai_mcp.store import MemoryStore
 
@@ -118,11 +110,7 @@ def test_role_column_migration_idempotency_and_index_presence(tmp_path):
     )
 
     # Second migrator run: must be a no-op (all rows already backfilled or none exist).
-    try:
-        from iai_mcp.migrate import migrate_role_column  # type: ignore[attr-defined]
-    except (ImportError, AttributeError):
-        pytest.skip("migrate_role_column not yet present")
-    second = migrate_role_column(store2)
+    second = _try_role_migrator(store2)
     assert second.get("updated", 0) == 0, (
         f"second migrator run updated rows unexpectedly: {second!r}"
     )

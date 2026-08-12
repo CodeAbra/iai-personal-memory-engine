@@ -90,9 +90,11 @@ def _provider_argv(provider: str, bin_path: str) -> "list[str] | None":
 
 
 def _subscription_child_env() -> dict[str, str]:
+    from iai_mcp.claude_cli import _ensure_user_identity
+
     env = {k: os.environ[k] for k in _CHILD_ENV_ALLOW if k in os.environ}
     env["NO_COLOR"] = "1"
-    return env
+    return _ensure_user_identity(env)
 
 
 def _reflection_cwd() -> "str | None":

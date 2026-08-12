@@ -1,6 +1,6 @@
 {
   "name": "iai-mcp-wrapper",
-  "version": "2.0.0",
+  "version": "3.0.1",
   "description": "TypeScript MCP wrapper for IAI-MCP Python core",
   "author": "Areg Noya",
   "type": "module",

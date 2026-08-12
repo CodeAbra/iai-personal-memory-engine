@@ -3,10 +3,6 @@
 Verifies that the migrator that backfills the ``role`` column from existing
 ``tags_json`` data is correct, idempotent, lossless, and supports dry-run.
 
-These tests skip cleanly on HEAD when the migrator symbol does not yet exist
-in ``iai_mcp.migrate`` — they turn from RED to GREEN when the role column implementation ships the
-migrator.
-
 Key behaviors under test:
 
 - **Backfill correctness**: a row whose tags carry ``role:user`` / ``role:assistant``
@@ -28,22 +24,10 @@ from uuid import uuid4
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Skip guard — all tests in this file skip cleanly until the migrator ships.
-# ---------------------------------------------------------------------------
-
-
 def _migrator():
-    """Return the migrate_role_column callable or skip the test."""
-    try:
-        from iai_mcp.migrate import migrate_role_column  # type: ignore[attr-defined]
-        return migrate_role_column
-    except (ImportError, AttributeError):
-        pytest.skip(
-            "migrate_role_column not yet present in iai_mcp.migrate — "
-            "this test turns GREEN after the role column implementation ships the migrator",
-            allow_module_level=False,
-        )
+    """Return the migrate_role_column callable."""
+    from iai_mcp.migrate import migrate_role_column  # type: ignore[attr-defined]
+    return migrate_role_column
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +136,8 @@ def _expected_role(tags: "list[str]") -> "str | None":
 
 
 def test_migrate_role_column_symbol_will_exist():
-    """The migrator symbol will be importable from iai_mcp.migrate after the role column implementation.
-
-    On HEAD this test skips (the migrator does not exist yet).
-    After the role column implementation it becomes GREEN.
-    """
-    _migrator()  # skip on HEAD
+    """The migrator symbol is importable from iai_mcp.migrate."""
+    assert callable(_migrator())
 
 
 def test_backfill_sets_correct_role_for_each_tag_variant(tmp_path, monkeypatch):

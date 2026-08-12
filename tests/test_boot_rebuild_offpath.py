@@ -355,6 +355,12 @@ def _make_graph_fixture_rec(seed: int, store):
     )
 
 
+def _emb_of(payload: dict):
+    # Graph-owned payloads carry a float32 buffer, which has no truth value.
+    emb = payload.get("embedding")
+    return [] if emb is None else emb
+
+
 def _graph_node_snapshot(graph) -> dict[str, tuple]:
     """A comparable {node_id: (embedding, surface, tier, pinned, tags, language,
     centrality)} snapshot of every node in a built graph, for topology-equivalence
@@ -362,7 +368,7 @@ def _graph_node_snapshot(graph) -> dict[str, tuple]:
     out: dict[str, tuple] = {}
     for label, payload in graph._node_payload.items():
         out[label] = (
-            tuple(round(x, 6) for x in (payload.get("embedding") or [])),
+            tuple(round(float(x), 6) for x in _emb_of(payload)),
             payload.get("surface", ""),
             payload.get("tier", "episodic"),
             bool(payload.get("pinned", False)),

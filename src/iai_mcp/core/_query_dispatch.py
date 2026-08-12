@@ -22,7 +22,14 @@ EVENTS_QUERY_WHITELIST: frozenset[str] = frozenset({
     "session_started",
     "recall_source",
     "embed_construct",
+    "rem_cycle_completed",
+    "hippo_compacted",
+    "recall_timing",
 })
+
+# events_query strips free-text insight synthesis from the wire; only
+# pass/fail/skip metadata leaves.
+_REM_CYCLE_REDACTED_FIELDS: frozenset[str] = frozenset({"main_insight_text"})
 
 
 def _schema_list_dispatch(store: MemoryStore, params: dict) -> dict:
@@ -140,13 +147,19 @@ def _events_query_dispatch(store: MemoryStore, params: dict) -> dict:
                 ts_str = str(ts)
         else:
             ts_str = str(ts)
+        data = e["data"]
+        if kind == "rem_cycle_completed" and isinstance(data, dict):
+            data = {
+                k: v for k, v in data.items()
+                if k not in _REM_CYCLE_REDACTED_FIELDS
+            }
         out_events.append({
             "id": str(e["id"]),
             "kind": e["kind"],
             "severity": e.get("severity"),
             "domain": e.get("domain"),
             "ts": ts_str,
-            "data": e["data"],
+            "data": data,
             "session_id": e.get("session_id"),
             "source_ids": e.get("source_ids", []),
         })

@@ -167,6 +167,203 @@ def test_deep_idle_override_requires_starvation(monkeypatch) -> None:
     )
 
 
+def test_may_enter_sleep_override_bypasses_heartbeat_gate(monkeypatch) -> None:
+    """An armed starvation override must not wait for wrapper-heartbeat
+    silence: agent sessions keeping the heartbeat fresh are exactly what
+    starves the pipeline on an always-driven machine."""
+    from iai_mcp.daemon import (
+        DEEP_IDLE_OVERRIDE_ENV,
+        WINDOW_DEEP_IDLE_ENV,
+        _may_enter_sleep,
+    )
+
+    monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
+    # The nightly-window arm is a separate entry path; disabled here so the
+    # starvation contract is pinned on its own regardless of run time.
+    monkeypatch.setenv(WINDOW_DEEP_IDLE_ENV, "0")
+    assert _may_enter_sleep(
+        0.0, True, {},
+        os_idle_sec=91 * 60.0, last_clean_cycle_wall=_starved_wall(),
+    ) is True
+    # Without starvation the heartbeat gate stands, whatever the OS idle.
+    assert _may_enter_sleep(
+        0.0, True, {},
+        os_idle_sec=91 * 60.0, last_clean_cycle_wall=time.time(),
+    ) is False
+    # The override never outranks sleep_eligible.
+    assert _may_enter_sleep(
+        0.0, False, {},
+        os_idle_sec=91 * 60.0, last_clean_cycle_wall=_starved_wall(),
+    ) is False
+
+
+def test_armed_override_climbs_the_fsm_ladder_from_wake(monkeypatch) -> None:
+    """Composed pin: the FSM accepts IDLE_30MIN only from DROWSY, so an
+    armed override starting in WAKE must reach SLEEP through the dispatch
+    table in two ticks — a label the FSM drops on the floor is the whole
+    backstop silently dead."""
+    from iai_mcp.daemon import (
+        DEEP_IDLE_OVERRIDE_ENV,
+        TRANSITION_DISPATCH,
+        _idle_transition_event,
+    )
+    from iai_mcp.lifecycle import (
+        LifecycleEvent,
+        LifecycleState,
+        compute_transition,
+    )
+
+    monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
+    state = LifecycleState.WAKE
+    seen: list = []
+    for _tick in range(3):
+        label = _idle_transition_event(
+            False, 0.0, True, {},
+            os_idle_sec=91 * 60.0,
+            last_clean_cycle_wall=_starved_wall(),
+            drowsy_after_sec=300.0,
+            current_state=state,
+        )
+        assert label is not None, "armed override must always propose a step"
+        event_name, _reason, extra = TRANSITION_DISPATCH[label]
+        nxt = compute_transition(state, LifecycleEvent[event_name], extra)
+        seen.append((state, label, nxt))
+        if nxt is not None:
+            state = nxt
+        if state is LifecycleState.SLEEP:
+            break
+    assert state is LifecycleState.SLEEP, seen
+    assert len(seen) == 2, seen
+
+
+def test_armed_override_outranks_a_live_wrapper_scanner(monkeypatch) -> None:
+    """A FRESH wrapper heartbeat (sessions open around the clock) must not
+    hold the armed backstop hostage — that standing wrapper is exactly the
+    starvation being broken. Outside the override the scanner keeps its
+    priority."""
+    from iai_mcp.daemon import (
+        DEEP_IDLE_OVERRIDE_ENV,
+        WINDOW_DEEP_IDLE_ENV,
+        _idle_transition_event,
+    )
+    from iai_mcp.lifecycle import LifecycleState
+
+    monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
+    # Pin the starvation contract alone: the nightly-window arm has its own
+    # tests and would otherwise flip the disarmed case during a night run.
+    monkeypatch.setenv(WINDOW_DEEP_IDLE_ENV, "0")
+    armed = {
+        "os_idle_sec": 91 * 60.0,
+        "last_clean_cycle_wall": _starved_wall(),
+        "drowsy_after_sec": 300.0,
+    }
+    assert _idle_transition_event(
+        True, 0.0, True, {},
+        current_state=LifecycleState.WAKE, **armed,
+    ) == "drowsy_armed"
+    assert _idle_transition_event(
+        True, 0.0, True, {},
+        current_state=LifecycleState.DROWSY, **armed,
+    ) == "sleep_starved"
+    # Disarmed: the live scanner wins as before.
+    assert _idle_transition_event(
+        True, 0.0, True, {},
+        os_idle_sec=91 * 60.0, last_clean_cycle_wall=time.time(),
+        drowsy_after_sec=300.0, current_state=LifecycleState.WAKE,
+    ) == "wake_refresh"
+    # Armed but sleep-ineligible: suppressing the scanner would strand the
+    # daemon in DROWSY with every exit event dropped — the scanner must
+    # keep priority whenever the override cannot lead to SLEEP.
+    assert _idle_transition_event(
+        True, 0.0, False, {},
+        current_state=LifecycleState.DROWSY, **armed,
+    ) == "wake_refresh"
+
+
+def test_deep_idle_override_floors_the_knob_at_the_hid_threshold(monkeypatch) -> None:
+    """A configured override below the sleep_eligible HID threshold could
+    arm in a region where sleep is structurally ineligible; the floor keeps
+    the two gates consistent."""
+    from iai_mcp.daemon import DEEP_IDLE_OVERRIDE_ENV, _deep_idle_override
+
+    monkeypatch.setenv(DEEP_IDLE_OVERRIDE_ENV, "10")
+    wall = _starved_wall()
+    assert _deep_idle_override(11 * 60, wall) is False
+    assert _deep_idle_override(29 * 60, wall) is False
+    assert _deep_idle_override(30 * 60, wall) is True
+
+
+def test_idle_transition_event_armed_truth_table(monkeypatch) -> None:
+    from iai_mcp.daemon import DEEP_IDLE_OVERRIDE_ENV, _idle_transition_event
+    from iai_mcp.lifecycle import LifecycleState
+
+    monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
+    armed = {
+        "os_idle_sec": 91 * 60.0,
+        "last_clean_cycle_wall": _starved_wall(),
+        "drowsy_after_sec": 300.0,
+    }
+    for idle in (0.0, 301.0, 1801.0):
+        assert _idle_transition_event(
+            False, idle, True, {},
+            current_state=LifecycleState.WAKE, **armed,
+        ) == "drowsy_armed", idle
+        assert _idle_transition_event(
+            False, idle, True, {},
+            current_state=LifecycleState.DROWSY, **armed,
+        ) == "sleep_starved", idle
+    # Legacy callers without a state still get a sleep-mapped label.
+    assert _idle_transition_event(
+        False, 0.0, True, {}, **armed
+    ) == "sleep_starved"
+
+
+def test_seed_starvation_clock_fallback_chain() -> None:
+    from datetime import datetime, timezone
+
+    from iai_mcp.daemon import _seed_starvation_clock
+
+    clean = datetime(2026, 8, 1, 3, 0, tzinfo=timezone.utc)
+    digest = datetime(2026, 7, 31, 3, 47, tzinfo=timezone.utc)
+
+    wall, minted = _seed_starvation_clock(
+        {"last_clean_cycle_at": clean.isoformat(),
+         "last_digest_shown_at": digest.isoformat()}
+    )
+    assert wall == clean.timestamp() and minted is None
+
+    wall, minted = _seed_starvation_clock(
+        {"last_digest_shown_at": digest.isoformat()}
+    )
+    assert wall == digest.timestamp() and minted is None
+
+    baseline = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+    wall, minted = _seed_starvation_clock(
+        {"sleep_cycle_baseline_at": baseline.isoformat()}
+    )
+    assert wall == baseline.timestamp() and minted is None
+
+    # Unparseable evidence falls through to the next key, never to zero.
+    wall, minted = _seed_starvation_clock(
+        {"last_clean_cycle_at": "not-a-date",
+         "last_digest_shown_at": digest.isoformat()}
+    )
+    assert wall == digest.timestamp() and minted is None
+
+    # Legacy tz-naive stamps read as UTC, matching every sibling reader.
+    naive = digest.replace(tzinfo=None)
+    wall, minted = _seed_starvation_clock({"last_digest_shown_at": naive.isoformat()})
+    assert wall == digest.timestamp() and minted is None
+
+    # No evidence at all: a fresh baseline is minted for the caller to
+    # persist, and it round-trips through the same chain on the next boot.
+    wall, minted = _seed_starvation_clock({})
+    assert minted is not None
+    assert wall == datetime.fromisoformat(minted).timestamp()
+    wall2, minted2 = _seed_starvation_clock({"sleep_cycle_baseline_at": minted})
+    assert wall2 == wall and minted2 is None
+
+
 def test_stamp_activity_presence_judges_busy_by_os_idle() -> None:
     from iai_mcp.daemon import PRESENCE_BUSY_IDLE_SEC, _stamp_activity_presence
 
@@ -271,8 +468,23 @@ def test_must_leave_sleep_truth_table(monkeypatch) -> None:
     monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
 
     _env_window(monkeypatch, containing=True)
+    # In-window with the human at the keyboard: the nap ends — the awake
+    # path keeps the machine, WAL resume finishes the cycle later.
     assert _must_leave_sleep(
         {}, os_idle_sec=0.0, last_clean_cycle_wall=time.time()
+    ) is True
+    # In-window with the human away: the cycle keeps running.
+    assert _must_leave_sleep(
+        {}, os_idle_sec=45 * 60.0, last_clean_cycle_wall=time.time()
+    ) is False
+    # Unknown idle must never kick a running cycle on ignorance.
+    assert _must_leave_sleep(
+        {}, os_idle_sec=None, last_clean_cycle_wall=time.time()
+    ) is False
+    # An explicit force keeps the machine even with the human present.
+    assert _must_leave_sleep(
+        {"force_rem_request": {"pending": True}},
+        os_idle_sec=0.0, last_clean_cycle_wall=time.time(),
     ) is False
 
     _env_window(monkeypatch, containing=False)
@@ -361,7 +573,14 @@ def test_transition_dispatch_table_is_complete() -> None:
             "HEARTBEAT_REFRESH", "heartbeat_refresh_active_wrapper", {},
         ),
         "sleep": ("IDLE_30MIN", "sleep_on_idle_30min", {"sleep_eligible": True}),
+        "sleep_starved": (
+            "IDLE_30MIN", "sleep_on_starvation_override", {"sleep_eligible": True},
+        ),
+        "sleep_window": (
+            "IDLE_30MIN", "sleep_on_window_deep_idle", {"sleep_eligible": True},
+        ),
         "drowsy": ("IDLE_5MIN", "drowsy_on_idle_5min", {}),
+        "drowsy_armed": ("IDLE_5MIN", "drowsy_on_armed_entry", {}),
     }
     for ev_name, _reason, _extra in TRANSITION_DISPATCH.values():
         assert hasattr(LifecycleEvent, ev_name), ev_name
@@ -458,3 +677,120 @@ def test_set_quiet_window_cli_rejects_out_of_range(monkeypatch, capsys) -> None:
     assert rc == 2
     assert not recorded, "an invalid window must not be stored"
     assert "HH:MM-HH:MM" in capsys.readouterr().err
+
+
+def test_window_arm_thresholds(monkeypatch) -> None:
+    """The nightly-window arm needs OS-level input idle past the knob and
+    membership in the effective window; unknown idle reads as present."""
+    from iai_mcp.daemon import WINDOW_DEEP_IDLE_ENV, _window_deep_idle_arm
+
+    _env_window(monkeypatch, containing=True)
+    monkeypatch.delenv(WINDOW_DEEP_IDLE_ENV, raising=False)
+
+    assert _window_deep_idle_arm(None, {}) is False
+    assert _window_deep_idle_arm(29 * 60.0, {}) is False
+    assert _window_deep_idle_arm(30 * 60.0, {}) is True
+
+    # <=0 disables the arm outright.
+    monkeypatch.setenv(WINDOW_DEEP_IDLE_ENV, "0")
+    assert _window_deep_idle_arm(10 ** 9, {}) is False
+
+    # A junk knob falls back to the default, floored at the HID threshold.
+    for junk in ("nan", "inf", "junk", ""):
+        monkeypatch.setenv(WINDOW_DEEP_IDLE_ENV, junk)
+        assert _window_deep_idle_arm(30 * 60.0, {}) is True, junk
+        assert _window_deep_idle_arm(29 * 60.0, {}) is False, junk
+
+    # A knob below the HID threshold is floored, never honored raw.
+    monkeypatch.setenv(WINDOW_DEEP_IDLE_ENV, "5")
+    assert _window_deep_idle_arm(6 * 60.0, {}) is False
+    assert _window_deep_idle_arm(30 * 60.0, {}) is True
+
+
+def test_window_arm_is_night_only(monkeypatch) -> None:
+    """Outside the effective window the arm never fires, at any idle depth —
+    daytime consolidation stays reachable only through the 48h backstop."""
+    from iai_mcp.daemon import WINDOW_DEEP_IDLE_ENV, _window_deep_idle_arm
+
+    monkeypatch.delenv(WINDOW_DEEP_IDLE_ENV, raising=False)
+    _env_window(monkeypatch, containing=False)
+    assert _window_deep_idle_arm(10 ** 9, {}) is False
+
+
+def test_window_arm_fails_closed_on_a_broken_gate(monkeypatch) -> None:
+    """The arm suppresses the live wrapper scanner, so a gate error must
+    read as OUTSIDE the window — never as permission."""
+    from iai_mcp.daemon import WINDOW_DEEP_IDLE_ENV, _window_deep_idle_arm
+
+    monkeypatch.delenv(WINDOW_DEEP_IDLE_ENV, raising=False)
+    _env_window(monkeypatch, containing=True)
+    assert _window_deep_idle_arm(10 ** 9, "not-a-dict") is False
+
+
+def test_window_arm_outranks_scanner_inside_the_window(monkeypatch) -> None:
+    """An open-but-idle session refreshes its heartbeat on a timer, so the
+    FRESH scanner must not block the nightly entry when the human is away:
+    the arm climbs WAKE -> DROWSY -> SLEEP through the dispatch ladder."""
+    from iai_mcp.daemon import (
+        DEEP_IDLE_OVERRIDE_ENV,
+        WINDOW_DEEP_IDLE_ENV,
+        _idle_transition_event,
+    )
+    from iai_mcp.lifecycle import LifecycleState
+
+    monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
+    monkeypatch.delenv(WINDOW_DEEP_IDLE_ENV, raising=False)
+    _env_window(monkeypatch, containing=True)
+    # A recent clean cycle: the starvation backstop is NOT armed, so any
+    # entry below comes from the window arm alone.
+    fresh = {
+        "os_idle_sec": 45 * 60.0,
+        "last_clean_cycle_wall": time.time() - 3600.0,
+        "drowsy_after_sec": 300.0,
+    }
+    assert _idle_transition_event(
+        True, 0.0, True, {},
+        current_state=LifecycleState.WAKE, **fresh,
+    ) == "drowsy_armed"
+    assert _idle_transition_event(
+        True, 0.0, True, {},
+        current_state=LifecycleState.DROWSY, **fresh,
+    ) == "sleep_window"
+    # The human is present (shallow OS idle): the scanner keeps priority.
+    assert _idle_transition_event(
+        True, 0.0, True, {},
+        os_idle_sec=5 * 60.0, last_clean_cycle_wall=time.time() - 3600.0,
+        drowsy_after_sec=300.0, current_state=LifecycleState.WAKE,
+    ) == "wake_refresh"
+    # Armed but sleep-ineligible: suppressing the scanner would strand the
+    # daemon in DROWSY, so the scanner keeps priority.
+    assert _idle_transition_event(
+        True, 0.0, False, {},
+        current_state=LifecycleState.DROWSY, **fresh,
+    ) == "wake_refresh"
+
+
+def test_may_enter_sleep_window_arm_bypasses_heartbeat_gate(monkeypatch) -> None:
+    """Inside the window with the human away, entry must not wait for
+    wrapper-heartbeat silence — and it still respects sleep_eligible."""
+    from iai_mcp.daemon import (
+        DEEP_IDLE_OVERRIDE_ENV,
+        WINDOW_DEEP_IDLE_ENV,
+        _may_enter_sleep,
+    )
+
+    monkeypatch.delenv(DEEP_IDLE_OVERRIDE_ENV, raising=False)
+    monkeypatch.delenv(WINDOW_DEEP_IDLE_ENV, raising=False)
+    _env_window(monkeypatch, containing=True)
+    recent = time.time() - 3600.0
+    assert _may_enter_sleep(
+        0.0, True, {}, os_idle_sec=45 * 60.0, last_clean_cycle_wall=recent,
+    ) is True
+    assert _may_enter_sleep(
+        0.0, False, {}, os_idle_sec=45 * 60.0, last_clean_cycle_wall=recent,
+    ) is False
+    # Outside the window the heartbeat gate stands as before.
+    _env_window(monkeypatch, containing=False)
+    assert _may_enter_sleep(
+        0.0, True, {}, os_idle_sec=45 * 60.0, last_clean_cycle_wall=recent,
+    ) is False

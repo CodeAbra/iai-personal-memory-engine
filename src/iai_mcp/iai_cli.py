@@ -1413,9 +1413,22 @@ def cmd_lang(args: argparse.Namespace) -> int:
             model_key = DEFAULT_MODEL_KEY
 
     cfg["embed"] = {**embed_cfg, "model_key": model_key, "languages": langs}
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.rename(path)
+    tmp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp.rename(path)
+    except OSError as exc:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        print(f"cannot write config at {path}: {exc}", file=sys.stderr)
+        return 1
 
     print(f"embedder: {model_key}")
     print(f"languages: {', '.join(langs) if langs else '(english-only default)'}")

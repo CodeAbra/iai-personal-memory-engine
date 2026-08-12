@@ -26,6 +26,7 @@ or forged frame breaks the chain; recovery stops at the first mismatch.
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 import struct
@@ -44,6 +45,8 @@ from iai_mcp.lillibrain.constants import (
 # Module-level binding so tests can patch wal_mod.durable_fsync directly
 # without having to also patch io_mod.durable_fsync (the two-site patch rule).
 from iai_mcp.lillibrain.io import durable_fsync  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -397,7 +400,13 @@ def recover_wal_on_open(
 
     try:
         wal_fd = os.open(str(wal_path), os.O_RDONLY)
-    except OSError:
+    except OSError as exc:
+        logger.warning(
+            "WAL recovery could not open sidecar %s; committed frames not "
+            "replayed this open: %s",
+            wal_path,
+            exc,
+        )
         return
 
     try:

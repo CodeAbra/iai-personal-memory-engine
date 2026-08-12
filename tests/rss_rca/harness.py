@@ -78,6 +78,7 @@ _VOLATILE_PREFIXES: tuple[str, ...] = (
     ".deferred-captures/",
     ".daemon.sock",
     ".daemon-state",
+    ".daemon-watchdog.log",
     ".session-start-payload",
     ".heartbeat",
     "wake.signal",
@@ -554,10 +555,33 @@ def run(
     dim: int | None = None,
     seed: int = 42,
     deferred_events_per_cycle: int = 250,
+    sleep_budget_sec: float | None = None,
 ) -> Path:
     """Drive ``cycles`` in-process WAKE→drain→SLEEP cycles against a tmp store.
 
     Returns the path to the rendered ``RCA-FINDINGS.md`` file under ``out``.
+
+    ``sleep_budget_sec``, when set, bounds each cycle's sleep pass with
+    ``pipeline.force_run(interrupt_check=...)`` instead of the bare
+    ``pipeline.run()`` -- the late REM steps (chiefly CLUSTER_SUMMARY) are
+    CPU-bound and scale poorly, and an unbounded multi-cycle run can grind for
+    tens of minutes. ``None`` (the default) keeps the prior unbounded
+    behaviour unchanged. When set, this driver ALSO force-rebuilds the
+    runtime-graph cache once per cycle before the settle-and-sample below
+    (``runtime_graph_cache._rebuild_and_save_rgc(store, force=True)``) --
+    the rolling budgeted pass's own RECALL_INDEX_REBUILD step can skip its
+    heavy body via the production dirty-threshold fuse even when the step
+    nominally "runs", so a bounded-deadline caller that wants a provable
+    per-cycle measurement of that allocator needs this forced call, not just
+    the rolling pass. A per-cycle sidecar ``settled-footprint.json`` is
+    always written under ``out`` with the per-cycle settled RSS, on macOS
+    the settled ``phys_footprint`` (the watchdog's charged metric), the
+    rolling pass's own ``completed_steps`` names, and
+    ``recall_index_rebuilt`` (whether the forced call's own rebuild body
+    actually ran, in bounded mode; whether RECALL_INDEX_REBUILD was in the
+    rolling pass's completed_steps, in unbounded mode). Additive to the
+    existing ``rca-log.jsonl`` settled-RSS marker, never a replacement for
+    it.
     """
     if n <= 0 or cycles <= 0:
         raise ValueError("--n and --cycles must be positive integers")
@@ -596,6 +620,7 @@ def run(
 
     # Project imports happen AFTER the ENV redirects so all module-level
     # ``Path.home()`` and ``IAI_MCP_STORE`` reads pick up the tmp root.
+    from iai_mcp import runtime_graph_cache
     from iai_mcp.capture import drain_deferred_captures
     from iai_mcp.lifecycle_event_log import LifecycleEventLog
     from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
@@ -667,6 +692,7 @@ def run(
 
         prior_state: dict[str, Any] | None = None
         all_rows_by_cycle: list[list[dict[str, Any]]] = []
+        settled_footprint_rows: list[dict[str, Any]] = []
 
         for cycle_idx in range(cycles):
             sampler.set_cycle(cycle_idx, "pre-drain")
@@ -699,7 +725,15 @@ def run(
                 event_log=event_log,
             )
             sleep_t0 = time.perf_counter()
-            result = pipeline.run()
+            if sleep_budget_sec is not None:
+                sleep_deadline = sleep_t0 + float(sleep_budget_sec)
+
+                def _sleep_interrupt(_deadline: float = sleep_deadline) -> bool:
+                    return time.perf_counter() >= _deadline
+
+                result = pipeline.force_run(interrupt_check=_sleep_interrupt)
+            else:
+                result = pipeline.run()
             sleep_duration = time.perf_counter() - sleep_t0
             snap_post_sleep, snap_post_sleep_np = _take_snapshot_with_numpy()
             state_post_sleep = _capture_per_cycle_state(
@@ -716,6 +750,31 @@ def run(
             state_post_sleep["completed_steps"] = completed
             state_post_sleep["sleep_duration_sec"] = round(sleep_duration, 3)
 
+            # Force the largest allocator's own work every measured cycle,
+            # independent of whether the rolling budgeted pass above reached
+            # or would have reached RECALL_INDEX_REBUILD in its own step
+            # chain. Two reasons a normal pass can skip the actual
+            # allocation even when the step nominally "runs": (1) the
+            # `force_run` deadline is checked only at each step's own entry
+            # (never mid-step), so a slow earlier step can push the deadline
+            # past this step's entry before the rolling pass even reaches
+            # it; (2) `_rebuild_and_save_rgc`'s own dirty-threshold fuse
+            # skips the heavy rebuild body entirely when the warm cache
+            # looks clean enough (`rebuilt: False, skipped:
+            # "warm_and_below_dirty_threshold"`), independent of the
+            # deadline. ``force=True`` bypasses that fuse unconditionally,
+            # so the settled-footprint measurement below always includes
+            # this allocator's genuine cost -- runs only when the caller
+            # opted into the bounded-deadline mode (`sleep_budget_sec` set);
+            # the unbounded default path is untouched.
+            if sleep_budget_sec is not None:
+                forced_result = runtime_graph_cache._rebuild_and_save_rgc(
+                    store, force=True,
+                )
+                recall_index_rebuilt = bool(forced_result.get("rebuilt"))
+            else:
+                recall_index_rebuilt = "RECALL_INDEX_REBUILD" in completed
+
             # Deterministic settle-and-sample at the per-cycle boundary.
             # The periodic sampler's "last tick" lands at a random moment with
             # large jitter (a VACUUM transient or a mid-rebuild spike can be
@@ -723,17 +782,27 @@ def run(
             # the cycle boundary force every returnable page back to the OS
             # (pyarrow pool release + gc.collect + macOS zone pressure relief)
             # and then take ONE RSS read. That "all returnable pages returned"
-            # footprint is reproducible. This runs in the driver AFTER run()
-            # returns — it observes the pipeline, it does not alter sleep
-            # behaviour. ``_step_memory_relief`` performs the three relief
-            # actions; the explicit psutil read after it yields integer bytes
-            # matching the periodic-sample schema (its own rss_after is MB).
+            # footprint is reproducible. ``_step_memory_relief`` performs the
+            # three relief actions; the explicit psutil read after it yields
+            # integer bytes matching the periodic-sample schema (its own
+            # rss_after is MB).
             settle = _step_memory_relief(f"post-cycle-{cycle_idx}")
             settled_rss = (
                 int(psutil.Process(pid).memory_info().rss)
                 or int(round(settle.get("rss_after_mb", 0.0) * 1e6))
             )
             sampler.emit_marker(cycle_idx, "post-cycle-settled", settled_rss)
+            # phys_footprint (the watchdog's charged metric, None off-darwin) —
+            # supplements the RSS marker above; never replaces it.
+            from tests.rss_rca.phys_footprint_harness import _phys_footprint_bytes
+            settled_phys = _phys_footprint_bytes(pid)
+            settled_footprint_rows.append({
+                "cycle": int(cycle_idx),
+                "settled_rss": settled_rss,
+                "settled_phys": settled_phys,
+                "completed_steps": list(completed),
+                "recall_index_rebuilt": recall_index_rebuilt,
+            })
 
             # Compute the diffs we need for attribution.
             diff_py_drain = snap_post_drain.compare_to(snap_pre, "lineno")
@@ -830,6 +899,11 @@ def run(
         }
         md_body = render_findings_md(final_rows, run_metadata)
         findings_path.write_text(md_body, encoding="utf-8")
+
+        footprint_sidecar_path = out / "settled-footprint.json"
+        footprint_sidecar_path.write_text(
+            json.dumps(settled_footprint_rows, indent=2), encoding="utf-8",
+        )
 
         return findings_path
 

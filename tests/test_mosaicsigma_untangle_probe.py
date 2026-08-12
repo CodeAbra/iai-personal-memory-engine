@@ -3,6 +3,8 @@ from __future__ import annotations
 import pathlib
 from uuid import UUID, uuid4
 
+import numpy as np
+
 from iai_mcp.graph import MemoryGraph
 
 
@@ -18,18 +20,24 @@ def _make_payload(seed: float) -> dict:
     }
 
 
+def _payload_embedding(payload: dict) -> list:
+    # Mirrors retrieve.py: a graph-owned vector is a buffer with no truth value.
+    emb = payload.get("embedding")
+    return [] if emb is None else list(emb)
+
+
 def _drive_cached_path_sidecar_write(
     graph: MemoryGraph, node_id: UUID, payload: dict
 ) -> None:
     graph.add_node(
         node_id,
         community_id=None,
-        embedding=list(payload.get("embedding") or []),
+        embedding=_payload_embedding(payload),
     )
     graph.set_node_payload(
         node_id,
         {
-            "embedding": list(payload.get("embedding") or []),
+            "embedding": _payload_embedding(payload),
             "surface": payload.get("surface", ""),
             "centrality": float(payload.get("centrality") or 0.0),
             "tier": payload.get("tier", "episodic"),
@@ -43,7 +51,7 @@ def _drive_cached_path_sidecar_write(
 def _drive_miss_rebuild_path_sidecar_write(
     graph: MemoryGraph, node_id: UUID, payload: dict
 ) -> None:
-    embedding = list(payload.get("embedding") or [])
+    embedding = _payload_embedding(payload)
     graph.add_node(
         node_id,
         community_id=None,
@@ -68,7 +76,7 @@ def _assert_embedding_in_sidecar(
 ) -> None:
     sidecar_emb = graph._node_payload[str(node_id)]["embedding"]
     api_emb = graph.get_embedding(node_id)
-    assert api_emb == sidecar_emb, (
+    assert np.array_equal(api_emb, sidecar_emb), (
         f"sidecar-vs-API drift at retrieve.py {source_lines}; "
         f"uuid={node_id}; "
         f"_node_payload[str(uuid)]['embedding']={sidecar_emb!r}; "
@@ -125,7 +133,10 @@ def test_attrs_post_untangle_carries_only_community_id() -> None:
         f"actual={attrs_keys}"
     )
     assert str(node_id) in graph._node_payload
-    assert graph._node_payload[str(node_id)].get("embedding") == embedding
+    assert np.array_equal(
+        graph._node_payload[str(node_id)].get("embedding"),
+        np.asarray(embedding, dtype=np.float32),
+    )
 
 
 def test_downstream_hardest_test_files_present() -> None:

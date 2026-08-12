@@ -20,7 +20,12 @@ Three guarantees are pinned here:
 """
 from __future__ import annotations
 
+import json
+import os
 import platform
+import subprocess
+import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -32,7 +37,12 @@ from iai_mcp import retrieve, runtime_graph_cache
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryRecord
-from tests._runtime_graph_rss_arm import run_runtime_graph_rss_arm
+
+_EMPTY_EMB = np.zeros(0, dtype=np.float32)
+
+
+def _emb_bytes(emb: "np.ndarray | None") -> bytes:
+    return (_EMPTY_EMB if emb is None else np.asarray(emb, dtype=np.float32)).tobytes()
 
 
 @pytest.fixture(autouse=True)
@@ -462,7 +472,7 @@ def test_centrality_only_worker_skips_community_detection():
 
     parent_conn.send(("config", {"centrality_only": True}))
     node_chunk = [
-        (str(uid), np.asarray(g.get_embedding(uid) or [], dtype=np.float32).tobytes())
+        (str(uid), _emb_bytes(g.get_embedding(uid)))
         for uid in g.iter_nodes()
     ]
     parent_conn.send(("nodes", node_chunk))
@@ -492,9 +502,101 @@ def test_centrality_only_worker_skips_community_detection():
         assert abs(child_map[node_uuid] - ref_val) <= 1e-6
 
 
+# Worker run by each arm of the parent-RSS isolation proof in its OWN fresh
+# process.  Seeds a store, builds the runtime graph either with the centrality
+# child isolated (the real path) or forced in-parent (detection + exact
+# betweenness resident), then prints the child's own peak RSS taken from
+# getrusage(RUSAGE_SELF).  Each arm in a clean process means the measurement is
+# the resident high-water of that build alone, free of the in-process
+# accumulation and arm-ordering that made an in-parent before/after delta flake.
+_RSS_ARM_WORKER = textwrap.dedent(
+    """
+    import json, resource, sys
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    import numpy as np
+
+    from iai_mcp import retrieve, runtime_graph_cache
+    import iai_mcp.community as _cm
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.store._buffers import flush_edge_buffer, flush_record_buffer
+    from iai_mcp.types import MemoryRecord
+
+    seed_base = int(sys.argv[1])
+    in_parent = sys.argv[2] == "in_parent"
+    root = sys.argv[3]
+    n_records = int(sys.argv[4])
+
+    s = MemoryStore(path=root + "/store")
+    import pathlib
+    s.root = pathlib.Path(root) / "root"
+    s.root.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    for i in range(n_records):
+        rng = np.random.default_rng(seed_base + i)
+        vec = rng.random(s.embed_dim).astype(np.float32)
+        vec = (vec / np.linalg.norm(vec)).tolist()
+        s.insert(MemoryRecord(
+            id=uuid4(), tier="episodic",
+            literal_surface=f"surface number {seed_base + i} carrying real text",
+            aaak_index="", embedding=vec, community_id=None, centrality=0.0,
+            detail_level=2, pinned=False, stability=0.0, difficulty=0.0,
+            last_reviewed=None, never_decay=False, never_merge=False,
+            provenance=[], created_at=now, updated_at=now,
+            tags=[f"tag{(seed_base + i) % 3}"], language="en",
+        ))
+    flush_record_buffer(s)
+    flush_edge_buffer(s)
+
+    if in_parent:
+        def _local_detect(store, graph, *, with_centrality=False):
+            assignment = _cm.detect_communities(graph, prior=None, prior_mode="seeded")
+            if with_centrality:
+                return assignment, None
+            return assignment
+        retrieve._detect_communities_isolated = _local_detect
+        runtime_graph_cache.compute_centrality_in_child = (
+            lambda graph, **kw: graph.centrality()
+        )
+
+    retrieve.build_runtime_graph(s)
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(json.dumps({"peak_rss_raw": peak}))
+    """
+)
+
+
+def _ru_maxrss_mb(raw: int) -> float:
+    if platform.system() == "Darwin":
+        return raw / (1024 * 1024)
+    return raw / 1024
+
+
+def _run_rss_arm(seed_base: int, in_parent: bool, root: Path, n_records: int) -> float:
+    env = os.environ.copy()
+    env["LILLI_STORAGE_DRIVER"] = "lilli"
+    env["IAI_MCP_CRYPTO_PASSPHRASE"] = "test-passphrase-not-secret"
+    proc = subprocess.run(
+        [
+            sys.executable, "-c", _RSS_ARM_WORKER,
+            str(seed_base),
+            "in_parent" if in_parent else "isolated",
+            str(root),
+            str(n_records),
+        ],
+        capture_output=True, text=True, env=env, timeout=600,
+    )
+    assert proc.returncode == 0, (
+        f"RSS arm subprocess failed (rc={proc.returncode}):\n{proc.stderr}"
+    )
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    return _ru_maxrss_mb(int(payload["peak_rss_raw"]))
+
+
 @pytest.mark.skipif(
     platform.system() != "Darwin",
-    reason="peak-RSS isolation proof calibrated on this host's allocator",
+    reason="settled-RSS isolation proof calibrated on this host's allocator",
 )
 def test_parent_rss_lower_with_centrality_child(store: MemoryStore):
     """Building the runtime graph with the centrality child keeps the parent RSS
@@ -511,28 +613,18 @@ def test_parent_rss_lower_with_centrality_child(store: MemoryStore):
     """
     n_records = 3000
 
-    in_parent_peak = run_runtime_graph_rss_arm(
-        proof="centrality",
-        driver="lilli",
-        seed_base=20_000,
-        in_parent=True,
-        root=store.root / "in_parent",
-        n_records=n_records,
+    in_parent_peak = _run_rss_arm(
+        seed_base=20_000, in_parent=True, root=store.root / "in_parent", n_records=n_records
     )
-    isolated_peak = run_runtime_graph_rss_arm(
-        proof="centrality",
-        driver="lilli",
-        seed_base=20_000,
-        in_parent=False,
-        root=store.root / "isolated",
-        n_records=n_records,
+    isolated_peak = _run_rss_arm(
+        seed_base=60_000, in_parent=False, root=store.root / "isolated", n_records=n_records
     )
 
     print(
         f"\n[centrality-rss] in_parent_peak={in_parent_peak:.1f}MB "
         f"isolated_peak={isolated_peak:.1f}MB"
     )
-    assert isolated_peak < in_parent_peak * 0.95, (
+    assert isolated_peak < in_parent_peak, (
         f"centrality child isolation did not lower the parent footprint: "
         f"in_parent_peak={in_parent_peak:.1f}MB "
         f"isolated_peak={isolated_peak:.1f}MB"

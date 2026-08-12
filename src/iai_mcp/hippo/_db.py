@@ -5,9 +5,11 @@ from __future__ import annotations
 import contextlib
 import errno
 from iai_mcp import _flock as fcntl
+import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import weakref
@@ -192,6 +194,73 @@ def _reembed_rss_soft_cap() -> int:
     except (TypeError, ValueError):
         return REEMBED_RSS_SOFT_CAP_DEFAULT_BYTES
     return val if val > 0 else 0
+
+
+# Bounds for the nightly embedding-integrity self-heal step. Lane A scans up to
+# ZERO_SCAN_BATCH active rows for all-zero vectors; Lane B samples up to
+# SAMPLE_SIZE active rows, re-embeds their text, and flags rows whose stored
+# vector scores below COSINE_FLOOR against the fresh one. When the flagged
+# fraction of a trusted-size sample exceeds MASS_MISMATCH_FRACTION the signal is
+# systemic (embedder identity drift) and Lane B heals nothing that cycle. Below
+# MIN_MASS_SAMPLE compared rows the fraction is not trustworthy as "systemic":
+# Lane B must NOT rewrite on that ambiguous signal (it could migrate good vectors
+# into a drifted space) — it defers, holding its cursor and flagging low_sample so
+# the window is re-examined when more rows can be compared.
+EMBED_INTEGRITY_ZERO_SCAN_BATCH_DEFAULT = 2000
+EMBED_INTEGRITY_SAMPLE_SIZE_DEFAULT = 500
+EMBED_INTEGRITY_COSINE_FLOOR_DEFAULT = 0.98
+EMBED_INTEGRITY_MASS_MISMATCH_FRACTION_DEFAULT = 0.20
+EMBED_INTEGRITY_MIN_MASS_SAMPLE = 25
+# A method-level (not per-row) write-back fault holds the lane cursor so the
+# window retries — but a permanent storage fault must not livelock the lane on
+# one window forever. After this many consecutive faults at the same window the
+# lane advances past it (the flagged rows stay recoverable from literal_surface).
+EMBED_INTEGRITY_MAX_WRITEBACK_RETRIES = 3
+EMBED_INTEGRITY_CURSOR_FILE = ".embed-integrity-cursor.json"
+
+
+def _embed_integrity_zero_scan_batch() -> int:
+    raw = os.environ.get("IAI_MCP_EMBED_INTEGRITY_ZERO_SCAN_BATCH")
+    if raw is None:
+        return EMBED_INTEGRITY_ZERO_SCAN_BATCH_DEFAULT
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return EMBED_INTEGRITY_ZERO_SCAN_BATCH_DEFAULT
+    return val if val > 0 else EMBED_INTEGRITY_ZERO_SCAN_BATCH_DEFAULT
+
+
+def _embed_integrity_sample_size() -> int:
+    raw = os.environ.get("IAI_MCP_EMBED_INTEGRITY_SAMPLE_SIZE")
+    if raw is None:
+        return EMBED_INTEGRITY_SAMPLE_SIZE_DEFAULT
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return EMBED_INTEGRITY_SAMPLE_SIZE_DEFAULT
+    return val if val > 0 else EMBED_INTEGRITY_SAMPLE_SIZE_DEFAULT
+
+
+def _embed_integrity_cosine_floor() -> float:
+    raw = os.environ.get("IAI_MCP_EMBED_INTEGRITY_COSINE_FLOOR")
+    if raw is None:
+        return EMBED_INTEGRITY_COSINE_FLOOR_DEFAULT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return EMBED_INTEGRITY_COSINE_FLOOR_DEFAULT
+    return val if 0.0 < val <= 1.0 else EMBED_INTEGRITY_COSINE_FLOOR_DEFAULT
+
+
+def _embed_integrity_mass_mismatch_fraction() -> float:
+    raw = os.environ.get("IAI_MCP_EMBED_INTEGRITY_MASS_MISMATCH_FRACTION")
+    if raw is None:
+        return EMBED_INTEGRITY_MASS_MISMATCH_FRACTION_DEFAULT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return EMBED_INTEGRITY_MASS_MISMATCH_FRACTION_DEFAULT
+    return val if 0.0 < val <= 1.0 else EMBED_INTEGRITY_MASS_MISMATCH_FRACTION_DEFAULT
 
 
 def _ro_pool_off() -> bool:
@@ -544,6 +613,10 @@ class HippoDB:
             if meta_dim is not None:
                 self._embed_dim = int(meta_dim[0])
         self._label_map: dict[str, int] = {}
+        # Set when a read-only open cannot repopulate the label map from the
+        # store; the open still succeeds and serves empty vector recall until a
+        # read-write open heals it. Distinguishes empty-by-failure from empty.
+        self._label_map_degraded: bool = False
         self._write_counter: int = 0
         # Observable counter for the reuse-path collision fallback (fresh
         # C++ allocation on a rebuild). The zero-per-cycle-allocation invariant
@@ -590,8 +663,13 @@ class HippoDB:
             self._hnsw_standby: _vecindex.Index | None = None
             try:
                 self._repopulate_label_map_from_sqlite()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "read-only label map repopulation failed on %s: %s",
+                    self._db_path,
+                    exc,
+                )
+                self._label_map_degraded = True
         else:
             self._repopulate_label_map_from_sqlite()
             self._initialize_hnsw_index()
@@ -803,7 +881,12 @@ class HippoDB:
             else:
                 try:
                     fcntl.flock(base_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                except OSError:
+                except OSError as exc:
+                    _log.warning(
+                        "shared-lock demote failed on %s; staying exclusive: %s",
+                        self._db_path,
+                        exc,
+                    )
                     return
             del _PROCESS_LOCKS[self._lock_key]
             _PROCESS_LOCKS_SHARED[self._lock_key] = (base_fd, refcount)
@@ -1616,8 +1699,6 @@ class HippoDB:
         next cycle, exactly like the drain's own soft cap. This keeps a large
         deferred backlog from climbing the resident set through one long run.
         """
-        import struct as _struct
-
         with self._conn_lock:
             ids = [
                 r["id"]
@@ -1630,6 +1711,39 @@ class HippoDB:
             ]
         if not ids:
             return 0
+        written, _ = self._reembed_write_ids(
+            ids,
+            embedder,
+            batch_size=batch_size,
+            rss_soft_cap_bytes=rss_soft_cap_bytes,
+            count_transition=True,
+        )
+        return written
+
+    def _reembed_write_ids(
+        self,
+        ids: list[str],
+        embedder: Any,
+        *,
+        batch_size: int = 0,
+        rss_soft_cap_bytes: int = 0,
+        count_transition: bool = True,
+    ) -> tuple[int, int]:
+        # Returns (written_count, last_attempted_index). last_attempted_index is
+        # the position of the last id in the last window fully examined before
+        # the resident-set budget cut the pass short — NOT the last row that was
+        # successfully written. A caller advances its resume cursor only when
+        # this reaches the end of its flagged list, so a budget-truncated window
+        # retries next cycle while a permanently unembeddable row still lets the
+        # cursor pass (a per-write-success test would livelock on it).
+        #
+        # count_transition gates the pending->active corpus-count bookkeeping:
+        # heal-in-place callers whose rows were already active MUST pass False,
+        # or the corpus-count cache double-counts.
+        import struct as _struct
+
+        if not ids:
+            return 0, -1
 
         window = batch_size if batch_size and batch_size > 0 else len(ids)
         # The cap must track the pass's own GROWTH, not an absolute number: a
@@ -1649,6 +1763,7 @@ class HippoDB:
         bounded = bool(batch_size and batch_size > 0)
 
         count = 0
+        last_attempted = -1
         for start in range(0, len(ids), window):
             # Soft resident-memory ceiling — checked before reading the next
             # window so the pass yields with the remaining rows still pending
@@ -1758,31 +1873,33 @@ class HippoDB:
                 # The flip moves exactly one row from pending to active: shift
                 # BOTH cached counts in place (touching only one leaves the
                 # other stale). Falls back to invalidation when no adjust
-                # callback is registered.
-                _cca = self._corpus_count_adjust
-                if _cca is not None:
-                    try:
-                        _cca("active", 1)
-                        _cca("pending", -1)
-                    except Exception as _exc:  # noqa: BLE001 -- hook isolation
-                        _log.debug(
-                            "corpus_count_adjust callback failed (active,pending)"
-                            " id=%s: %s",
-                            rid,
-                            _exc,
-                        )
-                else:
-                    _cci = self._corpus_count_invalidate
-                    if _cci is not None:
+                # callback is registered. Skipped when count_transition is
+                # False — the row was already active, so no count changes.
+                if count_transition:
+                    _cca = self._corpus_count_adjust
+                    if _cca is not None:
                         try:
-                            _cci("active", "pending")
+                            _cca("active", 1)
+                            _cca("pending", -1)
                         except Exception as _exc:  # noqa: BLE001 -- hook isolation
                             _log.debug(
-                                "corpus_count_invalidate callback failed (active,pending)"
+                                "corpus_count_adjust callback failed (active,pending)"
                                 " id=%s: %s",
                                 rid,
                                 _exc,
                             )
+                    else:
+                        _cci = self._corpus_count_invalidate
+                        if _cci is not None:
+                            try:
+                                _cci("active", "pending")
+                            except Exception as _exc:  # noqa: BLE001 -- hook isolation
+                                _log.debug(
+                                    "corpus_count_invalidate callback failed (active,pending)"
+                                    " id=%s: %s",
+                                    rid,
+                                    _exc,
+                                )
             if window_count > 0:
                 # Direct RO-pool staleness bump for the bare-HippoDB case (no
                 # MemoryStore, so no CorpusCountCache.on_invalidate hook
@@ -1795,7 +1912,12 @@ class HippoDB:
             if bounded and window_count > 0:
                 self._reembed_window_relief()
 
-        return count
+            # The whole window was examined — the RSS budget only ever breaks
+            # BEFORE the next window, never mid-window — so its far edge is the
+            # furthest position a resume cursor may advance to this cycle.
+            last_attempted = start + len(window_ids) - 1
+
+        return count, last_attempted
 
     @staticmethod
     def _reembed_rss_bytes() -> int:
@@ -1816,6 +1938,381 @@ class HippoDB:
             _step_memory_relief(label="reembed_pending")
         except Exception as exc:  # noqa: BLE001 -- relief is advisory, never fatal
             _log.debug("reembed_pending_rows: window relief failed: %s", exc)
+
+    def _embed_integrity_cursor_path(self) -> Path:
+        return self._store_root / EMBED_INTEGRITY_CURSOR_FILE
+
+    def _load_embed_integrity_cursor(self) -> dict:
+        try:
+            with open(
+                self._embed_integrity_cursor_path(), "r", encoding="utf-8"
+            ) as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _save_embed_integrity_cursor(
+        self,
+        zero_scan_last_id: str,
+        sample_last_id: str,
+        sample_sweeps_completed: int,
+        zero_writeback_faults: int = 0,
+        sample_writeback_faults: int = 0,
+    ) -> None:
+        path = self._embed_integrity_cursor_path()
+        payload = {
+            "zero_scan_last_id": zero_scan_last_id,
+            "sample_last_id": sample_last_id,
+            "sample_sweeps_completed": int(sample_sweeps_completed),
+            "zero_writeback_faults": int(zero_writeback_faults),
+            "sample_writeback_faults": int(sample_writeback_faults),
+        }
+        directory = str(path.parent) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".embed-integrity-cursor.", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, str(path))
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def selfheal_degraded_embeddings(
+        self,
+        embedder: Any,
+        *,
+        zero_scan_batch: int = 0,
+        sample_size: int = 0,
+        cosine_floor: float | None = None,
+        mass_mismatch_fraction: float | None = None,
+        batch_size: int = 0,
+        rss_soft_cap_bytes: int = 0,
+        embedder_for_zero_lane: Any = None,
+        interrupt_check: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Detect and heal zero-vector and text/embedding-mismatched rows.
+
+        Two independently keyset-cursor-bounded scan lanes over active
+        (``embedding_pending=0``, not tombstoned) rows, followed by a shared
+        bounded write-back that reuses :meth:`_reembed_write_ids` with
+        ``count_transition=False`` (the rows stay active — their count must not
+        move). Lane A flags all-zero vectors; Lane B re-embeds a rotating sample
+        and flags rows whose stored vector drifts below ``cosine_floor``.
+
+        ``embedder`` is the identity-guarded embedder (``None`` when the caller
+        could not resolve one — Lane B is then skipped entirely).
+        ``embedder_for_zero_lane`` is the separately-resolved embedder used for
+        Lane A's write-back only; a zero vector is invalid regardless of model,
+        so it may carry an unconfirmed identity where Lane B may not.
+
+        Never raises: every embedder/decrypt/SQL call is wrapped, so a fault in
+        one row or one lane degrades to "found but not healed", never an abort.
+        """
+        import numpy as _np
+
+        zero_scan_batch = (
+            zero_scan_batch if zero_scan_batch and zero_scan_batch > 0
+            else _embed_integrity_zero_scan_batch()
+        )
+        sample_size = (
+            sample_size if sample_size and sample_size > 0
+            else _embed_integrity_sample_size()
+        )
+        floor = (
+            cosine_floor if cosine_floor is not None
+            else _embed_integrity_cosine_floor()
+        )
+        mm_fraction = (
+            mass_mismatch_fraction if mass_mismatch_fraction is not None
+            else _embed_integrity_mass_mismatch_fraction()
+        )
+        bs = batch_size if batch_size and batch_size > 0 else _reembed_batch_size()
+        rss = (
+            rss_soft_cap_bytes if rss_soft_cap_bytes and rss_soft_cap_bytes > 0
+            else _reembed_rss_soft_cap()
+        )
+
+        cursor = self._load_embed_integrity_cursor()
+        zero_last = str(cursor.get("zero_scan_last_id", "") or "")
+        sample_last = str(cursor.get("sample_last_id", "") or "")
+        sweeps = int(cursor.get("sample_sweeps_completed", 0) or 0)
+        zero_faults = int(cursor.get("zero_writeback_faults", 0) or 0)
+        sample_faults = int(cursor.get("sample_writeback_faults", 0) or 0)
+
+        result: dict = {
+            "zero_found": 0,
+            "zero_healed": 0,
+            "sample_scanned": 0,
+            "sample_flagged": 0,
+            "sample_healed": 0,
+            "mass_mismatch_detected": False,
+            "flagged_fraction": 0.0,
+            "low_sample": False,
+            "cursor_wrapped_a": False,
+            "cursor_wrapped_b": False,
+            "zero_lane_embedder_unavailable": embedder_for_zero_lane is None,
+            "sample_lane_skipped": embedder is None,
+            "sample_lane_deferred": False,
+        }
+        new_zero_last = zero_last
+        new_sample_last = sample_last
+
+        def _decode_vec(blob):
+            if isinstance(blob, (bytes, bytearray, memoryview)):
+                return _np.frombuffer(blob, dtype=_np.float32)
+            return _np.asarray(
+                list(blob) if blob is not None else [], dtype=_np.float32
+            )
+
+        # ---- Lane A: zero-vector scan (blob decode only, no embedder needed
+        # to DETECT; write-back still needs embedder_for_zero_lane) ----
+        try:
+            with self._conn_lock:
+                rows_a = self._conn.execute(
+                    "SELECT id, embedding FROM records"
+                    " WHERE tombstoned_at IS NULL"
+                    "   AND COALESCE(embedding_pending, 0) = 0"
+                    "   AND id > ?"
+                    " ORDER BY id LIMIT ?",
+                    (zero_last, int(zero_scan_batch)),
+                ).fetchall()
+        except Exception as exc:  # noqa: BLE001 -- lane isolation, never abort
+            _log.warning("selfheal zero-scan query failed: %s", exc)
+            rows_a = []
+
+        result["cursor_wrapped_a"] = len(rows_a) < zero_scan_batch
+        scan_a_last = zero_last
+        zero_flagged: list[str] = []
+        for r in rows_a:
+            rid = r["id"]
+            scan_a_last = rid
+            try:
+                vec = _decode_vec(r["embedding"])
+            except Exception:  # noqa: BLE001 -- a bad decode is not a zero flag
+                continue
+            if vec.size == 0 or not bool(_np.any(vec)):
+                result["zero_found"] += 1
+                zero_flagged.append(rid)
+
+        can_advance_a = True
+        new_zero_faults = 0
+        if zero_flagged:
+            if embedder_for_zero_lane is None:
+                # Cannot heal without an embedder — hold so the same window
+                # retries once one is resolvable again. Not a write-back fault:
+                # carry the retry budget forward so a flapping embedder cannot
+                # reset it and mask a permanent fault.
+                can_advance_a = False
+                new_zero_faults = zero_faults
+            else:
+                writeback_failed = False
+                try:
+                    written_a, last_idx_a = self._reembed_write_ids(
+                        zero_flagged, embedder_for_zero_lane,
+                        batch_size=bs, rss_soft_cap_bytes=rss,
+                        count_transition=False,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- lane isolation
+                    _log.warning("selfheal zero-lane write-back failed: %s", exc)
+                    written_a, last_idx_a = 0, -1
+                    writeback_failed = True
+                result["zero_healed"] = written_a
+                if writeback_failed:
+                    # A method-level (not per-row) fault. Hold the window and
+                    # retry — but bound the retries so a permanent storage fault
+                    # cannot livelock the lane on one window forever.
+                    new_zero_faults = zero_faults + 1
+                    if new_zero_faults >= EMBED_INTEGRITY_MAX_WRITEBACK_RETRIES:
+                        _log.warning(
+                            "selfheal zero-lane write-back failed %d cycles at the"
+                            " same window; advancing past it (rows stay"
+                            " recoverable from literal_surface)",
+                            new_zero_faults,
+                        )
+                        can_advance_a = True
+                        new_zero_faults = 0
+                    else:
+                        can_advance_a = False
+                else:
+                    can_advance_a = last_idx_a >= len(zero_flagged) - 1
+
+        if can_advance_a:
+            new_zero_last = "" if result["cursor_wrapped_a"] else scan_a_last
+
+        # ---- yield to the foreground before the embedder-heavy Lane B ----
+        def _foreground_waiting() -> bool:
+            if interrupt_check is None:
+                return False
+            try:
+                return bool(interrupt_check())
+            except Exception:  # noqa: BLE001 -- caller predicate may raise anything
+                return False
+
+        new_sample_faults = sample_faults
+        if embedder is None:
+            result["sample_lane_skipped"] = True
+        elif _foreground_waiting():
+            result["sample_lane_deferred"] = True
+        else:
+            advance_b, scan_b_last, new_sample_faults = self._selfheal_drift_lane(
+                embedder, floor, mm_fraction, bs, rss, sample_size,
+                sample_last, sample_faults, result, _decode_vec,
+                _foreground_waiting,
+            )
+            if advance_b:
+                if result["cursor_wrapped_b"]:
+                    new_sample_last = ""
+                    sweeps += 1
+                else:
+                    new_sample_last = scan_b_last
+
+        try:
+            self._save_embed_integrity_cursor(
+                new_zero_last, new_sample_last, sweeps,
+                zero_writeback_faults=new_zero_faults,
+                sample_writeback_faults=new_sample_faults,
+            )
+        except Exception as exc:  # noqa: BLE001 -- a cursor save fault must not abort
+            _log.warning("selfheal cursor save failed: %s", exc)
+
+        return result
+
+    def _selfheal_drift_lane(
+        self, embedder, floor, mm_fraction, bs, rss, sample_size,
+        sample_last, sample_faults, result: dict, decode_vec,
+        foreground_waiting,
+    ) -> tuple[bool, str, int]:
+        import numpy as _np
+        from iai_mcp.write import cosine as _cosine
+
+        try:
+            with self._conn_lock:
+                rows_b = self._conn.execute(
+                    "SELECT id, literal_surface, embedding FROM records"
+                    " WHERE tombstoned_at IS NULL"
+                    "   AND COALESCE(embedding_pending, 0) = 0"
+                    "   AND id > ?"
+                    " ORDER BY id LIMIT ?",
+                    (sample_last, int(sample_size)),
+                ).fetchall()
+        except Exception as exc:  # noqa: BLE001 -- lane isolation, never abort
+            _log.warning("selfheal drift-sample query failed: %s", exc)
+            rows_b = []
+
+        result["cursor_wrapped_b"] = len(rows_b) < sample_size
+        scan_b_last = sample_last
+        compared = 0
+        examined = 0
+        flagged_ids: list[str] = []
+        for idx, r in enumerate(rows_b):
+            # Yield to a waiting foreground read every N rows: a long sequential
+            # decrypt+embed GIL hold starves live recall. A mid-sample yield
+            # defers the whole lane and holds its cursor (nothing healed, no
+            # partial breaker decision); the same window is re-examined next cycle.
+            if idx and idx % 32 == 0 and foreground_waiting():
+                result["sample_scanned"] = examined
+                result["sample_lane_deferred"] = True
+                return False, sample_last, sample_faults
+            examined += 1
+            rid = r["id"]
+            scan_b_last = rid
+            raw = r["literal_surface"] or ""
+            try:
+                surface = self._decrypt_record_field(rid, "literal_surface", raw)
+            except Exception:  # noqa: BLE001 -- never fabricate on an undecryptable row
+                continue
+            if not (surface or "").strip():
+                continue
+            # An all-zero stored vector is Lane A's business; excluding it keeps
+            # it out of the drift denominator so a pile of zeros can never trip
+            # the systemic-drift breaker and suppress genuine drift healing.
+            try:
+                stored = decode_vec(r["embedding"])
+            except Exception:  # noqa: BLE001
+                continue
+            if stored.size == 0 or not bool(_np.any(stored)):
+                continue
+            try:
+                fresh = list(embedder.embed(surface))
+            except Exception:  # noqa: BLE001 -- embed fault: skip the row
+                continue
+            compared += 1
+            try:
+                cos = _cosine(fresh, stored.tolist())
+            except Exception:  # noqa: BLE001
+                continue
+            if cos < floor:
+                flagged_ids.append(rid)
+
+        result["sample_scanned"] = examined
+        result["sample_flagged"] = len(flagged_ids)
+        if compared > 0:
+            result["flagged_fraction"] = len(flagged_ids) / compared
+
+        breaker = (
+            len(flagged_ids) > 0 and result["flagged_fraction"] > mm_fraction
+        )
+        low_sample = breaker and compared < EMBED_INTEGRITY_MIN_MASS_SAMPLE
+
+        advance_b = True
+        # Carry the write-back retry budget forward on any non-write-back hold;
+        # reset it only on a resolved window (heal success, force-advance, or a
+        # clean/decided window).
+        new_sample_faults = sample_faults
+        if breaker and not low_sample:
+            # Systemic signal (embedder identity drift) on a trusted-size sample,
+            # not sparse corruption: heal nothing this cycle, report. The window
+            # was fully examined — intentionally held, not truncated — so the
+            # cursor still advances.
+            result["mass_mismatch_detected"] = True
+            new_sample_faults = 0
+        elif low_sample:
+            # The breaker would trip but the sample is too small to trust as
+            # systemic. Rewriting here could migrate good vectors into a drifted
+            # embedder's space, so defer: hold the cursor and re-examine next
+            # cycle when more rows can be compared. literal_surface is untouched,
+            # so the flagged rows stay recoverable.
+            result["low_sample"] = True
+            advance_b = False
+        elif flagged_ids:
+            writeback_failed = False
+            try:
+                written_b, last_idx_b = self._reembed_write_ids(
+                    flagged_ids, embedder,
+                    batch_size=bs, rss_soft_cap_bytes=rss,
+                    count_transition=False,
+                )
+            except Exception as exc:  # noqa: BLE001 -- lane isolation
+                _log.warning("selfheal drift-lane write-back failed: %s", exc)
+                written_b, last_idx_b = 0, -1
+                writeback_failed = True
+            result["sample_healed"] = written_b
+            if writeback_failed:
+                new_sample_faults = sample_faults + 1
+                if new_sample_faults >= EMBED_INTEGRITY_MAX_WRITEBACK_RETRIES:
+                    _log.warning(
+                        "selfheal drift-lane write-back failed %d cycles at the"
+                        " same window; advancing past it (rows stay recoverable"
+                        " from literal_surface)",
+                        new_sample_faults,
+                    )
+                    advance_b = True
+                    new_sample_faults = 0
+                else:
+                    advance_b = False
+            else:
+                advance_b = last_idx_b >= len(flagged_ids) - 1
+                new_sample_faults = 0
+        else:
+            new_sample_faults = 0
+
+        return advance_b, scan_b_last, new_sample_faults
 
     def ingest_pending_embeddings(self) -> int:
         import json as _json
@@ -2296,8 +2793,10 @@ class HippoDB:
         if owns_conn:
             try:
                 self._conn.commit()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "commit at close failed on %s: %s", self._db_path, exc
+                )
             try:
                 self._conn.close()
             except Exception:  # noqa: BLE001

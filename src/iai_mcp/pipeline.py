@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 class SimpleRecordView:
 
     id: UUID
-    embedding: list[float]
+    # Graph-sourced views alias the graph's own float32 buffer; store-sourced
+    # records still carry a Python list, and a node stored without a vector
+    # carries None. Read it with `is not None`, never a bare truth test.
+    embedding: "np.ndarray | list[float] | None"
     literal_surface: str
     centrality: float
     tier: str
@@ -74,7 +77,7 @@ def _read_record_payload(graph, rid: UUID, store: MemoryStore):
         else:
             return SimpleRecordView(
                 id=rid,
-                embedding=list(node["embedding"]),
+                embedding=node["embedding"],
                 literal_surface=str(surface),
                 centrality=float(node.get("centrality", 0.0) or 0.0),
                 tier=str(node.get("tier", "episodic")),
@@ -545,7 +548,7 @@ def _collect_graph_pool(
         return _cached_pool[1], _cached_pool[2]
 
     pool_ids: list[UUID] = []
-    pool_embs_rows: list[list[float]] = []
+    pool_embs_rows: list["np.ndarray | list[float]"] = []
 
     # The graph may be the process-wide warm bundle, mutated live by the
     # store's graph_sync_hook on a concurrent write; a dict resize mid-iteration
@@ -558,14 +561,14 @@ def _collect_graph_pool(
 
     # Resolve which nodes lack an embedding on the graph node and in the cache;
     # those (and only those) fall through to the store, batched in one fetch.
-    def _node_emb(rid: UUID) -> "list[float] | None":
+    def _node_emb(rid: UUID) -> "np.ndarray | list[float] | None":
         node_emb = graph.get_embedding(rid)
-        if node_emb:
-            return list(node_emb)
+        if node_emb is not None:
+            return node_emb
         if records_cache is not None and rid in records_cache:
             cached_emb = getattr(records_cache[rid], "embedding", None)
-            if cached_emb:
-                return list(cached_emb)
+            if cached_emb is not None and len(cached_emb):
+                return cached_emb
         return None
 
     _fallback_ids = [rid for rid in node_ids if _node_emb(rid) is None]
@@ -579,11 +582,13 @@ def _collect_graph_pool(
 
     for rid in node_ids:
         emb = _node_emb(rid)
-        if not emb:
+        if emb is None or not len(emb):
+            emb = None
             rec = _fallback_batch.get(rid)
-            if rec is not None and rec.embedding:
-                emb = list(rec.embedding)
-        if emb:
+            rec_emb = getattr(rec, "embedding", None) if rec is not None else None
+            if rec_emb is not None and len(rec_emb):
+                emb = rec_emb
+        if emb is not None:
             pool_ids.append(rid)
             pool_embs_rows.append(emb)
     if not pool_ids:
@@ -958,7 +963,7 @@ def _recall_core(
                 continue
             records_cache[rid] = SimpleRecordView(
                 id=rid,
-                embedding=list(node["embedding"]),
+                embedding=node["embedding"],
                 literal_surface=str(node.get("surface", "")),
                 centrality=float(node.get("centrality", 0.0) or 0.0),
                 tier=str(node.get("tier", "episodic")),

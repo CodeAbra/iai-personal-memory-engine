@@ -511,3 +511,188 @@ def test_claude_binary_resolves_without_user_path(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_BIN")
     monkeypatch.setenv("PATH", str(tmp_path))
     assert _resolve_claude_bin() == str(fake)
+
+
+def test_bare_login_failure_retries_without_bare(
+    monkeypatch, fake_creds, isolated_state,
+):
+    """A --bare attempt that reports "Not logged in" (Keychain-credential
+    setups) retries once without the flag; hooks stay disabled via
+    --settings on the retry."""
+    from iai_mcp.claude_cli import invoke_claude_once
+
+    login_error = json.dumps({
+        "is_error": True,
+        "result": "Not logged in · Please run /login",
+    }).encode("utf-8")
+    ok_payload = json.dumps({
+        "result": "insight", "cost_usd": 0,
+        "usage": {"input_tokens": 7, "output_tokens": 3},
+    }).encode("utf-8")
+
+    procs = [
+        _FakeProc(stdout=login_error, returncode=1),
+        _FakeProc(stdout=ok_payload, returncode=0),
+    ]
+    calls: list = []
+
+    async def fake_spawn(*args, **kwargs):
+        calls.append(args)
+        return procs[len(calls) - 1]
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+
+    result = asyncio.run(invoke_claude_once("hello", model="haiku"))
+
+    assert result["ok"] is True
+    assert result["bare_fallback_used"] is True
+    assert len(calls) == 2
+    assert "--bare" in calls[0]
+    assert "--bare" not in calls[1]
+    assert "--settings" in calls[1]
+    settings = json.loads(calls[1][calls[1].index("--settings") + 1])
+    assert settings == {"disableAllHooks": True}
+
+
+def test_zero_exit_error_result_is_not_success(
+    monkeypatch, fake_creds, isolated_state,
+):
+    from iai_mcp.claude_cli import invoke_claude_once
+
+    proc = _FakeProc(stdout=json.dumps({
+        "is_error": True, "result": "overloaded",
+    }).encode("utf-8"), returncode=0)
+    _install_subprocess_mock(monkeypatch, proc)
+
+    result = asyncio.run(invoke_claude_once("hi", model="haiku"))
+
+    assert result["ok"] is False
+    assert result["reason"] == "error_result"
+    assert "overloaded" in result["detail"]
+
+
+def test_non_login_failure_does_not_retry(
+    monkeypatch, fake_creds, isolated_state,
+):
+    from iai_mcp.claude_cli import invoke_claude_once
+
+    calls: list = []
+
+    async def fake_spawn(*args, **kwargs):
+        calls.append(args)
+        return _FakeProc(stdout=b"boom", stderr=b"fatal", returncode=2)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+
+    result = asyncio.run(invoke_claude_once("hi", model="haiku"))
+
+    assert result["ok"] is False
+    assert len(calls) == 1, "only a Not-logged-in --bare failure may retry"
+
+
+def test_sync_bare_login_failure_retries_without_bare(
+    monkeypatch, fake_creds, isolated_state,
+):
+    import subprocess as _subprocess
+
+    from iai_mcp.claude_cli import invoke_claude_sync
+
+    login_error = json.dumps({
+        "is_error": True,
+        "result": "Not logged in · Please run /login",
+    }).encode("utf-8")
+    ok_payload = json.dumps({
+        "result": "insight", "cost_usd": 0,
+        "usage": {"input_tokens": 7, "output_tokens": 3},
+    }).encode("utf-8")
+
+    calls: list = []
+
+    class _Done:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = b""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _Done(1, login_error)
+        return _Done(0, ok_payload)
+
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+
+    result = invoke_claude_sync("hello", model="haiku")
+
+    assert result["ok"] is True
+    assert result["bare_fallback_used"] is True
+    assert "--bare" in calls[0]
+    assert "--bare" not in calls[1] and "--settings" in calls[1]
+
+
+def test_scrubbed_env_fills_user_identity(monkeypatch, fake_creds, isolated_state):
+    """A launchd child without USER/LOGNAME cannot refresh the Keychain
+    OAuth session; the scrubbed env fills both from the process owner."""
+    import pwd
+
+    from iai_mcp.claude_cli import _scrubbed_env
+
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+
+    env = _scrubbed_env()
+
+    expected = pwd.getpwuid(__import__("os").getuid()).pw_name
+    assert env.get("USER") == expected
+    assert env.get("LOGNAME") == expected
+
+
+def test_scrubbed_env_keeps_existing_identity(monkeypatch, fake_creds, isolated_state):
+    from iai_mcp.claude_cli import _scrubbed_env
+
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.setenv("LOGNAME", "alice")
+
+    env = _scrubbed_env()
+
+    assert env["USER"] == "alice"
+    assert env["LOGNAME"] == "alice"
+
+
+def test_login_marker_beyond_stdout_truncation_still_retries(
+    monkeypatch, fake_creds, isolated_state,
+):
+    """The real CLI front-loads a large usage block, pushing the result
+    text past any fixed stdout prefix — detection must ride the parsed
+    result field, not the truncation."""
+    from iai_mcp.claude_cli import invoke_claude_once
+
+    padding = {"usage": {("k%d" % i): 0 for i in range(80)}}
+    login_error = json.dumps({
+        "is_error": True,
+        **padding,
+        "result": "Not logged in · Please run /login",
+    }).encode("utf-8")
+    assert b"Not logged in" not in login_error[:500], "fixture must exceed prefix"
+    ok_payload = json.dumps({
+        "result": "insight", "cost_usd": 0,
+        "usage": {"input_tokens": 7, "output_tokens": 3},
+    }).encode("utf-8")
+
+    procs = [
+        _FakeProc(stdout=login_error, returncode=1),
+        _FakeProc(stdout=ok_payload, returncode=0),
+    ]
+    calls: list = []
+
+    async def fake_spawn(*args, **kwargs):
+        calls.append(args)
+        return procs[len(calls) - 1]
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+
+    result = asyncio.run(invoke_claude_once("hello", model="haiku"))
+
+    assert result["ok"] is True
+    assert result["bare_fallback_used"] is True
+    assert len(calls) == 2

@@ -83,12 +83,53 @@ def test_centrality_no_edges_all_zero() -> None:
 
 
 def test_get_embedding_returns_stored_vector() -> None:
+    import numpy as np
+
     g = MemoryGraph()
     nid = uuid4()
     emb = [1.0] + [0.0] * 383
     g.add_node(nid, community_id=None, embedding=emb)
-    assert g.get_embedding(nid) == emb
+    stored = g.get_embedding(nid)
+    # Compact float32 buffer, not a boxed list: a corpus-scale graph in the
+    # boxed form is what drove the consolidation memory kill.
+    assert isinstance(stored, np.ndarray)
+    assert stored.dtype == np.float32
+    assert list(stored) == emb
     assert g.get_embedding(uuid4()) is None
+
+
+def test_embeddings_are_stored_compactly() -> None:
+    import numpy as np
+
+    g = MemoryGraph()
+    nid = uuid4()
+    g.add_node(nid, community_id=None, embedding=[0.5] * 384)
+    stored = g.get_embedding(nid)
+    assert stored.nbytes == 384 * 4, stored.nbytes
+
+    # The payload door normalizes too — no writer can reintroduce boxing.
+    g.set_node_payload(nid, {"embedding": [0.25] * 384})
+    again = g.get_embedding(nid)
+    assert isinstance(again, np.ndarray) and again.dtype == np.float32
+    assert again.nbytes == 384 * 4
+
+    # An empty or absent embedding stays a single "no embedding" condition.
+    other = uuid4()
+    g.add_node(other, community_id=None, embedding=[])
+    assert g.get_embedding(other) is None
+
+
+def test_stored_embedding_owns_its_memory() -> None:
+    import numpy as np
+
+    g = MemoryGraph()
+    nid = uuid4()
+    src = np.ones(384, dtype=np.float32)
+    g.add_node(nid, community_id=None, embedding=src)
+    src[0] = 99.0
+    assert float(g.get_embedding(nid)[0]) == 1.0, (
+        "the graph must own its buffer: callers reuse pipe and decrypt frames"
+    )
 
 
 def test_rich_club_coefficient_on_star_graph() -> None:

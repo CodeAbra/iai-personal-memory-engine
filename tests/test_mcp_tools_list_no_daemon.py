@@ -142,7 +142,7 @@ def test_tools_list_returns_without_daemon(
             "memory_temporal_recall",
         }
         assert names == expected, (
-            f"tools/list returned {len(names)} tools, expected 14: "
+            f"tools/list returned {len(names)} tools, expected {len(expected)}: "
             f"missing={expected - names}, extra={names - expected}"
         )
         assert elapsed < 4.0, (

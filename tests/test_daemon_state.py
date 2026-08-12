@@ -157,3 +157,32 @@ def test_prune_handles_empty_and_missing_pending():
     assert prune_stale_first_turn({}) == 0
     assert prune_stale_first_turn({"first_turn_pending": {}}) == 0
     assert prune_stale_first_turn({"first_turn_pending": None}) == 0
+
+
+def test_pending_digest_fold_preserves_insight_skip_reason() -> None:
+    from iai_mcp.daemon import _update_pending_digest
+
+    state: dict = {}
+    _update_pending_digest(
+        state,
+        {
+            "summaries_created": 0,
+            "schema_candidates": 1,
+            "claude_call_used": False,
+            "insight_skip_reason": "no_evidence_sources",
+        },
+    )
+    digest = state["pending_digest"]
+    assert digest["claude_call_used"] is False
+    assert digest["insight_skip_reason"] == "no_evidence_sources"
+
+    _update_pending_digest(
+        state,
+        {"claude_call_used": True, "main_insight_text": "insight"},
+    )
+    digest = state["pending_digest"]
+    assert digest["claude_call_used"] is True
+    assert digest["main_insight_text"] == "insight"
+    assert "insight_skip_reason" not in digest, (
+        "a success must supersede the earlier skip reason"
+    )

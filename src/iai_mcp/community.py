@@ -64,7 +64,7 @@ def _flat_assignment(
     for u in graph.iter_nodes():
         nodes.append(u)
         emb = graph.get_embedding(u)
-        if emb:
+        if emb is not None:
             valid_embs.append(emb)
     if not nodes:
         return CommunityAssignment(backend="flat")
@@ -73,7 +73,7 @@ def _flat_assignment(
     embs: list[list[float]] = []
     for u in graph.iter_nodes():
         emb = graph.get_embedding(u)
-        embs.append(emb if emb else [0.0] * dim)
+        embs.append(emb if emb is not None else [0.0] * dim)
     centroid = _compute_centroid(embs) if dim else []
 
     flat_uuid: UUID | None = None

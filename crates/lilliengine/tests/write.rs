@@ -15,7 +15,7 @@ use lillibrain::{Store, Value};
 use lilliengine::ast::Stmt;
 use lilliengine::catalog::Catalog;
 use lilliengine::exec::{
-    execute_delete, execute_insert, execute_insert_many, execute_select, execute_update,
+    execute_delete, execute_insert, execute_insert_many, execute_select, execute_update, ColIndex,
     ConflictIndex, IdIndex, TxnScope, WriteOutcome,
 };
 use lilliengine::meta::MetaTable;
@@ -223,6 +223,48 @@ impl Fixture {
         idx.ensure_built(&self.store.tree(root), &col_names)
             .unwrap();
         idx
+    }
+
+    /// Build a table's col-index over `cols` from the current tree (one scan),
+    /// so a later `WHERE col IN (...)` / `col = <lit>` UPDATE runs scan-free.
+    fn build_col_index(&self, table: &str, cols: &[&str]) -> ColIndex {
+        let root = *self.root_map.get(table).unwrap();
+        let col_names = self.catalog.column_names(table).unwrap();
+        let mut cidx = ColIndex::new(cols.iter().map(|c| c.to_string()).collect());
+        cidx.ensure_built(&self.store.tree(root), &col_names)
+            .unwrap();
+        cidx
+    }
+
+    /// Parse + execute an UPDATE threading caller-owned id- and col-indexes into
+    /// their executor slots, so the write-side index fast paths are exercised.
+    fn update_full(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+        id_index: Option<&mut IdIndex>,
+        col_index: Option<&mut ColIndex>,
+    ) -> i64 {
+        let stmt = match parse(sql).unwrap() {
+            Stmt::Update(u) => u,
+            _ => panic!("not an update"),
+        };
+        execute_update(
+            &stmt,
+            &self.store,
+            &self.meta,
+            &self.catalog,
+            &self.root_map,
+            params,
+            None,
+            TxnScope::Own,
+            id_index,
+            None,
+            col_index,
+            None,
+        )
+        .unwrap()
+        .rowcount
     }
 
     fn cell(row: &[(String, Value)], col: &str) -> Value {
@@ -738,6 +780,319 @@ fn update_id_literal_absent_skips_scan() {
         0,
         "an absent id skips the scan entirely"
     );
+}
+
+// ---------------------------------------------------------------------------
+// UPDATE index fast paths: id IN, col IN, col = literal — each scan-free with
+// the full predicate re-applied, and each guarded against a stale index entry.
+// ---------------------------------------------------------------------------
+
+/// Seed four records (a,b,c,d) with the given labels into `f`.
+fn seed_labelled(f: &Fixture, rows: &[(&str, i64, &str)]) {
+    for (id, n, label) in rows {
+        f.insert(
+            "INSERT INTO records (id, n, label) VALUES (?, ?, ?)",
+            vec![t(id), Value::Int(*n), t(label)],
+        );
+    }
+}
+
+#[test]
+fn update_id_in_fast_path_no_full_scan() {
+    // WHERE id IN ('a','c') with a built id-index resolves each id by an O(1)
+    // point lookup — no full scan — and updates exactly the named rows. The
+    // result is byte-identical to an unindexed scan run over an identical store.
+    let rows = [("a", 1, "x"), ("b", 2, "x"), ("c", 3, "y")];
+    let indexed = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&indexed, &rows);
+    let plain = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&plain, &rows);
+
+    let mut idx = indexed.build_id_index("records");
+    indexed.store.reset_full_scan_count();
+    let n = indexed.update_full(
+        "UPDATE records SET n = ? WHERE id IN ('a', 'c')",
+        vec![Value::Int(99)],
+        Some(&mut idx),
+        None,
+    );
+    assert_eq!(n, 2);
+    assert_eq!(
+        indexed.store.full_scan_count(),
+        0,
+        "id IN (...) UPDATE must resolve by id-index point lookups"
+    );
+
+    // Same statement, no index → scan fallback. The two stores must agree.
+    let n_plain = plain.update_full(
+        "UPDATE records SET n = ? WHERE id IN ('a', 'c')",
+        vec![Value::Int(99)],
+        None,
+        None,
+    );
+    assert_eq!(n_plain, 2);
+    assert_eq!(indexed.rows("records"), plain.rows("records"));
+    let out = indexed.rows("records");
+    assert_eq!(Fixture::cell(&out[0], "n"), Value::Int(99)); // a
+    assert_eq!(Fixture::cell(&out[1], "n"), Value::Int(2)); // b untouched
+    assert_eq!(Fixture::cell(&out[2], "n"), Value::Int(99)); // c
+}
+
+#[test]
+fn update_col_in_fast_path_no_full_scan() {
+    // WHERE label IN ('x') with a ColIndex over `label` probes the index for the
+    // candidate keys instead of scanning, and the result equals the unindexed run.
+    let rows = [("a", 1, "x"), ("b", 2, "x"), ("c", 3, "y")];
+    let indexed = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&indexed, &rows);
+    let plain = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&plain, &rows);
+
+    let mut cidx = indexed.build_col_index("records", &["label"]);
+    indexed.store.reset_full_scan_count();
+    let n = indexed.update_full(
+        "UPDATE records SET n = ? WHERE label IN ('x')",
+        vec![Value::Int(99)],
+        None,
+        Some(&mut cidx),
+    );
+    assert_eq!(n, 2);
+    assert_eq!(
+        indexed.store.full_scan_count(),
+        0,
+        "col IN (...) UPDATE must resolve by the col-index"
+    );
+
+    let n_plain = plain.update_full(
+        "UPDATE records SET n = ? WHERE label IN ('x')",
+        vec![Value::Int(99)],
+        None,
+        None,
+    );
+    assert_eq!(n_plain, 2);
+    assert_eq!(indexed.rows("records"), plain.rows("records"));
+}
+
+#[test]
+fn update_col_eq_literal_fast_path_no_full_scan() {
+    // WHERE n = 1 with a ColIndex over `n` resolves the low-cardinality equality
+    // by a single index probe instead of a whole-table scan.
+    let rows = [("a", 1, "x"), ("b", 1, "y"), ("c", 5, "z")];
+    let indexed = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&indexed, &rows);
+    let plain = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&plain, &rows);
+
+    let mut cidx = indexed.build_col_index("records", &["n"]);
+    indexed.store.reset_full_scan_count();
+    let n = indexed.update_full(
+        "UPDATE records SET label = ? WHERE n = 1",
+        vec![t("hit")],
+        None,
+        Some(&mut cidx),
+    );
+    assert_eq!(n, 2);
+    assert_eq!(
+        indexed.store.full_scan_count(),
+        0,
+        "col = <lit> UPDATE must resolve by the col-index"
+    );
+
+    let n_plain = plain.update_full(
+        "UPDATE records SET label = ? WHERE n = 1",
+        vec![t("hit")],
+        None,
+        None,
+    );
+    assert_eq!(n_plain, 2);
+    assert_eq!(indexed.rows("records"), plain.rows("records"));
+}
+
+#[test]
+fn update_col_in_predicate_reapplied() {
+    // Guard (a): the col-index only narrows which rows are DECODED; the full
+    // bound predicate is re-applied. `label IN ('x') AND n > 5` must update ONLY
+    // the row passing the whole predicate, never the entire IN candidate superset.
+    let rows = [("a", 1, "x"), ("b", 10, "x"), ("c", 3, "x")];
+    let f = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&f, &rows);
+
+    let mut cidx = f.build_col_index("records", &["label"]);
+    f.store.reset_full_scan_count();
+    let n = f.update_full(
+        "UPDATE records SET n = ? WHERE label IN ('x') AND n > 5",
+        vec![Value::Int(99)],
+        None,
+        Some(&mut cidx),
+    );
+    assert_eq!(n, 1, "only b (n=10) passes label IN ('x') AND n > 5");
+    assert_eq!(
+        f.store.full_scan_count(),
+        0,
+        "an AND-tail over an indexed IN still rides the col-index"
+    );
+    let out = f.rows("records");
+    assert_eq!(Fixture::cell(&out[0], "n"), Value::Int(1)); // a: not > 5
+    assert_eq!(Fixture::cell(&out[1], "n"), Value::Int(99)); // b: updated
+    assert_eq!(Fixture::cell(&out[2], "n"), Value::Int(3)); // c: not > 5
+}
+
+#[test]
+fn update_col_in_missing_key_falls_back_to_scan() {
+    // Guard (b): a stale col-index posting (a key the tree no longer holds) must
+    // NOT cause a silent partial write. Here the index is built, then the tree is
+    // mutated behind its back: key 2 (b) is removed and a new matching row e is
+    // inserted at key 5 that the stale index does not list. Probing the index
+    // yields a candidate superset whose fetch comes up short → the branch must
+    // invalidate and fall through to the scan, which finds BOTH a and e.
+    use lilliengine::rowcodec::encode_row;
+    let f = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&f, &[("a", 1, "drop"), ("b", 2, "drop"), ("d", 3, "keep")]);
+    let root = *f.root_map.get("records").unwrap();
+
+    let mut cidx = f.build_col_index("records", &["label"]);
+    // Mutate the tree without maintaining the index: remove b (key 2) and add a
+    // fresh 'drop' row e at key 5. The index still says drop -> [1, 2].
+    f.store.begin_write().unwrap();
+    f.store.tree(root).delete(2).unwrap();
+    let e = vec![Value::Int(5), t("e"), Value::Int(7), t("drop")];
+    f.store.tree(root).insert(5, &encode_row(&e)).unwrap();
+    f.store.commit().unwrap();
+
+    let n = f.update_full(
+        "UPDATE records SET n = ? WHERE label IN ('drop')",
+        vec![Value::Int(99)],
+        None,
+        Some(&mut cidx),
+    );
+    // a (key1) and e (key5) both match 'drop' and must both be updated; b is gone.
+    assert_eq!(n, 2, "the fallback scan must not silently skip the moved-in row");
+    let out = f.rows("records");
+    // Rows are returned in ascending key order: a(1), d(3), e(5).
+    assert_eq!(out.len(), 3);
+    assert_eq!(Fixture::cell(&out[0], "id"), t("a"));
+    assert_eq!(Fixture::cell(&out[0], "n"), Value::Int(99));
+    assert_eq!(Fixture::cell(&out[1], "id"), t("d"));
+    assert_eq!(Fixture::cell(&out[1], "n"), Value::Int(3)); // 'keep' untouched
+    assert_eq!(Fixture::cell(&out[2], "id"), t("e"));
+    assert_eq!(Fixture::cell(&out[2], "n"), Value::Int(99));
+}
+
+#[test]
+fn update_id_in_missing_key_falls_back_to_scan() {
+    // The id-IN sibling of guard (b): a row whose key moved out from under the
+    // id-index entry must still be updated (per-id safe scan), never dropped.
+    let f = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&f, &[("a", 1, "x"), ("b", 2, "x")]);
+    let root = *f.root_map.get("records").unwrap();
+
+    let mut idx = f.build_id_index("records");
+    // Move b from key 2 to key 9 with an identical payload. The id-index still
+    // maps 'b' -> 2, but the tree no longer holds key 2.
+    f.store.begin_write().unwrap();
+    let payload = f.store.tree(root).get(2).unwrap().unwrap();
+    f.store.tree(root).delete(2).unwrap();
+    f.store.tree(root).insert(9, &payload).unwrap();
+    f.store.commit().unwrap();
+
+    let n = f.update_full(
+        "UPDATE records SET n = ? WHERE id IN ('a', 'b')",
+        vec![Value::Int(99)],
+        Some(&mut idx),
+        None,
+    );
+    assert_eq!(n, 2, "the moved row b must still be updated, not dropped");
+    let out = f.rows("records");
+    // a at key 1, b now at key 9.
+    assert_eq!(out.len(), 2);
+    assert_eq!(Fixture::cell(&out[0], "id"), t("a"));
+    assert_eq!(Fixture::cell(&out[0], "n"), Value::Int(99));
+    assert_eq!(Fixture::cell(&out[1], "id"), t("b"));
+    assert_eq!(Fixture::cell(&out[1], "n"), Value::Int(99));
+}
+
+#[test]
+fn update_col_in_invalidates_id_index() {
+    // Flag split: a col-index UPDATE that does not touch `id` sets `skip_scan`
+    // but leaves `resolved_via_id_index` false, so the tail invalidates the
+    // id-index exactly as the scan path does — a col branch never marks a
+    // (possibly stale) id-index valid.
+    let f = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&f, &[("a", 1, "x"), ("b", 2, "x"), ("c", 3, "y")]);
+
+    let mut idx = f.build_id_index("records");
+    let mut cidx = f.build_col_index("records", &["label"]);
+    assert!(idx.is_built(), "the id-index is built after the seed scan");
+
+    f.update_full(
+        "UPDATE records SET n = ? WHERE label IN ('x')",
+        vec![Value::Int(99)],
+        Some(&mut idx),
+        Some(&mut cidx),
+    );
+    assert!(
+        !idx.is_built(),
+        "a col-index selection must invalidate the id-index (no id-index fact)"
+    );
+}
+
+#[test]
+fn update_id_in_untouched_id_keeps_id_index_valid() {
+    // Flag split: an id-IN UPDATE that does not assign `id` keeps the id-index
+    // valid (`resolved_via_id_index` true, `touched_id` false) — the rows stayed
+    // at the same keys under the same ids, so a rebuild would be wasted work.
+    let f = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&f, &[("a", 1, "x"), ("b", 2, "x"), ("c", 3, "y")]);
+
+    let mut idx = f.build_id_index("records");
+    f.update_full(
+        "UPDATE records SET n = ? WHERE id IN ('a', 'b')",
+        vec![Value::Int(99)],
+        Some(&mut idx),
+        None,
+    );
+    assert!(
+        idx.is_built(),
+        "an id-IN UPDATE that leaves `id` alone keeps the id-index valid"
+    );
+    // And a follow-up id lookup stays scan-free (the index was not dropped).
+    f.store.reset_full_scan_count();
+    let n = f.update_full(
+        "UPDATE records SET n = ? WHERE id = 'a'",
+        vec![Value::Int(1)],
+        Some(&mut idx),
+        None,
+    );
+    assert_eq!(n, 1);
+    assert_eq!(f.store.full_scan_count(), 0);
+}
+
+#[test]
+fn update_id_in_touching_id_invalidates_id_index() {
+    // An UPDATE that assigns the `id` column moves a row's identity, so a built
+    // id-index is now potentially stale and must be invalidated (mirrors the
+    // conflict-path reconciliation, from the drop side).
+    let f = Fixture::new(&[DDL_RECORDS]);
+    seed_labelled(&f, &[("a", 1, "x"), ("b", 2, "x")]);
+
+    let mut idx = f.build_id_index("records");
+    assert!(idx.is_built());
+    let n = f.update_full(
+        "UPDATE records SET id = 'z' WHERE id IN ('a')",
+        vec![],
+        Some(&mut idx),
+        None,
+    );
+    assert_eq!(n, 1);
+    assert!(
+        !idx.is_built(),
+        "an UPDATE that rewrites `id` must invalidate the id-index"
+    );
+    // The rewrite landed: 'a' is gone, 'z' now resolves to the row.
+    let out = f.rows("records");
+    let ids: Vec<Value> = out.iter().map(|r| Fixture::cell(r, "id")).collect();
+    assert!(ids.contains(&t("z")));
+    assert!(!ids.contains(&t("a")));
 }
 
 #[test]

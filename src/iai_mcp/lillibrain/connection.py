@@ -711,14 +711,13 @@ class LilliBrainConnection:
         cursor = BtreeCursor(self._pager, root_page)
         index: dict[str, int] = {}
         for key, payload in cursor.full_scan():
-            try:
-                vals, _ = decode_record(payload, 0)
-                if id_col_idx < len(vals):
-                    id_val = vals[id_col_idx]
-                    if isinstance(id_val, str):
-                        index[id_val] = key
-            except Exception:  # noqa: BLE001 — skip undecodable rows; index stays partial
-                pass
+            # A decode failure fails the whole build (native id-index parity).
+            # Absent/non-text ids are skipped — also native parity.
+            vals, _ = decode_record(payload, 0)
+            if id_col_idx < len(vals):
+                id_val = vals[id_col_idx]
+                if isinstance(id_val, str):
+                    index[id_val] = key
         return index
 
     def _get_id_index_for_update(self, table: str) -> "dict[str, int] | None":

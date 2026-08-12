@@ -10,6 +10,28 @@ import numpy as np
 AUTO_CACHE_DEFAULT = "on"
 
 
+def _compact_embedding(embedding: "Iterable[float] | None") -> "np.ndarray | None":
+    """Node embeddings live as a contiguous float32 buffer, never a Python
+    list: a boxed list of 384 floats costs ~15 KB per node against ~1.6 KB
+    for the buffer, and a corpus-scale graph is built in BOTH the parent and
+    the community-detection child — the boxed form put the pair near a
+    gigabyte and drove the memory watchdog's kill during consolidation.
+
+    Returns None for an absent or empty embedding so callers can keep
+    treating "no embedding" as a single condition.
+    """
+    if embedding is None:
+        return None
+    arr = np.asarray(embedding, dtype=np.float32)
+    if arr.ndim != 1:
+        arr = arr.reshape(-1)
+    if arr.size == 0:
+        return None
+    # Own the memory: the caller's buffer (a pipe frame, a decrypt buffer)
+    # may be reused or freed under us.
+    return np.array(arr, dtype=np.float32, copy=True)
+
+
 class MemoryGraph:
 
     def __init__(self) -> None:
@@ -86,7 +108,7 @@ class MemoryGraph:
             "community_id": community_id,
         }
         self._node_payload[label] = {
-            "embedding": list(embedding),
+            "embedding": _compact_embedding(embedding),
         }
         self._dirty_since_centrality = True
         self._normalized_pool = None
@@ -99,7 +121,9 @@ class MemoryGraph:
         existing = self._node_payload.get(key, {})
         merged = dict(existing)
         for k, v in payload.items():
-            merged[k] = v
+            # Every entry point normalizes, so no writer can reintroduce the
+            # boxed-list form through the payload door.
+            merged[k] = _compact_embedding(v) if k == "embedding" else v
         self._node_payload[key] = merged
         # The pool matrix is built from node embeddings; a payload change can
         # alter an embedding, so the cached normalized pool must be dropped.
@@ -379,12 +403,19 @@ class MemoryGraph:
         return indptr, indices, data_arr
 
 
-    def get_embedding(self, node_id: UUID | str) -> list[float] | None:
+    def get_embedding(self, node_id: UUID | str) -> "np.ndarray | None":
+        """The node's embedding as a float32 buffer, or None when absent.
+
+        Callers must test for None (or length) — an array has no truth
+        value.
+        """
         payload = self._node_payload.get(str(node_id))
         if not payload:
             return None
         emb = payload.get("embedding")
-        return emb if emb else None
+        if emb is None:
+            return None
+        return emb if len(emb) else None
 
     def get_centrality(self, node_id: UUID | str) -> float:
         payload = self._node_payload.get(str(node_id))

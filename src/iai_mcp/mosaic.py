@@ -360,7 +360,7 @@ def _build_assignment(
         for n in members:
             node_to_community[n] = u
             emb = graph.get_embedding(n)
-            if emb:
+            if emb is not None:
                 nonempty_embs.append(emb)
 
     dim = len(nonempty_embs[0]) if nonempty_embs else 0
@@ -369,7 +369,7 @@ def _build_assignment(
         embs: list[list[float]] = []
         for node in members:
             emb = graph.get_embedding(node)
-            embs.append(emb if emb else [0.0] * dim)
+            embs.append(emb if emb is not None else [0.0] * dim)
         if dim > 0 and embs:
             arr = np.asarray(embs, dtype=np.float32)
             centroid = arr.mean(axis=0)

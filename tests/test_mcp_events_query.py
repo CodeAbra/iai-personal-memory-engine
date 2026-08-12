@@ -93,3 +93,44 @@ def test_events_query_ordered_newest_first(tmp_path):
     out = dispatch(store, "events_query", {"kind": "llm_health"})
     indices = [e["data"].get("i") for e in out["events"]]
     assert indices == sorted(indices, reverse=True)
+
+
+def test_events_query_hippo_compacted_whitelisted_metrics_only(tmp_path):
+    store = MemoryStore(path=tmp_path)
+    write_event(
+        store,
+        kind="hippo_compacted",
+        data={
+            "phase": "sleep_cycle",
+            "per_table": {"records": {"rows_before": 10, "rows_after": 9}},
+            "total_elapsed_sec": 1.23,
+        },
+        severity="info",
+    )
+    out = dispatch(store, "events_query", {"kind": "hippo_compacted"})
+    assert "error" not in out
+    assert len(out["events"]) == 1
+    data = out["events"][0]["data"]
+    assert set(data.keys()) == {"phase", "per_table", "total_elapsed_sec"}
+
+
+def test_events_query_recall_timing_whitelisted_metrics_only(tmp_path):
+    store = MemoryStore(path=tmp_path)
+    write_event(
+        store,
+        kind="recall_timing",
+        data={
+            "centrality_ms": 12.5,
+            "sigma_ms": 0.0,
+            "pool_collection_ms": 3.4,
+            "n_nodes": 42,
+        },
+        severity="info",
+    )
+    out = dispatch(store, "events_query", {"kind": "recall_timing"})
+    assert "error" not in out
+    assert len(out["events"]) == 1
+    data = out["events"][0]["data"]
+    assert set(data.keys()) == {
+        "centrality_ms", "sigma_ms", "pool_collection_ms", "n_nodes",
+    }

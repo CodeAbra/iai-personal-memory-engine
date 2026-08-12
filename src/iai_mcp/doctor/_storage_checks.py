@@ -1,8 +1,9 @@
 """Hippo store, SQLite, HNSW index, native embedder, CQRS-event, AVX2 and SDK-presence health checks.
 
 Read-only probes of the storage layer. They open the store at most read-only and
-never touch key material; a store held by the live daemon (or a SQLite lock from
-it) is reported as a normal, passing condition.
+never touch key material. Some checks read through the daemon's socket while it
+holds the store, falling back to a direct SHARED read-only open (which coexists
+with the daemon's own post-boot SHARED hold) when the daemon is down.
 """
 
 from __future__ import annotations
@@ -231,6 +232,39 @@ def check_w_no_permanent_failed() -> CheckResult:
             "run 'iai-mcp drain-permanent-failed' to recover"
         ),
         status="WARN",
+    )
+
+
+def check_aa_capture_state_hygiene() -> CheckResult:
+    from iai_mcp.capture import sweep_capture_state
+
+    name = "(aa) capture-state hygiene"
+    try:
+        counts = sweep_capture_state(apply=False)
+    except OSError as exc:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"could not scan capture-state dir: {exc}",
+            status="WARN",
+        )
+    stale_total = counts["stale"] + counts["tmp"]
+    if stale_total == 0:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"no stale files ({counts['kept']} live)",
+        )
+    return CheckResult(
+        name=name,
+        passed=False,
+        detail=(
+            f"{counts['stale']} month-old session state file(s) + "
+            f"{counts['tmp']} crashed-writer tmp file(s) — the heal "
+            "removes them; a swept offset costs one re-walk, deduped by "
+            "source-uuid keys where the host provides them and absorbed "
+            "by the cosine gate for text-keyed hosts"
+        ),
     )
 
 
@@ -479,47 +513,262 @@ def check_s_hippo_schema_version() -> CheckResult:
     )
 
 
+_HIPPO_COMPACTED_CHECK_NAME = "(t) hippo_compacted freshness"
+_CENTRALITY_CHECK_NAME = "(u) recall centrality regression"
+
+
+def _hippo_compacted_verdict(ts_value: object, now: "object") -> CheckResult:
+    """Shared PASS/WARN verdict for check_t, fed by either read path.
+
+    ``ts_value`` is either an aware datetime (the direct path — ``query_events``
+    always returns a datetime ``ts``) or an ISO-8601 string (the socket path —
+    the dispatch isoformats it on the wire). Both paths must feed this single
+    function so the two routes can never diverge in verdict.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    if isinstance(ts_value, _dt):
+        ts = ts_value if ts_value.tzinfo is not None else ts_value.replace(tzinfo=_tz.utc)
+    else:
+        try:
+            ts = _dt.fromisoformat(str(ts_value))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz.utc)
+        except (TypeError, ValueError):
+            return CheckResult(
+                name=_HIPPO_COMPACTED_CHECK_NAME,
+                passed=True,
+                detail="last hippo_compacted event timestamp unparseable",
+                status="WARN",
+            )
+
+    age_hours = (now - ts).total_seconds() / 3600.0
+    if age_hours <= 24.0:
+        return CheckResult(
+            name=_HIPPO_COMPACTED_CHECK_NAME,
+            passed=True,
+            detail=f"last hippo_compacted event {age_hours:.1f}h ago",
+            status="PASS",
+        )
+    return CheckResult(
+        name=_HIPPO_COMPACTED_CHECK_NAME,
+        passed=True,
+        detail=(
+            f"last hippo_compacted event {age_hours:.1f}h ago "
+            f"(consider `iai-mcp maintenance compact-hippo --apply --yes`)"
+        ),
+        status="WARN",
+    )
+
+
+def _centrality_verdict(
+    data_dicts: "list[dict]", *, emit_store: object = None,
+) -> CheckResult:
+    """Shared PASS/WARN verdict for check_u, fed by either read path.
+
+    ``data_dicts`` are the ``recall_timing`` event ``data`` payloads. The
+    ``health_concern`` best-effort emit only fires when ``emit_store`` is
+    given (the direct path owns a store handle; the socket path is
+    read-only and intentionally drops the emit — nothing consumes it).
+    """
+    import statistics
+
+    if not data_dicts:
+        return CheckResult(
+            name=_CENTRALITY_CHECK_NAME,
+            passed=True,
+            detail="no recall_timing events in last 24h (daemon idle or sampling missed)",
+            status="WARN",
+        )
+
+    centrality_values: list[float] = []
+    for payload in data_dicts:
+        cv = (payload or {}).get("centrality_ms")
+        if cv is None:
+            continue
+        try:
+            centrality_values.append(float(cv))
+        except (TypeError, ValueError):
+            continue
+    if not centrality_values:
+        return CheckResult(
+            name=_CENTRALITY_CHECK_NAME,
+            passed=True,
+            detail="recall_timing events present but centrality_ms missing/invalid",
+            status="WARN",
+        )
+
+    median_ms = statistics.median(centrality_values)
+    if median_ms > 30.0:
+        if emit_store is not None:
+            try:
+                from iai_mcp.events import write_event
+
+                write_event(
+                    emit_store,
+                    kind="health_concern",
+                    data={"centrality_median_ms": float(median_ms)},
+                    severity="warning",
+                )
+            except Exception as exc:  # noqa: BLE001 — telemetry best-effort
+                logger.debug("check_u: health_concern emit failed: %s", exc)
+        return CheckResult(
+            name=_CENTRALITY_CHECK_NAME,
+            passed=True,
+            detail=(
+                f"centrality_ms median {median_ms:.1f}ms > 30ms threshold "
+                f"(n_events={len(centrality_values)})"
+            ),
+            status="WARN",
+        )
+    return CheckResult(
+        name=_CENTRALITY_CHECK_NAME,
+        passed=True,
+        detail=(
+            f"centrality_ms median {median_ms:.1f}ms <= 30ms "
+            f"(n_events={len(centrality_values)})"
+        ),
+        status="PASS",
+    )
+
+
+def _check_t_via_socket(now: "object") -> CheckResult:
+    """Read the latest ``hippo_compacted`` event through the daemon socket.
+
+    Raises ``_SocketUnavailable`` when the daemon cannot be reached at all,
+    so the caller falls back to a direct store open; any other unusable
+    reply is a genuine WARN (the daemon answered, but the answer was not
+    usable) — never a blind PASS.
+    """
+    from iai_mcp.cli import _send_jsonrpc_request
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
+
+    resp = _send_jsonrpc_request(
+        "events_query",
+        {"kind": "hippo_compacted", "limit": 1},
+        connect_timeout=1.0,
+        read_timeout=5.0,
+    )
+    if resp is None:
+        raise _SocketUnavailable()
+    if not isinstance(resp, dict) or "result" not in resp:
+        return CheckResult(
+            name=_HIPPO_COMPACTED_CHECK_NAME,
+            passed=True,
+            detail="unable to read hippo_compacted freshness via daemon socket",
+            status="WARN",
+        )
+    result = resp["result"]
+    events = result.get("events") if isinstance(result, dict) else None
+    if events is None:
+        return CheckResult(
+            name=_HIPPO_COMPACTED_CHECK_NAME,
+            passed=True,
+            detail="unable to read hippo_compacted freshness via daemon socket",
+            status="WARN",
+        )
+    if not events:
+        return CheckResult(
+            name=_HIPPO_COMPACTED_CHECK_NAME,
+            passed=True,
+            detail="no hippo_compacted event found (fresh install or compaction not yet run)",
+            status="WARN",
+        )
+    return _hippo_compacted_verdict(events[0].get("ts"), now)
+
+
+def _check_u_via_socket(now: "object") -> CheckResult:
+    """Read the last 24h of ``recall_timing`` events through the daemon socket.
+
+    Same fall-back contract as ``_check_t_via_socket``. The socket path is
+    read-only, so the ``health_concern`` best-effort emit is intentionally
+    dropped here (preserved on the direct branch only).
+    """
+    from datetime import timedelta as _td
+
+    from iai_mcp.cli import _send_jsonrpc_request
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
+
+    since = now - _td(hours=24)
+    resp = _send_jsonrpc_request(
+        "events_query",
+        {"kind": "recall_timing", "since": since.isoformat(), "limit": 1000},
+        connect_timeout=1.0,
+        read_timeout=5.0,
+    )
+    if resp is None:
+        raise _SocketUnavailable()
+    if not isinstance(resp, dict) or "result" not in resp:
+        return CheckResult(
+            name=_CENTRALITY_CHECK_NAME,
+            passed=True,
+            detail="unable to read recall centrality via daemon socket",
+            status="WARN",
+        )
+    result = resp["result"]
+    events = result.get("events") if isinstance(result, dict) else None
+    if events is None:
+        return CheckResult(
+            name=_CENTRALITY_CHECK_NAME,
+            passed=True,
+            detail="unable to read recall centrality via daemon socket",
+            status="WARN",
+        )
+    return _centrality_verdict([e.get("data") or {} for e in events], emit_store=None)
+
+
 def check_t_hippo_compacted_freshness() -> CheckResult:
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
     from iai_mcp.hippo import HippoLockHeldError
 
     if not _store_file_present():
         return CheckResult(
-            name="(t) hippo_compacted freshness",
+            name=_HIPPO_COMPACTED_CHECK_NAME,
             passed=True,
             detail="no store yet (skip)",
         )
 
-    events: list[dict] = []
+    now = _dt.now(_tz.utc)
+    try:
+        return _check_t_via_socket(now)
+    except _SocketUnavailable:
+        pass
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never crash the run
+        logger.debug("check_t: socket read failed: %s", exc)
+        return CheckResult(
+            name=_HIPPO_COMPACTED_CHECK_NAME,
+            passed=True,
+            detail=f"events query failed: {type(exc).__name__}: {exc}",
+            status="WARN",
+        )
+
     _store = None
     try:
         from iai_mcp.events import query_events
+        from iai_mcp.hippo import AccessMode
         from iai_mcp.store import MemoryStore
 
-        _store = MemoryStore()
+        # SHARED + read-only coexists with the daemon's steady-state SHARED
+        # lock; reaching a lock error here means something unexpected holds
+        # the store exclusively, not a "daemon holds it, normal" condition.
+        _store = MemoryStore(access_mode=AccessMode.SHARED, read_only=True)
         events = query_events(_store, kind="hippo_compacted", limit=1)
     except HippoLockHeldError as exc:
-        logger.debug("check_t: store held by running daemon: %s", exc)
+        logger.debug("check_t: store lock unavailable: %s", exc)
         return CheckResult(
-            name="(t) hippo_compacted freshness",
+            name=_HIPPO_COMPACTED_CHECK_NAME,
             passed=True,
-            detail="deferred — daemon holds the store (normal)",
-            status="PASS",
+            detail=f"unable to read hippo_compacted freshness: {type(exc).__name__}",
+            status="WARN",
         )
     except errors.OperationalError as exc:
-        if "database is locked" in str(exc).lower():
-            logger.debug("check_t: store held by running daemon (sqlite): %s", exc)
-            return CheckResult(
-                name="(t) hippo_compacted freshness",
-                passed=True,
-                detail="deferred — daemon holds the store (normal)",
-                status="PASS",
-            )
         logger.debug("check_t: events query failed: %s", exc)
         return CheckResult(
-            name="(t) hippo_compacted freshness",
+            name=_HIPPO_COMPACTED_CHECK_NAME,
             passed=True,
             detail=f"events query failed: {type(exc).__name__}: {exc}",
             status="WARN",
@@ -527,7 +776,7 @@ def check_t_hippo_compacted_freshness() -> CheckResult:
     except Exception as exc:  # noqa: BLE001 — probe failure is advisory
         logger.debug("check_t: events query failed: %s", exc)
         return CheckResult(
-            name="(t) hippo_compacted freshness",
+            name=_HIPPO_COMPACTED_CHECK_NAME,
             passed=True,
             detail=f"events query failed: {type(exc).__name__}: {exc}",
             status="WARN",
@@ -541,147 +790,70 @@ def check_t_hippo_compacted_freshness() -> CheckResult:
 
     if not events:
         return CheckResult(
-            name="(t) hippo_compacted freshness",
+            name=_HIPPO_COMPACTED_CHECK_NAME,
             passed=True,
             detail="no hippo_compacted event found (fresh install or compaction not yet run)",
             status="WARN",
         )
-
-    last_event = events[0]
-    ts_str = last_event.get("timestamp") or last_event.get("ts") or ""
-    try:
-        ts = _dt.fromisoformat(ts_str)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=_tz.utc)
-        now = _dt.now(_tz.utc)
-        age_hours = (now - ts).total_seconds() / 3600.0
-    except (TypeError, ValueError):
-        return CheckResult(
-            name="(t) hippo_compacted freshness",
-            passed=True,
-            detail="last hippo_compacted event timestamp unparseable",
-            status="WARN",
-        )
-
-    if age_hours <= 24.0:
-        return CheckResult(
-            name="(t) hippo_compacted freshness",
-            passed=True,
-            detail=f"last hippo_compacted event {age_hours:.1f}h ago",
-            status="PASS",
-        )
-    return CheckResult(
-        name="(t) hippo_compacted freshness",
-        passed=True,
-        detail=(
-            f"last hippo_compacted event {age_hours:.1f}h ago "
-            f"(consider `iai-mcp maintenance compact-hippo --apply --yes`)"
-        ),
-        status="WARN",
-    )
+    return _hippo_compacted_verdict(events[0].get("ts"), now)
 
 
 def check_u_recall_centrality_regression() -> CheckResult:
-    import statistics
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     from datetime import timezone as _tz
 
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
     from iai_mcp.hippo import HippoLockHeldError
 
     if not _store_file_present():
         return CheckResult(
-            name="(u) recall centrality regression",
+            name=_CENTRALITY_CHECK_NAME,
             passed=True,
             detail="no store yet (skip)",
         )
 
+    now = _dt.now(_tz.utc)
+    try:
+        return _check_u_via_socket(now)
+    except _SocketUnavailable:
+        pass
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never crash the run
+        logger.debug("check_u: socket read failed: %s", exc)
+        return CheckResult(
+            name=_CENTRALITY_CHECK_NAME,
+            passed=True,
+            detail=f"events query failed: {type(exc).__name__}: {exc}",
+            status="WARN",
+        )
+
     store = None
     try:
-        from iai_mcp.events import query_events, write_event
+        from iai_mcp.events import query_events
+        from iai_mcp.hippo import AccessMode
         from iai_mcp.store import MemoryStore
 
-        store = MemoryStore()
-        since = _dt.now(_tz.utc) - _td(hours=24)
-        events = query_events(
-            store, kind="recall_timing", since=since, limit=1000
-        )
-
-        if not events:
-            return CheckResult(
-                name="(u) recall centrality regression",
-                passed=True,
-                detail="no recall_timing events in last 24h (daemon idle or sampling missed)",
-                status="WARN",
-            )
-
-        centrality_values: list[float] = []
-        for ev in events:
-            payload = ev.get("data") or {}
-            cv = payload.get("centrality_ms")
-            if cv is None:
-                continue
-            try:
-                centrality_values.append(float(cv))
-            except (TypeError, ValueError):
-                continue
-        if not centrality_values:
-            return CheckResult(
-                name="(u) recall centrality regression",
-                passed=True,
-                detail="recall_timing events present but centrality_ms missing/invalid",
-                status="WARN",
-            )
-
-        median_ms = statistics.median(centrality_values)
-        if median_ms > 30.0:
-            try:
-                write_event(
-                    store,
-                    kind="health_concern",
-                    data={"centrality_median_ms": float(median_ms)},
-                    severity="warning",
-                )
-            except Exception as exc:  # noqa: BLE001 — telemetry best-effort
-                logger.debug("check_u: health_concern emit failed: %s", exc)
-            return CheckResult(
-                name="(u) recall centrality regression",
-                passed=True,
-                detail=(
-                    f"centrality_ms median {median_ms:.1f}ms > 30ms threshold "
-                    f"(n_events={len(centrality_values)})"
-                ),
-                status="WARN",
-            )
-        return CheckResult(
-            name="(u) recall centrality regression",
-            passed=True,
-            detail=(
-                f"centrality_ms median {median_ms:.1f}ms <= 30ms "
-                f"(n_events={len(centrality_values)})"
-            ),
-            status="PASS",
+        # SHARED + read-only coexists with the daemon's steady-state SHARED
+        # lock; reaching a lock error here means something unexpected holds
+        # the store exclusively, not a "daemon holds it, normal" condition.
+        store = MemoryStore(access_mode=AccessMode.SHARED, read_only=True)
+        since = now - _td(hours=24)
+        events = query_events(store, kind="recall_timing", since=since, limit=1000)
+        return _centrality_verdict(
+            [ev.get("data") or {} for ev in events], emit_store=store,
         )
     except HippoLockHeldError as exc:
-        logger.debug("check_u: store held by running daemon: %s", exc)
+        logger.debug("check_u: store lock unavailable: %s", exc)
         return CheckResult(
-            name="(u) recall centrality regression",
+            name=_CENTRALITY_CHECK_NAME,
             passed=True,
-            detail="deferred — daemon holds the store (normal)",
-            status="PASS",
+            detail=f"unable to read recall centrality: {type(exc).__name__}",
+            status="WARN",
         )
     except errors.OperationalError as exc:
-        if "database is locked" in str(exc).lower():
-            logger.debug("check_u: store held by running daemon (sqlite): %s", exc)
-            return CheckResult(
-                name="(u) recall centrality regression",
-                passed=True,
-                detail="deferred — daemon holds the store (normal)",
-                status="PASS",
-            )
         logger.debug("check_u: events query failed: %s", exc)
         return CheckResult(
-            name="(u) recall centrality regression",
+            name=_CENTRALITY_CHECK_NAME,
             passed=True,
             detail=f"events query failed: {type(exc).__name__}: {exc}",
             status="WARN",
@@ -689,7 +861,7 @@ def check_u_recall_centrality_regression() -> CheckResult:
     except Exception as exc:  # noqa: BLE001 — probe failure is advisory
         logger.debug("check_u: events query failed: %s", exc)
         return CheckResult(
-            name="(u) recall centrality regression",
+            name=_CENTRALITY_CHECK_NAME,
             passed=True,
             detail=f"events query failed: {type(exc).__name__}: {exc}",
             status="WARN",

@@ -755,3 +755,364 @@ def check_q_iai_cli_reachable() -> CheckResult:
         detail=f"{iai_path} -> {version}",
         status="PASS",
     )
+
+
+# Consecutive elapsed nightly windows with no minted insight before this check
+# alarms.
+_INSIGHT_MINT_ALARM_THRESHOLD_NIGHTS: int = 3
+_INSIGHT_MINT_QUERY_LIMIT: int = 200
+
+
+_INSIGHT_MINT_CHECK_NAME: str = "(bb) nightly insight mint"
+
+
+def _evaluate_nightly_insight_events(
+    events: list[dict],
+    now: Any,
+    *,
+    no_history: bool,
+) -> CheckResult:
+    """Shared FAIL/WARN/PASS verdict logic for both read paths.
+
+    ``events`` are ``rem_cycle_completed`` rows shaped ``{"ts": datetime,
+    "data": dict}``, already windowed to the alarm's lookback. ``no_history``
+    signals a confirmed empty history (fresh install or daemon never run),
+    bypassing the bucketing entirely.
+    """
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    name = _INSIGHT_MINT_CHECK_NAME
+
+    if no_history:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no nightly cycle history yet (fresh install or daemon never run)",
+            status="PASS",
+        )
+
+    buckets: dict[Any, list[dict]] = {}
+    for ev in events:
+        ts = ev["ts"]
+        day = ts.astimezone(_tz.utc).date() if ts.tzinfo else ts.date()
+        buckets.setdefault(day, []).append(ev)
+
+    today = now.date()
+
+    today_events = buckets.get(today, [])
+    if any(ev["data"].get("claude_call_used") is True for ev in today_events):
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"last minted insight {today.isoformat()}",
+            status="PASS",
+        )
+
+    elapsed_buckets = {day: evs for day, evs in buckets.items() if day < today}
+
+    if not elapsed_buckets:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no elapsed nightly window recorded yet",
+            status="PASS",
+        )
+
+    earliest_known = min(elapsed_buckets)
+    consecutive = 0
+    saw_unreadable_night = False
+    cursor = today - _td(days=1)
+    last_mint_date = None
+
+    while cursor >= earliest_known and consecutive < _INSIGHT_MINT_ALARM_THRESHOLD_NIGHTS:
+        night_events = elapsed_buckets.get(cursor, [])
+        if any(ev["data"].get("claude_call_used") is True for ev in night_events):
+            last_mint_date = cursor
+            break
+        if night_events and all(ev["data"] == {} for ev in night_events):
+            saw_unreadable_night = True
+        consecutive += 1
+        cursor -= _td(days=1)
+
+    if last_mint_date is not None:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"last minted insight {last_mint_date.isoformat()}",
+            status="PASS",
+        )
+
+    if consecutive == 0:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no elapsed nightly window recorded yet",
+            status="PASS",
+        )
+
+    if consecutive >= _INSIGHT_MINT_ALARM_THRESHOLD_NIGHTS:
+        if saw_unreadable_night:
+            return CheckResult(
+                name=name,
+                passed=True,
+                detail=(
+                    f"{consecutive} consecutive nights without a confirmed mint; "
+                    "some event data was unreadable"
+                ),
+                status="WARN",
+            )
+        return CheckResult(
+            name=name,
+            passed=False,
+            detail=f"{consecutive} consecutive nights without a minted insight",
+            status="FAIL",
+        )
+
+    return CheckResult(
+        name=name,
+        passed=True,
+        detail=f"{consecutive} consecutive night(s) without a minted insight",
+        status="WARN",
+    )
+
+
+class _SocketUnavailable(Exception):
+    """Sentinel: the daemon socket could not be reached at all -- caller must
+    fall back to a direct store open, not treat this as a genuine failure."""
+
+
+def _normalize_socket_events(events_raw: list[Any]) -> tuple[list[dict], int]:
+    """Coerce wire-shaped event rows to ``{"ts": datetime, "data": dict}``.
+
+    Returns ``(events, dropped)``. A row is dropped only when its ``ts``
+    cannot be parsed at all (or the row itself is not a dict) -- the caller
+    must treat any drop as an ambiguous read, never as if the row never
+    existed, or the verdict gets computed on data known to be incomplete.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    out: list[dict] = []
+    dropped = 0
+    for e in events_raw:
+        if not isinstance(e, dict):
+            dropped += 1
+            continue
+        try:
+            ts = _dt.fromisoformat(str(e.get("ts")))
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_tz.utc)
+        data = e.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        out.append({"ts": ts, "data": data})
+    return out, dropped
+
+
+def _rem_events_via_socket(now: Any, *, since: Any) -> CheckResult:
+    """Read ``rem_cycle_completed`` events through the daemon's socket.
+
+    The daemon serves a generic JSON-RPC dispatch (``events_query`` ->
+    ``core.dispatch``) over its unix socket even in steady state, when a
+    same-process direct store open would contend for the OS lock the daemon
+    already holds. Raises ``_SocketUnavailable`` when the daemon cannot be
+    reached at all, so the caller falls back to the direct-open path; any
+    other failure (malformed response, dispatch error) is a genuine WARN --
+    the daemon answered, but the answer was not usable.
+    """
+    from iai_mcp.cli import _send_jsonrpc_request
+
+    name = _INSIGHT_MINT_CHECK_NAME
+
+    probe_resp = _send_jsonrpc_request(
+        "events_query",
+        {"kind": "rem_cycle_completed", "limit": 1},
+        connect_timeout=1.0,
+        read_timeout=5.0,
+    )
+    if probe_resp is None:
+        raise _SocketUnavailable()
+    if not isinstance(probe_resp, dict) or "result" not in probe_resp:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="unable to read nightly cycle history via daemon socket",
+            status="WARN",
+        )
+    probe_result = probe_resp["result"]
+    probe_events = probe_result.get("events") if isinstance(probe_result, dict) else None
+    if probe_events is None:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="unable to read nightly cycle history via daemon socket",
+            status="WARN",
+        )
+    if not probe_events:
+        return _evaluate_nightly_insight_events([], now, no_history=True)
+
+    windowed_resp = _send_jsonrpc_request(
+        "events_query",
+        {
+            "kind": "rem_cycle_completed",
+            "since": since.isoformat(),
+            "limit": _INSIGHT_MINT_QUERY_LIMIT,
+        },
+        connect_timeout=1.0,
+        read_timeout=5.0,
+    )
+    if not isinstance(windowed_resp, dict) or "result" not in windowed_resp:
+        # The daemon already answered the probe -- it is up. A now-failing
+        # second call is a genuine WARN, not grounds to fall back to a
+        # direct open that would contend for the same lock this path exists
+        # to avoid.
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="unable to read nightly cycle history via daemon socket",
+            status="WARN",
+        )
+    windowed_result = windowed_resp["result"]
+    events_raw = windowed_result.get("events") if isinstance(windowed_result, dict) else None
+    if events_raw is None:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="unable to read nightly cycle history via daemon socket",
+            status="WARN",
+        )
+    events, dropped = _normalize_socket_events(events_raw)
+    if dropped:
+        # Some windowed rows could not be interpreted (bad ts shape) -- the
+        # verdict below would be computed on data known to be incomplete.
+        # An empty windowed response (dropped == 0) still falls through to
+        # the legitimate "no elapsed nightly window" PASS.
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="unable to interpret nightly cycle history via daemon socket",
+            status="WARN",
+        )
+    return _evaluate_nightly_insight_events(events, now, no_history=False)
+
+
+def check_bb_nightly_insight_mint(*, store: Any = None, now: Any = None) -> CheckResult:
+    """Alarm when the nightly synthesis step stops producing insights.
+
+    Counts consecutive fully-elapsed nightly windows with no confirmed
+    successful mint. A confirmed mint in the current, not-yet-elapsed
+    window still clears the alarm immediately; an empty or insight-less
+    bucket for that same window is never counted toward the alarm.
+
+    A caller-supplied ``store`` (tests, or a future in-process caller) is
+    always read directly and never routes through the socket. Otherwise the
+    daemon's steady-state lock hold means a same-process direct open would
+    contend for the lock the daemon already has; the socket is tried first
+    and a direct SHARED read-only open is the fallback for when the daemon
+    is unreachable.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    from iai_mcp import errors as _errors
+    from iai_mcp.hippo import HippoLockHeldError
+
+    name = _INSIGHT_MINT_CHECK_NAME
+    now = now or _dt.now(_tz.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_tz.utc)
+
+    window_days = _INSIGHT_MINT_ALARM_THRESHOLD_NIGHTS + 10
+    since = now - _td(days=window_days)
+
+    if store is None:
+        try:
+            return _rem_events_via_socket(now, since=since)
+        except _SocketUnavailable:
+            pass
+        except Exception as exc:  # noqa: BLE001 -- a diagnostic must never crash the run
+            logger.debug("check_bb: socket read failed: %s", exc)
+            return CheckResult(
+                name=name,
+                passed=True,
+                detail=f"unable to read nightly cycle history: {type(exc).__name__}",
+                status="WARN",
+            )
+
+    _store = store
+    _owns_store = False
+
+    try:
+        if _store is None:
+            from iai_mcp.doctor._storage_checks import _store_file_present
+
+            if not _store_file_present():
+                return CheckResult(
+                    name=name,
+                    passed=True,
+                    detail="no store yet (skip)",
+                    status="PASS",
+                )
+            from iai_mcp.hippo import AccessMode
+            from iai_mcp.store import MemoryStore
+
+            # SHARED + read-only coexists with the daemon's steady-state
+            # SHARED lock (it downgrades from EXCLUSIVE after boot) instead of
+            # contending for the EXCLUSIVE lock a default open would demand.
+            # Hippo reads must stay daemon-independent — never gate a read on
+            # the daemon holding the store's lock.
+            _store = MemoryStore(access_mode=AccessMode.SHARED, read_only=True)
+            _owns_store = True
+
+        from iai_mcp.events import query_events
+
+        probe = query_events(_store, kind="rem_cycle_completed", limit=1)
+        if not probe:
+            return _evaluate_nightly_insight_events([], now, no_history=True)
+
+        events = query_events(
+            _store,
+            kind="rem_cycle_completed",
+            since=since,
+            limit=_INSIGHT_MINT_QUERY_LIMIT,
+        )
+        return _evaluate_nightly_insight_events(events, now, no_history=False)
+    except HippoLockHeldError as exc:
+        # A SHARED read-only open coexists with the daemon's steady-state
+        # SHARED lock, so reaching this branch means something genuinely
+        # unexpected is holding the store exclusively -- a real WARN, never
+        # a blind PASS-defer.
+        logger.debug("check_bb: store lock unavailable: %s", exc)
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"unable to read nightly cycle history: {type(exc).__name__}",
+            status="WARN",
+        )
+    except _errors.OperationalError as exc:
+        logger.debug("check_bb: query failed: %s", exc)
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"unable to read nightly cycle history: {type(exc).__name__}",
+            status="WARN",
+        )
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic must never crash the run
+        logger.debug("check_bb: unexpected failure: %s", exc)
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"unable to read nightly cycle history: {type(exc).__name__}",
+            status="WARN",
+        )
+    finally:
+        if _owns_store and _store is not None and hasattr(_store, "close"):
+            try:
+                _store.close()
+            except Exception:  # noqa: BLE001
+                pass

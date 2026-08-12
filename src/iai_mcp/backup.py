@@ -129,7 +129,9 @@ def restore(archive: Path, target: Path | None = None) -> Path:
     with tarfile.open(str(archive), "r:gz") as tar:
         for member in tar.getmembers():
             member_path = (target / member.name).resolve()
-            if not str(member_path).startswith(str(target.resolve())):
+            # Containment check, not a string prefix: "/a/b-evil" shares the
+            # prefix of target "/a/b" but is a sibling escape.
+            if not member_path.is_relative_to(target.resolve()):
                 raise ValueError(f"Path traversal detected in archive: {member.name}")
             if member.isdir():
                 member_path.mkdir(parents=True, exist_ok=True)

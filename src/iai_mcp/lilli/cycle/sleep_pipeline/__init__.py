@@ -51,6 +51,7 @@ class SleepStep(Enum):
     RECALL_INDEX_REBUILD = 13
     ENTITY_LINK = 14
     CURIOSITY_MINE = 15
+    EMBEDDING_INTEGRITY = 16
 
 
 class SleepPhase(Enum):
@@ -75,6 +76,7 @@ STEP_PHASE: dict[SleepStep, SleepPhase] = {
     SleepStep.RECALL_INDEX_REBUILD: SleepPhase.REM,
     SleepStep.ENTITY_LINK: SleepPhase.REM,
     SleepStep.CURIOSITY_MINE: SleepPhase.REM,
+    SleepStep.EMBEDDING_INTEGRITY: SleepPhase.NREM,
 }
 
 
@@ -397,6 +399,7 @@ class SleepPipeline:
             SleepStep.RECALL_INDEX_REBUILD: self._step_recall_index_rebuild,
             SleepStep.ENTITY_LINK: self._step_entity_link,
             SleepStep.CURIOSITY_MINE: self._step_curiosity_mine,
+            SleepStep.EMBEDDING_INTEGRITY: self._step_embedding_integrity,
         }
 
 
@@ -420,6 +423,7 @@ class SleepPipeline:
         # the next graph build reads them from the edges table.
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
+        SleepStep.EMBEDDING_INTEGRITY,
     )
 
     # Steps whose bodies materialize large transients (clustering / columnar
@@ -632,7 +636,7 @@ from iai_mcp.lilli.cycle.sleep_pipeline import (  # noqa: E402
     _schema_mine, _knob_tune, _dream_decay, _erasure, _optimize, _compact,
     _cluster_replay, _reconsolidation, _user_model, _dmn, _crisis,
     _cluster_summary, _recall_index, _essential_variable, _entity_link,
-    _curiosity_mine,
+    _curiosity_mine, _embed_integrity,
 )
 
 SleepPipeline._step_schema_mine = _schema_mine.step_schema_mine
@@ -652,6 +656,7 @@ SleepPipeline._step_cluster_summary = _cluster_summary.step_cluster_summary
 SleepPipeline._step_recall_index_rebuild = _recall_index.step_recall_index_rebuild
 SleepPipeline._step_entity_link = _entity_link.step_entity_link
 SleepPipeline._step_curiosity_mine = _curiosity_mine.step_curiosity_mine
+SleepPipeline._step_embedding_integrity = _embed_integrity.step_embedding_integrity
 SleepPipeline._run_essential_variable_tracker_hook = _essential_variable.run_essential_variable_tracker_hook
 SleepPipeline._clear_crisis_mode_via_s2_or_fallback = _essential_variable.clear_crisis_mode_via_s2_or_fallback
 SleepPipeline._set_crisis_mode_via_s2_or_fallback = _essential_variable.set_crisis_mode_via_s2_or_fallback

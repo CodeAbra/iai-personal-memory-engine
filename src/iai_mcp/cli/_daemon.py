@@ -34,6 +34,53 @@ def _matches_daemon_title(cmdline: list[str], target_title: str) -> bool:
     return (cmdline[0] or "").strip() == target_title
 
 
+def _pid_serves_this_store(pid: int) -> bool:
+    """Whether `pid` is a daemon process of THIS invocation's store.
+
+    Identity, not context: the lifecycle-lock pid is only evidence of what
+    the file says, and a stale record can name a recycled pid belonging to
+    an unrelated process — or to another store's daemon. Signalling on that
+    evidence alone is how a stop aimed at one store fells another. The
+    sweep already matches by process-title equality; the primary stop path
+    must hold to the same standard. Unknown identity is NOT a match: a
+    daemon we cannot identify is one we must not signal.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return False
+
+    from iai_mcp.lifecycle_lock import daemon_process_title
+    from iai_mcp.tz import store_root
+
+    try:
+        cmdline = psutil.Process(int(pid)).cmdline()
+    except (psutil.Error, ValueError, TypeError):
+        return False
+    return _matches_daemon_title(
+        [str(x) for x in (cmdline or [])], daemon_process_title(store_root())
+    )
+
+
+def _live_daemon_pid_for_this_store() -> "int | None":
+    """The lifecycle-lock pid when it is alive AND serves this store."""
+    from iai_mcp.lifecycle_lock import LifecycleLock, _is_pid_alive
+
+    try:
+        payload = LifecycleLock().read()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    pid = payload.get("pid") if payload else None
+    if pid is None:
+        return None
+    try:
+        if not _is_pid_alive(int(pid)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return int(pid) if _pid_serves_this_store(int(pid)) else None
+
+
 def _sweep_orphan_daemon_processes(
     exclude_pids: set[int],
     *,
@@ -461,18 +508,33 @@ def cmd_daemon_start(args: argparse.Namespace) -> int:
     if _cli._is_macos():
         uid = os.getuid()
         target = _cli.LAUNCHD_TARGET
-        _cli.subprocess.run(
-            ["launchctl", "bootout", f"gui/{uid}", str(target)],
-            check=False, capture_output=True,
-        )
+        # bootout is the ONLY step here that SIGTERMs a live instance, and
+        # callers that reach start as a heal (the unattended doctor reflex,
+        # a wrapper wake) would kill a daemon that is merely busy — losing
+        # the consolidation step it was running. Skip just that step;
+        # bootstrap must still run, or a daemon alive while the job is
+        # unloaded (stop's own bootout→SIGTERM window, a hand-run daemon)
+        # would leave the job permanently uninstalled.
+        if _live_daemon_pid_for_this_store() is None:
+            _cli.subprocess.run(
+                ["launchctl", "bootout", f"gui/{uid}", str(target)],
+                check=False, capture_output=True,
+            )
         _cli.subprocess.run(
             ["launchctl", "bootstrap", f"gui/{uid}", str(target)],
             check=False, capture_output=True,
         )
-        _cli.subprocess.run(
+        kick = _cli.subprocess.run(
             ["launchctl", "kickstart", f"gui/{uid}/{_cli.DAEMON_LABEL}"],
             check=False, capture_output=True,
         )
+        rc = getattr(kick, "returncode", 0)
+        if rc:
+            # A silent success here is how an uninstalled job hides.
+            print(
+                f"launchctl kickstart returned {rc} for {_cli.DAEMON_LABEL}",
+                file=sys.stderr,
+            )
     elif _cli._is_linux():
         _cli.subprocess.run(
             ["systemctl", "--user", "start", _cli.SERVICE_NAME],
@@ -497,18 +559,20 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
         logger.debug("sentinel write failed (non-blocking): %s", exc)
 
     if _cli._is_macos():
-        from iai_mcp.lifecycle_lock import LifecycleLock, _is_pid_alive
+        from iai_mcp.lifecycle_lock import _is_pid_alive
 
         uid = os.getuid()
-        payload = LifecycleLock().read()
-        pid = payload["pid"] if payload else None
+        # Signal only a pid whose process identifies as THIS store's daemon.
+        pid = _live_daemon_pid_for_this_store()
 
         _cli.subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}", str(_cli.LAUNCHD_TARGET)],
             check=False, capture_output=True,
         )
 
-        if pid is not None and _is_pid_alive(pid):
+        # Liveness and identity were both established above; re-checking
+        # here would only widen the window between decision and signal.
+        if pid is not None:
             try:
                 os.kill(pid, _signal.SIGTERM)
             except (ProcessLookupError, PermissionError) as exc:
@@ -542,14 +606,19 @@ def cmd_daemon_stop(args: argparse.Namespace) -> int:
         # Windows: signals cannot stop the tree — a plain terminate orphans
         # the child that still holds the hippo lock. taskkill /T fells the
         # whole process tree; /F because there is no SIGTERM grace concept.
-        from iai_mcp.lifecycle_lock import LifecycleLock, _is_pid_alive
-
-        payload = LifecycleLock().read()
-        pid = payload["pid"] if payload else None
-        if pid is not None and _is_pid_alive(pid):
+        pid = _live_daemon_pid_for_this_store()
+        if pid is not None:
             _cli.subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 check=False, capture_output=True,
+            )
+        else:
+            # The pid IS the whole stop mechanism here (no service manager
+            # to fall back on), so a stop that identified nothing must say
+            # so rather than report success over a daemon still running.
+            logger.warning(
+                "daemon stop: no live daemon of this store identified; "
+                "nothing was signalled",
             )
         _sweep_orphan_daemon_processes(set())
     else:

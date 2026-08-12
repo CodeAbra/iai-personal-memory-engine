@@ -107,6 +107,7 @@ def test_r1_step_phase_mapping() -> None:
         SleepStep.KNOB_TUNE,
         SleepStep.OPTIMIZE_HIPPO,
         SleepStep.HIPPO_CLEANUP,
+        SleepStep.EMBEDDING_INTEGRITY,
     }
     assert rem_steps == {
         SleepStep.DREAM_DECAY,
@@ -124,10 +125,10 @@ def test_r1_step_phase_mapping() -> None:
 
 def test_r2_step_order_nrem_before_rem() -> None:
     order = SleepPipeline._STEP_ORDER
-    assert len(order) == 15
-    assert order[-1] == SleepStep.CURIOSITY_MINE
-    assert order[-2] == SleepStep.ENTITY_LINK
-    assert order[-3] == SleepStep.RECALL_INDEX_REBUILD
+    assert len(order) == 16
+    assert order[-1] == SleepStep.EMBEDDING_INTEGRITY
+    assert order[-2] == SleepStep.CURIOSITY_MINE
+    assert order[-3] == SleepStep.ENTITY_LINK
 
     nrem_positions = [
         order.index(s)
@@ -168,15 +169,16 @@ def test_r2_step_order_nrem_before_rem() -> None:
     assert order.index(SleepStep.DMN_REFLECTION) == (
         order.index(SleepStep.USER_MODEL_UPDATE) + 1
     )
-    assert order.index(SleepStep.CRISIS_RECLUSTER) == len(order) - 5
+    assert order.index(SleepStep.CRISIS_RECLUSTER) == len(order) - 6
     assert SleepStep.CLUSTER_SUMMARY.value == 12
     assert SleepStep.RECALL_INDEX_REBUILD.value == 13
     assert SleepStep.ENTITY_LINK.value == 14
     assert SleepStep.CURIOSITY_MINE.value == 15
-    assert order[-4] == SleepStep.CLUSTER_SUMMARY
-    assert order[-3] == SleepStep.RECALL_INDEX_REBUILD
-    assert order[-2] == SleepStep.ENTITY_LINK
-    assert order[-1] == SleepStep.CURIOSITY_MINE
+    assert order[-5] == SleepStep.CLUSTER_SUMMARY
+    assert order[-4] == SleepStep.RECALL_INDEX_REBUILD
+    assert order[-3] == SleepStep.ENTITY_LINK
+    assert order[-2] == SleepStep.CURIOSITY_MINE
+    assert order[-1] == SleepStep.EMBEDDING_INTEGRITY
 
 def test_r3_cluster_replay_batches_intra_cluster_edges(
     tmp_path: Path,
@@ -365,6 +367,291 @@ def test_r5_crisis_recluster_conditional_on_crisis_mode(
     body = events_b[0]["data"]
     assert body["communities_dropped"] == 25
     assert body["dry_run_mode"] is False
+
+def test_crisis_recluster_updates_are_batched_and_interruptible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heavy path never issues one update() statement per record or per
+    community: the drop phase nulls its members with a direct bound-parameter
+    IN-UPDATE per batch, and the reassignment moves rows through
+    update_many_by_id (distinct-per-row payloads under one commit per chunk).
+    Interrupt checks between batches keep the step deferrable."""
+    monkeypatch.setenv("IAI_MCP_SLEEP_OVERHAUL_DRY_RUN", "false")
+    monkeypatch.setenv("IAI_MCP_CRISIS_DROP_QUARTILE", "0.25")
+
+    store = _make_store(tmp_path)
+    embed_dim = store._embed_dim
+    lifecycle_path = tmp_path / "lifecycle.json"
+
+    tbl = store.db.open_table(RECORDS_TABLE)
+    n_records = 120
+    for i in range(n_records):
+        rec = _make_record(
+            embed_dim=embed_dim,
+            literal_surface=f"alice batched rec {i}",
+        )
+        store.insert(rec)
+        tbl.update(
+            where=f"id = '{str(rec.id)}'",
+            values={"community_id": str(uuid.uuid4())},
+        )
+
+    state = default_state()
+    state["crisis_mode"] = True
+    save_state(state, lifecycle_path)
+    pipeline = SleepPipeline(store=store, lifecycle_state_path=lifecycle_path)
+
+    from iai_mcp.hippo import _table as _table_mod
+
+    update_wheres: list[str] = []
+    orig_update = _table_mod.HippoTable.update
+
+    def _counting_update(self, *args, **kwargs):
+        update_wheres.append(kwargs.get("where") or (args[0] if args else ""))
+        return orig_update(self, *args, **kwargs)
+
+    monkeypatch.setattr(_table_mod.HippoTable, "update", _counting_update)
+
+    many_call_cids: list[list] = []
+    orig_many = _table_mod.HippoTable.update_many_by_id
+
+    def _counting_many(self, rows):
+        many_call_cids.append([v.get("community_id") for (_rid, v) in rows])
+        return orig_many(self, rows)
+
+    monkeypatch.setattr(
+        _table_mod.HippoTable, "update_many_by_id", _counting_many
+    )
+
+    done, payload = pipeline._step_crisis_recluster(interrupt_check=None)
+    assert done is True
+
+    # The heavy path issues no per-record update() statement: the drop phase
+    # nulls members with a direct IN-UPDATE and the reassignment moves through
+    # chunked update_many_by_id calls.
+    assert len(update_wheres) == 0, (
+        f"per-statement update() is back in the heavy path: {update_wheres}"
+    )
+    # The clear phase no longer routes NULL-clears through the id-point-lookup
+    # seam: every update_many_by_id call now belongs to the reassignment and
+    # assigns a real community id, never None.
+    null_clears = [
+        cid for call in many_call_cids for cid in call if cid is None
+    ]
+    assert not null_clears, (
+        "clear phase must null members via a direct IN-UPDATE, not the seam"
+    )
+    # The reassignment still rides update_many_by_id with many ids per call.
+    assert many_call_cids, "reassignment must route through update_many_by_id"
+    assert all(len(call) > 1 for call in many_call_cids), (
+        f"bulk reassignment calls degenerated to single rows: "
+        f"{[len(c) for c in many_call_cids]}"
+    )
+    assert sum(len(call) for call in many_call_cids) >= n_records // 4
+
+    # A tripped interrupt inside the DROP phase defers: re-fragment the
+    # communities so the quartile is non-empty; check #2 is the clear batch.
+    tbl = store.db.open_table(RECORDS_TABLE)
+    rows = tbl._conn.execute("SELECT id FROM records").fetchall()
+    tbl.update_many_by_id(
+        [(str(rid), {"community_id": str(uuid.uuid4())}) for (rid,) in rows]
+    )
+
+    state = default_state()
+    state["crisis_mode"] = True
+    save_state(state, lifecycle_path)
+    pipeline_c = SleepPipeline(store=store, lifecycle_state_path=lifecycle_path)
+    calls = {"n": 0}
+
+    def _trip_after_first(_probe=None):
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    done_c, _ = pipeline_c._step_crisis_recluster(
+        interrupt_check=_trip_after_first,
+    )
+    assert done_c is False, (
+        "an interrupt landing at the drop clear batch must defer the step"
+    )
+
+    # And in the REASSIGNMENT loop: checks run start(1), drop clear(2),
+    # first reassignment chunk(3) — trip the third.
+    state = default_state()
+    state["crisis_mode"] = True
+    save_state(state, lifecycle_path)
+    pipeline_d = SleepPipeline(store=store, lifecycle_state_path=lifecycle_path)
+    calls_d = {"n": 0}
+
+    def _trip_late(_probe=None):
+        calls_d["n"] += 1
+        return calls_d["n"] > 2
+
+    done_d, _ = pipeline_d._step_crisis_recluster(interrupt_check=_trip_late)
+    assert done_d is False, (
+        "an interrupt landing between reassignment chunks must defer"
+    )
+
+
+def test_crisis_recluster_clear_phase_nulls_dropped_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clear phase nulls each dropped community's members with a direct
+    bound-parameter IN-UPDATE (not the id-point-lookup seam). With the
+    reassignment disabled, the nulls are observable: exactly the dropped
+    quartile's members end with community_id IS NULL, and update_many_by_id is
+    never called."""
+    monkeypatch.setenv("IAI_MCP_SLEEP_OVERHAUL_DRY_RUN", "false")
+    monkeypatch.setenv("IAI_MCP_CRISIS_DROP_QUARTILE", "0.25")
+
+    store = _make_store(tmp_path)
+    embed_dim = store._embed_dim
+    lifecycle_path = tmp_path / "lifecycle.json"
+
+    tbl = store.db.open_table(RECORDS_TABLE)
+    n_records = 120
+    for i in range(n_records):
+        rec = _make_record(
+            embed_dim=embed_dim,
+            literal_surface=f"alice clear {i}",
+        )
+        store.insert(rec)
+        tbl.update(
+            where=f"id = '{str(rec.id)}'",
+            values={"community_id": str(uuid.uuid4())},
+        )
+
+    def _count_null() -> int:
+        with store.db._conn_lock:
+            got = tbl._conn.execute(
+                "SELECT COUNT(*) FROM records WHERE community_id IS NULL"
+            ).fetchall()
+        return int(got[0][0])
+
+    null_before = _count_null()
+
+    # Disable the reassignment so the clear-phase nulls are not overwritten.
+    import iai_mcp.runtime_graph_cache as _rgc
+
+    def _no_reassign(*_a, **_k):
+        raise RuntimeError("reassignment disabled for the clear-phase probe")
+
+    monkeypatch.setattr(_rgc, "compute_assignment_in_child", _no_reassign)
+
+    # The clear phase must not touch the id-point-lookup seam.
+    from iai_mcp.hippo import _table as _table_mod
+
+    many_calls: list[int] = []
+    orig_many = _table_mod.HippoTable.update_many_by_id
+
+    def _counting_many(self, rows):
+        many_calls.append(len(rows))
+        return orig_many(self, rows)
+
+    monkeypatch.setattr(
+        _table_mod.HippoTable, "update_many_by_id", _counting_many
+    )
+
+    state = default_state()
+    state["crisis_mode"] = True
+    save_state(state, lifecycle_path)
+    pipeline = SleepPipeline(store=store, lifecycle_state_path=lifecycle_path)
+
+    done, payload = pipeline._step_crisis_recluster(interrupt_check=None)
+    assert done is True
+
+    dropped = int(payload["communities_dropped"])
+    assert dropped == n_records // 4, (
+        f"the smallest quartile is {n_records // 4} single-member communities, "
+        f"got {dropped}"
+    )
+    null_after = _count_null()
+    assert null_after - null_before == dropped, (
+        "the clear phase must null exactly the dropped communities' members "
+        f"({dropped}); saw a delta of {null_after - null_before}"
+    )
+    assert many_calls == [], (
+        "the clear phase must null via a direct IN-UPDATE, never "
+        f"update_many_by_id: {many_calls}"
+    )
+
+
+def test_update_many_by_id_one_txn_and_matched_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _make_store(tmp_path)
+    embed_dim = store._embed_dim
+    tbl = store.db.open_table(RECORDS_TABLE)
+
+    recs = []
+    for i in range(3):
+        rec = _make_record(
+            embed_dim=embed_dim,
+            literal_surface=f"alice bulk {i}",
+        )
+        store.insert(rec)
+        recs.append(rec)
+
+    import iai_mcp.hippo as hippo_pkg
+
+    txn_calls = {"n": 0}
+    orig_txn = hippo_pkg._txn
+
+    def _counting_txn(conn):
+        txn_calls["n"] += 1
+        return orig_txn(conn)
+
+    monkeypatch.setattr(hippo_pkg, "_txn", _counting_txn)
+
+    cid = str(uuid.uuid4())
+    matched = tbl.update_many_by_id(
+        [(str(r.id), {"community_id": cid}) for r in recs[:2]]
+        + [(str(uuid.uuid4()), {"community_id": cid})]
+    )
+    assert matched == 2, (
+        f"expected 2 matched rows (third id does not exist), got {matched}"
+    )
+    assert txn_calls["n"] == 1, (
+        f"the whole batch must ride ONE transaction/commit, saw {txn_calls['n']}"
+    )
+
+    with store.db._conn_lock:
+        got = tbl._conn.execute(
+            "SELECT COUNT(*) FROM records WHERE community_id = ?", (cid,)
+        ).fetchall()
+    assert int(got[0][0]) == 2
+
+
+def test_update_many_by_id_validates_before_writing(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    embed_dim = store._embed_dim
+    tbl = store.db.open_table(RECORDS_TABLE)
+
+    rec = _make_record(embed_dim=embed_dim, literal_surface="alice guard")
+    store.insert(rec)
+
+    cid = str(uuid.uuid4())
+    with pytest.raises(ValueError):
+        tbl.update_many_by_id(
+            [
+                (str(rec.id), {"community_id": cid}),
+                (str(rec.id), {"no_such_column": 1}),
+            ]
+        )
+    with pytest.raises(ValueError):
+        tbl.update_many_by_id(
+            [(str(rec.id), {"embedding": [0.0] * embed_dim})]
+        )
+    # Prepare-time validation rejects the batch before any statement runs.
+    with store.db._conn_lock:
+        got = tbl._conn.execute(
+            "SELECT COUNT(*) FROM records WHERE community_id = ?", (cid,)
+        ).fetchall()
+    assert int(got[0][0]) == 0
 
 @pytest.mark.parametrize(
     "var_name,bad_value",

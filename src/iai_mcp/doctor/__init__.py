@@ -86,7 +86,57 @@ async def _socket_status_probe(socket_path: Path, timeout: float) -> dict | None
             pass
 
 
+_HIPPO_READABLE_CHECK_NAME = "(f) hippo storage readable"
+
+
+def _check_f_via_socket() -> CheckResult:
+    """Prove Hippo is readable through the daemon socket.
+
+    ``session_started`` is already whitelisted for ``events_query`` — a
+    non-error reply carrying an ``events`` list (even empty) proves the
+    daemon executed a real ``query_events(store, ...)`` against the store.
+    Deliberately NOT ``_socket_status_probe``: the ``status`` reply is
+    assembled from the daemon's in-memory state and never reads the store,
+    so it would reproduce the same blind PASS in new clothes. Raises
+    ``_SocketUnavailable`` when the daemon cannot be reached at all, so the
+    caller falls back to a direct store open.
+    """
+    from iai_mcp.cli import _send_jsonrpc_request
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
+
+    resp = _send_jsonrpc_request(
+        "events_query",
+        {"kind": "session_started", "limit": 1},
+        connect_timeout=1.0,
+        read_timeout=5.0,
+    )
+    if resp is None:
+        raise _SocketUnavailable()
+    if not isinstance(resp, dict) or "result" not in resp:
+        return CheckResult(
+            _HIPPO_READABLE_CHECK_NAME,
+            True,
+            "unable to confirm Hippo readability via the daemon socket",
+            status="WARN",
+        )
+    result = resp["result"]
+    events = result.get("events") if isinstance(result, dict) else None
+    if events is None:
+        return CheckResult(
+            _HIPPO_READABLE_CHECK_NAME,
+            True,
+            "unable to confirm Hippo readability via the daemon socket",
+            status="WARN",
+        )
+    return CheckResult(
+        _HIPPO_READABLE_CHECK_NAME,
+        True,
+        "Hippo storage readable via the running daemon",
+    )
+
+
 def check_f_hippo_readable() -> CheckResult:
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
     from iai_mcp.hippo import HippoLockHeldError
 
     from iai_mcp.doctor._storage_checks import _store_file_present
@@ -101,47 +151,66 @@ def check_f_hippo_readable() -> CheckResult:
         except Exception:  # noqa: BLE001 -- naming the path is best-effort
             _root = "the configured store root"
         return CheckResult(
-            "(f) hippo storage readable",
+            _HIPPO_READABLE_CHECK_NAME,
             True,
             f"no store yet at {_root} — nothing to read",
             status="WARN",
         )
 
+    try:
+        return _check_f_via_socket()
+    except _SocketUnavailable:
+        pass
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never crash the run
+        logger.debug("check_f: socket read failed: %s", exc)
+        return CheckResult(
+            _HIPPO_READABLE_CHECK_NAME,
+            True,
+            "unable to confirm Hippo readability via the daemon socket",
+            status="WARN",
+        )
+
     _s = None
     try:
+        from iai_mcp.hippo import AccessMode
         from iai_mcp.store import MemoryStore
 
-        _s = MemoryStore()
+        # SHARED + read-only coexists with the daemon's steady-state SHARED
+        # lock; reaching a lock error here means something unexpected holds
+        # the store exclusively, not a "daemon holds it, normal" condition.
+        _s = MemoryStore(access_mode=AccessMode.SHARED, read_only=True)
         return CheckResult(
-            "(f) hippo storage readable",
+            _HIPPO_READABLE_CHECK_NAME,
             True,
             "Hippo storage opens without error",
         )
     except HippoLockHeldError as e:
-        logger.debug("check_f: store held by running daemon: %s", e)
+        logger.debug("check_f: store lock unavailable: %s", e)
         return CheckResult(
-            "(f) hippo storage readable",
+            _HIPPO_READABLE_CHECK_NAME,
             True,
-            "store held by the live daemon — normal",
+            f"unable to open Hippo storage: {type(e).__name__}",
+            status="WARN",
         )
     except errors.OperationalError as e:
         if "database is locked" in str(e).lower():
-            logger.debug("check_f: store held by running daemon (sqlite): %s", e)
+            logger.debug("check_f: store lock unavailable (sqlite): %s", e)
             return CheckResult(
-                "(f) hippo storage readable",
+                _HIPPO_READABLE_CHECK_NAME,
                 True,
-                "store held by the live daemon — normal",
+                f"unable to open Hippo storage: {type(e).__name__}",
+                status="WARN",
             )
         logger.debug("check_f: hippo storage open failed: %s", e)
         return CheckResult(
-            "(f) hippo storage readable",
+            _HIPPO_READABLE_CHECK_NAME,
             False,
             f"open failed: {type(e).__name__}: {e}",
         )
     except Exception as e:  # noqa: BLE001 — surface any open failure
         logger.debug("check_f: hippo storage open failed: %s", e)
         return CheckResult(
-            "(f) hippo storage readable",
+            _HIPPO_READABLE_CHECK_NAME,
             False,
             f"open failed: {type(e).__name__}: {e}",
         )
@@ -349,7 +418,9 @@ def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
         check_ii_embed_identity(),
         check_w_no_permanent_failed(),
         check_x_no_collapsed_timestamps(),
+        check_aa_capture_state_hygiene(),
         check_y_rss_24h_plateau(),
+        check_bb_nightly_insight_mint(),
         check_z_avx2_support(),
         check_plus_update_available(fetch=fetch_update),
     ]
@@ -728,10 +799,33 @@ def _rederive_timestamps() -> tuple[bool, str, int]:
     return _run_own_cli(["migrate", "--rederive-timestamps"], timeout_sec=1800.0)
 
 
+def _sweep_capture_state_heal() -> tuple[bool, str, int]:
+    from iai_mcp.capture import sweep_capture_state
+
+    counts = sweep_capture_state(apply=True)
+    return True, f"removed {counts['removed']} stale capture-state file(s)", 0
+
+
 def _plan_repair_actions(results: list[CheckResult]) -> list[RepairAction]:
     actions: list[RepairAction] = []
     fail_names = {r.name for r in results if not r.passed}
     by_name = {r.name: r for r in results}
+
+    if "(aa) capture-state hygiene" in fail_names:
+        actions.append(
+            RepairAction(
+                label="sweep_capture_state",
+                description=(
+                    "remove month-old capture-state files and day-old "
+                    "crashed-writer tmp debris"
+                ),
+                destructive=False,
+                execute=_sweep_capture_state_heal,
+                # Derived-file class: a swept offset re-walks an idempotent
+                # transcript, never loses store data.
+                auto_safe=True,
+            )
+        )
 
     if "(b) socket file fresh" in fail_names:
         actions.append(
@@ -1065,6 +1159,7 @@ from iai_mcp.doctor._lifecycle_checks import (
     _socket_connect_probe,
     check_a_daemon_alive,
     check_b_socket_fresh,
+    check_bb_nightly_insight_mint,
     check_c_lock_healthy,
     check_d_no_orphan_core,
     check_e_state_file_valid,
@@ -1091,6 +1186,7 @@ from iai_mcp.doctor._storage_checks import (
     check_w_no_permanent_failed,
     check_x_no_collapsed_timestamps,
     check_z_avx2_support,
+    check_aa_capture_state_hygiene,
 )
 
 __all__ = [
@@ -1130,6 +1226,8 @@ __all__ = [
     "check_v_native_embedder",
     "check_w_no_permanent_failed",
     "check_x_no_collapsed_timestamps",
+    "check_aa_capture_state_hygiene",
     "check_y_rss_24h_plateau",
     "check_z_avx2_support",
+    "check_bb_nightly_insight_mint",
 ]
