@@ -46,9 +46,19 @@ if [ -z "$session_id" ] || [ -z "$transcript_path" ]; then
   exit 0
 fi
 
+case "$session_id" in
+  *[!A-Za-z0-9._-]*)
+    echo "$ts skipped: invalid session_id" >> "$log" 2>/dev/null
+    exit 0
+    ;;
+esac
+
 PY_SCRIPT='
+import fcntl
+import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +66,10 @@ from pathlib import Path
 MAX_TURNS = 100_000
 
 session_id = sys.argv[1]
+# Session id is host-controlled text that lands in file paths.
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session_id):
+    print("skipped: invalid session_id", file=sys.stderr)
+    sys.exit(0)
 stdin_path = Path(sys.argv[2]).expanduser()
 home = Path(os.environ.get("HOME", str(Path.home())))
 
@@ -100,25 +114,81 @@ deferred_dir.mkdir(parents=True, exist_ok=True)
 state_dir.mkdir(parents=True, exist_ok=True)
 live = deferred_dir / f"{session_id}.live.jsonl"
 offset = state_dir / f"{session_id}.offset"
+# Offset and pending tool names live in ONE snapshot file published by a
+# single atomic rename: any crash or carrier race can only surface an older
+# coherent pair, whose replay is deterministic and lands on the same idem
+# keys. Two separate files can pair a fresh offset with stale pending and
+# fabricate a trailer. The legacy offset file is still mirrored for older
+# readers; when it is ahead, its position wins and pending drops.
+turnstate = state_dir / f"{session_id}.turnstate.json"
 
-prev = 0
+_lock_fd = os.open(
+    str(state_dir / f"{session_id}.capture.lock"),
+    os.O_WRONLY | os.O_CREAT, 0o600,
+)
+try:
+    fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    # Another carrier is draining this session right now; its walk covers
+    # these lines.
+    sys.exit(0)
+
+snap_offset = -1
+pending_tools = []
+snap_fp = ""
+if turnstate.exists():
+    try:
+        _snap = json.loads(turnstate.read_text())
+        if isinstance(_snap, dict):
+            snap_offset = int(_snap.get("offset", 0))
+            _loaded = _snap.get("pending")
+            if isinstance(_loaded, list):
+                pending_tools = [
+                    n for n in _loaded[:256] if isinstance(n, str) and n
+                ]
+            _loaded_fp = _snap.get("fp")
+            if isinstance(_loaded_fp, str):
+                snap_fp = _loaded_fp
+    except Exception:
+        snap_offset = -1
+        pending_tools = []
+        snap_fp = ""
+
+legacy = 0
 if offset.exists():
     try:
-        prev = int(offset.read_text().strip() or "0")
+        legacy = int(offset.read_text().strip() or "0")
     except ValueError:
-        prev = 0
+        legacy = 0
 
-with transcript_path.open() as fh:
+if snap_offset >= legacy:
+    prev = max(snap_offset, 0)
+else:
+    # A writer that knows only the legacy offset advanced past the
+    # snapshot: adopt its position and drop pending — trailer loss,
+    # never fabrication.
+    prev = legacy
+    pending_tools = []
+
+with transcript_path.open(encoding="utf-8") as fh:
     lines = fh.readlines()
 total = len(lines)
-if prev > total:
-    # Transcript is shorter than the stored offset — it was rotated or
-    # replaced.  Preserve the existing offset and skip capture to avoid
-    # re-emitting old turns or clobbering a valid large offset.
-    tmp = state_dir / f"{session_id}.offset.tmp"
-    tmp.write_text(str(prev))
-    os.replace(tmp, offset)
-    sys.exit(0)
+# Fingerprint the RAW first-line bytes: the fp is shared between carriers
+# through the snapshot, and hashing a decoded string would couple it to
+# each carrier decode setting.
+with transcript_path.open("rb") as fh_raw:
+    _first_raw = fh_raw.readline()
+stream_fp = hashlib.sha256(_first_raw).hexdigest()[:16] if _first_raw else ""
+# A changed first line means a different stream at the same path: the
+# stored offset and pending belong to a dead transcript even when the new
+# one already regrew past the old length. The length fence stays as the
+# backstop for fingerprint-less legacy snapshots and same-stream
+# truncation. Restarting at zero re-walks the new stream; replays dedup
+# on source-uuid idempotency keys where the host provides them and are
+# absorbed by the cosine gate for text-keyed hosts.
+if (snap_fp and stream_fp and snap_fp != stream_fp) or prev > total:
+    prev = 0
+    pending_tools = []
 
 cwd = os.getcwd()
 emitted = 0
@@ -141,24 +211,87 @@ def _is_noise(text):
             return True
     return False
 
+def _clean_tool_name(value):
+    # Mirror of capture._clean_tool_name — keep the two in lockstep.
+    if not isinstance(value, str):
+        return None
+    name = "".join(
+        ch for ch in value if ch.isprintable() and ch not in ",[]"
+    ).strip()
+    return name[:80].strip() or None
+
 def parse_line(raw):
     try:
         obj = json.loads(raw)
     except Exception:
         return None
+    if obj.get("type") == "response_item":
+        # Codex rollout lines. function_call carries the tool name;
+        # function_call_output is plumbing and must not reach the caller.
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        ptype = payload.get("type")
+        if ptype == "function_call":
+            name = _clean_tool_name(payload.get("name"))
+            return ("assistant", "", None, obj.get("timestamp"),
+                    [name] if name else [])
+        if ptype != "message":
+            return None
+        cdx_role = payload.get("role", "")
+        if cdx_role not in {"user", "assistant"}:
+            return None
+        content = payload.get("content", [])
+        if isinstance(content, list):
+            parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and isinstance(b.get("text"), str)
+            ]
+            cdx_text = "\n".join(p for p in parts if p).strip()
+        else:
+            cdx_text = str(content or "").strip()
+        if cdx_text.lstrip().startswith("<environment_context>") or _is_noise(cdx_text):
+            cdx_text = ""
+        cdx_uuid = payload.get("id") or obj.get("uuid") or None
+        if not cdx_text:
+            # A filtered user turn is still a conversational boundary.
+            if cdx_role == "user":
+                return "user", "", cdx_uuid, obj.get("timestamp"), []
+            return None
+        return cdx_role, cdx_text, cdx_uuid, obj.get("timestamp"), []
     if "step_index" in obj and "source" in obj:
         # Antigravity transcript_full lines: conversational turns only.
         src, typ = obj.get("source"), obj.get("type")
-        if src == "USER_EXPLICIT" and typ == "USER_INPUT":
+        if src == "USER_EXPLICIT" and typ != "USER_INPUT":
+            # Any explicit-user-sourced step is a conversational boundary.
+            return "user", "", None, obj.get("created_at"), []
+        if src == "USER_EXPLICIT":
             agy_role = "user"
         elif src == "MODEL" and typ == "PLANNER_RESPONSE":
             agy_role = "assistant"
         else:
             return None
+        agy_tools = []
+        if agy_role == "assistant":
+            calls = obj.get("tool_calls")
+            if isinstance(calls, list):
+                agy_tools = [
+                    n for n in (
+                        _clean_tool_name(c.get("name"))
+                        for c in calls if isinstance(c, dict)
+                    ) if n
+                ]
         agy_text = str(obj.get("content") or "").strip()
-        if not agy_text or _is_noise(agy_text):
+        if _is_noise(agy_text):
+            agy_text = ""
+        if not agy_text:
+            if agy_role == "user":
+                return "user", "", None, obj.get("created_at"), []
+            if agy_tools:
+                return "assistant", "", None, obj.get("created_at"), agy_tools
             return None
-        return agy_role, agy_text, None, obj.get("created_at"), []
+        return agy_role, agy_text, None, obj.get("created_at"), agy_tools
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
     # Claude puts the role in top-level "type", Cursor in top-level "role"
     # with the content nested under "message".
@@ -176,10 +309,12 @@ def parse_line(raw):
         text = "\n".join(parts).strip()
         if role == "assistant":
             tools = [
-                str(b.get("name") or "")
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "tool_use"
-                and b.get("name")
+                n for n in (
+                    _clean_tool_name(b.get("name"))
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "tool_use"
+                    and b.get("name")
+                ) if n
             ]
     else:
         text = str(content).strip()
@@ -212,7 +347,7 @@ def parse_line(raw):
 def _tools_trailer(names):
     seen = []
     for n in names:
-        if n not in seen:
+        if n and n not in seen:
             seen.append(n)
     if not seen:
         return ""
@@ -230,7 +365,6 @@ if total > prev:
                 "cwd": cwd,
             }
             out.write(json.dumps(header, ensure_ascii=False) + "\n")
-        pending_tools = []
         for raw in lines[prev:]:
             if emitted >= MAX_TURNS:
                 break
@@ -275,13 +409,41 @@ if total > prev:
             out.write(json.dumps(event, ensure_ascii=False) + "\n")
             emitted += 1
 
+# Snapshot first, legacy offset second: a crash between them leaves the
+# legacy offset older, and the snapshot (>=) stays authoritative.
 new_offset = prev + consumed
-tmp = state_dir / f"{session_id}.offset.tmp"
+tmp_s = state_dir / f"{session_id}.turnstate.json.tmp{os.getpid()}"
+with open(tmp_s, "w") as _f:
+    _f.write(json.dumps(
+        {"offset": new_offset, "pending": pending_tools[:256], "fp": stream_fp}
+    ))
+    _f.flush()
+    os.fsync(_f.fileno())
+os.replace(tmp_s, turnstate)
+
+# A pre-snapshot reader pairs the mirrored offset with the split pending
+# file and can fabricate a trailer from it — remove it BEFORE the offset
+# publish, so a reader that sees the fresh offset can never find it.
+try:
+    (state_dir / f"{session_id}.pending-tools").unlink()
+except OSError:
+    pass
+
+tmp = state_dir / f"{session_id}.offset.tmp{os.getpid()}"
 with open(tmp, "w") as _f:
     _f.write(str(new_offset))
     _f.flush()
     os.fsync(_f.fileno())
 os.replace(tmp, offset)
+# Rename durability needs the directory entry flushed too.
+_dfd = os.open(str(state_dir), os.O_RDONLY)
+try:
+    os.fsync(_dfd)
+finally:
+    os.close(_dfd)
+# Capture state is published — the freshness gate below must not run
+# inside the capture critical section.
+os.close(_lock_fd)
 
 # --- Freshness gate (best-effort, capture-first) ---
 #
@@ -353,7 +515,7 @@ try:
     def _gate_write_watermark(sid, ts):
         d = home / ".iai-mcp" / ".capture-state"
         d.mkdir(parents=True, exist_ok=True)
-        tmp_wm = d / f"{sid}.watermark.tmp"
+        tmp_wm = d / f"{sid}.watermark.tmp{os.getpid()}"
         tmp_wm.write_text(_gate_utc_iso(ts))
         os.replace(tmp_wm, d / f"{sid}.watermark")
 
@@ -394,7 +556,7 @@ try:
     def _gate_write_fingerprint(sid, total_sz):
         d = home / ".iai-mcp" / ".capture-state"
         d.mkdir(parents=True, exist_ok=True)
-        tmp_fp = d / f"{sid}.live-fingerprint.tmp"
+        tmp_fp = d / f"{sid}.live-fingerprint.tmp{os.getpid()}"
         tmp_fp.write_text(str(total_sz))
         os.replace(tmp_fp, d / f"{sid}.live-fingerprint")
 
