@@ -661,3 +661,36 @@ def test_live_user_capture_records_formality_signal(iai_home):
     assert len(after_replay) == len(after), (
         "a replayed (live_turn=False) turn must not record a formality signal"
     )
+
+
+def test_formality_lang_signal_defaults_to_english(iai_home):
+    """A store with no language pack enabled (the default) is English-only,
+    so claiming "en" for formality scoring is honest."""
+    from iai_mcp.capture import _formality_lang_signal
+
+    assert _formality_lang_signal() == "en"
+
+
+def test_formality_lang_signal_avoids_english_once_pack_enabled(iai_home):
+    """The moment a language pack is enabled via `iai lang add`, capture has
+    no per-message language detection to know which configured language a
+    given turn is actually in. Claiming "en" unconditionally would score
+    non-English text against English lexical markers, find nothing, and
+    feed a fabricated signal into the camouflaging_relaxation trend --
+    formality_score's own neutral-fallback path (see formality.py) exists
+    for exactly this "language not confidently known" case, so this must
+    resolve to something outside its English marker set, not "en"."""
+    import json
+    from iai_mcp.capture import _formality_lang_signal
+    from iai_mcp.formality import LEX_MARKERS
+    from iai_mcp.tz import store_config_path
+
+    cfg_path = store_config_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"embed": {"model_key": "multilingual", "languages": ["de"]}}))
+
+    lang = _formality_lang_signal()
+    assert lang not in LEX_MARKERS, (
+        f"resolved lang {lang!r} must not be one formality_score recognizes as "
+        f"confidently English once a language pack is enabled"
+    )

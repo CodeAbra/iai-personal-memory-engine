@@ -137,3 +137,52 @@ def test_relax_register_caps_at_one(tmp_path):
     store = MemoryStore(path=tmp_path)
     relax_register(store, delta=0.5)
     assert core._profile_state["camouflaging_relaxation"] == 1.0
+
+def test_run_weekly_pass_dedupes_repeated_calls_without_new_data(tmp_path):
+    """run_heavy_consolidation can call run_weekly_pass far more often than
+    weekly (every heavy pass, which itself can run repeatedly with nothing
+    new captured in between). detect_camouflaging re-reads the same static
+    event window every time with no memory of what it already acted on, so
+    without a guard, two calls against one unchanged 5-event window each
+    detect the same trend and each call relax_register -- moving
+    camouflaging_relaxation 0.0 -> 0.1 -> 0.2 on zero new evidence.
+    run_weekly_pass now tracks the id of the newest formality_score_weekly
+    event it has already processed and skips re-running detection when
+    nothing new has arrived."""
+    from iai_mcp.camouflaging import run_weekly_pass
+    from iai_mcp.events import query_events, write_event
+
+    import iai_mcp.core as core
+    core._profile_state["camouflaging_relaxation"] = 0.0
+
+    store = MemoryStore(path=tmp_path)
+    _seed_weekly_scores(store, [0.4, 0.55, 0.65, 0.75, 0.85])
+
+    result1 = run_weekly_pass(store)
+    assert result1["detected"] is True
+    knob_after_1 = core._profile_state["camouflaging_relaxation"]
+    assert knob_after_1 > 0.0
+
+    result2 = run_weekly_pass(store)
+    assert result2.get("deduped") is True
+    knob_after_2 = core._profile_state["camouflaging_relaxation"]
+    assert knob_after_2 == knob_after_1, (
+        "a repeated call with no new formality events must not re-relax the register"
+    )
+
+    detected_events = query_events(store, kind="camouflaging_detected", limit=10)
+    relaxed_events = query_events(store, kind="register_relaxed", limit=10)
+    assert len(detected_events) == 1
+    assert len(relaxed_events) == 1
+
+    # New evidence must still be able to relax further -- the watermark
+    # dedupes exact repeats, it must not permanently freeze the pipeline.
+    write_event(
+        store,
+        kind="formality_score_weekly",
+        data={"score": 0.95, "lang": "en", "week_iso": "2026-W99", "samples": 10},
+        severity="info",
+    )
+    result3 = run_weekly_pass(store)
+    assert result3["detected"] is True
+    assert core._profile_state["camouflaging_relaxation"] > knob_after_2

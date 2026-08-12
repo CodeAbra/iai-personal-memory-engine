@@ -361,6 +361,37 @@ def _is_episodic_conversational(tier: str, role: str) -> bool:
     return tier == "episodic" and role in {"user", "assistant"}
 
 
+def _formality_lang_signal() -> str:
+    """Best-effort language signal for record_user_formality.
+
+    formality_score only has English lexical markers (LEX_MARKERS) and
+    already degrades to a neutral 0.5 for any lang code it does not
+    recognize -- this only ever needs to answer "is it safe to assume
+    English". A store with no opted-in languages (the default) is
+    English-only, so "en" is correct there. The moment a language pack is
+    enabled via `iai lang add`, capture has no per-message language
+    detection to tell us which configured language a given turn is
+    actually in, so this intentionally returns a code outside
+    LEX_MARKERS and lets formality_score's own neutral fallback handle
+    it -- passing "en" unconditionally would score non-English text
+    against English markers, find nothing, and feed a fabricated signal
+    into the trend.
+    """
+    try:
+        import json as _json
+
+        from iai_mcp.tz import store_config_path
+
+        path = store_config_path()
+        if not path.exists():
+            return "en"
+        cfg = _json.loads(path.read_text(encoding="utf-8"))
+        languages = (cfg.get("embed") or {}).get("languages") or []
+        return "en" if not languages else "unsupported"
+    except Exception:  # noqa: BLE001 -- fail toward the safe default
+        return "en"
+
+
 def capture_turn(
     store: MemoryStore,
     *,
@@ -636,7 +667,7 @@ def capture_turn(
         # historical backfill would skew weeks that never happened live.
         try:
             from iai_mcp.camouflaging import record_user_formality
-            record_user_formality(store, text, lang="en")
+            record_user_formality(store, text, lang=_formality_lang_signal())
         except Exception as exc:  # noqa: BLE001 -- signal collection is additive
             log.debug("formality signal recording skipped: %s", exc)
 

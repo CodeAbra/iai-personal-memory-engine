@@ -99,7 +99,45 @@ def record_user_formality(store, text: str, lang: str) -> None:
     )
 
 
+def _weekly_pass_watermark_path(store):
+    return store.root / ".capture-state" / "camouflaging-weekly-pass.watermark"
+
+
 def run_weekly_pass(store) -> dict:
+    """Aggregate the week's collected formality_score_weekly events and
+    relax the register on a detected trend.
+
+    Callers may invoke this far more often than weekly (run_heavy_consolidation
+    calls it every heavy pass, which can itself run repeatedly with no new
+    capture in between). detect_camouflaging re-reads the same static event
+    window every time with no memory of what it already acted on, so without
+    a guard here, calling this twice with unchanged data double-relaxes the
+    register on zero new evidence -- confirmed: two calls against one static
+    5-event window moved camouflaging_relaxation 0.0 -> 0.1 -> 0.2. Dedupe by
+    tracking the id of the newest formality_score_weekly event already
+    processed; skip re-running detection entirely when nothing new arrived.
+    """
+    watermark_path = _weekly_pass_watermark_path(store)
+
+    newest = query_events(store, kind="formality_score_weekly", limit=1)
+    newest_id = newest[0]["id"] if newest else None
+
+    last_processed = None
+    try:
+        if watermark_path.exists():
+            last_processed = watermark_path.read_text().strip() or None
+    except OSError:
+        last_processed = None
+
+    if newest_id is not None and newest_id == last_processed:
+        return {
+            "detected": False,
+            "trajectory_slope": 0.0,
+            "current_mean": 0.0,
+            "sample_count": 0,
+            "deduped": True,
+        }
+
     result = detect_camouflaging(store)
     if result["detected"]:
         write_event(
@@ -114,4 +152,15 @@ def run_weekly_pass(store) -> dict:
             severity="info",
         )
         relax_register(store)
+
+    if newest_id is not None:
+        try:
+            import os
+            watermark_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = watermark_path.parent / f"camouflaging-weekly-pass.watermark.{os.getpid()}.tmp"
+            tmp.write_text(newest_id)
+            os.replace(tmp, watermark_path)
+        except OSError:
+            pass
+
     return result
