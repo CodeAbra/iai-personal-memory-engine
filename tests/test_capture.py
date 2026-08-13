@@ -609,25 +609,46 @@ def test_capture_turn_embeds_content_not_cue(iai_home, monkeypatch):
     )
 
 
-def test_live_user_capture_records_formality_signal(iai_home):
+def test_ambient_drain_path_records_formality_signal(iai_home):
     """AUTIST-13 (camouflaging_relaxation) has a complete detection pipeline
     in iai_mcp.camouflaging: record_user_formality collects a per-turn
-    signal, run_weekly_pass aggregates it and relaxes the register. Before
-    this fix, capture_turn never called record_user_formality, so the
-    formality_score_weekly event stream that run_weekly_pass depends on
-    stayed permanently empty regardless of how much the pipeline was used.
-    This exercises the actual capture path, not the collector in isolation
-    (already covered by tests/lilli/test_camouflaging_detection.py)."""
+    signal, run_weekly_pass aggregates it and relaxes the register.
+
+    The first version of this fix gated the call on live_turn, copying the
+    condition the foresight-refresh call right above it uses. That was
+    wrong: live_turn=True is only ever passed from the explicit
+    memory_capture RPC -- never from deferred_drain_worker's drain loop,
+    the path every host hook actually uses for ambient capture -- so
+    gating on it left this permanently dead against real usage. Verified
+    on a real install: zero formality_score_weekly events existed after
+    days of genuine multi-host activity.
+
+    The correct signal is recency of the turn's own timestamp, mirroring
+    run_light_consolidation's identical 1-hour gate in sleep.py: normal
+    ambient capture (drained within seconds to minutes of the real
+    exchange) is "now" for this purpose regardless of live_turn; a
+    historical bulk backfill is not, and must not skew weeks that never
+    happened live. This exercises all three real shapes, not the
+    collector in isolation (already covered by
+    tests/lilli/test_camouflaging_detection.py)."""
+    from datetime import datetime, timedelta, timezone
+
     from iai_mcp.capture import capture_turn
     from iai_mcp.events import query_events
 
     store = _open_store()
 
-    before = query_events(store, kind="formality_score_weekly", limit=50)
+    def _count():
+        return len(query_events(store, kind="formality_score_weekly", limit=100))
 
-    result = capture_turn(
+    before = _count()
+
+    # Shape 1: the real ambient drain-worker path -- live_turn defaults to
+    # False, recent timestamp (drained seconds after the real exchange).
+    recent_ts = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    r1 = capture_turn(
         store,
-        cue="formality signal wiring check",
+        cue="drain-path formality check",
         text=(
             "I would be most grateful if you could kindly assist me with "
             "this matter at your earliest convenience."
@@ -635,31 +656,51 @@ def test_live_user_capture_records_formality_signal(iai_home):
         tier="episodic",
         session_id=SESSION_ID,
         role="user",
-        live_turn=True,
+        ts=recent_ts,
     )
-    assert result["status"] == "inserted", result
-
-    after = query_events(store, kind="formality_score_weekly", limit=50)
-    assert len(after) == len(before) + 1, (
-        "capture_turn did not record a formality signal for a live user turn"
+    assert r1["status"] == "inserted", r1
+    after1 = _count()
+    assert after1 == before + 1, (
+        "the real ambient drain path (live_turn=False, recent ts) must "
+        "record a formality signal"
     )
 
-    # A replayed/bulk-imported turn (live_turn=False) must NOT count toward
-    # the trend -- a historical backfill would otherwise skew weeks that
-    # never happened live.
-    result2 = capture_turn(
+    # Shape 2: the explicit memory_capture RPC path -- live_turn=True must
+    # keep working exactly as before.
+    r2 = capture_turn(
         store,
-        cue="replay should not record formality",
+        cue="explicit memory_capture formality check",
         text="I would be most grateful if you could kindly assist me again.",
         tier="episodic",
         session_id=SESSION_ID,
         role="user",
-        live_turn=False,
+        live_turn=True,
     )
-    assert result2["status"] == "inserted", result2
-    after_replay = query_events(store, kind="formality_score_weekly", limit=50)
-    assert len(after_replay) == len(after), (
-        "a replayed (live_turn=False) turn must not record a formality signal"
+    assert r2["status"] == "inserted", r2
+    after2 = _count()
+    assert after2 == after1 + 1, (
+        "the explicit memory_capture path (live_turn=True) must keep "
+        "recording a formality signal"
+    )
+
+    # Shape 3: a historical bulk backfill -- old timestamp, live_turn=False.
+    # Must NOT count toward the trend, or a backfill would skew weeks that
+    # never happened live.
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    r3 = capture_turn(
+        store,
+        cue="historical backfill formality check",
+        text="I would be most grateful if you could kindly assist me once more.",
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+        ts=old_ts,
+    )
+    assert r3["status"] == "inserted", r3
+    after3 = _count()
+    assert after3 == after2, (
+        "a historical backfill turn (30-day-old ts) must not record a "
+        "formality signal"
     )
 
 

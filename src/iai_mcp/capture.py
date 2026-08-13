@@ -10,7 +10,7 @@ import shutil
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -661,13 +661,26 @@ def capture_turn(
         except Exception as exc:  # noqa: BLE001 -- anticipation is additive
             log.debug("foresight refresh skipped: %s", exc)
 
-        # Feed the camouflaging_relaxation weekly pass (AUTIST-13): scores
-        # this turn's formality and logs a formality_score_weekly event.
-        # Only live, non-replayed user turns count toward the trend, or a
-        # historical backfill would skew weeks that never happened live.
+    # Feed the camouflaging_relaxation weekly pass (AUTIST-13): scores this
+    # turn's formality and logs a formality_score_weekly event.
+    #
+    # Deliberately NOT gated on live_turn like the foresight refresh above:
+    # live_turn=True is only ever passed from the explicit memory_capture
+    # RPC, never from deferred_drain_worker's drain loop -- the path every
+    # host hook actually uses for ambient capture -- so gating on it here
+    # left this permanently dead against real usage; verified zero
+    # formality_score_weekly events existed after days of real multi-host
+    # activity. A recency check on the turn's own timestamp is the signal
+    # that was actually intended: normal ambient capture (drained within
+    # seconds to minutes of the real exchange) is "now" for this purpose; a
+    # historical bulk backfill is not, and must not skew weeks that never
+    # happened live. Mirrors run_light_consolidation's identical 1-hour
+    # recency gate in sleep.py for the same class of concern.
+    if role == "user" and tier == "episodic":
         try:
-            from iai_mcp.camouflaging import record_user_formality
-            record_user_formality(store, text, lang=_formality_lang_signal())
+            if (datetime.now(timezone.utc) - now) < timedelta(hours=1):
+                from iai_mcp.camouflaging import record_user_formality
+                record_user_formality(store, text, lang=_formality_lang_signal())
         except Exception as exc:  # noqa: BLE001 -- signal collection is additive
             log.debug("formality signal recording skipped: %s", exc)
 
