@@ -1348,7 +1348,15 @@ class BrainView:
             resp = json.loads(buf or b"{}")
             # Require an explicit ok:true — an empty/EOF reply (daemon crashed
             # mid-request) must NOT read as success.
-            if resp.get("ok") is True:
+            # Sleep is a desired-state command.  A dashboard poll can lag the
+            # daemon by one tick, so a second click may race with the first
+            # request and arrive after SLEEP has already been entered.  Treat
+            # that reply as idempotent success instead of showing the generic
+            # failure toast for a state the user explicitly requested.
+            already_at_target = (
+                action == "sleep" and resp.get("reason") == "already_sleeping"
+            )
+            if resp.get("ok") is True or already_at_target:
                 return {"status": "ok", "action": action, "result": resp}
             return {"status": "error",
                     "reason": str(resp.get("reason") or resp.get("error")
