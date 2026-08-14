@@ -462,7 +462,7 @@ iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,paus
 
 - MCP transport is a Unix domain socket. No TCP listener, no bind address, no auth surface to misconfigure.
 - Store at `~/.iai-mcp/`, AES-256-GCM per record, key at `.crypto.key` mode `0600`, rotation and prior-key recovery supported.
-- Thirteen languages beyond English ship as an opt-in pack, one command to turn on (`iai lang add ru`) plus a re-embed. English-only is the default. See [Languages](#languages).
+- Storage is English-only; non-English text is refused unless declared with a `raw:<lang>` tag. The embedder is swappable for those records — `iai lang add ru` moves it to a multilingual model, thirteen languages covered. See [Languages](#languages).
 - Embedder is swappable beyond that: `IAI_MCP_EMBED_PROVIDER=http` disables the native BGE model entirely (not constructed, not downloaded) and routes to a loopback endpoint, for a domain-specific model without a Python ML stack. Protocol in [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
 - The store records which embedder produced its vectors — model id, revision, pooling, dimension, text-prefix setting — and refuses to open under a different one. Two 384-dimension models pass a dimension check and still write vectors that read as noise against each other, which is a silently dead semantic lane. If the daemon refuses to start with `refusing to mix vector generations`, the service environment changed the embedder out from under the store: fix the environment, or run `iai-mcp migrate --reembed-from-text` to move the store to the new model.
 - Recall concurrency is bounded (`IAI_MCP_RECALL_CONCURRENCY`, default `2`); overflow returns `_degraded: recall_busy` rather than queueing unboundedly.
@@ -565,13 +565,17 @@ For other languages you do not need any of this; see
 
 ## Languages
 
-English is the default and stays the default. Thirteen more languages ship as an
-opt-in pack: Czech, German, Spanish, French, Hindi, Indonesian, Italian,
-Japanese, Portuguese, Russian, Thai, Vietnamese, Chinese.
+**The store is English-only, and that has not changed.** The engine refuses a
+record whose text carries Cyrillic, Japanese or CJK characters unless the caller
+declares it with a `raw:<lang>` tag — non-English storage is an explicit act, not
+a default. Assistants translate on the way in; the memory holds one language so
+there is one vector space and no cross-lingual drift.
 
-The pack changes which model turns your text into vectors. Nothing is
-translated: what you wrote is stored verbatim either way, and what changes is
-that recall on non-English text stops running through an English-only model.
+What the opt-in pack changes is **which embedder turns text into vectors**, for
+the case where you do keep raw non-English records. Thirteen languages are
+covered: Czech, German, Spanish, French, Hindi, Indonesian, Italian, Japanese,
+Portuguese, Russian, Thai, Vietnamese, Chinese. Turning it on does not translate
+anything and does not lift the English default — it swaps a model.
 
 ### Turn a language on
 
@@ -740,7 +744,7 @@ export IAI_MCP_VERSION_CHECK=0
 
 **Does it eat my tokens?** The opposite. Memory injected at session start replaces the files your assistant would re-read and the questions it would re-ask. The dashboard counts packs served, tokens injected, and a lower-bound estimate of tokens saved.
 
-**Why English-only?** On purpose: one embedder, one vector space, no cross-lingual drift — assistants translate on the way in. If you need something else, the replaceable `http` embedder provider exists — see [Configuration](#configuration).
+**Why English-only?** On purpose: one embedder, one vector space, no cross-lingual drift — assistants translate on the way in, and the engine refuses undeclared non-English text. The embedder itself is swappable: `iai lang add ru` moves it to a multilingual model for raw non-English records ([Languages](#languages)), and the replaceable `http` provider takes a model of your own — see [Configuration](#configuration).
 
 **Can I sync between machines?** Not yet. The data lives where the engine runs; backup is `cp -a ~/.iai-mcp/`.
 
@@ -784,7 +788,7 @@ Limitations worth knowing about:
 
 <p align="center"><img src="docs/assets/slides/slide-14.jpg" width="850" alt="iai-pme"></p>
 
-- English-only by design. The assistant translates to English on the way into memory; the store and the embedder are English-only on purpose.
+- English-only storage by design. The engine refuses non-English text unless it is declared with a `raw:<lang>` tag; assistants translate on the way in. A swappable embedder covers thirteen more languages for raw records ([Languages](#languages)), but it is a model swap, not a multilingual store: it needs a full re-embed, non-Latin scripts get no lexical contribution yet, and on a large non-English corpus a purpose-built 1024-dimension provider still beats our built-in 384-dimension one on recall quality.
 - No cross-machine sync. The data lives where the local engine runs. Backup is `cp -a ~/.iai-mcp/` somewhere safe.
 - Local-only inspection. The dashboard (`iai brain`), the desktop app, and the CLI (`iai-mcp doctor`, `iai-mcp daemon status`, `iai-mcp topology`) are the windows into the store — there is no hosted or cloud view, by design.
 - Cold start on a freshly booted machine takes a few seconds while the local engine initializes caches.
@@ -844,4 +848,4 @@ Three lanes where a first PR lands especially well:
 
 1. **Windows** — the runtime is ported; the test suite still needs porting. Every green test is a real contribution.
 2. **Ambient capture for your CLI** — the MCP tools already work on any host; wiring native hooks (Gemini CLI, Cursor, Goose, Zed…) makes capture automatic there. One shipped hook = one new supported host with your name on it.
-3. **Embedder providers** — thirteen languages ship built in, and the `http` provider protocol ([docs/EMBEDDERS.md](docs/EMBEDDERS.md)) makes domain-specific and self-hosted embedders pluggable without touching the engine.
+3. **Embedder providers** — the embedder is swappable (a built-in multilingual model covers thirteen languages for raw records), and the `http` provider protocol ([docs/EMBEDDERS.md](docs/EMBEDDERS.md)) makes domain-specific and self-hosted embedders pluggable without touching the engine.
