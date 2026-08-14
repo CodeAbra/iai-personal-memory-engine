@@ -1027,14 +1027,15 @@ def test_janitor_never_closes_store_mid_write(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("action", "expected_type"),
+    ("action", "expected_type", "reply"),
     [
-        ("sleep", "user_initiated_sleep"),
-        ("wake", "force_wake"),
-        ("consolidate", "force_rem"),
+        ("sleep", "user_initiated_sleep", {"ok": True, "state": "TRANSITIONING"}),
+        ("sleep", "user_initiated_sleep", {"ok": False, "reason": "already_sleeping"}),
+        ("wake", "force_wake", {"ok": True, "reason": "wake_queued"}),
+        ("consolidate", "force_rem", {"ok": True, "reason": "rem_queued"}),
     ],
 )
-def test_daemon_action_uses_control_protocol(action, expected_type, tmp_path):
+def test_daemon_action_uses_control_protocol(action, expected_type, reply, tmp_path):
     """sleep/wake/consolidate are CONTROL messages (type-protocol). A fake
     daemon socket must receive `type`, not a JSON-RPC `method`."""
     import shutil
@@ -1060,7 +1061,7 @@ def test_daemon_action_uses_control_protocol(action, expected_type, tmp_path):
                     break
                 buf += c
             seen["req"] = json.loads(buf)
-            conn.sendall(b'{"ok": true, "reason": "rem_queued"}\n')
+            conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
             conn.close()
         except OSError:
             pass
