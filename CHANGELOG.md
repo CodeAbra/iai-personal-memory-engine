@@ -42,7 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer applies a formality-relaxation adjustment based on that knob. Any host
   still calling `camouflaging_status` or reading/writing the removed knob must
   update to stop referencing them; historical audit-log rows recorded while the
-  feature was active remain queryable.
+  feature was active remain queryable. Thanks
+  [@tom-shields-stitch](https://github.com/tom-shields-stitch), whose analysis
+  showed the knob sitting at seed defaults on a real 33k-record store and whose
+  dead-path reports drove the surrounding cleanup.
 
 ### Fixed
 - A reader could briefly see fewer stored memories than were actually
