@@ -21,6 +21,9 @@ jobs:
     # (detected conflict: bin/cargo-clippy, then "can't find Rust compiler").
     env:
       RUSTUP_TOOLCHAIN: "1.87"
+      # Fresh stores default to the stdlib oracle; the prod engine runs only
+      # when this is set, so CI must set it or it tests the fallback, not lilli.
+      LILLI_STORAGE_DRIVER: "lilli"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
