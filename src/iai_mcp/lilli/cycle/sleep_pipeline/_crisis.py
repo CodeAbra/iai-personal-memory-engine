@@ -83,6 +83,7 @@ def step_crisis_recluster(
     new_community_count = 0
     modularity = 0.0
     backend = "flat"
+    total_communities = 0
 
     if size_rows:
         total_communities = len(size_rows)
@@ -260,6 +261,7 @@ def step_crisis_recluster(
     )
 
     return True, {
+        "total_communities": int(total_communities),
         "communities_dropped": int(communities_dropped),
         "dry_run": bool(dry_run),
     }

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 class _ControlledEmbedder:
     DIM = EMBED_DIM
@@ -352,11 +353,10 @@ def test_concept_mode_default_preserves_locked_baseline(tmp_path):
 
 def test_dispatch_verbatim_5_cue_variance_window(tmp_path, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
 
     (store, embedder, graph, assignment, rich_club,
      verbatim_ids_per_cue, hub_ids, cues) = _seed_5_verbatim_plus_10_hubs(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     positions: list[int] = []
     for cue in cues:
@@ -385,11 +385,10 @@ def test_dispatch_verbatim_5_cue_variance_window(tmp_path, monkeypatch):
 
 def test_dispatch_verbatim_position_1_strict_diagnostic_cue(tmp_path, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
 
     (store, embedder, graph, assignment, rich_club,
      verbatim_ids_per_cue, hub_ids, cues) = _seed_5_verbatim_plus_10_hubs(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue = cues[0]
     response = core.dispatch(
@@ -407,11 +406,10 @@ def test_dispatch_verbatim_position_1_strict_diagnostic_cue(tmp_path, monkeypatc
 
 def test_dispatch_verbatim_overrides_loose_knob_setting(tmp_path, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
 
     (store, embedder, graph, assignment, rich_club,
      verbatim_ids_per_cue, hub_ids, cues) = _seed_5_verbatim_plus_10_hubs(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     original_lp = core._profile_state.get("literal_preservation", "strong")
     core._profile_state["literal_preservation"] = "loose"

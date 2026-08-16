@@ -21,7 +21,6 @@ export const TOOL_NAMES = [
   "schema_list",
   "events_query",
   "topology",
-  "camouflaging_status",
   "episodes_recent",
   "memory_temporal_recall",
 ] as const;
@@ -292,7 +291,7 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
   profile_get_set: {
     name: "profile_get_set",
     description:
-      "Read or write a profile knob (11 sealed: 10 AUTIST + wake_depth). operation get|set; returns knob value.",
+      "Read or write a profile knob (10 sealed: 9 AUTIST + wake_depth). operation get|set; returns knob value.",
     inputSchema: {
       type: "object",
       properties: {
@@ -537,40 +536,6 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
         community_count: { type: "integer" },
         rich_club_ratio: { type: ["number", "null"] },
         regime: { type: "string" },
-      },
-    },
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
-    },
-  },
-  camouflaging_status: {
-    name: "camouflaging_status",
-    description:
-      "Detect formality/register camouflaging via weekly trajectory points (window_size). Read-only detector; does not relax register.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        window_size: {
-          type: "integer",
-          description:
-            "Weekly points in the sliding window (default 5). Larger " +
-            "windows smooth the formality trend at the cost of " +
-            "responsiveness to recent register shifts.",
-          default: 5,
-        },
-      },
-    },
-    outputSchema: {
-      type: "object",
-      properties: {
-        detected: { type: "boolean" },
-        trajectory_slope: { type: "number" },
-        current_mean: { type: "number" },
-        sample_count: { type: "integer" },
-        camouflaging_relaxation: { type: "number" },
       },
     },
     annotations: {
@@ -1111,8 +1076,6 @@ export async function invokeTool(
       return bridge.call("memory_recall_structural", args);
     case "topology":
       return bridge.call("topology", args);
-    case "camouflaging_status":
-      return bridge.call("camouflaging_status", args);
     case "episodes_recent": {
       try {
         return await bridge.call("episodes_recent", args);

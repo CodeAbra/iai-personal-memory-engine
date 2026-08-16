@@ -16,6 +16,9 @@ def _hit_to_json(h) -> dict:
         "valid_to": _vt.isoformat() if _vt is not None else None,
         "session_id": getattr(h, "session_id", None),
         "captured_at": getattr(h, "captured_at", None),
+        "community_id": (
+            str(_cid) if (_cid := getattr(h, "community_id", None)) is not None else None
+        ),
     }
 
 

@@ -49,6 +49,15 @@ pub enum EngineError {
     #[error("{0}")]
     ProgrammingError(String),
 
+    /// A UNIQUE / PRIMARY KEY violation on a plain INSERT or an `ON CONFLICT`
+    /// key-column rewrite that lands on a value a third row already holds.
+    /// Distinct from [`CorruptionKind::Integrity`] (structural on-disk damage,
+    /// which stays `Corruption` -> `DatabaseError`): this variant is a routine
+    /// constraint rejection -> `iai_mcp.errors.IntegrityError`, matching stdlib
+    /// sqlite3's class for the same violation.
+    #[error("{0}")]
+    Integrity(String),
+
     /// Unrecoverable storage corruption — a distinct class the boundary raises as
     /// a dedicated Python exception so the caller can quarantine rather than
     /// silently degrade.

@@ -29,6 +29,7 @@ from iai_mcp.migrate import (
     _swap_tables_filesystem,
     detect_partial_migration,
 )
+from iai_mcp.migrate._reembed import _create_canonical_staging
 
 
 log = logging.getLogger(__name__)
@@ -157,6 +158,16 @@ def _memory_record_from_raw_row_multikey(
     return rec
 
 
+def _duplicate_id_count(df) -> tuple[int, int]:
+    """`(total_rows, distinct_ids)` for a loaded `records` DataFrame.
+
+    A standalone function (rather than inlined) so a test can inject a
+    mismatch without depending on a driver-specific way to seed a genuine
+    duplicate id in the backing table.
+    """
+    return len(df), int(df["id"].nunique())
+
+
 def migrate_crypto_recover_prior_key(
     store: MemoryStore,
     prior_key: bytes,
@@ -190,6 +201,13 @@ def migrate_crypto_recover_prior_key(
     cur_key = store._key()
     key_chain = [cur_key] + [k for k in prior_generations if k != cur_key]
 
+    from iai_mcp.lilli.profile.persistence import reencrypt_profile_blob
+
+    profile_state_recovery = (
+        "dry_run" if dry_run
+        else reencrypt_profile_blob(store, key_chain, cur_key)
+    )
+
     names = _db_table_names_set(store.db)
     if CRYPTO_RECOVER_STAGING in names:
         try:
@@ -202,7 +220,13 @@ def migrate_crypto_recover_prior_key(
     orig_tbl = store.db.open_table(RECORDS_TABLE)
     orig_count = int(orig_tbl.count_rows())
     if orig_count == 0:
-        return {"no_op": True, "reason": "empty_store", "records_staged": 0, "dry_run": dry_run}
+        return {
+            "no_op": True,
+            "reason": "empty_store",
+            "records_staged": 0,
+            "dry_run": dry_run,
+            "profile_state": profile_state_recovery,
+        }
 
     df = orig_tbl.to_pandas()
     needs_prior = 0
@@ -232,6 +256,7 @@ def migrate_crypto_recover_prior_key(
             "reason": "all_rows_decrypt_with_current_key",
             "records_staged": 0,
             "dry_run": dry_run,
+            "profile_state": profile_state_recovery,
         }
 
     if dry_run:
@@ -240,16 +265,66 @@ def migrate_crypto_recover_prior_key(
             "dry_run": True,
             "would_stage": orig_count,
             "rows_needing_prior_key": needs_prior,
+            "profile_state": profile_state_recovery,
         }
 
-    schema = orig_tbl.schema
-    staging_tbl = store.db.create_table(CRYPTO_RECOVER_STAGING, schema=schema)
+    # Pre-flight distinct-id source guard: a duplicate id in `records` means the
+    # per-row re-fetch below (keyed by vec_label, not id) would still stage two
+    # rows that decrypt to the same logical identity — recovery refuses rather
+    # than amplifying a source that is already inconsistent. Reads the SAME
+    # in-memory `df` snapshot the staging loop below iterates (not a second
+    # query against the live table), so the check can never race a concurrent
+    # write; the row-count guard after the loop is blind to distinctness, this
+    # one is not. `COUNT(DISTINCT ...)` is not valid SQL on the native engine
+    # driver, hence the pandas dedup rather than a second aggregate query.
+    total_rows, distinct_ids = _duplicate_id_count(df)
+    if total_rows != distinct_ids:
+        raise RuntimeError(
+            f"crypto recover refused: records holds {total_rows} rows but only "
+            f"{distinct_ids} distinct ids — the source has a duplicate id and "
+            "recovery cannot proceed without amplifying it; restore from backup "
+            "or resolve the duplicate first"
+        )
+
+    staging_tbl = _create_canonical_staging(
+        store.db, table_name=CRYPTO_RECOVER_STAGING
+    )
     staged = 0
     t0 = time.time()
     for _, r in df.iterrows():
         row_dict = r.to_dict()
         rec = _memory_record_from_raw_row_multikey(store, row_dict, key_chain)
-        staging_tbl.add([store._to_row(rec)])
+        # Key the re-fetch by this row's OWN vec_label (the AUTOINCREMENT PK,
+        # always distinct), never by id: two source rows sharing an id would
+        # both resolve `WHERE id = ?` to the SAME physical row, collapsing one
+        # row's non-confidential columns (tier, structure_hv, vec_label, ...)
+        # onto the other's staged output. vec_label never collides.
+        vec_label = row_dict.get("vec_label")
+        with store.db.ro_conn() as conn:
+            source_row = conn.execute(
+                "SELECT * FROM records WHERE vec_label = ?", (int(vec_label),)
+            ).fetchone()
+        if source_row is None:
+            raise RuntimeError(
+                "source record disappeared during crypto recovery: "
+                f"vec_label={vec_label} id={rec.id}"
+            )
+        staged_row = dict(source_row)
+        # The staging table name is not "records", so add()'s _encrypt_rows gate
+        # is skipped entirely — the three confidential columns still hold prior-key
+        # ciphertext and MUST be re-keyed under the current key here, or the
+        # swapped-in store will not decrypt.
+        staged_row["literal_surface"] = store._encrypt_for_record(
+            rec.id, rec.literal_surface
+        )
+        staged_row["provenance_json"] = store._encrypt_for_record(
+            rec.id, json.dumps(rec.provenance)
+        )
+        staged_row["profile_modulation_gain_json"] = store._encrypt_for_record(
+            rec.id, json.dumps(rec.profile_modulation_gain or {})
+        )
+        staged_row["embedding"] = rec.embedding
+        staging_tbl.add([staged_row])
         staged += 1
 
     if staged != orig_count:
@@ -290,6 +365,7 @@ def migrate_crypto_recover_prior_key(
         "dry_run": False,
         "old_table": old_name,
         "rows_needed_prior_key": needs_prior,
+        "profile_state": profile_state_recovery,
     }
 
 

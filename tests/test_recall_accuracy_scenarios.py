@@ -40,6 +40,7 @@ from iai_mcp.pipeline import (
 )
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 _DIM = 16  # small synthetic dim; avoids loading the Rust embedder
 
@@ -153,9 +154,7 @@ def _make_rec(rid: UUID, surface: str, embedding: list[float]) -> MemoryRecord:
 
 
 def _stub_embedder_for_store(monkeypatch: pytest.MonkeyPatch, vec: list[float]) -> None:
-    import iai_mcp.embed as _embed_mod
-
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: _StubEmbedder(vec))
+    stub_embedder_for_store(monkeypatch, _StubEmbedder(vec))
 
 
 def _dispatch_traced_recall(store: MemoryStore, cue_vec: list[float], *, session_id: str) -> dict:

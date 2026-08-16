@@ -280,12 +280,108 @@ def cmd_capture_transcript(args: argparse.Namespace) -> int:
             session_id=args.session_id,
             max_turns=args.max_turns,
         )
+        _stamp_capture_batch_liveness(counts)
         print(json.dumps(counts, ensure_ascii=False))
         return 0
     except Exception as e:
         logger.error("capture-transcript inline failed: %s", e)
         print(f"capture-transcript: failed {type(e).__name__}: {e}", file=_sys.stderr)
         return 0
+
+
+def _stamp_capture_batch_liveness(counts: dict) -> None:
+    # A "reason" key means capture_transcript never opened a transcript at
+    # all (e.g. the path was missing) -- there were no genuine candidates,
+    # not a batch that ran and produced zero. Skip rather than fabricate a
+    # liveness row from an on-open failure.
+    if counts.get("reason"):
+        return
+    try:
+        from iai_mcp.lifecycle_event_log import _LIVENESS_SPEC_VERSION, LifecycleEventLog
+
+        log_root = os.environ.get("IAI_MCP_STORE")
+        log_dir = (Path(log_root) if log_root else Path.home() / ".iai-mcp") / "logs"
+        turns = sum(counts.get(k, 0) for k in ("inserted", "reinforced", "skipped"))
+        records = counts.get("inserted", 0) + counts.get("reinforced", 0)
+        LifecycleEventLog(log_dir=log_dir).append({
+            "event": "promise_liveness",
+            "promise": "capture_batch",
+            "liveness_candidates": turns,
+            "liveness_processed": records,
+            "liveness_spec_version": _LIVENESS_SPEC_VERSION,
+        })
+    except (OSError, ValueError) as exc:
+        logger.debug("capture_batch_liveness_append_failed: %s", exc)
+
+
+def _trajectory_last_recorded(store, session_id: str, metric: str) -> float | None:
+    # session_id-scoped at the SQL level -- an unrelated writer flooding
+    # trajectory_metric under other sessions must never evict this
+    # session's own dedup key from a fixed-size global window (the same
+    # horizon-eviction failure mode this phase's detector fix addresses).
+    from iai_mcp.events import query_events
+
+    for e in query_events(
+        store, kind="trajectory_metric", session_id=session_id, limit=200,
+    ):
+        data = e.get("data") or {}
+        if data.get("metric") != metric:
+            continue
+        try:
+            return float(data.get("value"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _drive_trajectory_metrics(session_id: str, state_dir: Path) -> None:
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.trajectory import (
+        compute_m1_clarifying_questions_per_session,
+        compute_m3_token_budget,
+        compute_m5_curiosity_frequency,
+        m2_precision_at_5_live,
+        m4_profile_movement_live,
+        m6_context_repeat_rate_live,
+        record_session_metrics,
+    )
+
+    with MemoryStore() as store:
+        per_session = {
+            "m1": compute_m1_clarifying_questions_per_session(store, session_id),
+            "m3": compute_m3_token_budget(store, session_id),
+            "m5": compute_m5_curiosity_frequency(store, session_id),
+        }
+        to_record = {
+            m: v for m, v in per_session.items()
+            if v != _trajectory_last_recorded(store, session_id, m)
+        }
+        if to_record:
+            record_session_metrics(store, session_id=session_id, metrics=to_record)
+
+        # Globals are store-wide, not session-scoped -- computed at most once per
+        # session so the per-turn cost stays a single cheap per-session write,
+        # not a repeated 10k-row scan (m6) plus buffer flush (m2) every turn.
+        globals_marker = state_dir / f"{session_id}.trajectory-globals-done"
+        if globals_marker.exists():
+            return
+
+        globals_vals = {
+            "m2": m2_precision_at_5_live(store),
+            "m4": m4_profile_movement_live(store),
+            "m6": m6_context_repeat_rate_live(store),
+        }
+        globals_to_record = {
+            m: v for m, v in globals_vals.items()
+            if v != _trajectory_last_recorded(store, "-", m)
+        }
+        if globals_to_record:
+            record_session_metrics(store, session_id="-", metrics=globals_to_record)
+
+        try:
+            globals_marker.touch(exist_ok=True)
+        except OSError:
+            pass
 
 
 def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
@@ -474,6 +570,12 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
             os.fsync(dfd)
         finally:
             os.close(dfd)
+
+        try:
+            _drive_trajectory_metrics(args.session_id, state_dir)
+        except Exception as exc:  # noqa: BLE001 -- best-effort, never blocks the turn capture
+            logger.debug("capture-turn-deferred trajectory driver failed: %s", exc)
+
         return 0
     except Exception as e:
         logger.error("capture-turn-deferred failed: %s", e)

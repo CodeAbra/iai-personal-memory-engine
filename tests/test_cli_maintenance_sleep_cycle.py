@@ -57,7 +57,7 @@ def _patch_pipeline_steps_to_noop(
 ) -> None:
     from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
 
-    for step, method_name in [
+    _NOOP_STEPS = [
         (SleepStep.SCHEMA_MINE, "_step_schema_mine"),
         (SleepStep.KNOB_TUNE, "_step_knob_tune"),
         (SleepStep.DREAM_DECAY, "_step_dream_decay"),
@@ -71,10 +71,13 @@ def _patch_pipeline_steps_to_noop(
         (SleepStep.DMN_REFLECTION, "_step_dmn_reflection"),
         (SleepStep.CLUSTER_SUMMARY, "_step_cluster_summary"),
         (SleepStep.RECALL_INDEX_REBUILD, "_step_recall_index_rebuild"),
-    (SleepStep.ENTITY_LINK, "_step_entity_link"),
+        (SleepStep.ENTITY_LINK, "_step_entity_link"),
         (SleepStep.CURIOSITY_MINE, "_step_curiosity_mine"),
         (SleepStep.EMBEDDING_INTEGRITY, "_step_embedding_integrity"),
-    ]:
+        (SleepStep.COMMUNITY_NAMING, "_step_community_naming"),
+    ]
+
+    for step, method_name in _NOOP_STEPS:
         def _make_noop(s=step):
             def _impl(self, _interrupt_check):
                 return True, {}
@@ -83,6 +86,8 @@ def _patch_pipeline_steps_to_noop(
         monkeypatch.setattr(
             SleepPipeline, method_name, _make_noop(),
         )
+
+    assert {s for s, _ in _NOOP_STEPS} == set(SleepPipeline._STEP_ORDER)
 
     monkeypatch.setattr(
         SleepPipeline,
@@ -103,22 +108,23 @@ def test_happy_path_runs_pipeline_and_prints_progress(
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sleep cycle started." in out
-    assert "[1/16] schema_mine" in out
-    assert "[2/16] knob_tune" in out
-    assert "[3/16] optimize_hippo" in out
-    assert "[4/16] hippo_cleanup" in out
-    assert "[5/16] dream_decay" in out
-    assert "[6/16] erasure_agent" in out
-    assert "[7/16] cluster_replay" in out
-    assert "[8/16] reconsolidation" in out
-    assert "[9/16] user_model_update" in out
-    assert "[10/16] dmn_reflection" in out
-    assert "[11/16] crisis_recluster" in out
-    assert "[12/16] cluster_summary" in out
-    assert "[13/16] recall_index_rebuild" in out
-    assert "[14/16] entity_link" in out
-    assert "[15/16] curiosity_mine" in out
-    assert "[16/16] embedding_integrity" in out
+    assert "[1/17] schema_mine" in out
+    assert "[2/17] knob_tune" in out
+    assert "[3/17] optimize_hippo" in out
+    assert "[4/17] hippo_cleanup" in out
+    assert "[5/17] dream_decay" in out
+    assert "[6/17] erasure_agent" in out
+    assert "[7/17] cluster_replay" in out
+    assert "[8/17] reconsolidation" in out
+    assert "[9/17] user_model_update" in out
+    assert "[10/17] dmn_reflection" in out
+    assert "[11/17] crisis_recluster" in out
+    assert "[12/17] cluster_summary" in out
+    assert "[13/17] recall_index_rebuild" in out
+    assert "[14/17] entity_link" in out
+    assert "[15/17] curiosity_mine" in out
+    assert "[16/17] embedding_integrity" in out
+    assert "[17/17] community_naming" in out
     assert "Sleep cycle complete" in out
 
 
@@ -172,8 +178,8 @@ def test_force_runs_pipeline_when_quarantined(
     rc = cmd_maintenance_sleep_cycle(_make_args(force=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[13/16] recall_index_rebuild" in out
-    assert "[14/16] entity_link" in out
+    assert "[13/17] recall_index_rebuild" in out
+    assert "[14/17] entity_link" in out
     assert "Sleep cycle complete" in out
 
     record_after = load_state(LIFECYCLE_STATE_PATH)
@@ -244,9 +250,9 @@ def test_failure_returns_nonzero_with_error_in_stderr(
     rc = cmd_maintenance_sleep_cycle(_make_args())
     assert rc == 1
     captured = capsys.readouterr()
-    assert "[1/16] schema_mine" in captured.out
-    assert "[2/16] knob_tune" in captured.out
-    assert "[3/16] optimize_hippo ... FAILED" in captured.err
+    assert "[1/17] schema_mine" in captured.out
+    assert "[2/17] knob_tune" in captured.out
+    assert "[3/17] optimize_hippo ... FAILED" in captured.err
     assert "synthetic optimize failure" in captured.err
 
 

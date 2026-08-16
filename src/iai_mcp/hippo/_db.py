@@ -66,8 +66,18 @@ class _MutationSignallingConn:
 
     A pooled read-only reader is a snapshot-at-open; it never live-tracks the
     writer. Without a staleness bump on EVERY mutating statement (not only
-    corpus-count-changing ones), a warm reader keeps serving pre-write field
-    values (e.g. an updated provenance_json) indefinitely.
+    corpus-count-changing ones), a warm reader would keep serving pre-write
+    field values (e.g. an updated provenance_json) indefinitely — this proxy
+    closes that hazard: it bumps the pool's generation counter on every
+    mutating statement AND on commit, so a warm slot refreshes on its next
+    borrow after any commit. Staleness through this proxy is bounded to at
+    most one borrow behind the last commit, and is zero for already-committed
+    data — a caller that borrows after a commit always sees it.
+
+    The only connection that evades this fence is a raw writer connection
+    opened outside the proxy; that path is forbidden by default and requires
+    an explicit opt-in from its caller (see the raw-connection primitive's
+    own contract for the opt-in and its staleness implications).
     """
 
     _MUTATING_VERBS = frozenset(
@@ -1516,6 +1526,14 @@ class HippoDB:
         exception raised by the caller's own use of the yielded connection
         (e.g. a rejected write attempt) propagates unchanged, exactly as it
         would from the shared writer connection.
+
+        The two branches are equivalent for reading already-committed data:
+        the stdlib branch yields the writer connection directly (autocommit
+        semantics, so a committed row is immediately visible on the same
+        connection); the lilli branch yields a generation-fenced pooled
+        snapshot, refreshed on borrow after the writer proxy's last commit,
+        and the underlying engine itself autocommits every execute. Neither
+        branch can observe a stale value for data that was actually committed.
         """
         pool = getattr(self, "_ro_pool", None)
         borrowed = None

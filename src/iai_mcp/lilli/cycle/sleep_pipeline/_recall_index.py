@@ -5,6 +5,7 @@ import time
 from contextlib import nullcontext
 from typing import Any, Callable
 
+from iai_mcp.lifecycle_event_log import _LIVENESS_SPEC_VERSION
 from iai_mcp.lilli.cycle.sleep_pipeline import SleepStep
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,18 @@ def step_recall_index_rebuild(
             result["lexical_index_warm"] = True
         except Exception as lex_exc:  # noqa: BLE001 -- warm-up is best-effort
             logger.debug("lexical warm-up failed: %s", lex_exc)
+
+        try:
+            self._event_log.append({
+                "event": "promise_liveness",
+                "promise": "warm_bm25_nightly",
+                "liveness_candidates": 1,
+                "liveness_processed": 1 if result.get("lexical_index_warm") else 0,
+                "liveness_spec_version": _LIVENESS_SPEC_VERSION,
+            })
+        except (OSError, ValueError) as exc:
+            logger.debug("best-effort promise_liveness event failed: %s", exc)
+
         return True, result
 
     except Exception as exc:  # noqa: BLE001 -- step must not crash the pipeline

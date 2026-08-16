@@ -27,6 +27,7 @@ TELEMETRY_RECALL_SOURCE: str = "recall_source"
 TELEMETRY_EMBED_CONSTRUCT: str = "embed_construct"
 TELEMETRY_MEMORY_RELIEF: str = "memory_relief"
 TELEMETRY_DRAIN_RSS_SOFT_CAP: str = "drain_rss_soft_cap"
+TELEMETRY_SHIELD_UNAVAILABLE: str = "shield_unavailable"
 
 DAEMON_WEDGE_KILL: str = "daemon_wedge_kill"
 DAEMON_MEMORY_PRESSURE_KILL: str = "daemon_memory_pressure_kill"
@@ -164,6 +165,7 @@ def query_events(
     severity: str | None = None,
     limit: int = 100,
     *,
+    session_id: str | None = None,
     since_exclusive: bool = False,
 ) -> list[dict]:
     # Lazy import — avoids a circular at module load between events <-> store/_store.
@@ -181,6 +183,9 @@ def query_events(
     if severity is not None:
         where_parts.append("severity = ?")
         params.append(severity)
+    if session_id is not None:
+        where_parts.append("session_id = ?")
+        params.append(session_id)
     if since is not None:
         # events.ts is always written by write_event via the raw-datetime
         # default adapter (space-form, full-microsecond TEXT). Normalize the

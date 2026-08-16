@@ -421,6 +421,7 @@ def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
         check_aa_capture_state_hygiene(),
         check_y_rss_24h_plateau(),
         check_bb_nightly_insight_mint(),
+        check_cc_background_liveness(),
         check_z_avx2_support(),
         check_plus_update_available(fetch=fetch_update),
     ]
@@ -1161,6 +1162,7 @@ from iai_mcp.doctor._lifecycle_checks import (
     check_b_socket_fresh,
     check_bb_nightly_insight_mint,
     check_c_lock_healthy,
+    check_cc_background_liveness,
     check_d_no_orphan_core,
     check_e_state_file_valid,
     check_g_no_dup_binders,
@@ -1230,4 +1232,5 @@ __all__ = [
     "check_y_rss_24h_plateau",
     "check_z_avx2_support",
     "check_bb_nightly_insight_mint",
+    "check_cc_background_liveness",
 ]

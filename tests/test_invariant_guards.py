@@ -12,9 +12,17 @@ Catalog:
 - Sealed registry: PROFILE_KNOBS has exactly 11 entries (daemon does NOT
   add knobs).
 - identity_audit.py does NOT import ProcessLock / concurrency module.
+- live/tombstoned_at co-occurrence: any source write that sets
+  `tombstoned_at` must set `live` in the same write, covering both
+  `values=` dict writes and SQL SET clauses (including f-strings).
+- migrate staging seam: within src/iai_mcp/migrate/, no `.add(...)` call
+  may be fed a row built by `store._to_row(...)` -- a full-table migrate
+  swap must stage byte-for-byte from the SQL row so storage-only columns
+  survive.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -291,17 +299,17 @@ def test_no_hardcoded_clock_time_in_quiet_window():
 
 
 # ---------------------------------------------------------------------------
-# Sealed registry: PROFILE_KNOBS has exactly 11 entries
-# (10 autistic-kernel + 1 operator wake_depth MCP-12)
+# Sealed registry: PROFILE_KNOBS has exactly 10 entries
+# (9 autistic-kernel + 1 operator wake_depth MCP-12)
 # ---------------------------------------------------------------------------
 
 def test_profile_knobs_still_sealed():
-    """11-knob registry is sealed. Daemon must not add new knobs. Transient
+    """10-knob registry is sealed. Daemon must not add new knobs. Transient
     state (hebbian-rate boost during developmental sigma, etc.) belongs in
     events or .daemon-state.json, never in PROFILE_KNOBS."""
     from iai_mcp import profile
-    assert len(profile.PROFILE_KNOBS) == 11, (
-        f"PROFILE_KNOBS unseal: expected 11, got {len(profile.PROFILE_KNOBS)}"
+    assert len(profile.PROFILE_KNOBS) == 10, (
+        f"PROFILE_KNOBS unseal: expected 10, got {len(profile.PROFILE_KNOBS)}"
     )
 
 
@@ -482,4 +490,236 @@ def test_hippea_cascade_is_read_only_against_store():
     offenders = [p for p in forbidden_calls if p in text]
     assert not offenders, (
         f"read-only violation: hippea_cascade.py contains store mutators: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# live/tombstoned_at co-occurrence guard
+#
+# Rule: any source write that sets `tombstoned_at` must set `live` in the
+# same write. Two shapes are checked:
+#
+#   Shape 1 -- a dict literal passed as the `values=` keyword of a call
+#   (`tbl.update(where=..., values={"tombstoned_at": ..., "live": ...})`).
+#   Gated on the `values=` keyword specifically so a plain dict that
+#   happens to carry a `tombstoned_at` key for an unrelated purpose (a
+#   journal record, a log payload) is never flagged.
+#
+#   Shape 2 -- a SQL string with a `SET` clause, covering both a plain
+#   `ast.Constant` string and an `ast.JoinedStr` (f-string). Only the
+#   segment between `SET` and `WHERE` is examined, so a WHERE clause that
+#   mentions `tombstoned_at` (a reconciliation pass correcting drift, or
+#   any read filter) is never flagged.
+#
+# Known blind spot: a dict passed positionally inside a list of tuples
+# (e.g. a hypothetical `update_many_by_id([(rid, {"tombstoned_at": now})])`)
+# is invisible to Shape 1, which gates on the `values=` keyword. Widening
+# Shape 1 to "any dict literal with a tombstoned_at key" would false-positive
+# on the journal-record shape above and require an allow-list that rots. No
+# seam uses the positional-tuple shape today; each verb's own
+# `COUNT(*) WHERE tombstoned_at IS NOT NULL AND live = 1 == 0` regression
+# assertion is the backstop for that blind spot.
+# ---------------------------------------------------------------------------
+
+# Anchored to the `UPDATE ... SET` shape (not a bare `SET`) so a docstring
+# or comment containing the English word "set" ahead of an unrelated
+# `tombstoned_at =` cannot false-positive and break the build.
+_SET_RE = re.compile(r"\bUPDATE\b.*?\bSET\b", re.IGNORECASE | re.DOTALL)
+_WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+_TOMBSTONED_AT_ASSIGN_RE = re.compile(r"tombstoned_at\s*=")
+_LIVE_ASSIGN_RE = re.compile(r"\blive\s*=")
+
+
+def _joinedstr_skeleton(node: ast.JoinedStr) -> str:
+    """Concatenate the constant fragments of an f-string; interpolated
+    values become a single-space gap so surrounding literal text stays
+    adjacent for a `SET ... WHERE` scan."""
+    parts: list[str] = []
+    for value in node.values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            parts.append(value.value)
+        else:
+            parts.append(" ")
+    return "".join(parts)
+
+
+def _set_segment(text: str) -> str | None:
+    """Return the substring between the first `SET` and the next `WHERE`
+    (case-insensitive), or None if the text carries no `SET` clause."""
+    set_match = _SET_RE.search(text)
+    if set_match is None:
+        return None
+    start = set_match.end()
+    where_match = _WHERE_RE.search(text, start)
+    end = where_match.start() if where_match is not None else len(text)
+    return text[start:end]
+
+
+class _TombstoneLiveVisitor(ast.NodeVisitor):
+    def __init__(self, file: Path) -> None:
+        self.file = file
+        self.violations: list[tuple[Path, str, int]] = []
+        self.candidates = 0
+
+    def visit_Call(self, node: ast.Call) -> None:
+        for kw in node.keywords:
+            if kw.arg == "values" and isinstance(kw.value, ast.Dict):
+                self._check_dict(kw.value)
+        self.generic_visit(node)
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+        self._check_sql(_joinedstr_skeleton(node), node.lineno)
+        # Do not generic_visit: the constant fragments below this node have
+        # already been folded into the skeleton above, and visiting them
+        # separately would both double-count candidates and lose the
+        # cross-fragment SET...WHERE span.
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str):
+            self._check_sql(node.value, node.lineno)
+
+    def _check_dict(self, node: ast.Dict) -> None:
+        keys = {
+            k.value
+            for k in node.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        if "tombstoned_at" not in keys:
+            return
+        self.candidates += 1
+        if "live" not in keys:
+            self.violations.append((
+                self.file,
+                "values= dict sets tombstoned_at without live",
+                node.lineno,
+            ))
+
+    def _check_sql(self, text: str, lineno: int) -> None:
+        segment = _set_segment(text)
+        if segment is None:
+            return
+        if not _TOMBSTONED_AT_ASSIGN_RE.search(segment):
+            return
+        self.candidates += 1
+        if not _LIVE_ASSIGN_RE.search(segment):
+            self.violations.append((
+                self.file,
+                "SQL SET clause sets tombstoned_at without live",
+                lineno,
+            ))
+
+
+def test_tombstoned_at_write_derives_live_in_same_write():
+    """A write that sets `tombstoned_at` must also set `live` in the same
+    write -- a removed record left with `live = 1` stays reachable on the
+    live-indexed direct recency rail even after this scan is green."""
+    all_violations: list[tuple[Path, str, int]] = []
+    total_candidates = 0
+    for f in _all_iai_mcp_files():
+        tree = ast.parse(f.read_text(), filename=str(f))
+        visitor = _TombstoneLiveVisitor(f)
+        visitor.visit(tree)
+        all_violations.extend(visitor.violations)
+        total_candidates += visitor.candidates
+
+    assert not all_violations, "a write sets tombstoned_at without live:\n" + "\n".join(
+        f"  {path}:{lineno} -- {detail}" for path, detail, lineno in all_violations
+    )
+    assert total_candidates >= 6, (
+        f"only found {total_candidates} tombstoned_at write candidates across "
+        "src/iai_mcp/ -- expected at least 6; the scan is broken (renamed "
+        "column, moved file, or a regex that stopped matching), not clean"
+    )
+
+
+def test_tombstoned_at_guard_scan_is_actually_populated():
+    """The guard above fails silent (a scan resolving to zero files, or a
+    regex that stopped matching, passes forever). Pin the scanned file list
+    non-empty and confirm two known seams are actually in it."""
+    scanned = _all_iai_mcp_files()
+    assert scanned, "live/tombstoned_at guard scan resolved to an empty file list"
+    assert (SRC / "migrate" / "_blob_quarantine.py") in scanned
+    assert (SRC / "migrate" / "_dedupe.py") in scanned
+
+
+# ---------------------------------------------------------------------------
+# migrate staging seam guard: no `.add(...)` call in src/iai_mcp/migrate/ may
+# be fed a row built by `store._to_row(...)`. `_to_row` is an insert
+# serializer -- it drops storage-only columns (tombstoned_at, live,
+# embedding_pending, valence) and regenerates vec_label. A full-table
+# migrate swap must stage byte-for-byte from the SQL row instead.
+# ---------------------------------------------------------------------------
+
+MIGRATE_DIR = SRC / "migrate"
+
+
+def _migrate_files() -> list[Path]:
+    return sorted(MIGRATE_DIR.glob("*.py"))
+
+
+class _ToRowIntoAddVisitor(ast.NodeVisitor):
+    def __init__(self, file: Path) -> None:
+        self.file = file
+        self.violations: list[tuple[Path, int]] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add":
+            for arg in node.args:
+                candidates = arg.elts if isinstance(arg, ast.List) else [arg]
+                for candidate in candidates:
+                    if self._contains_to_row_call(candidate):
+                        self.violations.append((self.file, node.lineno))
+                        break
+        self.generic_visit(node)
+
+    def _contains_to_row_call(self, node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "_to_row"
+            ):
+                return True
+        return False
+
+
+def test_migrate_add_never_fed_by_to_row():
+    """A full-table migrate swap (crypto recovery, re-embedding, etc.) must
+    stage rows byte-for-byte from the source SQL row. `store._to_row(...)`
+    is the fresh-insert serializer; feeding its output into a staging
+    `.add(...)` drops tombstoned_at/live/embedding_pending/valence and
+    regenerates vec_label."""
+    all_violations: list[tuple[Path, int]] = []
+    for f in _migrate_files():
+        tree = ast.parse(f.read_text(), filename=str(f))
+        visitor = _ToRowIntoAddVisitor(f)
+        visitor.visit(tree)
+        all_violations.extend(visitor.violations)
+
+    assert not all_violations, (
+        "migrate staging seam violation: .add(...) fed by store._to_row(...):\n"
+        + "\n".join(f"  {path}:{lineno}" for path, lineno in all_violations)
+    )
+
+
+def test_migrate_guard_scan_is_actually_populated():
+    """Non-vacuity: a repath that empties the migrate scan must fail loud,
+    not silently pass every migrate file forever."""
+    scanned = _migrate_files()
+    assert scanned, "migrate staging-seam guard scan resolved to an empty file list"
+    for f in scanned:
+        ast.parse(f.read_text(), filename=str(f))
+    assert (MIGRATE_DIR / "_crypto_mig.py") in scanned
+
+
+def test_to_row_into_add_visitor_flags_planted_violation():
+    """Positive control: prove the visitor actually flags a planted
+    violation, not just passes vacuously because no real file trips it."""
+    source = "tbl.add([o._to_row(r)])\n"
+    tree = ast.parse(source, filename="<synthetic>")
+    visitor = _ToRowIntoAddVisitor(Path("<synthetic>"))
+    visitor.visit(tree)
+    assert len(visitor.violations) == 1, (
+        f"expected exactly one violation for a planted .add([o._to_row(r)]) "
+        f"call, got {visitor.violations}"
     )

@@ -148,17 +148,34 @@ def test_reembed_upgrades_dim_and_preserves_all_non_embedding_fields(
 def test_reembed_table_swap_and_dimension_metadata_are_atomic(tmp_path, monkeypatch):
     store = _fresh_store(tmp_path, 384, monkeypatch)
     _seed_records(store, _DimEmbedder(384), n=2)
-    with store.db._conn_lock:
-        store.db._conn.execute(
-            """
-            CREATE TRIGGER reject_embed_dim_update
-            BEFORE UPDATE ON _hippo_meta
-            WHEN NEW.key = 'embed_dim'
-            BEGIN
-                SELECT RAISE(ABORT, 'simulated metadata failure');
-            END
-            """
-        )
+
+    # Both storage-driver connection wrappers reject instance-attribute
+    # assignment on `execute` (delegate to a read-only-attribute driver
+    # object); patch the wrapper CLASS instead, which class-level setattr
+    # reaches directly, and delegate every non-matching statement to the
+    # original bound method unchanged.
+    conn_cls = type(store.db._conn)
+    _orig_execute = conn_cls.execute
+
+    def _flatten(values):
+        for v in values:
+            if isinstance(v, (tuple, list)):
+                yield from _flatten(v)
+            else:
+                yield v
+
+    def _raise_on_meta_update(self, sql, *args, **kwargs):
+        bound = list(_flatten(args)) + list(_flatten(kwargs.values()))
+        if (
+            isinstance(sql, str)
+            and sql.lstrip().upper().startswith("UPDATE")
+            and "_hippo_meta" in sql
+            and ("embed_dim" in sql or "embed_dim" in bound)
+        ):
+            raise errors.IntegrityError("simulated metadata failure")
+        return _orig_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(conn_cls, "execute", _raise_on_meta_update)
 
     from iai_mcp.migrate import migrate_reembed_to_current_dim
 

@@ -44,12 +44,27 @@ def _make_record(store, text: str):
 
 
 def _forge_constraintless_records(store) -> None:
-    """Recreate `records` the way the buggy migration did: CREATE TABLE AS
-    SELECT drops every constraint (no PRIMARY KEY alias), then NULL out
-    vec_label like a post-swap insert would have left it."""
+    """Recreate `records` the way the buggy migration did: a constraintless
+    copy (no PRIMARY KEY alias), then NULL out vec_label like a post-swap
+    insert would have left it.
+
+    Row-by-row reinsert, not INSERT...SELECT: the lilli engine's INSERT
+    grammar requires an explicit VALUES list.
+    """
     with store.db._conn_lock:
         conn = store.db._conn
-        conn.execute("CREATE TABLE records_damaged AS SELECT * FROM records")
+        cols = conn.execute("PRAGMA table_info(records)").fetchall()
+        col_names = [c["name"] for c in cols]
+        coldefs = ", ".join(f"[{c['name']}] {c['type']}" for c in cols)
+        conn.execute(f"CREATE TABLE records_damaged ({coldefs})")
+        rows = [dict(row) for row in conn.execute("SELECT * FROM records").fetchall()]
+        col_list = ", ".join(f"[{c}]" for c in col_names)
+        placeholders = ", ".join(["?"] * len(col_names))
+        for row in rows:
+            conn.execute(
+                f"INSERT INTO records_damaged ({col_list}) VALUES ({placeholders})",
+                [row[c] for c in col_names],
+            )
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_damaged RENAME TO records")
         conn.execute("UPDATE records SET vec_label = NULL")

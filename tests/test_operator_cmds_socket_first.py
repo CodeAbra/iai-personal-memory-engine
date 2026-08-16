@@ -225,13 +225,13 @@ class TestCmdAuditSocketPath:
     def test_drift_mode_renders_alerts_from_socket(self):
         from iai_mcp.cli import cmd_audit
 
-        alerts = [{"window_sessions": 5, "first_value": 0.1, "last_value": 0.9}]
+        alerts = [{"cycles": 5, "first_value": 0.1, "last_value": 0.9}]
         payload = {"alerts": alerts, "count": 1}
         with patch("iai_mcp.cli._send_jsonrpc_request", return_value=_rpc_ok(payload)), \
              patch("iai_mcp.store.MemoryStore") as mock_store:
             out, rc = _capture(lambda: cmd_audit(_args(audit_sub="drift", since=None, severity=None)))
         assert rc == 0
-        assert "variance increasing" in out
+        assert "knob movement rising" in out
         mock_store.assert_not_called()
 
     def test_socket_down_audit_all_fallback_runs(self):
@@ -251,7 +251,7 @@ class TestCmdAuditSocketPath:
 
         with patch("iai_mcp.cli._send_jsonrpc_request", return_value=None), \
              patch("iai_mcp.store.MemoryStore") as mock_ms, \
-             patch("iai_mcp.s5.detect_drift_anomaly", return_value=[]):
+             patch("iai_mcp.s5.detect_drift_anomaly", return_value=([], 0, 0)):
             out, rc = _capture(lambda: cmd_audit(_args(audit_sub="drift", since=None, severity=None)))
         assert rc == 0
         assert "no anomaly" in out

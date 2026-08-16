@@ -1,5 +1,5 @@
-"""Autistic-cognition profile registry -- 11 sealed knobs (10 AUTIST + 1 wake_depth),
-Bayesian tuner, camouflaging + double_empathy invariants.
+"""Autistic-cognition profile registry -- 10 sealed knobs (9 AUTIST + 1 wake_depth),
+Bayesian tuner, double_empathy invariant.
 
 Retrieval-policy RL and trust refinement are exposed from lilli.profile.tuner.
 
@@ -24,6 +24,13 @@ from iai_mcp.lilli.profile.knobs import (
     bayesian_update,
     profile_modulation_for_record,
 )
+from iai_mcp.lilli.profile.persistence import (
+    PROFILE_META_KEY,
+    PROFILE_BLOB_VERSION,
+    save_profile_state,
+    load_profile_state,
+    hydrate_profile,
+)
 
 __all__ = [
     "KnobSpec",
@@ -37,4 +44,9 @@ __all__ = [
     "profile_set",
     "bayesian_update",
     "profile_modulation_for_record",
+    "PROFILE_META_KEY",
+    "PROFILE_BLOB_VERSION",
+    "save_profile_state",
+    "load_profile_state",
+    "hydrate_profile",
 ]

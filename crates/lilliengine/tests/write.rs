@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use lillibrain::{Store, Value};
 use lilliengine::ast::Stmt;
 use lilliengine::catalog::Catalog;
+use lilliengine::conn::Connection;
 use lilliengine::exec::{
     execute_delete, execute_insert, execute_insert_many, execute_select, execute_update, ColIndex,
     ConflictIndex, IdIndex, TxnScope, WriteOutcome,
@@ -323,12 +324,20 @@ fn insert_next_key_via_max_key_no_full_scan_per_row() {
     // next key from Tree::max_key (O(tree-height)), so the store's full-scan
     // counter stays at zero across the whole loop. A per-row full scan (the
     // O(rows^2) killer) would lift it.
+    //
+    // The UNIQUE-column enforcement probe (records.id) rides the SAME
+    // conflict-index discipline as ON CONFLICT: lazily built once, then O(1)
+    // per row. A persistent index is threaded through the loop (`insert_cidx`,
+    // matching how the connection shim always supplies one for `.add`) so the
+    // probe never degrades to the unindexed full-scan fallback.
     let f = Fixture::new(&[DDL_RECORDS]);
+    let mut cidx = ConflictIndex::default();
     f.store.reset_full_scan_count();
     for i in 0..2000 {
-        f.insert(
+        f.insert_cidx(
             "INSERT INTO records (id, n) VALUES (?, ?)",
             vec![t(&format!("id-{i}")), Value::Int(i)],
+            &mut cidx,
         );
     }
     assert_eq!(
@@ -342,6 +351,215 @@ fn insert_next_key_via_max_key_no_full_scan_per_row() {
     assert_eq!(
         Fixture::cell(rows.last().unwrap(), "vec_label"),
         Value::Int(2000)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Plain-INSERT UNIQUE/PK enforcement (no ON CONFLICT / OR IGNORE / OR REPLACE)
+// ---------------------------------------------------------------------------
+
+// A table carrying a nullable column-level UNIQUE (unlike DDL_RECORDS' `id`,
+// which is NOT NULL UNIQUE) — exercises the NULL-never-conflicts case.
+const DDL_TAGS_NULLABLE_UNIQUE: &str =
+    "CREATE TABLE IF NOT EXISTS tags ( n INTEGER , tag TEXT UNIQUE )";
+
+#[test]
+fn plain_insert_duplicate_id_raises_integrity_error() {
+    let f = Fixture::new(&[DDL_RECORDS]);
+    let mut cidx = ConflictIndex::default();
+    f.insert_cidx(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+        &mut cidx,
+    );
+    let err = f
+        .try_insert_cidx(
+            "INSERT INTO records (id, n) VALUES (?, ?)",
+            vec![t("a"), Value::Int(2)],
+            &mut cidx,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Integrity(_)),
+        "expected EngineError::Integrity, got {err:?}"
+    );
+    assert!(
+        format!("{err}").contains("UNIQUE constraint failed: records.id"),
+        "got: {err}"
+    );
+    assert_eq!(f.rows("records").len(), 1, "the duplicate must not land");
+}
+
+#[test]
+fn plain_insert_duplicate_id_raises_without_a_caller_supplied_index() {
+    // The unindexed fallback (no ConflictIndex threaded by the caller) must
+    // also enforce — a one-off raw `execute()` with no session-level cache.
+    let f = Fixture::new(&[DDL_RECORDS]);
+    f.insert(
+        "INSERT INTO records (id, n) VALUES (?, ?)",
+        vec![t("a"), Value::Int(1)],
+    );
+    let stmt = match parse("INSERT INTO records (id, n) VALUES (?, ?)").unwrap() {
+        Stmt::Insert(i) => i,
+        _ => unreachable!(),
+    };
+    let err = execute_insert(
+        &stmt,
+        &f.store,
+        &f.meta,
+        &f.catalog,
+        &f.root_map,
+        vec![t("a"), Value::Int(2)],
+        None,
+        TxnScope::Own,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+    assert_eq!(f.rows("records").len(), 1);
+}
+
+#[test]
+fn plain_insert_composite_pk_duplicate_raises_integrity_error() {
+    let f = Fixture::new(&[DDL_EDGES]);
+    let mut cidx = ConflictIndex::default();
+    f.insert_cidx(
+        "INSERT INTO edges (src, dst, edge_type, weight) VALUES (?, ?, ?, ?)",
+        vec![t("a"), t("b"), t("rel"), Value::Float(1.0)],
+        &mut cidx,
+    );
+    let err = f
+        .try_insert_cidx(
+            "INSERT INTO edges (src, dst, edge_type, weight) VALUES (?, ?, ?, ?)",
+            vec![t("a"), t("b"), t("rel"), Value::Float(2.0)],
+            &mut cidx,
+        )
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+    assert!(
+        format!("{err}").contains("UNIQUE constraint failed: edges.src, edges.dst, edges.edge_type"),
+        "got: {err}"
+    );
+    assert_eq!(f.rows("edges").len(), 1, "the duplicate composite key must not land");
+}
+
+#[test]
+fn plain_insert_null_unique_member_never_conflicts() {
+    let f = Fixture::new(&[DDL_TAGS_NULLABLE_UNIQUE]);
+    let mut cidx = ConflictIndex::default();
+    f.insert_cidx(
+        "INSERT INTO tags (n, tag) VALUES (?, ?)",
+        vec![Value::Int(1), Value::Null],
+        &mut cidx,
+    );
+    f.insert_cidx(
+        "INSERT INTO tags (n, tag) VALUES (?, ?)",
+        vec![Value::Int(2), Value::Null],
+        &mut cidx,
+    );
+    assert_eq!(
+        f.rows("tags").len(),
+        2,
+        "a NULL UNIQUE member is distinct from every other NULL, so both insert"
+    );
+}
+
+#[test]
+fn executemany_intra_batch_duplicate_id_rolls_back_whole_batch() {
+    let f = Fixture::new(&[DDL_RECORDS]);
+    let stmt = match parse("INSERT INTO records (id, n) VALUES (?, ?)").unwrap() {
+        Stmt::Insert(i) => i,
+        _ => unreachable!(),
+    };
+    let seq = vec![
+        vec![t("a"), Value::Int(1)],
+        vec![t("b"), Value::Int(2)],
+        vec![t("a"), Value::Int(3)], // intra-batch dup of row 1's id
+    ];
+    let mut cidx = ConflictIndex::default();
+    let err = execute_insert_many(
+        &stmt,
+        &f.store,
+        &f.meta,
+        &f.catalog,
+        &f.root_map,
+        seq,
+        None,
+        Some(&mut cidx),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+    assert!(format!("{err}").contains("UNIQUE constraint failed: records.id"));
+    assert_eq!(
+        f.rows("records").len(),
+        0,
+        "an intra-batch duplicate must roll back the whole batch"
+    );
+}
+
+#[test]
+fn plain_insert_naming_vec_label_rejects_duplicate_id() {
+    // A plain INSERT that explicitly names vec_label (the one-time migration
+    // import shape) must still enforce records.id, exactly like the auto-injected
+    // vec_label path above.
+    let f = Fixture::new(&[DDL_RECORDS]);
+    // Row one predates the conflict index: no cidx is threaded, so the row
+    // exists in the tree before the index's first lazy-build scan ever runs.
+    f.insert("INSERT INTO records (id) VALUES (?)", vec![t("alice")]);
+    let mut cidx = ConflictIndex::default();
+    let result = f.try_insert_cidx(
+        "INSERT INTO records (vec_label, id) VALUES (?, ?)",
+        vec![Value::Int(2), t("alice")],
+        &mut cidx,
+    );
+    let rows_after = f.rows("records").len();
+    eprintln!("FAILOPEN rows_after={rows_after}");
+    let err = result.unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+    assert_eq!(rows_after, 1, "a vec_label-named duplicate id must not land");
+}
+
+#[test]
+fn intra_batch_duplicate_id_naming_vec_label_rolls_back() {
+    // Maintenance-block routing guard: two rows in one batch, both naming
+    // vec_label with distinct vec_label but the same id, must roll the whole
+    // batch back. May already pass on the pre-fix shared map (tuple 1's
+    // maintenance loop happens to file the id-keyed entry too); it must stay
+    // green through the per-key-set refactor either way.
+    let f = Fixture::new(&[DDL_RECORDS]);
+    let stmt = match parse("INSERT INTO records (vec_label, id) VALUES (?, ?)").unwrap() {
+        Stmt::Insert(i) => i,
+        _ => unreachable!(),
+    };
+    let seq = vec![
+        vec![Value::Int(1), t("alice")],
+        vec![Value::Int(2), t("alice")], // intra-batch dup of row 1's id, distinct vec_label
+    ];
+    let mut cidx = ConflictIndex::default();
+    let err = execute_insert_many(
+        &stmt,
+        &f.store,
+        &f.meta,
+        &f.catalog,
+        &f.root_map,
+        seq,
+        None,
+        Some(&mut cidx),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+    assert!(format!("{err}").contains("UNIQUE constraint failed: records.id"));
+    assert_eq!(
+        f.rows("records").len(),
+        0,
+        "an intra-batch duplicate naming vec_label must roll back the whole batch"
     );
 }
 
@@ -1587,4 +1805,76 @@ fn conflict_rekey_through_both_indexes_inserts_old_key_fresh() {
         vec![1, 2],
         "both the moved row (k=2) and the fresh old-key row (k=1) survive"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Connection-level conflict-cache coherence across a mixed key-set workload
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_then_insert_on_other_keyset_is_enforced() {
+    // Drives the connection's own conflict-cache selection (not the raw exec.rs
+    // API), the surface this regression actually targets: a plain INSERT that
+    // does not name vec_label routes to the table's `id` key-set on first use,
+    // while a plain INSERT that DOES name vec_label routes to the `vec_label`
+    // key-set instead. A single-slot-per-table connection cache serves both
+    // through the SAME object (per-key-set maps, closed above); a
+    // per-(table, key-set) cache would instead give the two statement shapes
+    // two DISTINCT cache objects, and an UPDATE that invalidates only the
+    // first one `HashMap::iter_mut().find()` happens to return can strand the
+    // other with a stale, pre-UPDATE view of the table.
+    //
+    // Two duplicates are checked, one insert style each, so the regression is
+    // deterministic regardless of which cache object a random-iteration-order
+    // HashMap would have picked: under the old per-(table, key-set) cache,
+    // exactly one of them fails open no matter which entry the UPDATE
+    // invalidated.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("t.lilli");
+    let mut conn = Connection::open(path.to_str().unwrap(), 384).unwrap();
+    conn.execute(DDL_RECORDS, vec![]).unwrap();
+
+    // Unnamed vec_label -> routes to the table's `id` key-set on first use.
+    conn.execute(
+        "INSERT INTO records (id) VALUES (?)",
+        vec![t("alice")],
+    )
+    .unwrap();
+    // Named vec_label -> routes to the table's `vec_label` key-set instead.
+    conn.execute(
+        "INSERT INTO records (vec_label, id) VALUES (?, ?)",
+        vec![Value::Int(100), t("bob")],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO records (id) VALUES (?)",
+        vec![t("carol")],
+    )
+    .unwrap();
+
+    // An UPDATE that touches neither vec_label nor id.
+    conn.execute(
+        "UPDATE records SET n = ? WHERE id = ?",
+        vec![Value::Int(99), t("alice")],
+    )
+    .unwrap();
+
+    // A fresh named-vec_label INSERT duplicating carol's id must still raise.
+    let err = conn
+        .execute(
+            "INSERT INTO records (vec_label, id) VALUES (?, ?)",
+            vec![Value::Int(200), t("carol")],
+        )
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+
+    // A fresh unnamed-vec_label INSERT duplicating bob's id must still raise.
+    let err = conn
+        .execute("INSERT INTO records (id) VALUES (?)", vec![t("bob")])
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Integrity(_)), "got {err:?}");
+
+    let mut cur = conn.execute("SELECT * FROM records", vec![]).unwrap();
+    let rows = cur.fetchall();
+    assert_eq!(rows.len(), 3, "neither duplicate must land");
 }

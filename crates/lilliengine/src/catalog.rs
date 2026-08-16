@@ -28,6 +28,9 @@ pub struct ColumnMeta {
     pub nullable: bool,
     /// True when the column participates in the table's PRIMARY KEY.
     pub primary_key: bool,
+    /// True when the column carries a column-level `UNIQUE` constraint.
+    /// Table-level `UNIQUE(...)` and `CREATE UNIQUE INDEX` are not reflected here.
+    pub unique: bool,
     /// The column `DEFAULT`, or `None` when no default was declared. A declared
     /// `DEFAULT NULL` is carried as `Some(Value::Null)`, distinct from `None`.
     pub default: Option<Value>,
@@ -41,6 +44,7 @@ impl ColumnMeta {
             affinity: affinity.into(),
             nullable: true,
             primary_key: false,
+            unique: false,
             default: None,
         }
     }
@@ -248,6 +252,34 @@ impl Catalog {
             .collect())
     }
 
+    /// Every UNIQUE / PRIMARY KEY key-set tracked for `table`: the PRIMARY KEY
+    /// columns (if any) as one composite key-set, plus each column carrying a
+    /// column-level `UNIQUE` constraint as its own singleton key-set. Identical
+    /// key-sets are de-duplicated. Table-level `UNIQUE(...)` and `CREATE UNIQUE
+    /// INDEX` are not represented — Tier-1 (column-level) enforcement only.
+    /// Empty when `table` has neither a PRIMARY KEY nor a UNIQUE column.
+    pub fn unique_keysets(&self, table: &str) -> Result<Vec<Vec<String>>> {
+        let cols = self.get(table)?;
+        let mut keysets: Vec<Vec<String>> = Vec::new();
+        let pk: Vec<String> = cols
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.clone())
+            .collect();
+        if !pk.is_empty() {
+            keysets.push(pk);
+        }
+        for c in cols {
+            if c.unique {
+                let singleton = vec![c.name.clone()];
+                if !keysets.contains(&singleton) {
+                    keysets.push(singleton);
+                }
+            }
+        }
+        Ok(keysets)
+    }
+
     /// The PRAGMA `table_info(table)` rows: `(cid, name, type, notnull,
     /// dflt_value, pk)` per column. `dflt_value` is the declared default
     /// rendered to its stored cell, or `Value::Null` when none was declared.
@@ -427,6 +459,7 @@ impl Catalog {
 
             let mut nullable = true;
             let mut primary_key = false;
+            let mut unique = false;
             let mut default: Option<Value> = None;
             while !matches!(w.peek_upper().as_str(), "," | ")" | "") {
                 match w.peek_upper().as_str() {
@@ -446,6 +479,7 @@ impl Catalog {
                         w.advance();
                     }
                     "UNIQUE" => {
+                        unique = true;
                         w.advance();
                     }
                     "DEFAULT" => {
@@ -468,6 +502,7 @@ impl Catalog {
             let mut col = ColumnMeta::new(col_name, affinity);
             col.nullable = nullable;
             col.primary_key = primary_key;
+            col.unique = unique;
             // A declared default is stored in the column's affinity, matching the
             // storage class sqlite3 would persist for that column type.
             col.default = default.map(|d| coerce_affinity(d, &col.affinity));

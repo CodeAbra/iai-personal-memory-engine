@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -11,7 +10,8 @@ from pathlib import Path
 import psutil
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from _live_harness import REPO, _kill_test_daemons, _wait_for_daemon_socket
+
 WRAPPER = REPO / "mcp-wrapper"
 
 
@@ -59,31 +59,6 @@ def _count_iai_mcp_processes(root_pid: int) -> dict[str, int]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return counts
-
-
-def _kill_test_daemons(sock_path: Path) -> None:
-    target = str(sock_path)
-    res = subprocess.run(
-        ["lsof", "-U", "-F", "pn"],
-        capture_output=True, text=True, check=False,
-    )
-    current: int | None = None
-    pids: set[int] = set()
-    for line in res.stdout.splitlines():
-        if line.startswith("p"):
-            try:
-                current = int(line[1:])
-            except ValueError:
-                current = None
-        elif line.startswith("n") and current is not None and line[1:] == target:
-            pids.add(current)
-    for pid in pids:
-        try:
-            cl = " ".join(psutil.Process(pid).cmdline())
-            if "iai_mcp.daemon" in cl:
-                psutil.Process(pid).send_signal(signal.SIGTERM)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
 
 
 def _spawn_wrapper(
@@ -183,15 +158,6 @@ def _call_memory_recall(
     return elapsed, json.loads(line.decode("utf-8"))
 
 
-def _wait_for_daemon_socket(sock_path: Path, timeout_sec: float = 30.0) -> bool:
-    deadline = time.monotonic() + timeout_sec
-    while time.monotonic() < deadline:
-        if sock_path.exists():
-            return True
-        time.sleep(0.1)
-    return False
-
-
 def test_start_throws_DaemonUnreachableError_when_socket_missing(
     built_wrapper, tmp_path
 ):
@@ -239,8 +205,8 @@ def test_start_throws_DaemonUnreachableError_when_socket_missing(
         assert "result" in list_resp, f"tools/list error: {list_resp}"
         tools = list_resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert len(names) == 15, (
-            f"tools/list returned {len(names)} tools, expected 15. "
+        assert len(names) == 14, (
+            f"tools/list returned {len(names)} tools, expected 14. "
             f"names={sorted(names)}"
         )
         meta = list_resp["result"].get("_meta") or {}

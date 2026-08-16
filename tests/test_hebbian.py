@@ -65,7 +65,7 @@ def test_profile_get_returns_live_knobs(tmp_path):
     assert result["live"]["task_support"] == "cued_recognition"
     assert result["live"]["scene_construction_scaffold"] is True
     assert result["live"]["wake_depth"] == "minimal"
-    assert len(result["live"]) == 11
+    assert len(result["live"]) == 10
     assert len(result["deferred"]) == 0
 
 
@@ -74,23 +74,6 @@ def test_profile_get_specific_live_knob(tmp_path):
     result = dispatch(store, "profile_get", {"knob": "literal_preservation"})
     assert result["knob"] == "literal_preservation"
     assert result["value"] == "strong"
-
-
-def test_profile_get_camouflaging_now_live_after_autist13_flip(tmp_path):
-    import iai_mcp.core as core
-    core._profile_state["camouflaging_relaxation"] = 0.0
-
-    store = MemoryStore(path=tmp_path)
-    result = dispatch(store, "profile_get", {"knob": "camouflaging_relaxation"})
-    assert result["knob"] == "camouflaging_relaxation"
-    assert result["value"] == 0.0
-
-
-def test_profile_set_camouflaging_relaxation_now_succeeds(tmp_path):
-    store = MemoryStore(path=tmp_path)
-    result = dispatch(store, "profile_set", {"knob": "camouflaging_relaxation", "value": 0.3})
-    assert result["status"] == "ok"
-    dispatch(store, "profile_set", {"knob": "camouflaging_relaxation", "value": 0.0})
 
 
 def test_profile_set_live_knob_succeeds(tmp_path):

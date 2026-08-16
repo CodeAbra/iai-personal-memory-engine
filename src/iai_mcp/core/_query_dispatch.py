@@ -25,6 +25,8 @@ EVENTS_QUERY_WHITELIST: frozenset[str] = frozenset({
     "rem_cycle_completed",
     "hippo_compacted",
     "recall_timing",
+    "first_turn_recall",
+    "profile_tuned",
 })
 
 # events_query strips free-text insight synthesis from the wire; only

@@ -9,7 +9,7 @@ from iai_mcp.events import flush_event_buffer, query_events
 from iai_mcp.store import MemoryStore
 from iai_mcp.trajectory import (
     m2_precision_at_5_live,
-    m4_profile_variance_live,
+    m4_profile_movement_live,
     m6_context_repeat_rate_live,
 )
 from iai_mcp.types import EMBED_DIM, MemoryRecord
@@ -67,20 +67,16 @@ def test_real_recall_emits_retrieval_used_and_m2_lifts_off_zero(tmp_path):
         f"M2 must return >0 when retrieval_used events exist; got {m2_val}"
     )
 
-def test_real_profile_set_emits_profile_updated_and_m4_lifts_off_zero(tmp_path):
+def test_real_profile_tuned_event_lifts_m4_off_zero(tmp_path):
+    from iai_mcp.events import write_event
+
     store = MemoryStore(path=tmp_path)
-    state = profile.default_state()
+    write_event(store, kind="profile_tuned", data={"moved_count": 3}, severity="info")
 
-    profile.profile_set("interest_boost", 0.3, state, store=store)
-    profile.profile_set("interest_boost", 0.7, state, store=store)
-
-    events = query_events(store, kind="profile_updated", limit=20)
-    assert events, (
-        "FALSE-GREEN GUARD: profile.profile_set(store=store) must emit "
-        "kind='profile_updated' for M4 to be live."
-    )
-    m4_val = m4_profile_variance_live(store)
-    assert m4_val > 0.0, f"M4 must return >0 with non-trivial profile diffs; got {m4_val}"
+    events = query_events(store, kind="profile_tuned", limit=20)
+    assert events, "profile_tuned events must be readable for M4 to be live."
+    m4_val = m4_profile_movement_live(store)
+    assert m4_val > 0.0, f"M4 must return >0 with a non-zero moved_count; got {m4_val}"
 
 def test_profile_set_no_op_does_not_emit(tmp_path):
     store = MemoryStore(path=tmp_path)

@@ -137,7 +137,6 @@ def test_tools_list_returns_without_daemon(
             "schema_list",
             "events_query",
             "topology",
-            "camouflaging_status",
             "episodes_recent",
             "memory_temporal_recall",
         }

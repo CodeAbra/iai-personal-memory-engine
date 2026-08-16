@@ -20,7 +20,6 @@ TOOL_NAMES: list[str] = [
     "schema_list",
     "events_query",
     "topology",
-    "camouflaging_status",
 ]
 
 PROFILE_DISPATCH_BRANCHES: dict[str, list[str]] = {

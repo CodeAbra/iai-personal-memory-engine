@@ -9,17 +9,23 @@ def test_continuous_audit_invokes_both_underlying_calls(monkeypatch):
 
     s5_calls: list = []
     sigma_calls: list = []
+    emitted: list = []
 
     def fake_s5(store, window):
         s5_calls.append((store, window))
-        return []
+        return [], 0, 0
 
     def fake_sigma(store):
         sigma_calls.append((store,))
         return {"phase": "healthy"}
 
+    def capture_event(store, kind, data, *, severity=None, **kwargs):
+        emitted.append((kind, dict(data), severity))
+        return None
+
     monkeypatch.setattr(identity_audit, "detect_drift_anomaly", fake_s5)
     monkeypatch.setattr(identity_audit, "compute_and_emit", fake_sigma)
+    monkeypatch.setattr(identity_audit, "write_event", capture_event)
     monkeypatch.setattr(identity_audit, "AUDIT_INTERVAL_SEC", 0.02)
 
     async def runner():
@@ -36,6 +42,9 @@ def test_continuous_audit_invokes_both_underlying_calls(monkeypatch):
     assert len(s5_calls) >= 1, "detect_drift_anomaly never called"
     assert len(sigma_calls) >= 1, "compute_and_emit never called"
     assert s5_calls[0][1] == 5
+    assert not [e for e in emitted if e[0] == "identity_audit_error"], (
+        f"the 3-tuple unpack raised and was swallowed as an error event: {emitted}"
+    )
 
 
 def test_audit_runs_even_when_paused(monkeypatch):
@@ -45,7 +54,7 @@ def test_audit_runs_even_when_paused(monkeypatch):
 
     def fake_s5(store, window):
         s5_calls.append(1)
-        return []
+        return [], 0, 0
 
     monkeypatch.setattr(identity_audit, "detect_drift_anomaly", fake_s5)
     monkeypatch.setattr(identity_audit, "compute_and_emit", lambda store: {})
@@ -74,7 +83,7 @@ def test_audit_runs_even_when_paused(monkeypatch):
 def test_audit_shuts_down_cleanly(monkeypatch):
     from iai_mcp import identity_audit
 
-    monkeypatch.setattr(identity_audit, "detect_drift_anomaly", lambda s, w: [])
+    monkeypatch.setattr(identity_audit, "detect_drift_anomaly", lambda s, w: ([], 0, 0))
     monkeypatch.setattr(identity_audit, "compute_and_emit", lambda s: {})
     monkeypatch.setattr(identity_audit, "AUDIT_INTERVAL_SEC", 3600)
 
@@ -101,7 +110,7 @@ def test_audit_survives_s5_exception_and_emits_event(monkeypatch):
         s5_calls.append(1)
         if len(s5_calls) == 1:
             raise RuntimeError("simulated s5 failure")
-        return []
+        return [], 0, 0
 
     def capture_event(store, kind, data, *, severity=None, **kwargs):
         emitted.append((kind, dict(data), severity))
@@ -138,7 +147,7 @@ def test_audit_fires_multiple_times_with_short_interval(monkeypatch):
 
     def fake_s5(store, window):
         s5_calls.append(1)
-        return []
+        return [], 0, 0
 
     monkeypatch.setattr(identity_audit, "detect_drift_anomaly", fake_s5)
     monkeypatch.setattr(identity_audit, "compute_and_emit", lambda s: {})

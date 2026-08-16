@@ -48,8 +48,8 @@ def _extract_top_level_descriptions() -> list[tuple[str, str]]:
 
 def test_tool_count_pinned():
     descs = _extract_top_level_descriptions()
-    assert len(descs) == 15, (
-        f"expected 15 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
+    assert len(descs) == 14, (
+        f"expected 14 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
     )
 
 def test_each_tool_description_le_30_tokens():

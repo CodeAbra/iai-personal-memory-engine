@@ -12,7 +12,6 @@ HELPER_TO_KNOB_ID: dict[str, str] = {
     "_apply_masking_off": "AUTIST-06",
     "_apply_task_support": "AUTIST-07",
     "_apply_inertia_awareness": "AUTIST-10",
-    "_apply_formality_relaxation": "AUTIST-13",
     "_apply_scene_construction": "AUTIST-14",
     "dunn_quadrant": "AUTIST-03",
     "interest_boost": "AUTIST-09",
@@ -20,7 +19,18 @@ HELPER_TO_KNOB_ID: dict[str, str] = {
 }
 
 
-def apply_profile(response: dict, profile: dict) -> dict:
+def suggestions_visible(profile: dict, probe_active: bool) -> bool:
+    """Single source of truth for whether adjacent suggestions surface.
+
+    Called by both the decorator strip below and the pipeline's recorded
+    ``retrieval_used`` flag, so the nightly join can never see a strip
+    decision the recorded flag disagrees with.
+    """
+    mode = profile.get("task_support", "cued_recognition")
+    return mode != "blank_recall" or probe_active
+
+
+def apply_profile(response: dict, profile: dict, *, probe_active: bool = False) -> dict:
     if not isinstance(response, dict) or not isinstance(profile, dict):
         return response
 
@@ -31,7 +41,6 @@ def apply_profile(response: dict, profile: dict) -> dict:
         applied = {}
 
     for helper in (
-        _apply_formality_relaxation,
         _apply_monotropic_focus,
         _apply_literal_preservation,
         _apply_masking_off,
@@ -44,7 +53,10 @@ def apply_profile(response: dict, profile: dict) -> dict:
     ):
         helper_raised = False
         try:
-            helper(response, profile)
+            if helper is _apply_task_support:
+                helper(response, profile, probe_active)
+            else:
+                helper(response, profile)
         except Exception as exc:
             logger.debug("profile helper %s failed: %s", helper.__name__, exc)
             helper_raised = True
@@ -73,45 +85,27 @@ def apply_profile(response: dict, profile: dict) -> dict:
     return response
 
 
-def _apply_formality_relaxation(response: dict, profile: dict) -> None:
-    try:
-        level = float(profile.get("camouflaging_relaxation", 0.0))
-        if level <= 0.5:
-            return
-        for hit in response.get("hits", []) or []:
-            if not isinstance(hit, dict):
-                continue
-            text = hit.get("literal_surface") or hit.get("surface_text")
-            if not isinstance(text, str):
-                continue
-            stripped = text
-            for honorific in (" Sir.", " Sir,", " Madam.", " Madam,"):
-                stripped = stripped.replace(honorific, ".")
-            if "surface_text" in hit:
-                hit["surface_text"] = stripped
-    except (ValueError, TypeError, KeyError) as exc:
-        logger.debug("_apply_formality_relaxation: %s", exc)
-
-
 def _apply_monotropic_focus(response: dict, profile: dict) -> None:
     try:
         md = profile.get("monotropism_depth")
         if not isinstance(md, dict) or not md:
             return
-        hot_domains = {d for d, depth in md.items() if _as_float(depth, 0.0) > 0.7}
-        if not hot_domains:
+        hot_topics = {t for t, depth in md.items() if _as_float(depth, 0.0) > 0.7}
+        if not hot_topics:
             return
         hits = response.get("hits")
         if not isinstance(hits, list) or not hits:
             return
+        from iai_mcp.core import get_community_names
+        names = get_community_names()
         def _key(h):
             if not isinstance(h, dict):
                 return 1
-            tags = h.get("tags") or []
-            for t in tags:
-                if isinstance(t, str) and t.startswith("domain:"):
-                    return 0 if t.split(":", 1)[1] in hot_domains else 1
-            return 1
+            cid = h.get("community_id")
+            if cid is None:
+                return 1
+            name = names.get(str(cid))
+            return 0 if name is not None and name in hot_topics else 1
         hits.sort(key=_key)
     except (ValueError, TypeError, KeyError) as exc:
         logger.debug("_apply_monotropic_focus: %s", exc)
@@ -148,10 +142,9 @@ def _apply_masking_off(response: dict, profile: dict) -> None:
         logger.debug("_apply_masking_off: %s", exc)
 
 
-def _apply_task_support(response: dict, profile: dict) -> None:
+def _apply_task_support(response: dict, profile: dict, probe_active: bool = False) -> None:
     try:
-        mode = profile.get("task_support", "cued_recognition")
-        if mode != "blank_recall":
+        if suggestions_visible(profile, probe_active):
             return
         for hit in response.get("hits", []) or []:
             if isinstance(hit, dict) and "adjacent_suggestions" in hit:

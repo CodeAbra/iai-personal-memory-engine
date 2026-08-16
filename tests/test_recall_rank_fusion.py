@@ -15,6 +15,7 @@ from uuid import uuid4
 from iai_mcp import core
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 
 def _unit(i: int) -> list[float]:
@@ -49,11 +50,7 @@ class _MappedEmbedder:
 
 
 def _install_embedder(monkeypatch, mapping: dict[str, list[float]]) -> None:
-    import iai_mcp.embed as _embed_mod
-
-    monkeypatch.setattr(
-        _embed_mod, "embedder_for_store", lambda _store: _MappedEmbedder(mapping),
-    )
+    stub_embedder_for_store(monkeypatch, _MappedEmbedder(mapping))
 
 
 def _rec(text: str, emb: list[float], *, tier: str = "episodic", tags: list[str] | None = None) -> MemoryRecord:

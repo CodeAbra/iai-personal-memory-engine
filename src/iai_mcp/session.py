@@ -64,6 +64,11 @@ L0_RECORD_UUID = UUID("00000000-0000-0000-0000-000000000001")
 
 SESSION_START_CACHE_MAX_CHARS: int = 10_000
 
+# Per-turn refresh delta contract: the renderer must fit inside this ceiling
+# instead of re-injecting the full session-start brief on every advance.
+DELTA_MAX_TOKENS: int = 500
+K_DELTA: int = 12
+
 
 @dataclass
 class SessionStartPayload:
@@ -341,6 +346,124 @@ def _recent_thread_segment(
         origin = _origin_label(r)
         lines.append(f"- {prefix}{origin}{cleaned[:120]}")
     return "\n".join(lines)
+
+
+def _norm_delta_ts(ts: "datetime | str") -> str:
+    # Same fail-open UTC-normalize compare idiom the RPC uses on the caller
+    # watermark, extended to accept the datetime rows the delta read returns.
+    try:
+        dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(
+            str(ts).replace("Z", "+00:00").replace(" ", "T")
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return str(ts)
+
+
+def render_session_delta(
+    store: MemoryStore,
+    watermark: str,
+    *,
+    session_id: str = "-",
+) -> str:
+    """Per-turn delta: only records newer than watermark, in the
+    recent-thread line format, under one header — never the static
+    session-start blocks (those already shipped once at session start).
+    """
+    fetch_k = max(4 * K_DELTA, 40)
+    try:
+        rows = store._recent_user_turns_candidate_rows(fetch_k)
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        rows = []
+
+    fetched = [r for r in rows if r.id != L0_RECORD_UUID]
+
+    watermark_norm = _norm_delta_ts(watermark) if watermark else ""
+
+    window_incomplete = False
+    if fetched:
+        oldest_norm = _norm_delta_ts(fetched[-1].created_at)
+        if not watermark_norm or oldest_norm > watermark_norm:
+            window_incomplete = True
+
+    candidates: list = list(fetched)
+    try:
+        from iai_mcp.capture import _idem_tag as _cap_idem_tag
+        from iai_mcp.capture import read_pending_live_events
+        from iai_mcp.store import _PendingTurn
+
+        pending_events = read_pending_live_events()
+    except (OSError, RuntimeError, ValueError, ImportError):
+        pending_events = []
+
+    if pending_events:
+        seen_pending: set = set()
+        for ev in pending_events:
+            role = ev.get("role", "user")
+            if role not in ("user", "assistant"):
+                continue
+            ev_session = ev.get("session_id", "-")
+            src_uuid = ev.get("source_uuid")
+            ts_iso = ev["ts_iso"]
+            text = ev.get("text", "")
+            idem = _cap_idem_tag(ev_session, role, ts_iso, text, source_uuid=src_uuid)
+            if idem in seen_pending:
+                continue
+            try:
+                if store.find_record_by_tag(idem) is not None:
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                pass
+            seen_pending.add(idem)
+            candidates.append(_PendingTurn(
+                text=text,
+                session_id=ev_session,
+                ts=ev["ts"],
+                idem_tag=idem,
+                source_uuid=src_uuid,
+                role=role,
+            ))
+
+    candidates.sort(key=lambda r: r.created_at, reverse=True)
+
+    now = datetime.now(timezone.utc)
+    survivors: list[str] = []
+    for r in candidates:
+        r_norm = _norm_delta_ts(r.created_at)
+        if watermark_norm and r_norm <= watermark_norm:
+            continue
+        cleaned = _clean_surface(r.literal_surface)
+        if not cleaned:
+            continue
+        age = age_label(r.created_at, now)
+        prefix = f"({age}) " if age else ""
+        origin = _origin_label(r)
+        survivors.append(f"- {prefix}{origin}{cleaned[:120]}")
+
+    if not survivors:
+        return ""
+
+    overflow = window_incomplete or len(survivors) > K_DELTA
+
+    header = "## New since last turn (all sessions/projects; [labels] mark origin)"
+    marker = "- …earlier new records elided"
+    body = survivors[:K_DELTA]
+
+    def _assemble(lines: list[str], with_marker: bool) -> str:
+        parts = [header, *lines]
+        if with_marker:
+            parts.append(marker)
+        return "\n".join(parts)
+
+    rendered = _assemble(body, overflow)
+    while _approx_tokens(rendered) > DELTA_MAX_TOKENS and body:
+        body = body[:-1]
+        overflow = True
+        rendered = _assemble(body, overflow)
+
+    return rendered
 
 
 def _session_state_hash(payload: SessionStartPayload) -> str:

@@ -148,50 +148,6 @@ def test_should_run_heavy_respects_user_tz_utc():
     ok, reason = should_run_heavy(now, last, cfg, tz)
     assert ok is False
 
-def test_run_light_consolidation_returns_expected_shape(tmp_path):
-    from iai_mcp.sleep import run_light_consolidation
-    from iai_mcp.store import MemoryStore
-
-    store = MemoryStore(path=tmp_path)
-    result = run_light_consolidation(store, session_id="s-light")
-    assert isinstance(result, dict)
-    assert "fsrs_ticked" in result
-    assert "cooccurrence_updates" in result
-    assert result["mode"] == "light"
-
-def test_run_light_consolidation_no_llm_call(tmp_path, monkeypatch):
-    from iai_mcp import sleep as sleep_mod
-    from iai_mcp.sleep import run_light_consolidation
-    from iai_mcp.store import MemoryStore
-
-    call_count = {"n": 0}
-    original_should = sleep_mod.should_call_llm
-
-    def _counting(*args, **kwargs):
-        call_count["n"] += 1
-        return original_should(*args, **kwargs)
-
-    monkeypatch.setattr(sleep_mod, "should_call_llm", _counting)
-
-    store = MemoryStore(path=tmp_path)
-    store.insert(_record())
-
-    run_light_consolidation(store, session_id="s-light")
-    assert call_count["n"] == 0
-
-def test_run_light_consolidation_emits_event(tmp_path):
-    from iai_mcp.events import query_events
-    from iai_mcp.sleep import run_light_consolidation
-    from iai_mcp.store import MemoryStore
-
-    store = MemoryStore(path=tmp_path)
-    run_light_consolidation(store, session_id="s-x")
-    events = query_events(store, kind="cls_consolidation_run")
-    assert len(events) >= 1
-    ev = events[0]
-    assert ev["data"]["mode"] == "light"
-    assert ev["session_id"] == "s-x"
-
 def test_run_heavy_consolidation_uses_d_guard(tmp_path, monkeypatch):
     from iai_mcp.events import query_events
     from iai_mcp.guard import BudgetLedger, RateLimitLedger

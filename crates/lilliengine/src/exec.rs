@@ -2312,37 +2312,50 @@ fn scalar_index_tag(v: &Value) -> Option<String> {
     }
 }
 
-/// A per-table `(conflict-key tuple) → B-tree row-key` index for the
-/// `ON CONFLICT (...) DO UPDATE/NOTHING` / `OR IGNORE` / `OR REPLACE` path.
+/// A per-table, per-key-set `(conflict-key tuple) → B-tree row-key` index for
+/// the `ON CONFLICT (...) DO UPDATE/NOTHING` / `OR IGNORE` / `OR REPLACE` path
+/// AND the plain-INSERT UNIQUE/PK enforcement probe.
 ///
 /// Without it, every conflicting INSERT compares the attempted row against every
 /// existing row via one whole-table scan, so a bulk UPSERT degrades to
 /// O(rows^2). The index turns that comparison into an O(1) map lookup keyed by
 /// the serialized conflict columns, keeping a bulk UPSERT linear.
 ///
+/// A table can carry more than one declared UNIQUE/PK key-set (e.g. an
+/// AUTOINCREMENT PK plus a UNIQUE column), and a plain INSERT must enforce
+/// every one of them independently — a table's declared key-sets are never
+/// comparable to each other, so each owns its own lazily-built map.
+///
 /// Built and owned by the caller (the connection shim), maintained by the
-/// executor on insert / update / replace / delete, and never persisted. The
-/// `built` flag records whether the one-time population scan has run for the
-/// table — an empty-but-built index is distinct from an absent one, so an empty
-/// table is not re-scanned on every insert.
+/// executor on insert / update / replace / delete, and never persisted.
 #[derive(Debug, Default, Clone)]
 pub struct ConflictIndex {
+    per_keyset: HashMap<Vec<String>, KeysetMap>,
+}
+
+/// One key-set's lazily-built map. `built` records whether the one-time
+/// population scan has run for this key-set — an empty-but-built map is
+/// distinct from an absent one, so an empty table is not re-scanned per insert.
+#[derive(Debug, Default, Clone)]
+struct KeysetMap {
     map: HashMap<String, i64>,
     built: bool,
 }
 
 impl ConflictIndex {
-    /// Populate the index with one whole-table scan the first time it is needed
-    /// for a table; later calls are no-ops. Maps every existing row's serialized
-    /// conflict-key tuple to its B-tree key. NULL-bearing tuples are skipped (they
-    /// cannot conflict). After this returns, `lookup` / `insert` are O(1).
+    /// Populate the key-set's map with one whole-table scan the first time it
+    /// is needed; later calls for the SAME key-set are no-ops. Maps every
+    /// existing row's serialized conflict-key tuple to its B-tree key.
+    /// NULL-bearing tuples are skipped (they cannot conflict). After this
+    /// returns, `lookup` / `insert` for `conflict_keys` are O(1).
     fn ensure_built(
         &mut self,
         tree: &lillibrain::Tree,
         conflict_keys: &[String],
         col_names: &[String],
     ) -> Result<()> {
-        if self.built {
+        let slot = self.per_keyset.entry(conflict_keys.to_vec()).or_default();
+        if slot.built {
             return Ok(());
         }
         // Column-selective build: decode ONLY the conflict-key columns per
@@ -2354,7 +2367,7 @@ impl ConflictIndex {
             .iter()
             .filter_map(|ck| col_names.iter().position(|c| c == ck).map(|p| (p, ck)))
             .collect();
-        let map = &mut self.map;
+        let map = &mut slot.map;
         tree.scan_cells_with(|key, payload| {
             let vals = crate::rowcodec::decode_row_columns(&payload, &mask)?;
             let mut src: HashMap<String, Value> = HashMap::with_capacity(conflict_keys.len());
@@ -2367,36 +2380,49 @@ impl ConflictIndex {
             Ok(())
         })
         .map_err(|e: EngineError| e)?;
-        self.built = true;
+        slot.built = true;
         Ok(())
     }
 
-    /// O(1) lookup of the B-tree key for a serialized conflict-key tuple. Only
-    /// valid after [`ensure_built`](Self::ensure_built).
-    fn lookup(&self, ckey: &str) -> Option<i64> {
-        self.map.get(ckey).copied()
+    /// Whether `keyset`'s map has completed its one-time population scan.
+    fn built_for(&self, keyset: &[String]) -> bool {
+        self.per_keyset.get(keyset).is_some_and(|s| s.built)
     }
 
-    /// Record the conflict-key → row-key entry for a freshly inserted row.
-    fn insert(&mut self, ckey: String, key: i64) {
-        self.map.insert(ckey, key);
+    /// O(1) lookup of the B-tree key for a serialized conflict-key tuple within
+    /// `keyset`'s map. Only meaningful after [`ensure_built`](Self::ensure_built)
+    /// for the same `keyset`.
+    fn lookup(&self, keyset: &[String], ckey: &str) -> Option<i64> {
+        self.per_keyset.get(keyset)?.map.get(ckey).copied()
     }
 
-    /// Drop a conflict-key entry when a DO UPDATE / OR REPLACE rewrites a
-    /// conflict-key column, so the old key value no longer maps to the rewritten
-    /// row (a later insert of the old value inserts fresh, not falsely conflicts).
-    /// Paired with [`insert`](Self::insert) of the new key at the same row-key.
-    fn remove(&mut self, ckey: &str) {
-        self.map.remove(ckey);
+    /// Record the conflict-key → row-key entry for a freshly inserted row, in
+    /// `keyset`'s own map.
+    fn insert(&mut self, keyset: &[String], ckey: String, key: i64) {
+        self.per_keyset
+            .entry(keyset.to_vec())
+            .or_default()
+            .map
+            .insert(ckey, key);
     }
 
-    /// Invalidate the index so the next conflict probe re-populates it. Used when
-    /// a write path that does not maintain the conflict map (a non-key UPDATE that
-    /// could touch conflict columns, or a DELETE without per-row keys) may have
-    /// changed the indexed rows.
+    /// Drop a conflict-key entry from `keyset`'s map when a DO UPDATE / OR
+    /// REPLACE rewrites a conflict-key column, so the old key value no longer
+    /// maps to the rewritten row (a later insert of the old value inserts
+    /// fresh, not falsely conflicts). Paired with [`insert`](Self::insert) of
+    /// the new key at the same row-key.
+    fn remove(&mut self, keyset: &[String], ckey: &str) {
+        if let Some(slot) = self.per_keyset.get_mut(keyset) {
+            slot.map.remove(ckey);
+        }
+    }
+
+    /// Invalidate every key-set's map so the next conflict probe re-populates
+    /// whichever one it needs. Used when a write path that does not maintain
+    /// the conflict map (a non-key UPDATE that could touch conflict columns, or
+    /// a DELETE without per-row keys) may have changed the indexed rows.
     fn invalidate(&mut self) {
-        self.map.clear();
-        self.built = false;
+        self.per_keyset.clear();
     }
 }
 
@@ -2824,7 +2850,7 @@ fn enforce_not_null(cols: &[ColumnMeta], vals: &[Value], table: &str) -> Result<
 /// Resolve the conflict-key columns for an INSERT: an explicit `ON CONFLICT
 /// (keys)` clause wins; otherwise OR IGNORE / OR REPLACE fall back to the
 /// catalog primary key, then to the first column when no PK is declared.
-fn resolve_conflict_keys(stmt: &InsertStmt, cols: &[ColumnMeta]) -> Vec<String> {
+pub(crate) fn resolve_conflict_keys(stmt: &InsertStmt, cols: &[ColumnMeta]) -> Vec<String> {
     if !stmt.conflict_keys.is_empty() {
         return stmt.conflict_keys.clone();
     }
@@ -2842,6 +2868,17 @@ fn resolve_conflict_keys(stmt: &InsertStmt, cols: &[ColumnMeta]) -> Vec<String> 
         }
     }
     Vec::new()
+}
+
+/// True when `keyset` must be excluded from plain-INSERT UNIQUE/PK enforcement
+/// (and from the conflict-index cache slot backing it): its sole column is the
+/// AUTOINCREMENT `vec_label` primary key and this statement did not name it
+/// explicitly. The engine then injects a fresh, always-distinct value
+/// (`vec_label` AUTOINCREMENT injection above), so the key-set can never
+/// collide — probing it would force a full-table index build on the first
+/// write to a large table for zero benefit.
+fn is_auto_injected_only_keyset(keyset: &[String], names_vec_label: bool) -> bool {
+    !names_vec_label && keyset.len() == 1 && keyset[0].eq_ignore_ascii_case("vec_label")
 }
 
 /// Execute an INSERT (with `?`/`:name` binds, vec_label AUTOINCREMENT injection,
@@ -2952,7 +2989,10 @@ pub fn execute_insert(
         // Indexed probe: lazily populate once, then O(1) lookup. A NULL-bearing
         // attempted tuple never conflicts (its serialized key is None).
         idx.ensure_built(&tree, &conflict_keys, &col_names)?;
-        match attempted_ckey.as_deref().and_then(|ck| idx.lookup(ck)) {
+        match attempted_ckey
+            .as_deref()
+            .and_then(|ck| idx.lookup(&conflict_keys, ck))
+        {
             Some(key) => {
                 let payload = tree.get(key).map_err(store_err)?;
                 match payload {
@@ -3024,7 +3064,7 @@ pub fn execute_insert(
                             nk,
                         )? {
                             if owner != key {
-                                return Err(unique_constraint_error(table, &conflict_keys));
+                                return Err(integrity_unique_error(table, &conflict_keys));
                             }
                         }
                     }
@@ -3104,19 +3144,20 @@ pub fn execute_insert(
                     }
                 }
             }
-            // Reconcile the conflict index when the rewrite changed the row's
-            // conflict-key tuple: drop the stale old key (so a later insert of the
-            // old value inserts fresh, not a false conflict) and file the new key at
-            // the same row-key (so a later insert of the new value conflicts). Only
-            // when the index is built — an unbuilt index rebuilds from the tree on
-            // its next probe. A NULL-bearing tuple yields None and is never indexed.
+            // Reconcile the conflict-clause key-set's map when the rewrite changed
+            // the row's conflict-key tuple: drop the stale old key (so a later
+            // insert of the old value inserts fresh, not a false conflict) and
+            // file the new key at the same row-key (so a later insert of the new
+            // value conflicts). Only when that key-set's map is built — an unbuilt
+            // map rebuilds from the tree on its next probe. A NULL-bearing tuple
+            // yields None and is never indexed.
             if let Some(cidx) = conflict_index.as_deref_mut() {
-                if cidx.built && new_ckey != old_ckey {
+                if cidx.built_for(&conflict_keys) && new_ckey != old_ckey {
                     if let Some(old) = &old_ckey {
-                        cidx.remove(old);
+                        cidx.remove(&conflict_keys, old);
                     }
                     if let Some(new) = &new_ckey {
-                        cidx.insert(new.clone(), key);
+                        cidx.insert(&conflict_keys, new.clone(), key);
                     }
                 }
             }
@@ -3129,6 +3170,35 @@ pub fn execute_insert(
             });
         }
         // No conflict found — fall through to the normal insert.
+    }
+
+    // Plain-INSERT UNIQUE/PK enforcement. A statement carrying a conflict clause
+    // (ON CONFLICT / OR IGNORE / OR REPLACE) already resolved its own conflict
+    // above; a genuinely plain INSERT reaches here with no uniqueness probe run
+    // at all, so every UNIQUE/PK key-set the catalog tracks for `table` must be
+    // checked here or the declared constraint is a silent no-op. `conflict_index`,
+    // when supplied, is reused for every key-set's probe (each lazily built once,
+    // then O(1) per row) — its per-key-set maps mean the loop can enforce every
+    // key-set with the one object the caller hands in.
+    let mut enforced_keysets: Vec<(Vec<String>, Option<String>)> = Vec::new();
+    if !needs_conflict_scan {
+        for keyset in catalog.unique_keysets(table)? {
+            if is_auto_injected_only_keyset(&keyset, names_vec_label) {
+                continue;
+            }
+            if let Some(idx) = conflict_index.as_deref_mut() {
+                idx.ensure_built(&tree, &keyset, &col_names)?;
+            }
+            let ck = conflict_key_string(&keyset, &value_map);
+            if let Some(ck) = &ck {
+                if existing_owner_of_ckey(&tree, conflict_index.as_deref(), &keyset, &col_names, ck)?
+                    .is_some()
+                {
+                    return Err(integrity_unique_error(table, &keyset));
+                }
+            }
+            enforced_keysets.push((keyset, ck));
+        }
     }
 
     let payload_vals = build_payload(&cols, &value_map, table)?;
@@ -3146,16 +3216,31 @@ pub fn execute_insert(
             idx.insert(id.clone(), next_key);
         }
     }
-    // Keep the conflict-key index current: a fresh non-NULL conflict tuple maps to
-    // the row just written. NULL-bearing tuples are never indexed (they cannot
-    // conflict). The index is left untouched on the unindexed fallback path. It
-    // is safe to insert into a built index here; if the index was never built
-    // (no conflict clause on this INSERT) the entry simply primes it for a later
-    // ensure_built no-op only when `built` is already set — otherwise the next
-    // conflict probe rebuilds from the tree, which includes this row.
+    // Keep the conflict-clause key-set's map current: a fresh non-NULL conflict
+    // tuple maps to the row just written. NULL-bearing tuples are never indexed
+    // (they cannot conflict). The map is left untouched on the unindexed
+    // fallback path. It is safe to insert into a built map here; if it was never
+    // built (no conflict clause on this INSERT, so `conflict_keys` is `[]` and
+    // `built_for(&[])` stays false) the entry is skipped — the next conflict
+    // probe rebuilds its own key-set's map from the tree, which includes this
+    // row.
     if let (Some(idx), Some(ck)) = (conflict_index.as_deref_mut(), attempted_ckey) {
-        if idx.built {
-            idx.insert(ck, next_key);
+        if idx.built_for(&conflict_keys) {
+            idx.insert(&conflict_keys, ck, next_key);
+        }
+    }
+    // Keep each enforced UNIQUE/PK key-set's OWN map current for this fresh row,
+    // mirroring the conflict-key maintenance above. Each key-set routes to its
+    // own map — a shared map would strand every key-set but the first built.
+    // `enforced_keysets` is empty whenever `needs_conflict_scan` was true (the
+    // conflict path already handled its own key-set above).
+    if let Some(idx) = conflict_index.as_deref_mut() {
+        for (keyset, ck) in &enforced_keysets {
+            if idx.built_for(keyset) {
+                if let Some(ck) = ck {
+                    idx.insert(keyset, ck.clone(), next_key);
+                }
+            }
         }
     }
     // Keep the col-index current for this fresh row: map each indexed column's
@@ -3204,8 +3289,8 @@ fn existing_owner_of_ckey(
     ckey: &str,
 ) -> Result<Option<i64>> {
     if let Some(idx) = conflict_index {
-        if idx.built {
-            return Ok(idx.lookup(ckey));
+        if idx.built_for(conflict_keys) {
+            return Ok(idx.lookup(conflict_keys, ckey));
         }
     }
     for (k, payload) in tree.full_scan().map_err(store_err)? {
@@ -3218,15 +3303,19 @@ fn existing_owner_of_ckey(
 }
 
 /// The sqlite3-shaped UNIQUE-constraint message naming the table-qualified
-/// conflict columns (`UNIQUE constraint failed: t.a, t.b`), matching stdlib
-/// sqlite3 for a conflict-key collision.
-fn unique_constraint_error(table: &str, conflict_keys: &[String]) -> EngineError {
-    let cols = conflict_keys
+/// violated key-set columns (`UNIQUE constraint failed: t.a, t.b`), classified
+/// as an integrity violation so it surfaces as `iai_mcp.errors.IntegrityError`
+/// at the Python boundary — matching stdlib sqlite3's class for the same
+/// violation. The message is built from `keyset`, the key-set that actually
+/// collided, never from a statement's (possibly empty, on a plain INSERT)
+/// `conflict_keys`.
+fn integrity_unique_error(table: &str, keyset: &[String]) -> EngineError {
+    let cols = keyset
         .iter()
         .map(|c| format!("{table}.{c}"))
         .collect::<Vec<_>>()
         .join(", ");
-    EngineError::parse(format!("UNIQUE constraint failed: {cols}"))
+    EngineError::Integrity(format!("UNIQUE constraint failed: {cols}"))
 }
 
 /// The unindexed conflict probe: one whole-table scan comparing the attempted row
@@ -3250,6 +3339,20 @@ fn scan_conflict(
         }
     }
     Ok(None)
+}
+
+/// True when `expr` references `rowid` (case-insensitive) anywhere below the
+/// top level — e.g. wrapped in `COALESCE(rowid, 0)` or `DATETIME(rowid)`.
+/// `rowid` is never a decoded row column, so a wrapped reference would fall
+/// through to `eval_scalar` against the row and silently evaluate to NULL;
+/// the SET-RHS write loop rejects this shape instead of writing NULL.
+fn set_rhs_wraps_rowid(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(name) => name.eq_ignore_ascii_case(ROWID),
+        Expr::Coalesce(args) => args.iter().any(set_rhs_wraps_rowid),
+        Expr::FuncCall { args, .. } => args.iter().any(set_rhs_wraps_rowid),
+        _ => false,
+    }
 }
 
 /// Execute an UPDATE: bind SET then WHERE in textual order, select matching rows
@@ -3284,13 +3387,25 @@ pub fn execute_update(
     // the one-time meta-tree disk-seed scan for a fence it will never need.
     let has_col_index = col_index.is_some();
 
-    // SET ?s bind before WHERE ?s (SQL textual order). Each SET rhs is a literal
-    // or placeholder evaluated against an empty row.
+    // SET ?s bind before WHERE ?s (SQL textual order). Placeholders resolve here;
+    // the RHS expression is evaluated per-row in the write loop below, against
+    // each row's pre-update values, so multi-assignment (`SET a=b, b=a`) swaps
+    // correctly instead of reading a partially-updated row.
     let mut binder = Binder::new(params, named);
-    let mut bound_set: Vec<(String, Value)> = Vec::with_capacity(stmt.set_clauses.len());
+    let mut bound_set: Vec<(String, Expr)> = Vec::with_capacity(stmt.set_clauses.len());
     for (set_col, set_expr) in &stmt.set_clauses {
         let bound = binder.bind(set_expr)?;
-        bound_set.push((set_col.clone(), eval_scalar(&bound, &Row::new())));
+        // A bare top-level `rowid` RHS is handled below (raw B-tree key); a
+        // wrapped one (COALESCE/DATETIME) has no decoded row column to read
+        // and must fail loud rather than silently write NULL.
+        if !matches!(&bound, Expr::Column(name) if name.eq_ignore_ascii_case(ROWID))
+            && set_rhs_wraps_rowid(&bound)
+        {
+            return Err(EngineError::unsupported(
+                "rowid is only supported as a bare SET RHS, not wrapped in an expression",
+            ));
+        }
+        bound_set.push((set_col.clone(), bound));
     }
     let bound_where = match &stmt.where_clause {
         Some(w) => Some(binder.bind(w)?),
@@ -3461,7 +3576,14 @@ pub fn execute_update(
     let guard = TxnGuard::begin(store, scope)?;
     for (key, row) in &to_update {
         let mut updated = row.clone();
-        for (set_col, set_val) in &bound_set {
+        for (set_col, set_expr) in &bound_set {
+            // A bare `rowid` RHS is the raw B-tree key, not a decoded column —
+            // `eval_scalar` against `row` would yield NULL. Every other RHS
+            // evaluates against the ORIGINAL pre-update `row` (not `updated`).
+            let set_val = match set_expr {
+                Expr::Column(name) if name.eq_ignore_ascii_case(ROWID) => Value::Int(*key),
+                other => eval_scalar(other, row),
+            };
             // Coerce the assigned value to the target column's affinity so the
             // stored cell's storage class agrees with stdlib sqlite3.
             let aff = cols
@@ -3469,7 +3591,7 @@ pub fn execute_update(
                 .find(|c| &c.name == set_col)
                 .map(|c| c.affinity.as_str())
                 .unwrap_or("TEXT");
-            updated.set(set_col.clone(), coerce_affinity(set_val.clone(), aff));
+            updated.set(set_col.clone(), coerce_affinity(set_val, aff));
         }
         let payload_vals: Vec<Value> = col_names.iter().map(|cn| updated.get_or_null(cn)).collect();
         tree.insert(*key, &encode_row(&payload_vals))

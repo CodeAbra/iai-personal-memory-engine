@@ -1677,7 +1677,19 @@ def get_lilli_engine_conn(path: str):
     return conn
 
 
-def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawConn | None":
+_RAW_WRITER_FENCE_MESSAGE = (
+    "A raw writer connection bypasses the read-only pool's generation fence; a "
+    "mutation through it is NOT seen by warm pooled readers. For mutations that "
+    "must be visible to read-path readers, use the proxy writer connection "
+    "(store.db._conn). If a raw writer is genuinely required (at-rest test "
+    "writes), pass allow_writer=True and, when readers must observe the write, "
+    "invalidate the owning store's read-only pool for that path after committing."
+)
+
+
+def get_lilli_raw_conn(
+    path: str, *, read_only: bool = False, allow_writer: bool = False
+) -> "LilliBrainRawConn | None":
     """Return a LilliBrainRawConn for path if the lilli driver owns it, else None.
 
     When the owning HippoDB is still open and read_only=False (the writer path),
@@ -1694,10 +1706,16 @@ def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawC
 
     When read_only=True the returned adapter enforces the RO constraint at its
     own layer; the live writer connection's write path is never touched.
+
+    The writer branch (read_only=False) bypasses the read-only pool's generation
+    fence, so a bare default call raises errors.DatabaseError; pass
+    allow_writer=True to opt in explicitly (see _RAW_WRITER_FENCE_MESSAGE).
     """
     conn = get_lilli_engine_conn(path)
     if conn is not None:
         if not read_only:
+            if not allow_writer:
+                raise errors.DatabaseError(_RAW_WRITER_FENCE_MESSAGE)
             # Writer path: borrow the shared connection — no second pager.
             return conn.raw_conn(read_only=False)
         # Read-only path on a registry hit: open a dedicated lock-free handle
@@ -1744,6 +1762,8 @@ def get_lilli_raw_conn(path: str, *, read_only: bool = False) -> "LilliBrainRawC
     p = _Path(path)
     if not p.exists():
         return None
+    if not read_only and not allow_writer:
+        raise errors.DatabaseError(_RAW_WRITER_FENCE_MESSAGE)
     # Heuristic: sqlite3 files start with "SQLite format 3\x00"; LilliBrain files do not.
     try:
         with p.open("rb") as _fh:

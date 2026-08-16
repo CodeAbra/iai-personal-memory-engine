@@ -90,20 +90,6 @@ def compute_m5_curiosity_frequency(
     return float(total)
 
 
-def compute_session_metrics_snapshot(
-    store: MemoryStore,
-    session_id: str,
-) -> dict[str, float]:
-    return {
-        "m1": compute_m1_clarifying_questions_per_session(store, session_id),
-        "m2": m2_precision_at_5_live(store),
-        "m3": compute_m3_token_budget(store, session_id),
-        "m4": m4_profile_variance_live(store),
-        "m5": compute_m5_curiosity_frequency(store, session_id),
-        "m6": m6_context_repeat_rate_live(store),
-    }
-
-
 M2_SYNTHETIC_CONSTANT: float = 0.0
 M4_SYNTHETIC_CONSTANT: float = 0.0
 M6_SYNTHETIC_CONSTANT: float = 0.0
@@ -135,40 +121,19 @@ def m2_precision_at_5_live(
     return sum(precisions) / len(precisions)
 
 
-def m4_profile_variance_live(
+def m4_profile_movement_live(
     store: MemoryStore,
     *,
-    n_updates: int = 20,
+    limit: int = 100,
 ) -> float:
-    events = query_events(store, kind="profile_updated", limit=n_updates * 5)
-    if not events:
-        return 0.0
-
-    per_knob: dict[str, list[float]] = {}
-    for ev in events[:n_updates]:
+    events = query_events(store, kind="profile_tuned", limit=limit)
+    for ev in events:
         data = ev.get("data") or {}
-        knob = data.get("knob")
-        new_val = data.get("new")
-        if knob is None or new_val is None:
+        raw = data.get("moved_count")
+        if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
-        if isinstance(new_val, bool) or not isinstance(new_val, (int, float)):
-            continue
-        per_knob.setdefault(str(knob), []).append(float(new_val))
-
-    if not per_knob:
-        return 0.0
-
-    variances: list[float] = []
-    for _knob, vals in per_knob.items():
-        if len(vals) < 2:
-            variances.append(0.0)
-            continue
-        mean = sum(vals) / len(vals)
-        var = sum((v - mean) ** 2 for v in vals) / len(vals)
-        variances.append(var)
-    if not variances:
-        return 0.0
-    return sum(variances) / len(variances)
+        return float(raw)
+    return 0.0
 
 
 def m6_context_repeat_rate_live(
@@ -202,7 +167,7 @@ def m2(store: MemoryStore) -> float:
 
 
 def m4(store: MemoryStore) -> float:
-    return m4_profile_variance_live(store)
+    return m4_profile_movement_live(store)
 
 
 def m6(store: MemoryStore) -> float:

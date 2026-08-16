@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
+from iai_mcp import core
 from iai_mcp.store import EDGES_TABLE, MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+
+@pytest.fixture(autouse=True)
+def _restore_community_names():
+    saved = dict(core._community_names_cache)
+    yield
+    core.set_community_names(saved)
 
 def _rec(
     *,
@@ -14,6 +21,7 @@ def _rec(
     vec: list[float] | None = None,
     tags: list[str] | None = None,
     language: str = "en",
+    community_id: UUID | None = None,
 ) -> MemoryRecord:
     if vec is None:
         vec = [1.0] + [0.0] * (EMBED_DIM - 1)
@@ -24,7 +32,7 @@ def _rec(
         literal_surface=text,
         aaak_index="",
         embedding=vec,
-        community_id=None,
+        community_id=community_id,
         centrality=0.0,
         detail_level=2,
         pinned=False,
@@ -40,6 +48,12 @@ def _rec(
         language=language,
     )
 
+def _runtime_community_id(assignment, rid: UUID) -> UUID | None:
+    for gc, members in assignment.mid_regions.items():
+        if rid in members:
+            return gc
+    return None
+
 def test_profile_modulation_for_record_empty_profile():
     from iai_mcp.profile import profile_modulation_for_record
 
@@ -48,10 +62,12 @@ def test_profile_modulation_for_record_empty_profile():
     assert isinstance(gains, dict)
     assert gains == {} or all(v == 1.0 for v in gains.values())
 
-def test_profile_modulation_for_record_monotropism_depth_domain_tag():
+def test_profile_modulation_for_record_monotropism_depth_community_name():
     from iai_mcp.profile import profile_modulation_for_record
 
-    rec = _rec(text="deep coding fact", tags=["domain:coding"])
+    cid = uuid4()
+    core.set_community_names({str(cid): "coding"})
+    rec = _rec(text="deep coding fact", community_id=cid)
     gains = profile_modulation_for_record(
         rec,
         profile_state={"monotropism_depth": {"coding": 0.9}},
@@ -59,10 +75,12 @@ def test_profile_modulation_for_record_monotropism_depth_domain_tag():
     assert "monotropism_depth" in gains
     assert gains["monotropism_depth"] > 1.0
 
-def test_profile_modulation_for_record_wrong_domain_no_gain():
+def test_profile_modulation_for_record_wrong_community_no_gain():
     from iai_mcp.profile import profile_modulation_for_record
 
-    rec = _rec(text="gardening fact", tags=["domain:gardening"])
+    cid = uuid4()
+    core.set_community_names({str(cid): "gardening"})
+    rec = _rec(text="gardening fact", community_id=cid)
     gains = profile_modulation_for_record(
         rec,
         profile_state={"monotropism_depth": {"coding": 0.9}},
@@ -113,6 +131,9 @@ def test_profile_modulation_edge_created_on_knob_affect(tmp_path, monkeypatch):
     store.insert(r)
 
     graph, assignment, rc = retrieve.build_runtime_graph(store)
+    runtime_cid = _runtime_community_id(assignment, r.id)
+    assert runtime_cid is not None
+    core.set_community_names({str(runtime_cid): "coding"})
     profile_state = {"monotropism_depth": {"coding": 0.9}}
 
     recall_for_response(
@@ -171,6 +192,9 @@ def test_profile_modulation_gain_populates_on_record(tmp_path):
     store.insert(r)
 
     graph, assignment, rc = retrieve.build_runtime_graph(store)
+    runtime_cid = _runtime_community_id(assignment, r.id)
+    assert runtime_cid is not None
+    core.set_community_names({str(runtime_cid): "coding"})
     profile_state = {"monotropism_depth": {"coding": 0.9}}
 
     resp = recall_for_response(

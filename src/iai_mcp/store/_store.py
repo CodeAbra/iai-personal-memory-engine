@@ -580,6 +580,14 @@ class MemoryStore:
                 "boot migration migrate_live_flag_backfill failed (non-fatal): %s", exc
             )
 
+        from iai_mcp.migrate._live_flag_backfill import reconcile_live_flag_drift
+        try:
+            reconcile_live_flag_drift(self)
+        except Exception as exc:  # noqa: BLE001 — boot migration must not abort open
+            logger.warning(
+                "boot migration reconcile_live_flag_drift failed (non-fatal): %s", exc
+            )
+
         from iai_mcp.migrate._record_tags_backfill import migrate_record_tags_backfill
         try:
             result = migrate_record_tags_backfill(self)
@@ -1033,11 +1041,12 @@ class MemoryStore:
                 tier=tier_val or "episodic",
             ))
 
-        # Atomically swap in the new entry set under a single lock acquisition.
-        # replace_all installs the full new map and sets warm=True in ONE hold,
-        # never clear-then-fill across separate acquisitions — so a concurrent
-        # reader never observes an empty or half-filled buffer mid-warm.
-        self._recency_buffer.replace_all(new_buffer_entries)
+        # Merge (not replace) the SQL-warmed set under a single lock acquisition:
+        # a cold-buffer warm must not wipe a pushed-but-unflushed marker the
+        # write path already fed into the buffer (the SQL query above cannot
+        # see it yet). merge_warm preserves every still-buffered sentinel
+        # exempt from eviction; a same-id SQL row supersedes its sentinel.
+        self._recency_buffer.merge_warm(new_buffer_entries)
 
     def insert(self, record: MemoryRecord) -> None:
         if record.tier not in TIER_ENUM:
@@ -3374,31 +3383,37 @@ class MemoryStore:
             pair = (anchor_id, record_id)
         result = self.boost_edges([pair], delta=delta, edge_type=edge_type)
         if is_retrieval:
+            # Must not depend on the reconsolidation dry-run flag or config load.
+            now = datetime.now(timezone.utc)
+            values: dict[str, object] = {"last_reviewed": now}
             try:
                 from iai_mcp.daemon_config import _load_reconsolidation_config
                 cfg = _load_reconsolidation_config()
                 if not cfg.dry_run:
-                    labile_until = datetime.now(timezone.utc) + timedelta(
+                    values["labile_until"] = now + timedelta(
                         seconds=cfg.labile_window_sec
                     )
-                    tbl = self.db.open_table(RECORDS_TABLE)
-                    try:
-                        tbl.update(
-                            where=f"id = '{_uuid_literal(record_id)}'",
-                            values={"labile_until": labile_until},
-                        )
-                    except (RuntimeError, ValueError, OSError, KeyError) as exc:
-                        msg = str(exc).lower()
-                        column_missing = (
-                            "labile_until" in msg
-                            or "no such column" in msg
-                            or ("column" in msg and "not found" in msg)
-                        )
-                        if not column_missing:
-                            raise
-                        logger.debug("labile_until column missing, skipped: %s", exc)
-            except ImportError:
-                pass
+            except (ImportError, ValueError) as exc:
+                logger.debug("reconsolidation config unavailable, skipped: %s", exc)
+            from iai_mcp.errors import DatabaseError
+
+            tbl = self.db.open_table(RECORDS_TABLE)
+            try:
+                tbl.update(
+                    where=f"id = '{_uuid_literal(record_id)}'",
+                    values=values,
+                )
+            except (RuntimeError, ValueError, OSError, KeyError, DatabaseError) as exc:
+                msg = str(exc).lower()
+                column_missing = (
+                    "last_reviewed" in msg
+                    or "labile_until" in msg
+                    or "no such column" in msg
+                    or ("column" in msg and "not found" in msg)
+                )
+                if not column_missing:
+                    raise
+                logger.debug("records column missing, skipped: %s", exc)
         return result
 
     def upgrade_tier(

@@ -103,32 +103,35 @@ def test_knobs_applied_no_op_marker_for_scene_construction_off() -> None:
     assert "no-op" in ka["AUTIST-14"], ka["AUTIST-14"]
 
 
-def test_helper_to_knob_id_has_11_verified_entries() -> None:
-    assert len(HELPER_TO_KNOB_ID) == 11, (
-        f"HELPER_TO_KNOB_ID must have exactly 11 verified entries "
-        f"(8 helper + 2 upstream-gains + 1 wake_depth seed), "
+def test_helper_to_knob_id_has_10_verified_entries() -> None:
+    assert len(HELPER_TO_KNOB_ID) == 10, (
+        f"HELPER_TO_KNOB_ID must have exactly 10 verified entries "
+        f"(7 helper + 2 upstream-gains + 1 wake_depth seed), "
         f"got {len(HELPER_TO_KNOB_ID)}: {HELPER_TO_KNOB_ID}"
     )
     knob_ids = set(HELPER_TO_KNOB_ID.values())
-    assert len(knob_ids) == 11, knob_ids
-    for removed in ("AUTIST-02", "AUTIST-08", "AUTIST-11", "AUTIST-12"):
+    assert len(knob_ids) == 10, knob_ids
+    for removed in ("AUTIST-02", "AUTIST-08", "AUTIST-11", "AUTIST-12", "AUTIST-13"):
         assert removed not in knob_ids, (
             f"{removed} was removed; do not re-add"
         )
-    expected_autist = {f"AUTIST-{i:02d}" for i in (1, 3, 4, 5, 6, 7, 9, 10, 13, 14)}
+    expected_autist = {f"AUTIST-{i:02d}" for i in (1, 3, 4, 5, 6, 7, 9, 10, 14)}
     assert expected_autist.issubset(knob_ids), (expected_autist - knob_ids)
     assert "MCP-12" in knob_ids
 
 
 def test_profile_modulation_records_into_accumulator() -> None:
+    from iai_mcp import core
+
     now = datetime.now(timezone.utc)
+    cid = uuid4()
     rec = MemoryRecord(
         id=uuid4(),
         tier="episodic",
         literal_surface="x",
         aaak_index="",
         embedding=[0.0] * EMBED_DIM,
-        community_id=None,
+        community_id=cid,
         centrality=0.0,
         detail_level=1,
         pinned=False,
@@ -141,15 +144,20 @@ def test_profile_modulation_records_into_accumulator() -> None:
         created_at=now,
         updated_at=now,
         language="en",
-        tags=["domain:coding"],
+        tags=[],
     )
     state = default_state()
     state["monotropism_depth"] = {"coding": 0.5}
     state["interest_boost"] = 0.3
     state["dunn_quadrant"] = "seeking"
 
-    accumulator: dict[str, str] = {}
-    gains = profile_modulation_for_record(rec, state, knobs_applied=accumulator)
+    saved_names = dict(core._community_names_cache)
+    core.set_community_names({str(cid): "coding"})
+    try:
+        accumulator: dict[str, str] = {}
+        gains = profile_modulation_for_record(rec, state, knobs_applied=accumulator)
+    finally:
+        core.set_community_names(saved_names)
     assert "monotropism_depth" in gains
     assert "AUTIST-01" in accumulator, accumulator
     assert "AUTIST-09" in accumulator, accumulator
@@ -188,7 +196,7 @@ def test_profile_modulation_back_compat_without_kwarg() -> None:
     assert "interest_boost" in gains
 
 
-def _seed_one_record(store, text: str = "reference content") -> None:
+def _seed_one_record(store, text: str = "reference content", *, community_id=None) -> None:
     now = datetime.now(timezone.utc)
     rec = MemoryRecord(
         id=uuid4(),
@@ -196,7 +204,7 @@ def _seed_one_record(store, text: str = "reference content") -> None:
         literal_surface=text,
         aaak_index="",
         embedding=[0.1] * EMBED_DIM,
-        community_id=None,
+        community_id=community_id,
         centrality=0.5,
         detail_level=3,
         pinned=False,
@@ -209,7 +217,7 @@ def _seed_one_record(store, text: str = "reference content") -> None:
         created_at=now,
         updated_at=now,
         language="en",
-        tags=["domain:coding"],
+        tags=[],
     )
     store.insert(rec)
 
@@ -233,8 +241,11 @@ def _call_production_dispatch_path(tmp_path, monkeypatch) -> dict:
     monkeypatch.setattr("iai_mcp.daemon_state.save_state", _save_state)
 
     store = MemoryStore(path=tmp_path)
-    _seed_one_record(store, "reference content for knobs telemetry test")
+    cid = uuid4()
+    _seed_one_record(store, "reference content for knobs telemetry test", community_id=cid)
 
+    saved_names = dict(core._community_names_cache)
+    core.set_community_names({str(cid): "coding"})
     try:
         core._profile_state["dunn_quadrant"] = "seeking"
         core._profile_state["interest_boost"] = 0.5
@@ -249,6 +260,7 @@ def _call_production_dispatch_path(tmp_path, monkeypatch) -> dict:
     finally:
         core._profile_state.clear()
         core._profile_state.update(saved_profile)
+        core.set_community_names(saved_names)
     return response
 
 
@@ -259,7 +271,7 @@ def test_knobs_applied_via_production_dispatch_path(tmp_path, monkeypatch) -> No
     ka = response["_knobs_applied"]
     assert isinstance(ka, dict), ka
 
-    assert len(ka) == 11, ka
+    assert len(ka) == 10, ka
 
     for required in ("AUTIST-03", "AUTIST-09", "MCP-12"):
         assert required in ka, (required, sorted(ka.keys()))
@@ -267,12 +279,12 @@ def test_knobs_applied_via_production_dispatch_path(tmp_path, monkeypatch) -> No
     assert "profile.py" in ka["AUTIST-09"], ka["AUTIST-09"]
     assert "session.py" in ka["MCP-12"], ka["MCP-12"]
 
-    for removed in ("AUTIST-02", "AUTIST-08", "AUTIST-11", "AUTIST-12"):
+    for removed in ("AUTIST-02", "AUTIST-08", "AUTIST-11", "AUTIST-12", "AUTIST-13"):
         assert removed not in ka, (removed, ka)
 
     for autist in (
         "AUTIST-01", "AUTIST-03", "AUTIST-04", "AUTIST-05",
         "AUTIST-06", "AUTIST-07", "AUTIST-09", "AUTIST-10",
-        "AUTIST-13", "AUTIST-14",
+        "AUTIST-14",
     ):
         assert autist in ka, (autist, sorted(ka.keys()))

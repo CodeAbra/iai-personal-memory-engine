@@ -9,18 +9,17 @@ from iai_mcp.profile import (
     profile_set,
 )
 
-def test_profile_has_exactly_11_knobs():
-    assert len(PROFILE_KNOBS) == 11
+def test_profile_has_exactly_10_knobs():
+    assert len(PROFILE_KNOBS) == 10
 
 def test_live_knob_names_cover_the_sealed_registry():
-    assert len(LIVE_KNOB_NAMES) == 11
+    assert len(LIVE_KNOB_NAMES) == 10
     assert "literal_preservation" in LIVE_KNOB_NAMES
     assert "masking_off" in LIVE_KNOB_NAMES
     assert "task_support" in LIVE_KNOB_NAMES
     assert "scene_construction_scaffold" in LIVE_KNOB_NAMES
     assert "monotropism_depth" in LIVE_KNOB_NAMES
     assert "dunn_quadrant" in LIVE_KNOB_NAMES
-    assert "camouflaging_relaxation" in LIVE_KNOB_NAMES
     assert "wake_depth" in LIVE_KNOB_NAMES
 
 def test_deferred_knob_names_empty():
@@ -47,13 +46,13 @@ def test_live_knob_defaults_match_d11():
 def test_default_state_excludes_deferred_knobs():
     state = default_state()
     assert set(state.keys()) == LIVE_KNOB_NAMES
-    assert len(state) == 11
+    assert len(state) == 10
 
-def test_profile_get_none_returns_total_11():
+def test_profile_get_none_returns_total_10():
     state = default_state()
     result = profile_get(None, state)
-    assert result["total_knobs"] == 11
-    assert len(result["live"]) == 11
+    assert result["total_knobs"] == 10
+    assert len(result["live"]) == 10
     assert len(result["deferred"]) == 0
 
 def test_profile_get_none_live_values_match_d11():
@@ -84,13 +83,6 @@ def test_profile_get_monotropism_depth_now_live():
     assert r["knob"] == "monotropism_depth"
     assert "value" in r
     assert r["value"] == {}
-
-def test_profile_get_camouflaging_now_live_after_autist13_flip():
-    state = default_state()
-    r = profile_get("camouflaging_relaxation", state)
-    assert r["knob"] == "camouflaging_relaxation"
-    assert "value" in r
-    assert r["value"] == 0.0
 
 def test_profile_get_unknown_knob():
     state = default_state()
@@ -127,17 +119,6 @@ def test_profile_set_monotropism_depth_rejects_non_dict():
     r = profile_set("monotropism_depth", 3, state)
     assert r["status"] == "error"
     assert "dict" in r["reason"].lower()
-
-def test_profile_set_camouflaging_now_accepts_value_after_autist13_flip():
-    state = default_state()
-    r = profile_set("camouflaging_relaxation", 0.5, state)
-    assert r["status"] == "ok"
-    assert state["camouflaging_relaxation"] == 0.5
-
-def test_profile_set_camouflaging_rejects_out_of_range():
-    state = default_state()
-    r = profile_set("camouflaging_relaxation", 1.5, state)
-    assert r["status"] == "error"
 
 def test_profile_set_unknown_knob_returns_unknown_reason():
     state = default_state()

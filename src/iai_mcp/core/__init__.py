@@ -8,6 +8,7 @@ import sys
 import threading
 import time as _time
 import traceback
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -46,9 +47,6 @@ def _passes_mode_filter(record: MemoryRecord, cue_mode: str) -> bool:
     )
 
 
-FORCE_WAKE_TIMEOUT_SEC: int = 15 * 60
-
-
 from cachetools import TTLCache as _CoreTTLCache
 
 _CORE_WARM_LRU: _CoreTTLCache = _CoreTTLCache(maxsize=50, ttl=300)
@@ -64,7 +62,60 @@ _profile_state: dict[str, Any] = profile.default_state()
 
 _posterior_state: dict[str, Any] = {}
 
+#: Boot-cached expiry of a re-exposure probe opened by the nightly tuner --
+#: one comparison on the display path, no per-turn store hit. None means no
+#: probe is active. Loaded once at hydration, re-loaded on the next daemon
+#: boot after the nightly step writes a fresh `task_support_probe` event.
+_task_support_probe_active_until: "datetime | None" = None
+
 _arousal_state: object | None = None
+
+#: Bounds how long a later recall WAITS to share an in-flight embedder
+#: build -- not the build itself. A recall that wins a free lock becomes
+#: the sole builder and pays the full build cost.
+_BOOT_WINDOW_EMBED_BUILD_TIMEOUT_SEC = 0.44
+
+
+class _EmbedderBuildNotReadyDegrade(Exception):
+    """Internal signal: the boot-window bounded wait elapsed with no shared
+    embedder build ready. Never crosses the recall dispatcher -- caught
+    locally and routed to the existing zero-cue degrade path."""
+
+
+def _embedder_ready_bounded(store) -> bool:
+    """True when a full-quality embedder build is available within
+    `_BOOT_WINDOW_EMBED_BUILD_TIMEOUT_SEC`. False ONLY on a bounded-wait
+    timeout (`_EmbedderBuildNotReady`) -- an identity/config refusal
+    propagates, never becomes a False. The embedder cache is monotonic once
+    built, so a True result cannot go stale before the immediately-following
+    recall."""
+    from iai_mcp.embed import try_embedder_for_store
+
+    return (
+        try_embedder_for_store(
+            store, build_timeout=_BOOT_WINDOW_EMBED_BUILD_TIMEOUT_SEC,
+        )
+        is not None
+    )
+
+
+def _fallback_recall(
+    store, params: dict, *, embedder_ready: bool, cue_mode: str, budget_tokens: int,
+):
+    """The single dispatch shared by every degraded/fallback recall site: a
+    caller opts out of `retrieve.recall`'s own unbounded re-embed fallback
+    ONLY when it has already proven (or assumed) no embedder is ready --
+    never blindly, so re-embed quality is preserved whenever one is."""
+    cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
+    return retrieve.recall(
+        store=store,
+        cue_embedding=cue_embedding,
+        cue_text=params["cue"],
+        session_id=params.get("session_id", "unknown"),
+        budget_tokens=budget_tokens,
+        mode=cue_mode,
+        allow_cue_reembed=embedder_ready,
+    )
 
 _last_injection_embedding: list[float] | None = None
 _last_injection_ids: list[str] = []
@@ -86,6 +137,20 @@ _topology_cache_key: str | None = None
 _topology_state_lock: threading.Lock = threading.Lock()
 _topology_inflight: threading.Lock = threading.Lock()
 
+#: Server-side debounce for the per-turn refresh RPC, keyed on the
+#: caller-supplied session_id. The daemon is one long-lived process, so a
+#: module-level dict persists across requests; a bare dict write is atomic
+#: under the GIL, no lock needed. OrderedDict + move_to_end on every write
+#: keeps FIFO order so eviction is O(1) popitem, no iteration. Capped so a
+#: caller cannot grow it unbounded by rotating session ids.
+_SESSION_REFRESH_LAST_RENDER: OrderedDict[str, float] = OrderedDict()
+_SESSION_REFRESH_DEBOUNCE_S: float = 30.0
+_SESSION_REFRESH_MAX_ENTRIES: int = 512
+
+
+def _reset_session_refresh_debounce() -> None:
+    _SESSION_REFRESH_LAST_RENDER.clear()
+
 
 def _topology_store_key(store: "MemoryStore") -> str:
     root = getattr(store, "root", None)
@@ -93,7 +158,98 @@ def _topology_store_key(store: "MemoryStore") -> str:
 
 LIVE_KNOBS: dict[str, Any] = _profile_state
 DEFERRED_KNOBS: frozenset[str] = frozenset(profile.DEFERRED_KNOB_NAMES)
-assert len(DEFERRED_KNOBS) == 0, "all 10 autistic-kernel knobs live"
+assert len(DEFERRED_KNOBS) == 0, "all 9 autistic-kernel knobs live"
+
+#: Store roots already hydrated in this process -- hydration reads the
+#: store's durable profile blob at most once per root, not once per call.
+_profile_hydrated_stores: set[str] = set()
+
+
+def ensure_profile_hydrated(store: "MemoryStore") -> dict:
+    """Hydrate ``_profile_state`` / ``_posterior_state`` from *store* the
+    first time this process sees that store root; a no-op on every call
+    after. Shared by the daemon boot sequence and the lazy dispatch path so
+    neither double-reads the blob. Never raises -- a hydration failure is
+    logged and the live state is left as it was.
+    """
+    key = _topology_store_key(store)
+    with _profile_lock:
+        if key in _profile_hydrated_stores:
+            return {"hydrated": False, "already_hydrated": True}
+        _profile_hydrated_stores.add(key)
+    try:
+        from iai_mcp.lilli.profile.persistence import hydrate_profile
+
+        result = hydrate_profile(store, _profile_state, _posterior_state)
+    except Exception:  # noqa: BLE001 -- hydration must never break a caller
+        logger.debug("profile hydration failed for store %s", key, exc_info=True)
+        result = {"hydrated": False, "error": True}
+    try:
+        _load_task_support_probe_cache(store)
+    except Exception:  # noqa: BLE001 -- probe cache load must never break a caller
+        logger.debug("task_support_probe_cache_load_failed for store %s", key, exc_info=True)
+    try:
+        from iai_mcp.lilli.profile.community_names import load_community_names
+
+        set_community_names(load_community_names(store).get("reverse_index", {}))
+    except Exception:  # noqa: BLE001 -- community-name hydration must never break a caller
+        logger.debug("community_names_cache_load_failed for store %s", key, exc_info=True)
+    return result
+
+
+def task_support_probe_active(now: "datetime | None" = None) -> bool:
+    """True while a nightly-opened re-exposure probe window is still open."""
+    if _task_support_probe_active_until is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return now < _task_support_probe_active_until
+
+
+def set_task_support_probe_active_until(value: "datetime | None") -> None:
+    """Set the boot-cached probe expiry. The nightly scheduler calls this
+    on open so the SAME process sees the probe without waiting for a restart."""
+    global _task_support_probe_active_until
+    _task_support_probe_active_until = value
+
+
+#: Boot-cached community_names reverse index (community_id -> topic name).
+#: Loaded from the persisted map by `ensure_profile_hydrated` on the first
+#: dispatch after a restart, then kept current by the nightly
+#: COMMUNITY_NAMING step. Empty only when no naming cycle has ever run for
+#: this store.
+_community_names_cache: "dict[str, str]" = {}
+
+
+def get_community_names() -> "dict[str, str]":
+    """The live process dict, not a copy -- a per-recall consumer pays one
+    dict lookup, never an O(communities) copy."""
+    return _community_names_cache
+
+
+def set_community_names(reverse_index: "dict[str, str]") -> None:
+    global _community_names_cache
+    _community_names_cache = dict(reverse_index or {})
+
+
+def _load_task_support_probe_cache(store: "MemoryStore") -> None:
+    from iai_mcp.events import query_events
+
+    rows = query_events(store, kind="task_support_probe", limit=1)
+    if not rows:
+        set_task_support_probe_active_until(None)
+        return
+    raw = (rows[0].get("data") or {}).get("active_until")
+    if not raw:
+        set_task_support_probe_active_until(None)
+        return
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        set_task_support_probe_active_until(None)
+        return
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    set_task_support_probe_active_until(dt)
 
 
 def _crisis_degraded_last_resort() -> dict:
@@ -290,6 +446,7 @@ def _incident_edges_warm(
 def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
     global _last_injection_embedding, _last_injection_ids, _arousal_state
     global _topology_cache, _topology_cache_at, _topology_cache_key
+    ensure_profile_hydrated(store)
     if method == "memory_recall":
         _recall_t0 = _time.perf_counter()
         # Stamp the foreground-activity beacon so polite background loops
@@ -336,6 +493,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             _crisis_active = bool(_crisis_state.get("crisis_mode", False))
         except Exception as exc:  # noqa: BLE001 -- never let the guard crash recall
             logger.debug("crisis_mode load_state failed; serving warm path: %s", exc)
+        _trace_mark("crisis_load")
         if _crisis_active:
             logger.warning(
                 "memory_recall served degraded under crisis_mode; "
@@ -375,8 +533,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             logger.debug("arousal_budget_init_failed: %s", exc)
             _arousal_budget_tokens = 1500
             _arousal_diag = None
+        _trace_mark("prelude")
 
         _cortex_fallback = False
+        _embedder_build_degraded = False
         _structural_source: str = ""
         _authority_pairs: list = []
         # Set True only when merge_authority_hits actually folds at least one
@@ -389,6 +549,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         # count_rows on the lilli engine re-scans every leaf page, and this
         # gate sits on a per-call read path.
         records_count = store.active_records_count()
+        _trace_mark("count")
         if records_count == 0:
             cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
             resp = retrieve.recall(
@@ -404,7 +565,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 EmbedderConfigError,
                 EmbedIdentityMismatch,
                 embed_query,
-                embedder_for_store,
+                try_embedder_for_store,
             )
             from iai_mcp.pipeline import recall_for_response
             # State detection and the recall dispatch keep separate guards:
@@ -420,16 +581,16 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 )
             except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
                 logger.debug("cqrs_sleep_detection_failed: %s", exc)
+            _trace_mark("daemon_state")
             if _daemon_sleeping:
                 try:
-                    cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
-                    resp = retrieve.recall(
-                        store=store,
-                        cue_embedding=cue_embedding,
-                        cue_text=params["cue"],
-                        session_id=params.get("session_id", "unknown"),
+                    # Bounded acquire; an identity/config refusal propagates
+                    # through this call, caught by the except clause below.
+                    resp = _fallback_recall(
+                        store, params,
+                        embedder_ready=_embedder_ready_bounded(store),
+                        cue_mode=cue_mode,
                         budget_tokens=params.get("budget_tokens") or _arousal_budget_tokens,
-                        mode=cue_mode,
                     )
                     _cortex_fallback = True
                 except (EmbedderConfigError, EmbedIdentityMismatch):
@@ -442,7 +603,16 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     from iai_mcp.graph import MemoryGraph
                     from iai_mcp.pipeline import K_CANDIDATES
 
-                    embedder = embedder_for_store(store)
+                    embedder = try_embedder_for_store(
+                        store, build_timeout=_BOOT_WINDOW_EMBED_BUILD_TIMEOUT_SEC,
+                    )
+                    _trace_mark("embed_acquire")
+                    if embedder is None:
+                        # BUILD-NOT-READY within the bound: never block a
+                        # boot-window recall on a cold construction --
+                        # EmbedIdentityMismatch/config errors still raised
+                        # through try_embedder_for_store above, unswallowed.
+                        raise _EmbedderBuildNotReadyDegrade()
 
                     assignment, rc, _cached_max_degree, _structural_source, _cached_node_degrees = _rgc.load_recall_structural(store)
                     _trace_mark("structural")
@@ -793,6 +963,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                         _arec.created_at.isoformat()
                                         if _arec.created_at else None
                                     ),
+                                    community_id=getattr(_arec, "community_id", None),
                                 ))
                             if _auth_hits:
                                 # This authority merge is unconditional by design: exact_top_k
@@ -860,20 +1031,46 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     # surface — degrading to a zero cue vector would
                     # silently serve garbage recall.
                     raise
+                except _EmbedderBuildNotReadyDegrade:
+                    # Correctness backstop, not an SLA path: the boot-window
+                    # embedder build was not ready within the bound -- Hippo
+                    # still answers, degraded, rather than blocking.
+                    logger.warning(
+                        "recall_embedder_build_not_ready; degrading boot-window "
+                        "recall within %.2fs bound",
+                        _BOOT_WINDOW_EMBED_BUILD_TIMEOUT_SEC,
+                    )
+                    try:
+                        _update_arousal(_arousal_state, "error")
+                    except Exception:  # noqa: BLE001 -- arousal update fail-safe
+                        pass
+                    # The bounded acquire ABOVE (embed_acquire) already proved
+                    # no embedder is available within the bound -- do not
+                    # re-acquire here, that would waste a second full bound on
+                    # an already-degraded path. A re-embed fallback would
+                    # re-enter the same unbounded construction wait, turning
+                    # this "bounded" backstop into an unbounded one that
+                    # tracks whatever the concurrent build costs.
+                    resp = _fallback_recall(
+                        store, params,
+                        embedder_ready=False,
+                        cue_mode=cue_mode,
+                        budget_tokens=params.get("budget_tokens") or _arousal_budget_tokens,
+                    )
+                    _embedder_build_degraded = True
                 except Exception as exc:  # noqa: BLE001 -- soft availability fallback
                     logger.warning("recall_pipeline_fallback: %s", exc)
                     try:
                         _update_arousal(_arousal_state, "error")
                     except Exception:  # noqa: BLE001 -- arousal update fail-safe
                         pass
-                    cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
-                    resp = retrieve.recall(
-                        store=store,
-                        cue_embedding=cue_embedding,
-                        cue_text=params["cue"],
-                        session_id=params.get("session_id", "unknown"),
+                    # Bounded acquire; an identity/config refusal from this
+                    # acquire propagates out of this handler, not re-caught.
+                    resp = _fallback_recall(
+                        store, params,
+                        embedder_ready=_embedder_ready_bounded(store),
+                        cue_mode=cue_mode,
                         budget_tokens=params.get("budget_tokens") or _arousal_budget_tokens,
-                        mode=cue_mode,
                     )
         try:
             _arousal_event = "recall_success" if resp.hits else "recall_failed"
@@ -897,6 +1094,15 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             response["_source"] = "cortex-fallback"
         if not _cortex_fallback and _structural_source == "cold_degrade":
             response["_source"] = "cold-structural-degrade"
+        if _embedder_build_degraded:
+            response["_source"] = "embedder-build-degrade"
+        # Additive: distinguishes a full-quality structural read (normal,
+        # overlay) from a fast degraded one (last_good, cold_degrade) that
+        # the _source markers above do not fully cover -- last_good carries
+        # no _source of its own (full hits, degraded rank) and would
+        # otherwise be indistinguishable from a real full-quality answer.
+        if _structural_source:
+            response["_structural_source"] = _structural_source
         if _trace_spans is not None:
             _trace_mark("respond")
             response["_recall_trace_ms"] = list(_trace_spans)
@@ -958,7 +1164,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         _first_turn_recall_hook(response, params=params, store=store)
         try:
             from iai_mcp.response_decorator import apply_profile
-            apply_profile(response, _profile_state)
+            apply_profile(
+                response, _profile_state,
+                probe_active=task_support_probe_active(),
+            )
         except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
             logger.debug("apply_profile_failed: %s", exc)
         try:
@@ -1251,20 +1460,6 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             "schema_candidates": list(result["schema_candidates"]),
         }
 
-    if method == "session_exit":
-        from iai_mcp.sleep import run_light_consolidation
-        from iai_mcp.trajectory import (
-            compute_session_metrics_snapshot,
-            record_session_metrics,
-        )
-
-        sid = params.get("session_id", "-")
-        result = run_light_consolidation(store, session_id=sid)
-        snapshot = compute_session_metrics_snapshot(store, sid)
-        record_session_metrics(store, session_id=sid, metrics=snapshot)
-        result["trajectory_metrics_emitted"] = len(snapshot)
-        return result
-
     if method == "s5_propose":
         from iai_mcp.s5 import propose_invariant_update
 
@@ -1277,42 +1472,6 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         return {
             "verdict": verdict,
             "proposal_id": str(pid) if pid is not None else None,
-        }
-
-    if method == "profile_update_from_signal":
-        from iai_mcp.profile import bayesian_update
-
-        global _posterior_state
-        knob = params["knob"]
-        signal = params["signal"]
-        observed = params["observed"]
-        with _profile_lock:
-            new_val, new_post = bayesian_update(
-                knob, signal, observed, _profile_state, _posterior_state,
-            )
-            _posterior_state = new_post
-        return {"new_value": new_val, "knob": knob, "signal": signal}
-
-    if method == "schema_induce":
-        from iai_mcp.guard import BudgetLedger, RateLimitLedger
-        from iai_mcp.schema import induce_schemas_tier1
-
-        budget = BudgetLedger(store)
-        rate = RateLimitLedger(store)
-        candidates = induce_schemas_tier1(
-            store, budget=budget, rate=rate, llm_enabled=False,
-        )
-        return {
-            "candidates": [
-                {
-                    "pattern": c.pattern,
-                    "confidence": c.confidence,
-                    "evidence_count": c.evidence_count,
-                    "status": c.status,
-                }
-                for c in candidates
-            ],
-            "count": len(candidates),
         }
 
     if method == "curiosity_pending":
@@ -1332,15 +1491,6 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             ],
             "count": len(qs),
         }
-
-    if method == "trajectory_record":
-        from iai_mcp.trajectory import record_session_metrics
-
-        metrics = params.get("metrics", {})
-        record_session_metrics(
-            store, session_id=params.get("session_id", "-"), metrics=metrics,
-        )
-        return {"recorded": len(metrics), "session_id": params.get("session_id", "-")}
 
     if method == "schema_list":
         return _schema_list_dispatch(store, params)
@@ -1479,8 +1629,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
     if method == "detect_drift":
         from iai_mcp.s5 import detect_drift_anomaly
 
-        window = int(params.get("window_sessions", 5) or 5)
-        alerts = detect_drift_anomaly(store, window_sessions=window)
+        cycles = int(params.get("cycles", params.get("window_sessions", 5)) or 5)
+        alerts, _c, _p = detect_drift_anomaly(store, cycles=cycles)
         return {"alerts": alerts, "count": len(alerts)}
 
     if method == "shield_check":
@@ -1593,22 +1743,6 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         finally:
             _topology_inflight.release()
 
-    if method == "camouflaging_status":
-        from iai_mcp import camouflaging
-
-        window = int(params.get("window_size", 5) or 5)
-        result = camouflaging.detect_camouflaging(store, window_size=window)
-        result["camouflaging_relaxation"] = float(
-            _profile_state.get("camouflaging_relaxation", 0.0),
-        )
-        return result
-
-    if method == "initiate_sleep_mode":
-        return asyncio.run(handle_initiate_sleep_mode(params))
-
-    if method == "force_wake":
-        return asyncio.run(handle_force_wake(params))
-
     if method == "profile_get":
         return profile.profile_get(params.get("knob"), _profile_state)
 
@@ -1676,12 +1810,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
     if method == "session_refresh_if_stale":
         from iai_mcp.capture import drain_active_live_captures, drain_deferred_captures
-        from iai_mcp.session import (
-            SESSION_START_CACHE_MAX_CHARS,
-            _compose_session_start_payload,
-            format_payload_as_markdown,
-            max_record_created_at,
-        )
+        from iai_mcp.session import max_record_created_at, render_session_delta
 
         caller_watermark = params.get("watermark") or ""
         refreshing_session_id = params.get("session_id", "-")
@@ -1730,17 +1859,19 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         if not new_max_ts or (caller_watermark and _new_max_norm <= _wm_norm):
             return {"rendered": "", "new_max_ts": new_max_ts or ""}
 
-        _graph, assignment, rc = retrieve.build_runtime_graph(store)
-        payload = _compose_session_start_payload(
-            store,
-            assignment,
-            rc,
-            session_id=params.get("session_id", "-"),
-            profile_state={"wake_depth": "standard"},
+        now_monotonic = _time.monotonic()
+        last_render = _SESSION_REFRESH_LAST_RENDER.get(refreshing_session_id, 0.0)
+        if now_monotonic - last_render < _SESSION_REFRESH_DEBOUNCE_S:
+            return {"rendered": "", "new_max_ts": new_max_ts}
+
+        rendered = render_session_delta(
+            store, caller_watermark, session_id=refreshing_session_id,
         )
-        rendered = format_payload_as_markdown(payload)
-        if len(rendered) > SESSION_START_CACHE_MAX_CHARS:
-            rendered = rendered[:SESSION_START_CACHE_MAX_CHARS]
+        if rendered:
+            _SESSION_REFRESH_LAST_RENDER[refreshing_session_id] = now_monotonic
+            _SESSION_REFRESH_LAST_RENDER.move_to_end(refreshing_session_id)
+            if len(_SESSION_REFRESH_LAST_RENDER) > _SESSION_REFRESH_MAX_ENTRIES:
+                _SESSION_REFRESH_LAST_RENDER.popitem(last=False)
         return {"rendered": rendered, "new_max_ts": new_max_ts}
 
     if method == "episodes_recent":
@@ -1839,39 +1970,6 @@ async def _send_to_daemon(
             await writer.wait_closed()
         except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
             logger.debug("socket_writer_close_failed: %s", exc)
-
-
-async def handle_initiate_sleep_mode(params: dict) -> dict:
-    if not isinstance(params, dict):
-        raise ValueError("initiate_sleep_mode params must be an object")
-    if "consent" not in params:
-        raise ValueError("initiate_sleep_mode requires 'consent' (bool)")
-    if "reason" not in params:
-        raise ValueError("initiate_sleep_mode requires 'reason' (str)")
-    if not isinstance(params["consent"], bool):
-        raise ValueError("'consent' must be bool")
-    if not isinstance(params["reason"], str):
-        raise ValueError("'reason' must be str")
-
-    if params["consent"] is not True:
-        return {"ok": False, "reason": "consent_declined"}
-
-    reason = params["reason"][:500]
-    return await _send_to_daemon({
-        "type": "user_initiated_sleep",
-        "reason": reason,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    })
-
-
-async def handle_force_wake(params: dict) -> dict:
-    return await _send_to_daemon(
-        {
-            "type": "force_wake",
-            "ts": datetime.now(timezone.utc).isoformat(),
-        },
-        timeout=float(FORCE_WAKE_TIMEOUT_SEC),
-    )
 
 
 def _inject_sleep_suggestion(
@@ -2099,7 +2197,6 @@ __all__ = [
     "_profile_state",
     "LIVE_KNOBS",
     "DEFERRED_KNOBS",
-    "FORCE_WAKE_TIMEOUT_SEC",
     "SOCKET_PATH",
     "get_pending_digest",
     "load_state",
@@ -2111,8 +2208,6 @@ __all__ = [
     "_inject_sleep_suggestion",
     "_first_turn_recall_hook",
     "_send_to_daemon",
-    "handle_initiate_sleep_mode",
-    "handle_force_wake",
     "_hit_to_json",
     "_payload_to_json",
     "_schema_list_dispatch",

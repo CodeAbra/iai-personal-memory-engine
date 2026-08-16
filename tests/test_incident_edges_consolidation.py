@@ -32,6 +32,7 @@ from test_store import _make
 
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import EMBED_DIM
+from tests._helpers import stub_embedder_for_store
 
 _DRIVER_PARAMS = [
     pytest.param("stdlib", id="stdlib"),
@@ -148,9 +149,7 @@ def _make_rec(rid, seed, surface, *, embedding=None):
 
 
 def _stub_embedder_for_store(monkeypatch, vec: list[float]) -> None:
-    import iai_mcp.embed as _embed_mod
-
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: _StubEmbedder(vec))
+    stub_embedder_for_store(monkeypatch, _StubEmbedder(vec))
 
 
 def _dispatch_recall(store: MemoryStore, cue_vec: list[float], budget: int = 2000) -> dict:

@@ -216,11 +216,3 @@ def test_should_relearn_24h_cadence():
     assert should_relearn(now - timedelta(hours=24), now) is True
     assert should_relearn(now - timedelta(hours=12), now) is False
 
-def test_should_bootstrap_trigger_2h_idle():
-    from iai_mcp.quiet_window import should_bootstrap_trigger
-
-    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
-    assert should_bootstrap_trigger(None, now) is True
-    assert should_bootstrap_trigger(now - timedelta(hours=3), now) is True
-    assert should_bootstrap_trigger(now - timedelta(hours=2), now) is True
-    assert should_bootstrap_trigger(now - timedelta(hours=1), now) is False

@@ -11,8 +11,8 @@ from iai_mcp.profile import (
 )
 
 
-def test_live_knob_names_has_11_knobs():
-    assert len(LIVE_KNOB_NAMES) == 11
+def test_live_knob_names_has_10_knobs():
+    assert len(LIVE_KNOB_NAMES) == 10
 
 
 def test_deferred_knob_names_empty():
@@ -23,15 +23,15 @@ def test_all_requirement_ids_present():
     autist_specs = [
         s for s in PROFILE_KNOBS.values() if s.requirement_id.startswith("AUTIST-")
     ]
-    assert len(autist_specs) == 10
+    assert len(autist_specs) == 9
     req_ids = {spec.requirement_id for spec in autist_specs}
     expected = {
         "AUTIST-01", "AUTIST-03", "AUTIST-04", "AUTIST-05",
         "AUTIST-06", "AUTIST-07", "AUTIST-09", "AUTIST-10",
-        "AUTIST-13", "AUTIST-14",
+        "AUTIST-14",
     }
     assert req_ids == expected
-    assert len(PROFILE_KNOBS) == 11
+    assert len(PROFILE_KNOBS) == 10
     assert "wake_depth" in PROFILE_KNOBS
     assert PROFILE_KNOBS["wake_depth"].requirement_id == "MCP-12"
 
@@ -105,10 +105,10 @@ def test_HIPPEA_precision_spec_added_wire_to_autist_03():
         assert spec.value_schema.startswith("enum:")
 
 
-def test_profile_get_returns_14_live_entries():
+def test_profile_get_returns_10_live_entries():
     state = default_state()
     result = profile_get(None, state)
-    assert len(result["live"]) == 11
+    assert len(result["live"]) == 10
     assert len(result["deferred"]) == 0
 
 

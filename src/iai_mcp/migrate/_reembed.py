@@ -24,8 +24,8 @@ from iai_mcp.migrate import STAGING_TABLE, OLD_TABLE_PREFIX, PROGRESS_FILE
 log = logging.getLogger(__name__)
 
 
-def _create_canonical_staging(db):
-    """Create the staging table from the CANONICAL records DDL, not from a
+def _create_canonical_staging(db, table_name: str = STAGING_TABLE):
+    """Create a staging table from the CANONICAL records DDL, not from a
     pyarrow-derived column list. Arrow schemas carry names and types but no
     SQL constraints, so an arrow-derived staging table loses
     ``vec_label INTEGER PRIMARY KEY AUTOINCREMENT`` and ``id UNIQUE`` — after
@@ -33,12 +33,14 @@ def _create_canonical_staging(db):
     the next label-map load crashes the daemon into a restart loop. The SQL
     DDL is embedding-dim independent (the column is a BLOB), so the canonical
     text is correct for any target dim; live columns added after the DDL was
-    written are aligned by the same reconcile pass the boot path uses."""
+    written are aligned by the same reconcile pass the boot path uses. Every
+    full-table staging swap (re-embed, crypto recovery) shares this builder
+    so the constraints never drift between callers."""
     from iai_mcp.hippo._table import _DDL_RECORDS, _pa_type_to_sqlite
 
     ddl = _DDL_RECORDS.replace(
         "CREATE TABLE IF NOT EXISTS records (",
-        f"CREATE TABLE IF NOT EXISTS {STAGING_TABLE} (",
+        f"CREATE TABLE IF NOT EXISTS {table_name} (",
         1,
     )
     from iai_mcp.hippo._db import _txn
@@ -50,8 +52,8 @@ def _create_canonical_staging(db):
     drift = [
         (f.name, _pa_type_to_sqlite(f.type)) for f in live_schema
     ]
-    db._reconcile_columns(STAGING_TABLE, drift)
-    return db.open_table(STAGING_TABLE)
+    db._reconcile_columns(table_name, drift)
+    return db.open_table(table_name)
 
 
 def _progress_path(store: MemoryStore) -> Path:

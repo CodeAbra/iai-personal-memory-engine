@@ -104,12 +104,3 @@ def test_m3_reads_what_session_start_writes(tmp_path):
     )
     assemble_session_start(store, assignment, [], session_id="s-live")
     assert compute_m3_token_budget(store, "s-live") > 0.0
-
-def test_session_exit_writes_trajectory_events(tmp_path, monkeypatch):
-    from iai_mcp.core import dispatch
-
-    store = MemoryStore(path=tmp_path)
-    dispatch(store, "session_exit", {"session_id": "s-exit"})
-    events = query_events(store, kind="trajectory_metric")
-    session_events = [e for e in events if e.get("session_id") == "s-exit"]
-    assert len(session_events) >= 1

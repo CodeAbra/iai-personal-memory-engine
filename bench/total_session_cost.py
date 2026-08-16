@@ -38,7 +38,7 @@ _SCRIPT: list[dict] = [
     },
     {
         "kind": "recall_cross_community",
-        "input": "What is the connection between the formality knob and the autistic kernel?",
+        "input": "What is the connection between the literal_preservation knob and the autistic kernel?",
     },
     {
         "kind": "save",
@@ -78,7 +78,6 @@ _POST_TOK15_TOOL_DESCRIPTIONS = "\n".join([
     "List induced schemas. Optional domain + confidence_min filters.",
     "Query user-visible events by kind, since, severity, limit.",
     "Topology snapshot: N, C, L, sigma, community_count, regime.",
-    "Camouflaging detection status; window_size weekly points.",
 ])
 
 _RESULT_BODIES: dict[str, str] = {

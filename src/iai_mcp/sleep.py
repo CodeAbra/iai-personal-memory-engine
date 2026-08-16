@@ -39,7 +39,6 @@ class SleepConfig:
 DECAY_EPSILON: float = 0.01
 DECAY_GRACE_DAYS: int = 90
 DECAY_BASE: float = 0.9
-FSRS_STABILITY_BOOST: float = 0.2
 CLUSTER_MIN_SIZE: int = 3
 HEAVY_LTP_DELTA: float = 0.05
 #: Edge kinds that carry real record-to-record connectivity. Consolidation
@@ -102,14 +101,6 @@ def should_run_heavy(
             f"local hour={local.hour}"
         )
     return True, ""
-
-
-def _apply_fsrs(record: MemoryRecord, now: datetime) -> MemoryRecord:
-    if record.never_decay:
-        return record
-    record.stability = min(1.0, record.stability + FSRS_STABILITY_BOOST)
-    record.last_reviewed = now
-    return record
 
 
 #: Edges applied per transaction. One commit (one write-generation bump, one
@@ -218,49 +209,6 @@ def _decay_edges(
                         decayed += 1
 
     return {"decayed": decayed, "pruned": pruned, "interrupted": False}
-
-
-def run_light_consolidation(
-    store: MemoryStore, session_id: str,
-) -> dict:
-    now = datetime.now(timezone.utc)
-    records = store.all_records()
-    fsrs_ticked = 0
-
-    for r in records:
-        if r.never_decay:
-            continue
-        if not r.provenance:
-            continue
-        last_prov = r.provenance[-1]
-        try:
-            ts_str = last_prov.get("ts", "")
-            prov_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            if prov_ts.tzinfo is None:
-                prov_ts = prov_ts.replace(tzinfo=timezone.utc)
-            if (now - prov_ts).total_seconds() < 3600:
-                _apply_fsrs(r, now)
-                store.update_record(r)
-                fsrs_ticked += 1
-        except (TypeError, ValueError, KeyError, AttributeError):
-            continue
-
-    write_event(
-        store,
-        kind="cls_consolidation_run",
-        data={
-            "mode": "light",
-            "fsrs_ticked": fsrs_ticked,
-            "record_count": len(records),
-        },
-        severity="info",
-        session_id=session_id,
-    )
-    return {
-        "mode": "light",
-        "fsrs_ticked": fsrs_ticked,
-        "cooccurrence_updates": 0,
-    }
 
 
 def _connective_edges(edges_df) -> list[tuple[UUID, UUID, float]]:

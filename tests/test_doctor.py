@@ -374,7 +374,7 @@ def test_run_diagnosis_includes_rows_j_k_l_in_order(
     results = run_diagnosis()
     names = [r.name for r in results]
 
-    assert len(results) == 30, f"expected 30 rows, got {len(results)}: {names}"
+    assert len(results) == 31, f"expected 31 rows, got {len(results)}: {names}"
     assert any(r.name.startswith("(u)") for r in results), f"missing (u) recall centrality regression row: {names}"
 
     j_idx = next(i for i, r in enumerate(results) if "(j)" in r.name)

@@ -35,7 +35,9 @@ def _bare_path(path: str) -> str:
     return m.group("path") if m else path
 
 
-def open_store_conn(path: str | Path, *, read_only: bool = False):
+def open_store_conn(
+    path: str | Path, *, read_only: bool = False, allow_writer: bool = False
+):
     """Open the backing store for raw direct access, driver-aware.
 
     Returns None on the default driver: the caller keeps its existing
@@ -53,6 +55,11 @@ def open_store_conn(path: str | Path, *, read_only: bool = False):
     returns None (path absent or is a genuine sqlite3 file) — fail loud rather
     than silently hand back a broken or mis-typed connection.
 
+    The writer branch (read_only=False) bypasses the read-only pool's
+    generation fence, so a bare default call raises errors.DatabaseError; pass
+    allow_writer=True to opt in explicitly — see
+    iai_mcp.lillibrain.connection.get_lilli_raw_conn for the fence contract.
+
     Driver selection follows the on-disk file format (env only for a fresh or
     absent file), so a process without ``LILLI_STORAGE_DRIVER`` — e.g. the
     user-shell ``iai recall`` daemon-down raw path — still reads a native-engine
@@ -68,7 +75,7 @@ def open_store_conn(path: str | Path, *, read_only: bool = False):
     from iai_mcp.lillibrain.connection import get_lilli_raw_conn  # noqa: PLC0415
 
     bare = _bare_path(str(path))
-    conn = get_lilli_raw_conn(bare, read_only=read_only)
+    conn = get_lilli_raw_conn(bare, read_only=read_only, allow_writer=allow_writer)
     if conn is None:
         raise RuntimeError(
             f"lilli driver active but no engine connection for {path!r}"

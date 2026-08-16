@@ -804,7 +804,17 @@ pub fn eval_expr(expr: &Expr, row: &Row) -> EvalVal {
         Expr::Placeholder => EvalVal::Val(Value::Null),
         Expr::NamedParam(_) => EvalVal::Val(Value::Null),
         Expr::Excluded(_) => EvalVal::Val(Value::Null),
-        Expr::Column(name) => EvalVal::Val(row.get_or_null(name)),
+        // A dotted `table.col` reference matches a row cell exactly first (a
+        // literally-named "a.b" column wins); otherwise it unqualifies to the
+        // bare column name, since `Row` (single-table, no JOIN) stores cells
+        // undotted.
+        Expr::Column(name) => EvalVal::Val(match row.get(name) {
+            Some(v) => v.clone(),
+            None => match name.rsplit_once('.') {
+                Some((_, col)) => row.get_or_null(col),
+                None => Value::Null,
+            },
+        }),
         Expr::BinOp { op, left, right } => eval_binop(op, left, right, row),
         Expr::UnaryOp { op, operand } => {
             let v = eval_expr(operand, row);

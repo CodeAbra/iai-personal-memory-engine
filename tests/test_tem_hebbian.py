@@ -122,18 +122,6 @@ def test_co_retrieval_trigger_does_not_fire_below_threshold(tmp_path, monkeypatc
     structure_edges = edges_df[edges_df["edge_type"] == "hebbian_structure"]
     assert len(structure_edges) == 0
 
-def test_decay_structure_edge_matches_content_edge_formula():
-    from iai_mcp.tem import decay_structure_edge
-
-    assert decay_structure_edge(0.5, 0.3, 30) == 1.0
-    assert decay_structure_edge(0.5, 0.3, 90) == 1.0
-
-    expected_30 = 0.9 ** 30
-    assert decay_structure_edge(0.5, 0.3, 120) == pytest.approx(expected_30)
-
-    expected_60 = 0.9 ** 60
-    assert decay_structure_edge(0.5, 0.3, 150) == pytest.approx(expected_60)
-
 def test_sleep_decay_sweep_includes_hebbian_structure(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp.hebbian_structure import strengthen_structure_edge

@@ -17,19 +17,6 @@ def test_apply_profile_is_noop_on_default_state():
     )
     assert isinstance(out["_knobs_applied"], dict), out["_knobs_applied"]
 
-def test_formality_relaxation_applied_to_surface_text():
-    from iai_mcp import profile
-    from iai_mcp.response_decorator import apply_profile
-
-    state = profile.default_state()
-    state["camouflaging_relaxation"] = 0.8
-    resp = {
-        "hits": [{"record_id": "r1", "literal_surface": "Good morning Sir."}],
-        "anti_hits": [],
-    }
-    apply_profile(resp, state)
-    assert "hits" in resp and len(resp["hits"]) == 1
-
 def test_monotropic_focus_narrows_hits():
     from iai_mcp import profile
     from iai_mcp.response_decorator import apply_profile

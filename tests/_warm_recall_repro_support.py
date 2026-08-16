@@ -272,6 +272,19 @@ def spawn_isolated_daemon(
     )
 
     env = os.environ.copy()
+    # Warm the model cache before HOME is overridden below: the real cache
+    # holds the already-installed embedder (as prod does), so the spawned
+    # daemon's embedder build is the warm fixed cost instead of a cold
+    # re-download. HF_HOME (not HF_HUB_CACHE, which already has "hub"
+    # appended) is what the resolver reads and falls back from -- pointing
+    # it at HF_HUB_CACHE's value here would double-join into ".../hub/hub"
+    # and force a cold miss. setdefault so an explicitly-set parent HF_HOME
+    # always wins. Paired with a fail-loud offline flag: a wrong or missing
+    # cache path must error, never silently re-download and launder a fast
+    # green that is actually a cold miss.
+    _real_hf_home = os.environ.get("HF_HOME") or str(_real_home() / ".cache" / "huggingface")
+    env.setdefault("HF_HOME", _real_hf_home)
+    env.setdefault("IAI_MCP_EMBED_OFFLINE", "1")
     env["HOME"] = str(scratch_home)
     env["IAI_MCP_STORE"] = str(base)
     env["IAI_DAEMON_SOCKET_PATH"] = str(socket_path)

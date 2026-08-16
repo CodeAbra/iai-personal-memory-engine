@@ -5,6 +5,130 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2026-08-15
+
+### Added
+- A hand-set behavioural-profile knob now persists and
+  is pinned the instant it is set, rather than waiting for a later write to
+  flush the whole profile. A pinned knob is recorded in the durable blob at
+  set time and survives a process restart even if no other write happens
+  first.
+- The task-support knob now auto-tunes from genuine
+  same-session follow-through: if adjacent suggestions go consistently
+  unused it switches to blank recall, and if that later stops fitting, a
+  bounded nightly probe (at most once every two weeks) briefly re-shows
+  suggestions and switches back only when the user actually uses them
+  again. An unused probe changes nothing.
+- The monotropism-depth knob now auto-tunes per
+  topic, keyed by the topic's own human-readable name, from how
+  concentrated recall cues are on one topic versus a spread of topics
+  night over night; a genuinely dominant topic's rank gain grows
+  (bounded, capped well below the level a manual override would need to
+  reach), and a topic that stops recurring fades back out. The knob's
+  proactive same-topic duplicate check now resolves the same way, so a
+  hand-set depth on a named topic reaches both the rank gain and the
+  duplicate check consistently.
+- A hand-set monotropism-depth above the manual
+  threshold now also reorders which hits are served first, promoting
+  memories from that named topic (including exact-match hits) to the
+  front of the response. This reorder is manual-only; ordinary
+  night-over-night auto-tuning never reaches it.
+
+### Removed
+- Dropped the masking-detection tool and its behavioural
+  knob. The `camouflaging_status` MCP tool is gone, leaving 14 tools on the MCP
+  surface, and the `camouflaging_relaxation` knob is gone from the sealed
+  behavioural profile registry, which now holds 10 entries. The recall path no
+  longer applies a formality-relaxation adjustment based on that knob. Any host
+  still calling `camouflaging_status` or reading/writing the removed knob must
+  update to stop referencing them; historical audit-log rows recorded while the
+  feature was active remain queryable.
+
+### Fixed
+- A stored memory whose internal vector-index label was
+  ever left empty could not be recovered on the storage engine: the boot-time
+  repair meant to backfill it silently did nothing (a column-to-column update
+  wrote empty instead of copying the row key), so the store refused to reopen
+  instead of self-healing. The update now copies the value correctly, so such a
+  store recovers on the next start.
+- A cached filtered row count could report more rows than
+  actually match after a soft-delete, because the cache was not refreshed when a
+  non-indexed column changed. The boot decision about whether to rebuild the
+  vector index, the wake sequencing, and the corpus count all read that count, so
+  a stale over-count could trigger needless work or mask a real mismatch; the
+  count is now refreshed on every write that can change it.
+- Setting a behavioural-profile knob to the value it
+  already held recorded no pin, leaving it open to being moved by the
+  nightly self-tuner even though the owner had explicitly locked it in.
+  Any explicit set now pins the knob regardless of whether the value
+  changed. Separately, a failed durable write during a knob set (disk full,
+  encryption error) was silently swallowed and reported back as full
+  success; the response now distinguishes a persisted set from one that
+  only updated the live session, and a failed write raises a warning event.
+- The per-turn memory refresh re-injected the entire
+  session-start brief (identity, critical facts, topic communities, key
+  memories) on every store advance instead of just what changed, so a busy
+  session could re-pay thousands of tokens per turn for content the model
+  already had. It now renders a bounded delta of only the records newer than
+  the caller's own watermark, cross-session records carry an origin label, a
+  burst larger than the render window still advances the watermark and marks
+  the truncation, and a server-side debounce caps how often a session can
+  fire the refresh without ever dropping a new record — it simply
+  accumulates until the next allowed render.
+- A retrieved memory was never marked as reviewed, so
+  the nightly forgetting sweep and cluster-replay step both treated it as
+  never used. Recall now stamps `last_reviewed` on every returned record as
+  part of the write it already issues, independent of the reconsolidation
+  dry-run flag and of that config loading successfully. Using a memory now
+  protects it from the forgetting sweep's rolling window and lets nightly
+  replay reach it.
+- The monotropism-depth topic names did not survive a
+  daemon restart: the map is persisted, but the in-process cache that the
+  rank gain, the response reorder, and the duplicate check all read from
+  stayed empty until a nightly cycle happened to run in that same process,
+  so a restart silently disabled the whole feature until the next sleep.
+  Boot hydration now loads the persisted topic names the same way it loads
+  the rest of the behavioural profile, so the feature keeps working
+  immediately after a restart.
+- A topic's monotropism-depth learning could reset for
+  no reason: when a topic's display name needed a disambiguating second
+  word (two topics sharing the same top word), that second word was
+  recomputed fresh every night, so it could rotate even though the topic
+  itself never changed, starting that topic's accumulated depth over from
+  zero under the new name. The disambiguating word is now sticky the same
+  way the topic's main name already was, so a stable topic keeps its
+  learned depth.
+- Removed records could still be returned by recall. The two maintenance
+  operations `iai-mcp blob-quarantine --apply` and `iai-mcp idem-dedup --apply`
+  soft-deleted a record but did not mark it not-live in the same write, so recall
+  (which serves only live rows) kept returning it, and the row also stayed
+  resident in the warm caches. Both operations now clear the live flag together
+  with the deletion timestamp and evict the removed ids from the exact-match and
+  recency caches. A one-shot boot-time self-heal repairs a store already drifted
+  by the old behavior, and a source-scan check keeps any future deletion path
+  from reintroducing the split.
+- Encryption key recovery resurrected deleted records. `iai-mcp crypto
+  recover-prior-key` rebuilt every row through the fresh-insert serializer, which
+  dropped the deletion timestamp, the live flag, and the pending-embedding flag —
+  so recovery brought soft-deleted records back as findable and silently marked
+  pending rows ready. Recovery now stages each row byte-for-byte from storage
+  (preserving deletion and pending state) and re-keys only the encrypted columns
+  under the new key. The recovery staging table is built from the canonical
+  schema so the vector-index key and the record-id uniqueness constraint survive
+  the swap. Stores already recovered under the old behavior cannot be repaired
+  (the deletion timestamp was erased); this fix prevents it going forward.
+- A duplicate identifier written straight to the memory
+  table (bypassing the normal upsert path) silently appended a second row
+  instead of being rejected, on the primary storage engine only — the
+  fallback engine already refused it. Both engines now refuse a duplicate
+  identifier the same way, and a routine batch write that hits a genuine
+  duplicate no longer keeps retrying the same batch forever; the offending
+  entry is dropped once its content is confirmed already stored, and
+  anything else is surfaced loudly rather than assumed safe. Encryption key
+  recovery also now refuses outright, rather than silently duplicating
+  content, if it ever finds a source that already holds two entries under
+  the same identifier.
+
 ## [3.0.1] — 2026-08-12
 
 Six defects found by running the engine at production scale on a live box rather

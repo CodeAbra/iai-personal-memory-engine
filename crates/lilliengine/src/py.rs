@@ -43,9 +43,11 @@ type SharedConn = Arc<Mutex<conn::Connection>>;
 ///
 /// A bind-count fault maps to `ProgrammingError`; storage corruption maps to the
 /// bare `DatabaseError` (the parent, not a subclass) so a caller's
-/// `except OperationalError` does not swallow disk damage; a transient storage
-/// I/O fault, read-only write rejection, and parse/unsupported errors map to
-/// `OperationalError` so the host sees a SQL-shaped error.
+/// `except OperationalError` does not swallow disk damage; a UNIQUE / PRIMARY KEY
+/// violation maps to `IntegrityError`, matching stdlib sqlite3's class for the
+/// same violation; a transient storage I/O fault, read-only write rejection, and
+/// parse/unsupported errors map to `OperationalError` so the host sees a
+/// SQL-shaped error.
 fn to_pyerr(py: Python<'_>, e: EngineError) -> PyErr {
     let msg = e.to_string();
     // A snapshot fence is transient: raise the dedicated OperationalError
@@ -61,6 +63,7 @@ fn to_pyerr(py: Python<'_>, e: EngineError) -> PyErr {
     let exc_name = match &e {
         EngineError::ProgrammingError(_) => "ProgrammingError",
         EngineError::Corruption { .. } => "DatabaseError",
+        EngineError::Integrity(_) => "IntegrityError",
         _ => "OperationalError",
     };
     match errors_mod.getattr(exc_name) {

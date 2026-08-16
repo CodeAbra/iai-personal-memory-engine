@@ -106,6 +106,38 @@ def declared_output_fields() -> dict[str, set[str]]:
     return out
 
 
+def _independent_property_bearing_outputschema_count(text: str) -> int:
+    """Count tool entries whose outputSchema declares a properties block.
+
+    Trivially independent of declared_output_fields(): a plain indentation
+    window scan, no brace balancing, no regex. Exists to catch a silently
+    broken sophisticated parser that returns a near-empty result.
+    """
+    count = 0
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].lstrip()
+        if stripped.startswith("outputSchema:"):
+            indent = len(lines[i]) - len(stripped)
+            j = i + 1
+            has_props = False
+            while j < n:
+                inner = lines[j]
+                inner_stripped = inner.lstrip()
+                if inner_stripped and (len(inner) - len(inner_stripped)) <= indent:
+                    break
+                if inner_stripped.startswith("properties:"):
+                    has_props = True
+                    break
+                j += 1
+            if has_props:
+                count += 1
+        i += 1
+    return count
+
+
 def _seed_record(vec: list[float], text: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
@@ -166,7 +198,6 @@ def _params_for(tool: str, store: MemoryStore, recs: list[MemoryRecord]) -> dict
         "schema_list": {},
         "events_query": {"kind": "s4_contradiction", "limit": 5},
         "topology": {},
-        "camouflaging_status": {},
         "episodes_recent": {"n": 3},
     }
     return table[tool]
@@ -177,7 +208,17 @@ def test_every_declared_output_field_is_served(seeded_store) -> None:
 
     store, recs = seeded_store
     declared = declared_output_fields()
-    assert len(declared) >= 14, f"expected the hot tools, got {sorted(declared)}"
+    independent = _independent_property_bearing_outputschema_count(TOOLS_TS.read_text())
+    assert independent > 0, (
+        "the independent outputSchema scan found no property-bearing tools — "
+        "one of the two parsers is broken"
+    )
+    assert len(declared) == independent, (
+        "the outputSchema parser and an independent scan disagree on how many "
+        "tools declare a properties block — one of them is broken:\n"
+        f"  parser: {len(declared)} {sorted(declared)}\n"
+        f"  independent scan: {independent}"
+    )
 
     problems: list[str] = []
     for tool, fields in sorted(declared.items()):

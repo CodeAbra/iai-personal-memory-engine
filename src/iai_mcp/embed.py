@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import math
+import threading
 from dataclasses import dataclass
 from typing import Literal
 from urllib.error import HTTPError, URLError
@@ -554,10 +555,93 @@ def stamp_store_embed_identity(store, embedder: "Embedder") -> None:
         db._conn.commit()
 
 
-def embedder_for_store(store, *, allow_identity_mismatch: bool = False) -> "Embedder":
+#: Leaf lock below `_conn_lock` -- the identity guard (which takes
+#: `_conn_lock`) always runs OUTSIDE this lock, never nested under it.
+_embedder_lock = threading.Lock()
+_embedder_cache: dict[tuple, "Embedder"] = {}
+
+
+class _EmbedderBuildNotReady(Exception):
+    """Internal signal: a bounded acquire's build_timeout elapsed while a
+    different caller still holds the build. Never crosses embedder_for_store
+    -- try_embedder_for_store translates it to None so a boot-window recall
+    degrades instead of blocking on a cold construction."""
+
+
+def _embedder_construction_key(
+    *,
+    provider: str,
+    model_key: str | None = None,
+    http_config: tuple | None = None,
+) -> tuple:
+    """The exhaustive single-flight cache key.
+
+    Folds every input that changes what Embedder(...) constructs or how
+    effective_model_identity stamps it -- missing one serves a stale
+    instance to a caller expecting a different identity.
+    """
+    quantize = _resolve_quantize_mode()
+    model_id_env = os.environ.get("IAI_MCP_EMBED_MODEL_ID", "")
+    revision_env = os.environ.get("IAI_MCP_EMBED_REVISION", "")
+    prefix_env = os.environ.get("IAI_MCP_EMBED_TEXT_PREFIX", "")
+    if provider == "http":
+        return ("http", http_config, quantize, model_id_env, revision_env, prefix_env)
+    return ("native", model_key, quantize, model_id_env, revision_env, prefix_env)
+
+
+def _build_or_get_shared_embedder(key: tuple, factory, *, timeout: float | None = None):
+    """Double-checked construction: the second concurrent caller for the same
+    key blocks on and shares the first build instead of starting its own.
+
+    Fast path is lock-free (dict.get is atomic under the GIL). A failed
+    build is never cached -- the slot stays empty so the next caller retries
+    fresh. `timeout=None` blocks until the build completes (or fails);
+    a numeric timeout bounds the WAIT, not the build -- a caller that wins
+    the race becomes the builder and still pays the full build cost.
+    """
+    inst = _embedder_cache.get(key)
+    if inst is not None:
+        return inst
+    if timeout is None:
+        with _embedder_lock:
+            inst = _embedder_cache.get(key)
+            if inst is None:
+                inst = factory()
+                _embedder_cache[key] = inst
+            return inst
+    if not _embedder_lock.acquire(timeout=timeout):
+        raise _EmbedderBuildNotReady()
+    try:
+        inst = _embedder_cache.get(key)
+        if inst is None:
+            inst = factory()
+            _embedder_cache[key] = inst
+        return inst
+    finally:
+        _embedder_lock.release()
+
+
+def _reset_embedder_singleton() -> None:
+    """Test hook: empty the construction cache so the next call rebuilds.
+
+    Import-poison-safe callers must use getattr on the already-bound module
+    -- a test poisons sys.modules["iai_mcp.embed"] with None elsewhere.
+    dict.clear() is atomic under the GIL, so this takes no lock -- an
+    autouse fixture must never block on a build lock a prior test may leak.
+    """
+    _embedder_cache.clear()
+
+
+def embedder_for_store(
+    store, *, allow_identity_mismatch: bool = False, build_timeout: float | None = None
+) -> "Embedder":
     target_dim = getattr(store, "embed_dim", None)
     if _resolve_provider() == "http":
-        embedder = Embedder()
+        http_config = _resolve_http_config()
+        key = _embedder_construction_key(provider="http", http_config=http_config)
+        embedder = _build_or_get_shared_embedder(
+            key, lambda: Embedder(), timeout=build_timeout
+        )
         if target_dim is not None and int(target_dim) != embedder.DIM:
             raise EmbedderConfigError(
                 f"store uses {target_dim}d embeddings but the configured http "
@@ -569,7 +653,11 @@ def embedder_for_store(store, *, allow_identity_mismatch: bool = False) -> "Embe
         )
         return embedder
     if target_dim is None:
-        embedder = Embedder()
+        resolved_key = _resolve_model_key(None)
+        key = _embedder_construction_key(provider="native", model_key=resolved_key)
+        embedder = _build_or_get_shared_embedder(
+            key, lambda: Embedder(), timeout=build_timeout
+        )
         _enforce_store_embed_identity(
             store, embedder, allow_mismatch=allow_identity_mismatch
         )
@@ -595,14 +683,27 @@ def embedder_for_store(store, *, allow_identity_mismatch: bool = False) -> "Embe
         # With no config the resolver lands on the default anyway; argless
         # construction keeps this arm byte-identical to every other default
         # call site (and to the native env-honoring arm).
-        embedder = Embedder()
+        cache_key = _embedder_construction_key(provider="native", model_key=key)
+        embedder = _build_or_get_shared_embedder(
+            cache_key, lambda: Embedder(), timeout=build_timeout
+        )
     elif key is not None and key in MODEL_REGISTRY:
-        embedder = Embedder(model_key=key)
+        cache_key = _embedder_construction_key(provider="native", model_key=key)
+        embedder = _build_or_get_shared_embedder(
+            cache_key, lambda: Embedder(model_key=key), timeout=build_timeout
+        )
     else:
         embedder = None
         for reg_key, spec in MODEL_REGISTRY.items():
             if int(spec["dim"]) == int(target_dim):
-                embedder = Embedder(model_key=reg_key)
+                cache_key = _embedder_construction_key(
+                    provider="native", model_key=reg_key
+                )
+                embedder = _build_or_get_shared_embedder(
+                    cache_key,
+                    lambda reg_key=reg_key: Embedder(model_key=reg_key),
+                    timeout=build_timeout,
+                )
                 break
         if embedder is None:
             # Same contract as the http branch: a store whose vectors no
@@ -618,3 +719,24 @@ def embedder_for_store(store, *, allow_identity_mismatch: bool = False) -> "Embe
         store, embedder, allow_mismatch=allow_identity_mismatch
     )
     return embedder
+
+
+def try_embedder_for_store(
+    store, *, build_timeout: float, allow_identity_mismatch: bool = False
+) -> "Embedder | None":
+    """Bounded acquire for the boot-window recall path.
+
+    Shares a full-quality in-flight build within build_timeout and returns
+    it. Returns None ONLY when the build is not ready within build_timeout
+    -- the caller degrades. EmbedIdentityMismatch / config errors are never
+    swallowed by the timeout; they propagate exactly as embedder_for_store
+    raises them.
+    """
+    try:
+        return embedder_for_store(
+            store,
+            allow_identity_mismatch=allow_identity_mismatch,
+            build_timeout=build_timeout,
+        )
+    except _EmbedderBuildNotReady:
+        return None

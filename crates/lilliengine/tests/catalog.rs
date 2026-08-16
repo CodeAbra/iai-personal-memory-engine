@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS _hippo_meta (
     value TEXT
 )";
 
+const DDL_RECORD_TAGS: &str = "\
+CREATE TABLE IF NOT EXISTS record_tags (
+    record_id TEXT NOT NULL,
+    tag       TEXT NOT NULL,
+    UNIQUE(record_id, tag)
+)";
+
 #[test]
 fn records_columns_affinity_and_pk() {
     let mut cat = Catalog::new();
@@ -196,6 +203,65 @@ fn all_six_hippo_schemas_register() {
     );
     // _hippo_meta key TEXT PRIMARY KEY.
     assert!(col(&cat, "_hippo_meta", "key").primary_key);
+}
+
+/// Count the enforceable key-sets: every tracked UNIQUE/PK key-set except a lone
+/// AUTOINCREMENT `vec_label` PK, which the engine injects fresh per row and can
+/// never collide (mirrors exec's auto-injected-only filter for the common INSERT
+/// that does not name `vec_label`).
+fn enforceable_keysets(keysets: &[Vec<String>]) -> usize {
+    keysets
+        .iter()
+        .filter(|ks| !(ks.len() == 1 && ks[0].eq_ignore_ascii_case("vec_label")))
+        .count()
+}
+
+/// The plain-INSERT UNIQUE/PK enforcement path reuses ONE conflict index per
+/// INSERT and records no key-set identity on it, so it can enforce at most one
+/// key-set. This locks the schema-level precondition: every canonical table
+/// presents at most one enforceable (non-auto-injected) key-set. Adding a second
+/// UNIQUE / PRIMARY KEY to any of these turns this RED — the signal to generalize
+/// the conflict cache to a per-key-set map before the engine can enforce it.
+#[test]
+fn canonical_tables_present_at_most_one_enforceable_keyset() {
+    for ddl in [
+        DDL_RECORDS,
+        DDL_EDGES,
+        DDL_EVENTS,
+        DDL_BUDGET,
+        DDL_RATELIMIT,
+        DDL_HIPPO_META,
+        DDL_RECORD_TAGS,
+    ] {
+        let mut cat = Catalog::new();
+        apply(&mut cat, ddl);
+        let table = cat.table_names()[0].clone();
+        let keysets = cat.unique_keysets(&table).unwrap();
+        assert!(
+            enforceable_keysets(&keysets) <= 1,
+            "table {table} presents {} enforceable key-sets {keysets:?}; the single-conflict-index \
+             plain-INSERT path enforces only one — generalize the cache first",
+            enforceable_keysets(&keysets),
+        );
+    }
+}
+
+/// Positive control for the invariant above: a PRIMARY KEY plus a separate
+/// column-level UNIQUE surfaces two enforceable key-sets, so the assertion
+/// would fire — proving it is not vacuously green.
+#[test]
+fn two_enforceable_keysets_are_visible() {
+    let mut cat = Catalog::new();
+    apply(
+        &mut cat,
+        "CREATE TABLE two_keys ( a INTEGER PRIMARY KEY , b TEXT UNIQUE )",
+    );
+    let keysets = cat.unique_keysets("two_keys").unwrap();
+    assert_eq!(
+        enforceable_keysets(&keysets),
+        2,
+        "PK + separate UNIQUE must surface two enforceable key-sets, got {keysets:?}"
+    );
 }
 
 #[test]
@@ -518,4 +584,82 @@ fn create_table_duplicate_column_rejected() {
     let stmt = parse("CREATE TABLE t ( id TEXT , id INTEGER )").expect("parse DDL");
     let err = cat.apply_ddl(&stmt).unwrap_err();
     assert_eq!(err.to_string(), "duplicate column name: id");
+}
+
+// ---------------------------------------------------------------------------
+// unique_keysets — column-level UNIQUE tracking + PK/UNIQUE key-set exposure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unique_column_constraint_is_tracked() {
+    // The column-level UNIQUE keyword must no longer be silently discarded.
+    let mut cat = Catalog::new();
+    apply(&mut cat, DDL_RECORDS);
+    let id = col(&cat, "records", "id");
+    assert!(id.unique, "records.id UNIQUE must be tracked on ColumnMeta");
+    let vec_label = col(&cat, "records", "vec_label");
+    assert!(
+        !vec_label.unique,
+        "vec_label carries no column-level UNIQUE (it is the PK)"
+    );
+}
+
+/// Order-insensitive comparison of two key-set lists.
+fn assert_keysets_eq(mut got: Vec<Vec<String>>, mut want: Vec<Vec<String>>) {
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "unique_keysets mismatch");
+}
+
+#[test]
+fn unique_keysets_records_yields_pk_and_unique_column() {
+    let mut cat = Catalog::new();
+    apply(&mut cat, DDL_RECORDS);
+    let keysets = cat.unique_keysets("records").unwrap();
+    assert_keysets_eq(
+        keysets,
+        vec![vec!["vec_label".to_string()], vec!["id".to_string()]],
+    );
+}
+
+#[test]
+fn unique_keysets_edges_yields_composite_pk() {
+    let mut cat = Catalog::new();
+    apply(&mut cat, DDL_EDGES);
+    let keysets = cat.unique_keysets("edges").unwrap();
+    assert_keysets_eq(
+        keysets,
+        vec![vec![
+            "src".to_string(),
+            "dst".to_string(),
+            "edge_type".to_string(),
+        ]],
+    );
+}
+
+#[test]
+fn unique_keysets_events_yields_single_pk_column() {
+    let mut cat = Catalog::new();
+    apply(&mut cat, DDL_EVENTS);
+    let keysets = cat.unique_keysets("events").unwrap();
+    assert_keysets_eq(keysets, vec![vec!["id".to_string()]]);
+}
+
+#[test]
+fn unique_keysets_hippo_meta_yields_single_pk_column() {
+    let mut cat = Catalog::new();
+    apply(&mut cat, DDL_HIPPO_META);
+    let keysets = cat.unique_keysets("_hippo_meta").unwrap();
+    assert_keysets_eq(keysets, vec![vec!["key".to_string()]]);
+}
+
+#[test]
+fn unique_keysets_table_with_no_pk_or_unique_is_empty() {
+    let mut cat = Catalog::new();
+    apply(&mut cat, DDL_BUDGET);
+    let keysets = cat.unique_keysets("budget_ledger").unwrap();
+    assert!(
+        keysets.is_empty(),
+        "a table with neither PK nor UNIQUE must yield no key-sets, got {keysets:?}"
+    );
 }

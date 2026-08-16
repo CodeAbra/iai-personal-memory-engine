@@ -1,3 +1,11 @@
+"""Percentile-math coverage for compute_session_start_tokens_p90.
+
+Covers the rolling p90 arithmetic only (windowing, outlier resistance,
+event-kind filtering, restart persistence). Not a session-start token
+budget guard — that role lives in test_session_refresh_rpc.py, against
+the real per-turn refresh RPC.
+"""
+
 from __future__ import annotations
 
 import time

@@ -216,6 +216,45 @@ class RecencyBuffer:
                     self._evict_oldest()
             self._warm = True
 
+    def merge_warm(self, entries: list[RecencyMarker]) -> None:
+        """Merge a SQL-warmed set into the buffer, preserving unflushed pushes.
+
+        A cold-buffer lazy warm cannot rebuild an entry the write path just
+        pushed (``source_rowid == -1``) because that SQL query does not see
+        the row yet. ``replace_all`` would wipe that entry; this instead
+        builds the new SQL-warmed map first, then unions in every currently
+        buffered sentinel whose id is NOT already present in the SQL set (a
+        same-id SQL row is the flushed version and wins over its sentinel).
+        Sentinels are exempt from capacity eviction — only non-sentinel
+        entries are evicted down to ``maxlen`` when the merged set exceeds
+        it, so a sentinel can never be evicted before it is superseded by
+        its own flush. With no sentinels present this produces the same
+        result as ``replace_all``.
+
+        Single lock acquisition, matching ``replace_all``'s race-free swap
+        discipline — never clear-then-fill across separate holds.
+        """
+        with self._lock:
+            sentinels = {
+                eid: e
+                for eid, e in self._entries.items()
+                if e.source_rowid == -1
+            }
+            new_entries: dict[str, RecencyMarker] = {}
+            for e in entries:
+                new_entries[e.id] = e
+                if len(new_entries) > self._maxlen:
+                    oldest_id = min(
+                        new_entries,
+                        key=lambda eid: _as_utc(new_entries[eid].created_at),
+                    )
+                    del new_entries[oldest_id]
+            for eid, sentinel in sentinels.items():
+                if eid not in new_entries:
+                    new_entries[eid] = sentinel
+            self._entries = new_entries
+            self._warm = True
+
     def clear(self) -> None:
         """Empty the buffer and reset the warm flag."""
         with self._lock:

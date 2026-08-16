@@ -134,6 +134,7 @@ class MemoryHit:
     valid_to: datetime | None = None
     session_id: str | None = None
     captured_at: str | None = None
+    community_id: UUID | None = None
 
 
 @dataclass

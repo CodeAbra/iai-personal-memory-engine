@@ -242,6 +242,32 @@ def test_warm_recall_prodscale_isolated_daemon(tmp_path: Path, driver: str) -> N
                 f"persistent index with maintenance work kept off the awake "
                 f"recall path"
             )
+
+            # A sub-SLA wall clock alone is not proof of a full-quality
+            # answer: a degraded (no-embedder / cold-structural /
+            # cortex-fallback) response can also be fast. The gate must
+            # reject a laundered degrade.
+            _degrade_source = result.get("_source")
+            assert _degrade_source not in (
+                "embedder-build-degrade", "cold-structural-degrade", "cortex-fallback",
+            ), (
+                f"cue {cue!r} was under the SLA but degraded "
+                f"(_source={_degrade_source!r}) on the {driver} driver -- a fast "
+                f"degrade is not a full-quality pass"
+            )
+
+            # A missing _source alone is still not proof of full quality: a
+            # fast last_good structural read (full hits, degraded rank)
+            # carries no _source of its own. The structural branch must be
+            # full-quality too.
+            _structural_branch = result.get("_structural_source")
+            assert _structural_branch in ("normal", "overlay"), (
+                f"cue {cue!r} was under the SLA and non-degraded by _source "
+                f"on the {driver} driver, but its structural branch was "
+                f"{_structural_branch!r}, not full-quality (normal/overlay) -- "
+                f"a fast last_good/cold_degrade structural read must not pass "
+                f"this gate"
+            )
     finally:
         handle.terminate()
         _assert_prod_daemon_alive_if_present(prod_daemon_pid)

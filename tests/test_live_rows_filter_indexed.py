@@ -514,3 +514,161 @@ def test_fresh_migrate_lands_live_column_populated_before_first_recall(
             )
     finally:
         dst_store.db.close()
+
+
+# ---------------------------------------------------------------------------
+# Test 6 -- an already-drifted store (a row tombstoned without deriving live
+# in the same write, and its symmetric reverse) self-corrects on the next
+# reconciliation pass, and a second pass is a stamped no-op.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not _native_available(),
+    reason="iai_mcp_native.engine submodule not installed (build the native wheel)",
+)
+def test_drifted_live_flag_reconciles_and_second_pass_is_noop(
+    tmp_path: Path,
+) -> None:
+    """A store carrying pre-existing live/tombstoned drift self-corrects.
+
+    Simulates the shape an affected maintenance verb leaves behind: a row
+    with ``tombstoned_at`` set but ``live`` still 1 (the verb wrote only the
+    timestamp), plus the symmetric reverse case (``tombstoned_at`` unset but
+    ``live`` still 0) to cover both directional UPDATEs. The reconciliation
+    pass must correct both rows and stamp completion; a second pass must be
+    a no-op that reports zero further updates.
+    """
+    from iai_mcp.migrate._live_flag_backfill import (
+        _RECONCILE_MARKER_KEY,
+        reconcile_live_flag_drift,
+    )
+    from iai_mcp.store import MemoryStore, flush_record_buffer
+    from iai_mcp.types import MemoryRecord
+    import numpy as np
+
+    store = MemoryStore(tmp_path)
+    try:
+        rng = np.random.RandomState(11)
+        base = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+        drifted_id = uuid.uuid4()
+        reverse_id = uuid.uuid4()
+        for rid, text in (
+            (drifted_id, "quarantined blob still marked live"),
+            (reverse_id, "revived row still marked dead"),
+        ):
+            rec = MemoryRecord(
+                id=rid,
+                tier="episodic",
+                literal_surface=text,
+                aaak_index="",
+                embedding=rng.randn(384).tolist(),
+                community_id=None,
+                centrality=0.0,
+                detail_level=1,
+                pinned=False,
+                stability=0.0,
+                difficulty=0.0,
+                last_reviewed=None,
+                never_decay=False,
+                never_merge=False,
+                provenance=[{"session_id": "sess", "role": "user"}],
+                created_at=base,
+                updated_at=base,
+                tags=["role:user"],
+                language="en",
+            )
+            store.insert(rec)
+        flush_record_buffer(store)
+
+        # Simulate the drift the affected verbs leave: tombstoned_at set
+        # without deriving live in the same write (forward drift), and the
+        # symmetric reverse drift (tombstoned_at cleared without deriving
+        # live) to exercise the other directional UPDATE.
+        with store.db._conn_lock:
+            store.db._conn.execute(
+                "UPDATE records SET tombstoned_at = ?, live = 1 WHERE id = ?",
+                (base.isoformat(), str(drifted_id)),
+            )
+            store.db._conn.execute(
+                "UPDATE records SET tombstoned_at = NULL, live = 0 WHERE id = ?",
+                (str(reverse_id),),
+            )
+            # The store's own construction already ran reconciliation once
+            # (with zero rows drifted at that point) and set the stamp. A
+            # store that predates this code would never have written this
+            # key -- delete it to model that shape, otherwise the drift
+            # introduced above would never be examined.
+            store.db._conn.execute(
+                "DELETE FROM _hippo_meta WHERE key = ?",
+                (_RECONCILE_MARKER_KEY,),
+            )
+            store.db._conn.commit()
+
+            forward_drift_before = store.db._conn.execute(
+                "SELECT COUNT(*) FROM records "
+                "WHERE tombstoned_at IS NOT NULL AND live = 1"
+            ).fetchone()
+        assert int(forward_drift_before[0]) > 0, (
+            "expected the simulated forward drift to be present before "
+            "reconciliation"
+        )
+
+        report = reconcile_live_flag_drift(store)
+        assert report["updated"] >= 2
+        assert report["dry_run"] is False
+
+        with store.db._conn_lock:
+            row_drifted = store.db._conn.execute(
+                "SELECT live FROM records WHERE id = ?", (str(drifted_id),)
+            ).fetchone()
+            row_reverse = store.db._conn.execute(
+                "SELECT live FROM records WHERE id = ?", (str(reverse_id),)
+            ).fetchone()
+            forward_drift_after = store.db._conn.execute(
+                "SELECT COUNT(*) FROM records "
+                "WHERE tombstoned_at IS NOT NULL AND live = 1"
+            ).fetchone()
+            reverse_drift_after = store.db._conn.execute(
+                "SELECT COUNT(*) FROM records "
+                "WHERE tombstoned_at IS NULL AND live = 0"
+            ).fetchone()
+            stamp = store.db._conn.execute(
+                "SELECT value FROM _hippo_meta WHERE key = ?",
+                (_RECONCILE_MARKER_KEY,),
+            ).fetchone()
+
+        live_drifted = (
+            row_drifted["live"] if hasattr(row_drifted, "keys") else row_drifted[0]
+        )
+        live_reverse = (
+            row_reverse["live"] if hasattr(row_reverse, "keys") else row_reverse[0]
+        )
+        assert int(live_drifted) == 0, (
+            "expected the drifted tombstoned row to land live = 0 after "
+            "reconciliation"
+        )
+        assert int(live_reverse) == 1, (
+            "expected the reverse-drift row to land live = 1 after "
+            "reconciliation"
+        )
+        assert int(forward_drift_after[0]) == 0, (
+            "expected zero rows with tombstoned_at set and live = 1 after "
+            "reconciliation"
+        )
+        assert int(reverse_drift_after[0]) == 0, (
+            "expected zero rows with tombstoned_at unset and live = 0 after "
+            "reconciliation"
+        )
+        assert stamp is not None, (
+            "expected the reconciliation completion stamp to be written"
+        )
+
+        # Idempotency: a second pass is a stamped no-op -- no further rows
+        # change and the report carries zero updates.
+        second_report = reconcile_live_flag_drift(store)
+        assert second_report["updated"] == 0
+        assert second_report.get("note") == "already reconciled"
+    finally:
+        store.db.close()

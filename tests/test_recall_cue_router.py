@@ -211,7 +211,7 @@ def test_dispatch_routes_verbatim_cue_to_verbatim_mode(tmp_path, monkeypatch):
     from iai_mcp import embed as _embed_mod
 
     store, embedder, cue, rec = _seed_populated_store(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store, **_kw: embedder)
 
     response = core.dispatch(
         store, "memory_recall",
@@ -228,7 +228,7 @@ def test_dispatch_routes_concept_cue_to_concept_mode(tmp_path, monkeypatch):
     from iai_mcp import embed as _embed_mod
 
     store, embedder, _cue, _rec = _seed_populated_store(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store, **_kw: embedder)
 
     concept_cue = "tell me about cleanup"
     embedder.set_fixed(concept_cue, embedder.embed(concept_cue))
@@ -264,7 +264,7 @@ def test_dispatch_passes_mode_kwarg_to_recall_for_response(tmp_path, monkeypatch
     from iai_mcp.types import RecallResponse
 
     store, embedder, _cue, _rec = _seed_populated_store(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store, **_kw: embedder)
 
     captured: dict = {}
 
