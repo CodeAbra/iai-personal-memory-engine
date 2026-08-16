@@ -1550,7 +1550,21 @@ def _install_boot_signal_trace() -> None:
         except Exception:  # noqa: BLE001 -- re-raise is best-effort
             os._exit(128 + int(signum))
 
-    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    # SIGHUP is POSIX-only (absent on Windows); resolve each signal lazily and
+    # drop those this platform lacks, mirroring the run-loop shutdown handler's
+    # getattr guard below. A bare signal.SIGHUP in the tuple raised
+    # AttributeError before the per-signal try/except could catch it, killing
+    # daemon boot on Windows.
+    _boot_sigs = [
+        _s
+        for _s in (
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGINT", None),
+            getattr(signal, "SIGHUP", None),
+        )
+        if _s is not None
+    ]
+    for _sig in _boot_sigs:
         try:
             signal.signal(_sig, _trace)
         except (AttributeError, ValueError, OSError):
