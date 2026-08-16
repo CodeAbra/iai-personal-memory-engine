@@ -29,8 +29,8 @@ use crate::error::{Result, StoreError};
 use crate::io::{durable_fsync, fsync_parent_directory};
 use crate::journal::{journal_path_for, recover_journal_on_open, Journal};
 use crate::wal::{
-    read_checkpoint_generation, read_committed_wal_frames, recover_wal_on_open, wal_path_for,
-    CheckpointGeneration, WalWriter,
+    read_checkpoint_generation, read_committed_wal_frames_to_end, recover_wal_on_open,
+    wal_path_for, CheckpointGeneration, WalWriter,
 };
 
 /// The header page (page 1) is always pinned.
@@ -144,6 +144,13 @@ pub struct Pager {
     /// torn B-tree, without taking any writer-blocking lock. `None` for a
     /// read-write open.
     ro_snapshot_fence: Option<RoSnapshotFence>,
+    /// The committed-tail byte offset of the adopted overlay's parse, for the
+    /// read-only refresh's never-regress check: within one checkpoint
+    /// generation the sidecar only grows, so an accepted capture whose tail
+    /// sits BEHIND this offset would regress the view onto an older snapshot
+    /// and must be rejected. Reset when a checkpoint crosses. 0 for a
+    /// read-write open.
+    wal_committed_end: u64,
 }
 
 /// The open-time fence a lock-free read-only pager re-validates on every
@@ -218,6 +225,7 @@ impl Pager {
             read_only: false,
             wal_overlay: HashMap::new(),
             ro_snapshot_fence: None,
+            wal_committed_end: 0,
         };
 
         if existing_size == 0 {
@@ -244,6 +252,66 @@ impl Pager {
     /// verify every page read, so a page torn by a concurrent commit surfaces as
     /// an integrity error rather than silent corruption. Fails if the file does
     /// not exist or is empty.
+    /// Capture a read-only view's `(WAL overlay, main-file length, checkpoint
+    /// generation, committed-tail offset)` that is ONE committed snapshot at
+    /// least as new as the sidecar's tail at capture time.
+    ///
+    /// A single unguarded parse racing a live writer can observe a torn WAL —
+    /// a mid-file checksum break or a mid-reset header — and silently truncate
+    /// the overlay to a stale prefix (or to empty), which a reader would then
+    /// serve as a snapshot with committed rows absent. Acceptance: the
+    /// checkpoint generation must not move across the parse, and the walk must
+    /// end within one frame of the sidecar length measured AFTER the walk —
+    /// i.e. every complete frame present when the walk finished was consumed.
+    /// A live appender only ever leaves the sub-frame in-flight tail
+    /// unconsumed, so the loop converges; a torn mid-file break retries. A
+    /// short walk that repeats byte-identically across two attempts with a
+    /// still sidecar is at-rest content beyond the last commit barrier
+    /// (abandoned rollback bytes), not a race, and is accepted. Exhaustion is
+    /// a hard error — the caller reopens or fails loud, never serves the torn
+    /// read.
+    fn capture_ro_view(
+        wal_path: &Path,
+        page_size: usize,
+        main_len: &dyn Fn() -> Result<u64>,
+    ) -> Result<(HashMap<u32, Vec<u8>>, u64, Option<CheckpointGeneration>, u64)> {
+        const ATTEMPTS: u32 = 8;
+        let mut prev_probe: Option<(u64, Option<CheckpointGeneration>, u64)> = None;
+        for attempt in 0..ATTEMPTS {
+            let gen_before = read_checkpoint_generation(wal_path);
+            let (overlay, end) = read_committed_wal_frames_to_end(wal_path, page_size);
+            let main_len_after = main_len()?;
+            let wal_len_after = std::fs::metadata(wal_path).map(|m| m.len()).unwrap_or(0);
+            let gen_after = read_checkpoint_generation(wal_path);
+            if gen_after == gen_before {
+                let complete = if wal_len_after <= crate::consts::WAL_HEADER_SIZE as u64 {
+                    true
+                } else {
+                    end >= crate::consts::WAL_HEADER_SIZE as u64
+                        && wal_len_after.saturating_sub(end)
+                            < crate::consts::WAL_FRAME_SIZE as u64
+                };
+                if complete {
+                    return Ok((overlay, main_len_after, gen_after, end));
+                }
+                let probe = (wal_len_after, gen_after, end);
+                if prev_probe.as_ref() == Some(&probe) {
+                    return Ok((overlay, main_len_after, gen_after, end));
+                }
+                prev_probe = Some(probe);
+            } else {
+                prev_probe = None;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(
+                150 * (attempt as u64 + 1),
+            ));
+        }
+        Err(StoreError::Integrity {
+            detail: "read-only snapshot capture: WAL kept tearing across bounded retries"
+                .to_string(),
+        })
+    }
+
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Pager> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
@@ -261,19 +329,23 @@ impl Pager {
 
         // Overlay the committed-but-unmerged WAL frames so a reader sees data a
         // writer logged but has not yet checkpointed into the main file. No
-        // main-file write, no recovery, no WAL writer. Computed before the path
-        // moves into the struct.
+        // main-file write, no recovery, no WAL writer. Captured stable-or-fail:
+        // adopting a torn parse would open a snapshot with committed rows
+        // absent.
         let wal_path = wal_path_for(&path);
-        let wal_overlay = read_committed_wal_frames(&wal_path, PAGE_SIZE);
+        let main_len = |f: &File| -> Result<u64> { Ok(f.metadata()?.len()) };
+        let (wal_overlay, fence_main_len, fence_generation, committed_end) =
+            Self::capture_ro_view(&wal_path, PAGE_SIZE, &|| main_len(&file))?;
 
-        // Capture the snapshot fence: the main-file length and the sidecar
-        // checkpoint generation as observed at open. Each main-file fallback read
-        // re-validates against this so a concurrent checkpoint that rewrites
-        // main-file pages is detected (and reported) rather than silently mixed
-        // with the open-time overlay into a cross-generation read.
+        // The snapshot fence: the main-file length and the sidecar checkpoint
+        // generation captured in the SAME stable window as the overlay. Each
+        // main-file fallback read re-validates against this so a concurrent
+        // checkpoint that rewrites main-file pages is detected (and reported)
+        // rather than silently mixed with the open-time overlay into a
+        // cross-generation read.
         let ro_snapshot_fence = Some(RoSnapshotFence {
-            main_len: existing_size,
-            generation: read_checkpoint_generation(&wal_path),
+            main_len: fence_main_len,
+            generation: fence_generation,
             wal_path,
         });
 
@@ -306,6 +378,7 @@ impl Pager {
             read_only: true,
             wal_overlay,
             ro_snapshot_fence,
+            wal_committed_end: committed_end,
         };
 
         // Load page 1 so header fields are accessible; no recovery, no WAL writer.
@@ -403,27 +476,32 @@ impl Pager {
                 detail: "refresh_ro_snapshot: read-only pager has no snapshot fence".to_string(),
             });
         };
-        let current_len = self.with_file(|f| Ok(f.metadata()?.len()))?;
-        let current_generation = read_checkpoint_generation(&fence.wal_path);
-        let new_overlay = read_committed_wal_frames(&fence.wal_path, self.page_size);
-        // Re-read the fence AFTER parsing the overlay: a checkpoint completing
-        // entirely between the two reads would otherwise pair a pre-checkpoint
-        // fence with a post-truncate (empty) overlay — the per-page branch
-        // would evict nothing while cached pre-checkpoint pages are stale.
-        // Any movement across the parse forces the wholesale-clear branch.
-        let recheck_len = self.with_file(|f| Ok(f.metadata()?.len()))?;
-        let recheck_generation = read_checkpoint_generation(&fence.wal_path);
-        let checkpoint_crossed = current_len != fence.main_len
-            || current_generation != fence.generation
-            || recheck_len != current_len
-            || recheck_generation != current_generation;
-        let current_len = recheck_len;
-        let current_generation = recheck_generation;
+        let wal_path = fence.wal_path.clone();
+        let fence_main_len = fence.main_len;
+        let fence_generation = fence.generation;
+        let (new_overlay, current_len, current_generation, committed_end) =
+            Self::capture_ro_view(&wal_path, self.page_size, &|| {
+                self.with_file(|f| Ok(f.metadata()?.len()))
+            })?;
+        let checkpoint_crossed =
+            current_len != fence_main_len || current_generation != fence_generation;
+        // Within one checkpoint generation the sidecar only grows; a capture
+        // whose committed tail sits behind the adopted view would regress this
+        // reader onto an older snapshot — reject it loud (the borrower reopens
+        // rather than serving committed rows as absent).
+        if !checkpoint_crossed && committed_end < self.wal_committed_end {
+            return Err(StoreError::Integrity {
+                detail: format!(
+                    "refresh_ro_snapshot: captured tail {committed_end} behind adopted tail {}",
+                    self.wal_committed_end
+                ),
+            });
+        }
         // A journal-mode writer commits straight into main-file pages with no
         // sidecar generation to fence on, so an unchanged length and an empty
         // overlay prove nothing — drop the cache wholesale and re-arm.
         let unfenceable = current_generation.is_none()
-            && fence.generation.is_none()
+            && fence_generation.is_none()
             && new_overlay.is_empty()
             && self.wal_overlay.is_empty();
         if !unfenceable && !checkpoint_crossed && new_overlay == self.wal_overlay {
@@ -441,8 +519,8 @@ impl Pager {
                 }
             }
         }
-        let wal_path = fence.wal_path.clone();
         self.wal_overlay = new_overlay;
+        self.wal_committed_end = committed_end;
         self.ro_snapshot_fence = Some(RoSnapshotFence {
             main_len: current_len,
             generation: current_generation,

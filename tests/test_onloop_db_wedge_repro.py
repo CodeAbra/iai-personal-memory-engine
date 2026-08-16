@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import threading
 import time
@@ -8,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
+import pytest
 
 from tests._helpers import short_socket_path as _short_socket_path_base
 
@@ -21,6 +23,15 @@ _N_SEED = 80
 _PROBE_READ_TIMEOUT = 1.0
 _HOLD_SEC = 3.0
 _SERVED_RTT_CEIL = 1.0
+
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+
+_lilli_only = pytest.mark.skipif(
+    not _LILLI,
+    reason="held-lock read-service proofs are lilli-only (stdlib ro_conn() IS "
+    "the writer-lock path, so the asserted contract does not exist there); "
+    "the fixture smoke runs unconditionally instead",
+)
 
 def _make_representative_record(vec, community_id, centrality: float) -> MemoryRecord:
     import datetime
@@ -212,6 +223,7 @@ def _served_fraction(samples: list[float], ceil: float) -> float:
     served = sum(1 for s in samples if s != float("inf") and s <= ceil)
     return served / len(samples)
 
+@_lilli_only
 def test_on_loop_store_read_under_held_lock_stays_served(tmp_path):
     store_root = tmp_path / ".iai-mcp"
     store_root.mkdir(parents=True, exist_ok=True)
@@ -271,6 +283,7 @@ def test_on_loop_store_read_under_held_lock_stays_served(tmp_path):
         store.close()
         shutil.rmtree(sock_path.parent, ignore_errors=True)
 
+@_lilli_only
 def test_off_loop_store_read_under_held_lock_keeps_probe_served(tmp_path):
     store_root = tmp_path / ".iai-mcp"
     store_root.mkdir(parents=True, exist_ok=True)

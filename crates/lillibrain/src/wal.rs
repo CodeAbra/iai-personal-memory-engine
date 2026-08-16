@@ -380,18 +380,33 @@ pub fn read_committed_wal_frames(
     wal_path: &Path,
     page_size: usize,
 ) -> std::collections::HashMap<u32, Vec<u8>> {
+    read_committed_wal_frames_to_end(wal_path, page_size).0
+}
+
+/// [`read_committed_wal_frames`] plus the byte offset where the walk stopped.
+///
+/// The offset lets a caller detect a TORN parse: racing a live writer (an
+/// in-flight append, a checkpoint header reset) can break the checksum chain
+/// mid-file, silently truncating the overlay to a stale prefix — or to empty
+/// on a torn header. A parse is complete only when the stop offset reaches
+/// within one frame of the sidecar length observed on a stable re-stat;
+/// adopting a short parse as a snapshot serves committed rows as absent.
+pub fn read_committed_wal_frames_to_end(
+    wal_path: &Path,
+    page_size: usize,
+) -> (std::collections::HashMap<u32, Vec<u8>>, u64) {
     let mut newest: std::collections::HashMap<u32, Vec<u8>> = std::collections::HashMap::new();
     if !wal_path.exists() {
-        return newest;
+        return (newest, 0);
     }
     let wal_file = match File::open(wal_path) {
         Ok(f) => f,
-        Err(_) => return newest,
+        Err(_) => return (newest, 0),
     };
 
     let mut raw_header = vec![0u8; WAL_HEADER_SIZE];
     if wal_file.read_exact_at(&mut raw_header, 0).is_err() {
-        return newest;
+        return (newest, 0);
     }
     let magic = u32::from_be_bytes(raw_header[0..4].try_into().unwrap());
     let hdr_pgsz = u32::from_be_bytes(raw_header[8..12].try_into().unwrap()) as usize;
@@ -401,11 +416,11 @@ pub fn read_committed_wal_frames(
     let hdr_s1 = u32::from_be_bytes(raw_header[28..32].try_into().unwrap());
 
     if magic != WAL_MAGIC_BE || hdr_pgsz != page_size {
-        return newest;
+        return (newest, 0);
     }
     let (c0, c1) = wal_checksum(&raw_header[..24], 0, 0);
     if (c0, c1) != (hdr_s0, hdr_s1) {
-        return newest;
+        return (newest, 0);
     }
 
     let mut running_s0 = hdr_s0;
@@ -455,7 +470,7 @@ pub fn read_committed_wal_frames(
             }
         }
     }
-    newest
+    (newest, read_offset)
 }
 
 pub fn recover_wal_on_open(db_path: &Path, wal_path: &Path, page_size: usize) -> Result<()> {
@@ -760,5 +775,62 @@ mod tests {
         // The same writer can commit again post-checkpoint.
         w.commit_transaction(&[(5, page_of(0x88))], 5).unwrap();
         assert_eq!(w.read_page(5).unwrap(), Some(page_of(0x88)));
+    }
+
+    #[test]
+    fn overlay_parse_reports_end_at_the_committed_tail() {
+        let (_d, db) = temp_db();
+        let mut w = WalWriter::open(&db).unwrap();
+        w.commit_transaction(&[(4, page_of(0xAA)), (5, page_of(0xBB))], 5)
+            .unwrap();
+        w.commit_transaction(&[(6, page_of(0xCC))], 6).unwrap();
+        let wal = wal_path_for(&db);
+        let len = std::fs::metadata(&wal).unwrap().len();
+        let (overlay, end) = read_committed_wal_frames_to_end(&wal, PAGE_SIZE);
+        assert_eq!(overlay.len(), 3);
+        assert_eq!(end, len, "a clean parse must consume the whole sidecar");
+    }
+
+    #[test]
+    fn overlay_parse_reports_a_short_end_on_a_truncated_tail_frame() {
+        let (_d, db) = temp_db();
+        let mut w = WalWriter::open(&db).unwrap();
+        w.commit_transaction(&[(4, page_of(0xAA))], 4).unwrap();
+        w.commit_transaction(&[(5, page_of(0xBB))], 5).unwrap();
+        let wal = wal_path_for(&db);
+        let full = std::fs::metadata(&wal).unwrap().len();
+        // Chop the last frame in half: the walk must stop at the last intact
+        // frame boundary and say so — a caller that compares `end` to the
+        // sidecar length sees the gap instead of adopting the prefix blind.
+        let torn = full - (WAL_FRAME_SIZE as u64) / 2;
+        let f = std::fs::OpenOptions::new().write(true).open(&wal).unwrap();
+        f.set_len(torn).unwrap();
+        let (overlay, end) = read_committed_wal_frames_to_end(&wal, PAGE_SIZE);
+        assert_eq!(overlay.len(), 1, "only the first commit survives the tear");
+        assert_eq!(end, WAL_HEADER_SIZE as u64 + WAL_FRAME_SIZE as u64);
+        assert!(torn.saturating_sub(end) >= 1);
+    }
+
+    #[test]
+    fn overlay_parse_reports_zero_end_on_a_torn_header() {
+        let (_d, db) = temp_db();
+        let mut w = WalWriter::open(&db).unwrap();
+        w.commit_transaction(&[(4, page_of(0xAA))], 4).unwrap();
+        let wal = wal_path_for(&db);
+        // Corrupt one header checksum byte: the parse must yield an EMPTY
+        // overlay with end 0 — the caller's completeness check then refuses
+        // to treat "nothing to overlay" as a snapshot while frames exist.
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&wal)
+            .unwrap();
+        let mut b = [0u8; 1];
+        f.read_exact_at(&mut b, 24).unwrap();
+        f.write_all_at(&[b[0] ^ 0xFF], 24).unwrap();
+        let (overlay, end) = read_committed_wal_frames_to_end(&wal, PAGE_SIZE);
+        assert!(overlay.is_empty());
+        assert_eq!(end, 0);
+        assert!(std::fs::metadata(&wal).unwrap().len() > WAL_HEADER_SIZE as u64);
     }
 }

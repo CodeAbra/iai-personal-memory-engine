@@ -45,6 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature was active remain queryable.
 
 ### Fixed
+- A reader could briefly see fewer stored memories than were actually
+  committed while writes were in flight — in the worst case a batch of recent
+  memories vanished from one read and reappeared on the next. A read-only
+  snapshot captured the write-ahead log in a single unguarded pass; racing a
+  live writer could tear that pass mid-file, silently truncating the view to an
+  older prefix that was then served as current. Snapshot capture now verifies it
+  consumed the log to its true committed tail, a refresh can never regress a
+  reader onto an older view, and a capture that cannot be verified fails loud and
+  falls back to the strongly-consistent path instead of serving a phantom
+  snapshot.
+- Defense in depth for the same class: every cached row-count formation point now
+  re-checks its freshness fence across the count read and recounts instead of
+  caching when the fence moved, so a stale count can never be paired with a
+  current generation.
 - A stored memory whose internal vector-index label was
   ever left empty could not be recovered on the storage engine: the boot-time
   repair meant to backfill it silently did nothing (a column-to-column update
