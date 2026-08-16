@@ -1,4 +1,22 @@
 #!/bin/sh
+# --- iai-pme: portable Python interpreter resolution (Windows/macOS/Linux) ---
+# Honors IAI_MCP_PYTHON when set by the installer; otherwise resolves a real
+# python3/python, skipping the Windows Store "python3" App-Execution-Alias stub
+# (WindowsApps), and finally falls back to the Windows "py" launcher. The result
+# is an absolute interpreter path usable as "$PYBIN" -c '...'.
+PYBIN="${IAI_MCP_PYTHON:-}"
+if [ -z "$PYBIN" ]; then
+  for _c in python3 python; do
+    _p=$(command -v "$_c" 2>/dev/null) || continue
+    case "$_p" in *WindowsApps*) continue ;; esac
+    PYBIN="$_p"; break
+  done
+fi
+if [ -z "$PYBIN" ] && command -v py >/dev/null 2>&1; then
+  PYBIN=$(py -3 -c "import sys; print(sys.executable)" 2>/dev/null)
+fi
+[ -n "$PYBIN" ] || PYBIN=/usr/bin/python3
+# --- end iai-pme interpreter resolution ---
 # IAI-MCP SessionStart hook — recall injection.
 #
 # Fires on Claude Code session start (sources: startup, resume, clear,
@@ -20,7 +38,7 @@ extract() {
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$input" | jq -r ".${key} // empty" 2>/dev/null
   else
-    printf '%s' "$input" | /usr/bin/python3 -c "
+    printf '%s' "$input" | "$PYBIN" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)

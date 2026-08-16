@@ -1,4 +1,22 @@
 #!/bin/sh
+# --- iai-pme: portable Python interpreter resolution (Windows/macOS/Linux) ---
+# Honors IAI_MCP_PYTHON when set by the installer; otherwise resolves a real
+# python3/python, skipping the Windows Store "python3" App-Execution-Alias stub
+# (WindowsApps), and finally falls back to the Windows "py" launcher. The result
+# is an absolute interpreter path usable as "$PYBIN" -c '...'.
+PYBIN="${IAI_MCP_PYTHON:-}"
+if [ -z "$PYBIN" ]; then
+  for _c in python3 python; do
+    _p=$(command -v "$_c" 2>/dev/null) || continue
+    case "$_p" in *WindowsApps*) continue ;; esac
+    PYBIN="$_p"; break
+  done
+fi
+if [ -z "$PYBIN" ] && command -v py >/dev/null 2>&1; then
+  PYBIN=$(py -3 -c "import sys; print(sys.executable)" 2>/dev/null)
+fi
+[ -n "$PYBIN" ] || PYBIN=/usr/bin/python3
+# --- end iai-pme interpreter resolution ---
 # IAI-MCP UserPromptSubmit hook — per-turn ambient capture.
 #
 # Pure file IO: appends one JSONL event line per new transcript turn to
@@ -24,7 +42,7 @@ _extract_tmp=$(mktemp 2>/dev/null || echo "/tmp/iai-mcp-turn-extract-$$.tmp")
 if command -v jq >/dev/null 2>&1; then
   printf '%s' "$input" | jq -r '(.session_id // "") + "\t" + (.transcript_path // "")' >"$_extract_tmp" 2>/dev/null
 else
-  printf '%s' "$input" | /usr/bin/python3 -c "
+  printf '%s' "$input" | "$PYBIN" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -697,11 +715,11 @@ except Exception:
 '
 
 if command -v timeout >/dev/null 2>&1; then
-  timeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  timeout 5 "$PYBIN" -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  gtimeout 5 "$PYBIN" -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
 else
-  /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  "$PYBIN" -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
 fi
 rc=$?
 
