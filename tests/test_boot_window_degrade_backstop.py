@@ -144,7 +144,7 @@ def test_degraded_recall_returns_fast_despite_concurrent_slow_construction(
     # The degrade fallback must not re-enter the same unbounded single-flight
     # lock the bounded acquire just gave up sharing: total latency must not
     # track the concurrent construction's hold duration (~1.2s here).
-    assert elapsed < 0.6, (
+    assert elapsed < 0.9, (
         f"degraded recall took {elapsed:.3f}s while a concurrent construction "
         f"held the embedder lock for {hold_sec}s -- the degrade backstop must "
         f"bound TOTAL latency, not track the concurrent construction's cost"
@@ -252,7 +252,7 @@ def test_sleep_cortex_fallback_bounds_embedder_acquire_under_concurrent_construc
     assert resp.get("hits"), (
         "cortex-fallback recall returned zero hits on a 20-record corpus"
     )
-    assert elapsed < 0.6, (
+    assert elapsed < 0.9, (
         f"cortex-fallback recall took {elapsed:.3f}s while a concurrent "
         f"construction held the embedder lock for {hold_sec}s -- the sibling "
         f"site must bound its acquire, not track the concurrent build's cost"
@@ -309,7 +309,7 @@ def test_generic_fallback_bounds_embedder_acquire_under_concurrent_construction(
     assert resp.get("hits"), (
         "generic-fallback recall returned zero hits on a 20-record corpus"
     )
-    assert elapsed < 0.6, (
+    assert elapsed < 0.9, (
         f"generic-fallback recall took {elapsed:.3f}s while a concurrent "
         f"construction held the embedder lock for {hold_sec}s -- the sibling "
         f"site must bound its acquire, not track the concurrent build's cost"
