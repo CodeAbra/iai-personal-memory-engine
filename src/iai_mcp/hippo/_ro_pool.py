@@ -485,7 +485,15 @@ class RoConnPool:
                 try:
                     self._queue.put_nowait(slot)
                 except queue.Full:  # pragma: no cover -- defensive
+                    # A concurrent _release() can refill the queue between our
+                    # drain and re-put; closing this slot WITHOUT shrinking
+                    # _filled would leave the pool believing it holds a live slot
+                    # it doesn't -- that leak drains the pool over a daemon
+                    # lifetime until borrow()'s get() blocks forever. Decrement
+                    # _filled exactly as _release() does.
                     self._close_slot_conn(slot.conn)
+                    with self._fill_lock:
+                        self._filled = max(0, self._filled - 1)
         except Exception as exc:  # noqa: BLE001 -- recycle must never raise
             _log.debug("RoConnPool.recycle failed: %s", exc)
 
