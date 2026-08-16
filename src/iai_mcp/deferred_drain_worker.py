@@ -122,16 +122,24 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
                         continue
                     seen_this_run.add(tag)
 
-            result = capture_turn(
-                store,
-                cue=ev.get("cue", ev.get("text", "")),
-                text=ev.get("text", ""),
-                tier=tier,
-                session_id=session_id,
-                role=role,
-                ts=ev.get("ts"),
-                source_uuid=ev.get("source_uuid"),
-            )
+            try:
+                result = capture_turn(
+                    store,
+                    cue=ev.get("cue", ev.get("text", "")),
+                    text=ev.get("text", ""),
+                    tier=tier,
+                    session_id=session_id,
+                    role=role,
+                    ts=ev.get("ts"),
+                    source_uuid=ev.get("source_uuid"),
+                )
+            except Exception:  # noqa: BLE001 -- poison-pill guard
+                # A record the embedder rejects (or any per-record failure) must
+                # NOT wedge the whole drain and every capture queued behind it
+                # forever. Skip it so the file still unlinks and the backlog
+                # drains; a re-run stays loss-free via the source_uuid idem-tag.
+                skipped += 1
+                continue
             status = result.get("status")
             if status == "inserted":
                 inserted += 1
