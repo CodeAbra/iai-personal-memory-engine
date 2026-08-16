@@ -46,6 +46,10 @@ from iai_mcp.store._buffers import (
 logger = logging.getLogger(__name__)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _slow_ann_log_threshold_ms() -> float:
     try:
         return float(os.environ.get("IAI_MCP_SLOW_ANN_LOG_MS", "500"))
@@ -3384,7 +3388,7 @@ class MemoryStore:
         result = self.boost_edges([pair], delta=delta, edge_type=edge_type)
         if is_retrieval:
             # Must not depend on the reconsolidation dry-run flag or config load.
-            now = datetime.now(timezone.utc)
+            now = _utc_now()
             values: dict[str, object] = {"last_reviewed": now}
             try:
                 from iai_mcp.daemon_config import _load_reconsolidation_config

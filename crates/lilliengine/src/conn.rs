@@ -348,6 +348,12 @@ pub struct Connection {
     /// rebuilt per call, so caching the AST alone changes no result, only the
     /// per-execute lex+parse cost. Bounded by [`PARSE_CACHE_CAP`].
     parse_cache: HashMap<String, Stmt>,
+    /// Test-only interleave seam, invoked between a select's walk and the
+    /// count-cache populate — the instant a concurrent commit would land.
+    /// Lets a deterministic unit test force the pairing skew the pre-walk
+    /// fence guards against.
+    #[cfg(test)]
+    pub(crate) post_walk_hook: Option<Box<dyn FnMut(&mut Connection) + Send>>,
 }
 
 impl Connection {
@@ -471,6 +477,8 @@ impl Connection {
             filtered_count_cache: HashMap::new(),
             content_generation: HashMap::new(),
             parse_cache: HashMap::new(),
+            #[cfg(test)]
+            post_walk_hook: None,
         };
         if read_only {
             conn.adopt_from_built_cache_or_demand();
@@ -528,8 +536,21 @@ impl Connection {
                             self.id_caches.insert(table.clone(), iidx.clone());
                         }
                         if let Some(count) = row_count {
-                            self.bare_count_cache
-                                .insert(table.clone(), (generation, *count));
+                            // Structural pairing invariant, not a live-race
+                            // check: the count installs only under a re-read
+                            // fence equal to the entry's published generation,
+                            // so no future change to the mirror's freshness
+                            // model can pair a cross-connection count with a
+                            // generation it was not published at.
+                            let gen_still = self
+                                .meta
+                                .col_generation(&self.store, &table)
+                                .map(|g| g == generation)
+                                .unwrap_or(false);
+                            if gen_still {
+                                self.bare_count_cache
+                                    .insert(table.clone(), (generation, *count));
+                            }
                         }
                     }
                 }
@@ -775,10 +796,19 @@ impl Connection {
         // count it already holds at this exact generation — it must never
         // pay a walk here.
         let row_count: Option<i64> = if !self.is_readonly_mount {
-            self.root_map
+            // Publish the count only when the fence did not move across the
+            // read — a skewed pair adopted by a reader would serve a stale
+            // count as exact for its whole generation. Indexes still publish
+            // without it; adopters recount lazily.
+            let counted = self
+                .root_map
                 .get(table)
                 .and_then(|root| self.store.tree(*root).count_cells().ok())
-                .map(|c| c as i64)
+                .map(|c| c as i64);
+            match self.meta.col_generation(&self.store, table) {
+                Ok(gen_after) if gen_after == generation => counted,
+                _ => None,
+            }
         } else {
             self.bare_count_cache
                 .get(table)
@@ -1037,6 +1067,12 @@ impl Connection {
                 .unwrap_or_default();
             let generation = self.meta.col_generation(&self.store, &table)?;
             let row_count = tree.count_cells().map_err(open_err)?;
+            // A fence moved across the count read means the persisted pair
+            // would certify a stale count; leave the table out of the sidecar
+            // and let the lazy build serve it.
+            if self.meta.col_generation(&self.store, &table)? != generation {
+                continue;
+            }
             tables.push(PersistedTableIndex {
                 table,
                 columns: cols,
@@ -1393,6 +1429,19 @@ impl Connection {
                     }
                     entry
                 });
+                // Fence observed BEFORE the walk. The populates below re-read
+                // it after the walk and cache only when unchanged: a commit
+                // landing across the count acquisition would otherwise pair a
+                // stale count with a current generation and serve it as exact
+                // for that whole generation. A mismatch skips the cache —
+                // recount, never staleness.
+                let count_gen_before = if (bare_count_shape || filtered_count_key.is_some())
+                    && !self.in_transaction
+                {
+                    self.meta.col_generation(&self.store, &plan.table).ok()
+                } else {
+                    None
+                };
                 let rs = execute_select(
                     &plan,
                     &self.store,
@@ -1402,18 +1451,21 @@ impl Connection {
                     col_ref,
                     ord_ref,
                 )?;
-                // Populate the bare-count cache from the freshly computed
-                // result, keyed by the generation observed AFTER the walk (any
-                // committed write between the two reads simply re-keys the
-                // next probe to a miss — err toward recount, never staleness).
+                #[cfg(test)]
+                if let Some(mut hook) = self.post_walk_hook.take() {
+                    hook(self);
+                    self.post_walk_hook = Some(hook);
+                }
                 if bare_count_shape && !self.in_transaction {
                     if let (Some(row), Ok(current_gen)) = (
                         rs.rows.first(),
                         self.meta.col_generation(&self.store, &plan.table),
                     ) {
-                        if let Some((_, Value::Int(count))) = row.first() {
-                            self.bare_count_cache
-                                .insert(plan.table.clone(), (current_gen, *count));
+                        if count_gen_before == Some(current_gen) {
+                            if let Some((_, Value::Int(count))) = row.first() {
+                                self.bare_count_cache
+                                    .insert(plan.table.clone(), (current_gen, *count));
+                            }
                         }
                     }
                 }
@@ -1423,18 +1475,20 @@ impl Connection {
                             rs.rows.first(),
                             self.meta.col_generation(&self.store, &plan.table),
                         ) {
-                            if let Some((_, Value::Int(count))) = row.first() {
-                                let current_content_gen = self
-                                    .content_generation
-                                    .get(&plan.table)
-                                    .copied()
-                                    .unwrap_or(0);
-                                const FILTERED_COUNT_CACHE_CAP: usize = 64;
-                                if self.filtered_count_cache.len() >= FILTERED_COUNT_CACHE_CAP {
-                                    self.filtered_count_cache.clear();
+                            if count_gen_before == Some(current_col_gen) {
+                                if let Some((_, Value::Int(count))) = row.first() {
+                                    let current_content_gen = self
+                                        .content_generation
+                                        .get(&plan.table)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    const FILTERED_COUNT_CACHE_CAP: usize = 64;
+                                    if self.filtered_count_cache.len() >= FILTERED_COUNT_CACHE_CAP {
+                                        self.filtered_count_cache.clear();
+                                    }
+                                    self.filtered_count_cache
+                                        .insert(key, (current_col_gen, current_content_gen, *count));
                                 }
-                                self.filtered_count_cache
-                                    .insert(key, (current_col_gen, current_content_gen, *count));
                             }
                         }
                     }
@@ -2576,6 +2630,81 @@ fn ro_index_publish_allowed(path: &std::path::Path, table: &str) -> bool {
         return ok;
     }
     false
+}
+
+#[cfg(test)]
+mod count_pair_fence_tests {
+    use super::Connection;
+    use lillibrain::Value;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    const DDL: &str = "CREATE TABLE IF NOT EXISTS records ( \
+        vec_label INTEGER PRIMARY KEY AUTOINCREMENT , id TEXT NOT NULL UNIQUE , \
+        n INTEGER , label TEXT )";
+
+    fn bare_count(conn: &mut Connection) -> i64 {
+        let mut cur = conn
+            .execute("SELECT COUNT(*) FROM records", vec![])
+            .unwrap();
+        let row = cur.fetchone().unwrap();
+        match row.get_name("COUNT(*)") {
+            Some(Value::Int(n)) => *n,
+            other => panic!("bare count returned {other:?}"),
+        }
+    }
+
+    fn insert_row(conn: &mut Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO records (id, n, label) VALUES (?, ?, ?)",
+            vec![
+                Value::Text(id.to_string()),
+                Value::Int(1),
+                Value::Text("x".to_string()),
+            ],
+        )
+        .unwrap();
+    }
+
+    /// A commit landing between the count walk and the cache populate must
+    /// not leave a stale count paired with the post-commit generation: the
+    /// next bare COUNT would then serve it as exact for that whole
+    /// generation (one below the committed floor — the CI signature).
+    #[test]
+    fn commit_across_the_walk_never_caches_a_stale_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.lilli");
+        let mut conn = Connection::open(path.to_str().unwrap(), 384).unwrap();
+        conn.execute(DDL, vec![]).unwrap();
+        conn.execute("CREATE INDEX idx_n ON records ( n )", vec![])
+            .unwrap();
+        for i in 0..3 {
+            insert_row(&mut conn, &format!("seed-{i}"));
+        }
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_in_hook = Arc::clone(&fired);
+        conn.post_walk_hook = Some(Box::new(move |c: &mut Connection| {
+            if !fired_in_hook.swap(true, Ordering::SeqCst) {
+                insert_row(c, "landed-across-the-walk");
+            }
+        }));
+
+        // Walk counts 3, then the hook commits row #4 before the populate:
+        // the stale (post-commit generation, 3) pair must NOT be cached.
+        assert_eq!(bare_count(&mut conn), 3);
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the interleave hook must have fired"
+        );
+
+        // Served from a fresh walk (or a correctly re-formed cache) — a
+        // poisoned cache would return 3 here.
+        assert_eq!(bare_count(&mut conn), 4);
+        // And the re-formed cache stays exact on the cached-serve path.
+        assert_eq!(bare_count(&mut conn), 4);
+    }
 }
 
 #[cfg(test)]

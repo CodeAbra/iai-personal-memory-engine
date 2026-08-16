@@ -118,6 +118,12 @@ def _make_pipeline(store: MemoryStore, tmp_path, monkeypatch) -> SleepPipeline:
     monkeypatch.setattr(
         "iai_mcp.lilli.cycle.sleep_pipeline._utc_now", lambda: FROZEN_NOW,
     )
+    # The retrieval stamp must share the frozen clock, or a run crossing
+    # 00:00 UTC stamps a different date than FROZEN_NOW and the date-prefix
+    # gate fails spuriously.
+    monkeypatch.setattr(
+        "iai_mcp.store._store._utc_now", lambda: FROZEN_NOW,
+    )
     return SleepPipeline(
         store=store, lifecycle_state_path=tmp_path / "lifecycle_state.json",
     )
