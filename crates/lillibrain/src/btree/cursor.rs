@@ -156,7 +156,23 @@ impl<'p> Cursor<'p> {
             let first_ovf = read_spilled_pointer(page, raw.payload_start)?;
             read_overflow_chain(self.pager, first_ovf, raw.payload_len)
         } else {
-            Ok(page[raw.payload_start..raw.payload_start + raw.payload_len].to_vec())
+            let end = raw
+                .payload_start
+                .checked_add(raw.payload_len)
+                .ok_or_else(|| StoreError::Integrity {
+                    detail: "inline cell payload length overflow".to_string(),
+                })?;
+            Ok(page
+                .get(raw.payload_start..end)
+                .ok_or_else(|| StoreError::Integrity {
+                    detail: format!(
+                        "inline cell payload {}..{} out of page bounds (page len {})",
+                        raw.payload_start,
+                        end,
+                        page.len()
+                    ),
+                })?
+                .to_vec())
         }
     }
 
@@ -600,10 +616,24 @@ pub fn read_full_cell(pager: &Pager, page: &[u8], idx: usize) -> Result<(i64, Ve
         let payload = read_overflow_chain(pager, first_ovf, raw.payload_len)?;
         Ok((raw.key, payload))
     } else {
-        Ok((
-            raw.key,
-            page[raw.payload_start..raw.payload_start + raw.payload_len].to_vec(),
-        ))
+        let end = raw
+            .payload_start
+            .checked_add(raw.payload_len)
+            .ok_or_else(|| StoreError::Integrity {
+                detail: "inline cell payload length overflow".to_string(),
+            })?;
+        let payload = page
+            .get(raw.payload_start..end)
+            .ok_or_else(|| StoreError::Integrity {
+                detail: format!(
+                    "inline cell payload {}..{} out of page bounds (page len {})",
+                    raw.payload_start,
+                    end,
+                    page.len()
+                ),
+            })?
+            .to_vec();
+        Ok((raw.key, payload))
     }
 }
 

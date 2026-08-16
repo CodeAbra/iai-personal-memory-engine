@@ -60,7 +60,15 @@ pub fn write_overflow_chain(pager: &Pager, payload: &[u8]) -> Result<u32> {
 /// a chain that ends short of `total_len`, or a cycle.
 pub fn read_overflow_chain(pager: &Pager, first_page: u32, total_len: usize) -> Result<Vec<u8>> {
     let db_size = pager.db_size()?;
-    let mut out = Vec::with_capacity(total_len);
+    // `total_len` is a caller-supplied on-disk length; a corrupted or forged
+    // varint could make it enormous, and Vec::with_capacity on that value hits
+    // the allocator abort path (handle_alloc_error -> uncatchable, kills the
+    // host on a single damaged page). Cap the initial reservation at the
+    // physical maximum this chain could provide (db_size pages x
+    // OVERFLOW_USABLE); the Vec still grows via extend_from_slice, and the
+    // chain-length checks below reject any mismatch.
+    let cap_ceiling = (db_size as usize).saturating_mul(OVERFLOW_USABLE);
+    let mut out = Vec::with_capacity(total_len.min(cap_ceiling));
     let mut current = first_page;
     let mut seen = std::collections::HashSet::new();
 
