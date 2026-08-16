@@ -1571,8 +1571,35 @@ def _install_boot_signal_trace() -> None:
             pass
 
 
+def _install_windows_ctrl_ignore() -> None:
+    """Managed Windows daemon survival: ignore stray console CTRL_C / CTRL_BREAK
+    so a host-CLI restart or console-close does NOT deliver SIGINT and shut the
+    background service down (observed: STATUS_CONTROL_C_EXIT killing a healthy
+    daemon on a Claude Code restart). Task Scheduler still stops us via
+    TerminateProcess, unaffected by this. No-op off Windows or when unmanaged."""
+    import os as _os
+    if _os.name != "nt" or not _os.environ.get("IAI_MCP_LAUNCHD_MANAGED"):
+        return
+    try:
+        import ctypes as _ct
+        global _WIN_CTRL_HANDLER
+        _H = _ct.WINFUNCTYPE(_ct.c_int, _ct.c_uint)
+
+        def _cb(evt):  # 0=CTRL_C, 1=CTRL_BREAK -> swallow; else default handling
+            return 1 if evt in (0, 1) else 0
+
+        _WIN_CTRL_HANDLER = _H(_cb)  # strong ref: the OS retains this pointer
+        _ct.windll.kernel32.SetConsoleCtrlHandler(_WIN_CTRL_HANDLER, True)
+    except Exception:
+        pass
+
+
+_WIN_CTRL_HANDLER = None
+
+
 async def main() -> int:
     _set_process_title()
+    _install_windows_ctrl_ignore()
     _rotate_launchd_stderr()
     _require_native()
     _raise_fd_limit()
