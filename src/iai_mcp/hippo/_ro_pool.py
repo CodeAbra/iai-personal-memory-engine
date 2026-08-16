@@ -7,11 +7,15 @@ fixed-size pool so the recall read path never contends on the writer's
 
 Staleness model: each pool slot is a snapshot-at-open reader (the native
 ``open_read_only`` overlays committed WAL frames at open time; it does not
-live-track the writer afterward). A slot is refreshed (closed and reopened)
-the next time it is borrowed after the pool's generation counter has been
-bumped by a committed corpus-changing write — never eagerly, never on a read.
-This keeps read-heavy windows on a warm parse/col-cache connection while
-bounding staleness to "at most one borrow behind the last commit".
+live-track the writer afterward). That snapshot-at-open property is the
+HAZARD this module closes, not the observed behavior of a borrowed slot: a
+slot is refreshed (closed and reopened) the next time it is borrowed after
+the pool's generation counter has been bumped by any mutating statement on
+the writer connection (not only a corpus-count-changing one) — never
+eagerly, never on a read. On the writer-proxy path, already-committed data
+is never stale: a slot refreshes on its next borrow after any commit. This
+keeps read-heavy windows on a warm parse/col-cache connection while bounding
+staleness to "at most one borrow behind the last commit".
 """
 from __future__ import annotations
 
@@ -263,8 +267,9 @@ class RoConnPool:
                         except Exception:  # noqa: BLE001 — introspection best-effort
                             pass
                         _log.warning(
-                            "slow RO execute: %.0fms %s sql=%s",
-                            _ms, _idx, sql[:120],
+                            "slow RO execute: %.0fms pid=%d thread=%s %s sql=%s",
+                            _ms, os.getpid(), threading.current_thread().name,
+                            _idx, sql[:120],
                         )
                     return result
                 except errors.OperationalError as exc:

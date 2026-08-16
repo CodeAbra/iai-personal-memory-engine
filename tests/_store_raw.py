@@ -31,7 +31,7 @@ def open_store_raw(path: str | Path):
 
     from iai_mcp.lillibrain.connection import get_lilli_raw_conn  # noqa: PLC0415
 
-    conn = get_lilli_raw_conn(str(path))
+    conn = get_lilli_raw_conn(str(path), allow_writer=True)
     if conn is None:
         raise RuntimeError(
             f"lilli driver active but no engine connection for {path!r}"
@@ -57,7 +57,7 @@ def simulate_daemon_reembed(
     db_path = root / "hippo" / "brain.sqlite3"
     blob = struct.pack(f"<{len(embedding)}f", *embedding)
     from iai_mcp.hippo._raw_open import open_store_conn  # noqa: PLC0415
-    _eng = open_store_conn(db_path)
+    _eng = open_store_conn(db_path, allow_writer=True)
     if _eng is not None:
         conn = _eng
     else:

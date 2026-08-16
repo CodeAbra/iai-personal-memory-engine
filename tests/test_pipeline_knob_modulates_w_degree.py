@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 class _ControlledEmbedder:
 
@@ -321,18 +322,18 @@ def test_empty_profile_state_falls_back_to_medium_scale(tmp_path):
         session_id="r3_medium_ref", budget_tokens=2000,
         profile_state={"literal_preservation": "medium"},
     )
-    scores_empty = {h.record_id: h.score for h in resp_empty.hits}
-    scores_medium = {h.record_id: h.score for h in resp_medium.hits}
-    assert scores_empty.keys() == scores_medium.keys(), (
-        "empty profile_state and medium baseline must return the same records; "
-        f"empty_only={scores_empty.keys() - scores_medium.keys()}, "
-        f"medium_only={scores_medium.keys() - scores_empty.keys()}"
+    ids_empty = [h.record_id for h in resp_empty.hits]
+    ids_medium = [h.record_id for h in resp_medium.hits]
+    assert ids_empty == ids_medium, (
+        f"empty profile_state must equal medium baseline. "
+        f"empty={ids_empty}, medium={ids_medium}"
     )
-    for record_id in scores_empty:
-        assert abs(scores_empty[record_id] - scores_medium[record_id]) < 1e-5, (
-            "empty and medium scores must match within float noise; "
-            f"record_id={record_id}, empty={scores_empty[record_id]}, "
-            f"medium={scores_medium[record_id]}"
+    scores_empty = [h.score for h in resp_empty.hits]
+    scores_medium = [h.score for h in resp_medium.hits]
+    for a, b in zip(scores_empty, scores_medium):
+        assert abs(a - b) < 1e-5, (
+            f"empty and medium scores must match within float noise; "
+            f"empty={scores_empty}, medium={scores_medium}"
         )
 
 def test_dispatch_passes_profile_state_to_recall_for_response(tmp_path, monkeypatch):
@@ -377,7 +378,6 @@ def test_dispatch_passes_profile_state_to_recall_for_response(tmp_path, monkeypa
 
 def test_dispatch_end_to_end_knob_moves_verbatim_position(tmp_path, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
     from uuid import UUID
 
     (store, embedder, graph, assignment, rich_club,
@@ -389,7 +389,7 @@ def test_dispatch_end_to_end_knob_moves_verbatim_position(tmp_path, monkeypatch)
     # exercising the knob's end-to-end effect on the graph-ranked path.
     monkeypatch.setenv("IAI_MCP_EXACT_AUTHORITY_OFF", "1")
 
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     monkeypatch.setitem(core._profile_state, "literal_preservation", "strong")
     resp_strong = core.dispatch(

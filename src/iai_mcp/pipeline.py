@@ -48,6 +48,7 @@ class SimpleRecordView:
     provenance: list = field(default_factory=list)
     tags: list = field(default_factory=list)
     language: str = "en"
+    community_id: "UUID | None" = None
 
 
 def _payload_created_at(raw: object) -> datetime:
@@ -258,6 +259,11 @@ class _RecallCoreResult:
     cue_mode: str = "concept"
     budget_used: int = 0
     _records_cache: dict = field(default_factory=dict)
+    # Pre-rank community-gate top-1 + K + backend, carried out for the
+    # monotropism_depth signal -- never the post-rank top hit.
+    cue_community_id: "str | None" = None
+    community_k: "int | None" = None
+    community_backend: "str | None" = None
 
 
 PROFILE_SENTINEL_UUID = UUID("00000000-0000-0000-0000-0000000000f1")
@@ -888,6 +894,7 @@ def _recall_core(
                 adjacent_suggestions=[],
                 session_id=_l0_prov.get("session_id"),
                 captured_at=l0_rec.created_at.isoformat() if l0_rec.created_at else None,
+                community_id=getattr(l0_rec, "community_id", None),
             )
             try:
                 store.append_provenance(
@@ -1449,6 +1456,8 @@ def _recall_core(
                         base_s += spread_contrib
             community_contrib = 0.0
             cand_community = community_id_by_member.get(cid)
+            if cand_community is not None:
+                rec.community_id = cand_community
             if cand_community is not None and max_community_score > 0.0:
                 graded_weight = max(
                     0.0, community_scores.get(cand_community, 0.0) / max_community_score,
@@ -1593,6 +1602,7 @@ def _recall_core(
                 adjacent_suggestions=suggestions,
                 session_id=_prov.get("session_id"),
                 captured_at=rec.created_at.isoformat() if rec.created_at else None,
+                community_id=getattr(rec, "community_id", None),
             ),
         )
         budget_used += tokens
@@ -1658,6 +1668,11 @@ def _recall_core(
                 "ordering should be treated as low confidence"
             ),
         })
+    _gate_top1 = str(_gated_top_n[0]) if _gated_top_n else None
+    # The corpus-stable community count, NOT len(community_scores) -- the
+    # max-node gate scores only communities with a member in this query's
+    # candidate pool, which shrinks and grows per query. mid_regions is the
+    # full corpus grouping the gate was built from.
     return _RecallCoreResult(
         scored_hits=scored_hits,
         activation_trace=activation_trace,
@@ -1667,6 +1682,9 @@ def _recall_core(
         cue_mode=mode,
         budget_used=budget_used,
         _records_cache=records_cache,
+        cue_community_id=_gate_top1,
+        community_k=len(assignment.mid_regions),
+        community_backend=assignment.backend,
     )
 
 
@@ -1685,6 +1703,9 @@ def _apply_post_rank_pipeline(
     path_label: str,
     knobs_applied: dict | None = None,
     contradicts_outgoing: dict[str, list[str]] | None = None,
+    cue_community_id: "str | None" = None,
+    community_k: "int | None" = None,
+    community_backend: "str | None" = None,
 ) -> tuple[list[MemoryHit], list[MemoryHit], list[dict], list[dict]]:
     s4_scope_hits = hits[:_POST_RANK_MAX_HITS]
 
@@ -1822,6 +1843,22 @@ def _apply_post_rank_pipeline(
         hits = kept_hits
 
     try:
+        from iai_mcp.response_decorator import suggestions_visible
+        try:
+            from iai_mcp.core import task_support_probe_active
+            _probe_active = task_support_probe_active()
+        except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
+            logger.debug("task_support_probe_active_lookup_failed: %s", exc)
+            _probe_active = False
+        _suggestions_visible_now = suggestions_visible(profile_state or {}, _probe_active)
+        # Gated to null at emit (never inside the pure spec): a flat backend
+        # or K below the floor carries no honest concentration signal.
+        from iai_mcp.lilli.cycle.sleep_pipeline._knob_tune_specs import K_MIN
+        _gate_signal_valid = (
+            community_backend != "flat"
+            and community_k is not None
+            and community_k >= K_MIN
+        )
         write_event(
             store,
             kind="retrieval_used",
@@ -1831,6 +1868,15 @@ def _apply_post_rank_pipeline(
                 "used": len(hits) > 0,
                 "budget_used": budget_used,
                 "path": path_label,
+                "session_id": session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "suggestion_ids": [
+                    str(s) for h in hits for s in (h.adjacent_suggestions or [])
+                ],
+                "suggestions_visible": _suggestions_visible_now,
+                "probe": _probe_active,
+                "cue_community_id": cue_community_id if _gate_signal_valid else None,
+                "community_k": community_k if _gate_signal_valid else None,
             },
             severity="info",
             session_id=session_id,
@@ -1999,6 +2045,7 @@ def recall_for_response(
                 captured_at=(
                     _pm.created_at.isoformat() if _pm.created_at else None
                 ),
+                community_id=getattr(_pm, "community_id", None),
             ))
             budget_used += _pm_tokens
             _marker_used += _pm_tokens
@@ -2032,6 +2079,9 @@ def recall_for_response(
         budget_used=budget_used, path_label="recall_for_response",
         knobs_applied=knobs_applied,
         contradicts_outgoing=_tv_outgoing,
+        cue_community_id=core.cue_community_id,
+        community_k=core.community_k,
+        community_backend=core.community_backend,
     )
 
     if hits:
@@ -2265,6 +2315,9 @@ def recall_for_benchmark(
         budget_used=budget_used, path_label="recall_for_benchmark",
         knobs_applied=knobs_applied,
         contradicts_outgoing=_tv_outgoing,
+        cue_community_id=core.cue_community_id,
+        community_k=core.community_k,
+        community_backend=core.community_backend,
     )
 
     return RecallResponse(

@@ -260,15 +260,16 @@ def monotropic_proactive_check(
     if not isinstance(md, dict):
         return []
 
-    domain_tag: str | None = next(
-        (t for t in (new_record.tags or []) if t.startswith("domain:")),
-        None,
-    )
-    if domain_tag is None:
+    from iai_mcp.core import get_community_names
+    community_names = get_community_names()
+
+    if new_record.community_id is None:
+        return []
+    name = community_names.get(str(new_record.community_id))
+    if name is None:
         return []
 
-    domain_name = domain_tag.split(":", 1)[1]
-    depth = md.get(domain_name, 0.0)
+    depth = md.get(name, 0.0)
     if depth <= S4_MONOTROPIC_THETA:
         return []
 
@@ -277,7 +278,9 @@ def monotropic_proactive_check(
 
     same_domain = [
         r for r in store.all_records()
-        if (r.tags or []) and domain_tag in r.tags and r.id != new_record.id
+        if r.id != new_record.id
+        and r.community_id is not None
+        and community_names.get(str(r.community_id)) == name
     ]
 
     if len(same_domain) > MONOTROPIC_MAX_PAIRWISE:
@@ -285,12 +288,10 @@ def monotropic_proactive_check(
             store,
             kind="s4_monotropic_skip",
             data={
-                "domain": domain_tag,
                 "count": len(same_domain),
                 "record_id": str(new_record.id),
             },
             severity="warning",
-            domain=domain_tag,
             session_id=session_id,
         )
         return []
@@ -304,7 +305,7 @@ def monotropic_proactive_check(
                 "severity": "info",
                 "source_ids": [str(new_record.id), str(r.id)],
                 "text": (
-                    f"monotropic near-duplicate in {domain_tag}: sim={sim:.3f}"
+                    f"monotropic near-duplicate in {name}: sim={sim:.3f}"
                 ),
                 "similarity": sim,
             }
@@ -313,12 +314,10 @@ def monotropic_proactive_check(
                 store,
                 kind="s4_monotropic_contradiction",
                 data={
-                    "domain": domain_tag,
                     "source_ids": [str(new_record.id), str(r.id)],
                     "similarity": sim,
                 },
                 severity="info",
-                domain=domain_tag,
                 session_id=session_id,
                 source_ids=[new_record.id, r.id],
             )

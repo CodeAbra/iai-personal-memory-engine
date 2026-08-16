@@ -1133,21 +1133,35 @@ class _inject_embedder_into_dispatch:
     scoped to the measurement loop and never leaks into other callers.
     """
 
+    # shared with tests/_helpers.RECALL_STUB_ACTIVE_ENV -- bench cannot
+    # import the test tree, so both sides hardcode this string literal;
+    # the test-suite degrade guard reads it to see this non-monkeypatch stub
+    _RECALL_STUB_ACTIVE_ENV = "IAI_MCP_TEST_RECALL_STUB_ACTIVE"
+
     def __init__(self, shim: "_VectorInjectionEmbedder") -> None:
         self._shim = shim
         self._orig = None
 
     def __enter__(self) -> "_inject_embedder_into_dispatch":
+        import os
+
         import iai_mcp.embed as _emb
         self._emb_mod = _emb
         self._orig = _emb.embedder_for_store
-        _emb.embedder_for_store = lambda _store: self._shim
+        # **_kwargs absorbs allow_identity_mismatch/build_timeout, which the
+        # recall dispatch always passes -- a one-arg shim raises TypeError,
+        # caught by the pipeline as a silent degrade instead of using it
+        _emb.embedder_for_store = lambda _store, **_kwargs: self._shim
+        os.environ[self._RECALL_STUB_ACTIVE_ENV] = "1"
         return self
 
     def __exit__(self, *_exc) -> None:
+        import os
+
         if self._orig is not None:
             self._emb_mod.embedder_for_store = self._orig
             self._orig = None
+        os.environ.pop(self._RECALL_STUB_ACTIVE_ENV, None)
 
 
 def _dispatch_recall_ids(

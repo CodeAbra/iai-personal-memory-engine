@@ -151,6 +151,8 @@ def recall(
     k_hits: int = 5,
     k_anti: int = 3,
     mode: str = "verbatim",
+    *,
+    allow_cue_reembed: bool = True,
 ) -> RecallResponse:
     # A missing, zero, wrong-dim or non-finite cue vector must be embedded
     # HERE, not searched: the SLEEP/exception fallback dispatchers pad an
@@ -159,13 +161,20 @@ def recall(
     # answer correctly on every path, not just the primary one. Embed
     # failure keeps the caller's vector (degraded, never a crash into
     # recall).
+    #
+    # allow_cue_reembed=False skips that re-embed attempt entirely: a caller
+    # that already knows no embedder is available within its own bound (a
+    # boot-window degrade backstop, not a plain missing-vector case) must not
+    # have this fallback silently reintroduce an unbounded wait on the same
+    # construction it already gave up sharing -- the caller's vector (however
+    # degraded) is searched as-is.
     from iai_mcp.embed import _valid_cue_vec
 
     _dim = getattr(store, "embed_dim", None) or len(cue_embedding or [])
     _vec = _valid_cue_vec(cue_embedding, _dim)
     if _vec is not None:
         cue_embedding = _vec
-    elif cue_text:
+    elif cue_text and allow_cue_reembed:
         from iai_mcp.embed import EmbedderConfigError, EmbedIdentityMismatch
         try:
             from iai_mcp.embed import embed_query, embedder_for_store
@@ -202,6 +211,7 @@ def recall(
                 adjacent_suggestions=[],
                 session_id=_prov.get("session_id"),
                 captured_at=record.created_at.isoformat() if record.created_at else None,
+                community_id=getattr(record, "community_id", None),
             )
         )
         provenance_pending.append((

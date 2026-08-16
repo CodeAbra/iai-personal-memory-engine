@@ -27,6 +27,7 @@ def test_continuous_audit_never_calls_optimize_hippo_storage(monkeypatch):
 
     def fake_s5(store, window):
         s5_calls.append(store)
+        return [], 0, 0
 
     def fake_sigma(store):
         sigma_calls.append(store)
@@ -58,15 +59,22 @@ def test_continuous_audit_read_stages_still_run(monkeypatch):
 
     s5_calls: list = []
     sigma_calls: list = []
+    emitted: list = []
 
     def fake_s5(store, window):
         s5_calls.append(store)
+        return [], 0, 0
 
     def fake_sigma(store):
         sigma_calls.append(store)
 
+    def capture_event(store, kind, data, *, severity=None, **kwargs):
+        emitted.append((kind, dict(data), severity))
+        return None
+
     monkeypatch.setattr(identity_audit, "detect_drift_anomaly", fake_s5)
     monkeypatch.setattr(identity_audit, "compute_and_emit", fake_sigma)
+    monkeypatch.setattr(identity_audit, "write_event", capture_event)
 
     async def runner():
         shutdown = asyncio.Event()
@@ -86,6 +94,9 @@ def test_continuous_audit_read_stages_still_run(monkeypatch):
     )
     assert len(sigma_calls) >= 2, (
         f"compute_and_emit was called {len(sigma_calls)} time(s); expected >= 2"
+    )
+    assert not [e for e in emitted if e[0] == "identity_audit_error"], (
+        f"the 3-tuple unpack raised and was swallowed as an error event: {emitted}"
     )
 
 

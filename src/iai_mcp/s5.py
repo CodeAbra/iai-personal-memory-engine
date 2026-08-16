@@ -126,6 +126,24 @@ def propose_invariant_update(
         )
         enforce_language_tagged(updated)
         updated.aaak_index = generate_aaak_index(updated)
+
+        ok, reason = check_identity_anchor_on_write(store, updated, profile_state={})
+        if not ok:
+            write_event(
+                store,
+                kind="identity_write_rejected",
+                data={
+                    "anchor_id": str(anchor_id),
+                    "candidate_record_id": str(updated.id),
+                    "reason": reason,
+                    "session_id": session_id,
+                },
+                severity="critical",
+                session_id=session_id,
+                source_ids=[anchor_id],
+            )
+            return "guard_rejected", None
+
         store.insert(updated)
         store.boost_edges(
             [(anchor_id, updated.id)],
@@ -184,31 +202,38 @@ def check_identity_anchor_on_write(
         )
 
     try:
-        anchors_with_other_lang = [
-            r for r in store.all_records()
-            if r.pinned
-            and r.s5_trust_score >= TRUST_THRESHOLD_IDENTITY
-            and (r.language or "") != ""
-            and (r.language or "") != (record.language or "")
-        ]
-    except (OSError, RuntimeError, ValueError):
-        anchors_with_other_lang = []
+        with store.db.ro_conn() as _ro:
+            sql = (  # nosemgrep: sql-injection
+                "SELECT id, language FROM records"
+                f" WHERE pinned = 1 AND s5_trust_score >= {TRUST_THRESHOLD_IDENTITY}"  # noqa: S608
+                " AND language != '' AND tombstoned_at IS NULL"
+            )
+            rows = _ro.execute(sql).fetchall()
+    except Exception:  # noqa: BLE001 -- best-effort cross-lingual scan must never fail the identity write
+        rows = []
+    record_language = record.language or ""
+    anchors_with_other_lang = [
+        row for row in rows if (row[1] or "") != record_language
+    ]
     if anchors_with_other_lang:
         anchor_langs = sorted({
-            r.language for r in anchors_with_other_lang if r.language
+            row[1] for row in anchors_with_other_lang if row[1]
         })
-        write_event(
-            store,
-            kind="identity_cross_lingual_warning",
-            data={
-                "record_id": str(record.id),
-                "record_language": record.language,
-                "existing_anchor_languages": anchor_langs,
-            },
-            severity="warning",
-            session_id="-",
-            source_ids=[record.id],
-        )
+        try:
+            write_event(
+                store,
+                kind="identity_cross_lingual_warning",
+                data={
+                    "record_id": str(record.id),
+                    "record_language": record.language,
+                    "existing_anchor_languages": anchor_langs,
+                },
+                severity="warning",
+                session_id="-",
+                source_ids=[record.id],
+            )
+        except Exception:  # noqa: BLE001 -- best-effort cross-lingual scan must never fail the identity write
+            pass
 
     return True, ""
 
@@ -221,64 +246,99 @@ AUDIT_EVENT_KINDS: tuple[str, ...] = (
     "shield_rejection",
     "shield_flag",
     "identity_cross_lingual_warning",
+    "identity_write_rejected",
 )
 
 
 def detect_drift_anomaly(
     store: MemoryStore,
-    window_sessions: int = 5,
-) -> list[dict]:
-    events = query_events(store, kind="trajectory_metric", limit=1000)
-    m4: list[tuple] = []
+    cycles: int = 5,
+) -> tuple[list[dict], int, int]:
+    events = query_events(store, kind="profile_tuned", limit=1000)
+    moved: list[tuple] = []
     for e in events:
         data = e.get("data") or {}
-        if data.get("metric") != "m4":
-            continue
-        try:
-            v = float(data.get("value", 0.0))
-        except (TypeError, ValueError):
+        raw = data.get("moved_count")
+        if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
         ts = e.get("ts")
-        m4.append((ts, v))
+        moved.append((ts, float(raw)))
 
-    if len(m4) < window_sessions:
-        return []
+    if len(moved) < cycles:
+        return [], 0, 0
 
     try:
-        m4.sort(key=lambda x: x[0])
+        moved.sort(key=lambda x: x[0])
     except TypeError:
         pass
-    recent = m4[-window_sessions:]
+    recent = moved[-cycles:]
+    candidates = len(recent)
+    processed = max(0, len(recent) - 1)
 
     increases = 0
     for i in range(1, len(recent)):
         if recent[i][1] > recent[i - 1][1]:
             increases += 1
 
-    threshold = max(1, window_sessions - 2)
+    threshold = max(1, cycles - 2)
     if increases < threshold:
-        return []
+        return [], candidates, processed
 
     alert = {
         "kind": "s5_drift_alert",
         "severity": "warning",
-        "window_sessions": window_sessions,
+        "cycles": cycles,
         "increases": increases,
         "first_value": float(recent[0][1]),
         "last_value": float(recent[-1][1]),
     }
-    write_event(
-        store,
-        kind="s5_drift_alert",
-        data={
-            "window_sessions": window_sessions,
-            "increases": increases,
-            "first_value": alert["first_value"],
-            "last_value": alert["last_value"],
-        },
-        severity="warning",
+    signature = (
+        alert["first_value"],
+        alert["last_value"],
+        increases,
+        cycles,
     )
-    return [alert]
+    # Persist only when this drift episode differs from the last recorded one:
+    # a sustained episode spans many hourly audit passes and would otherwise
+    # re-emit an identical row each pass. The returned alert is unconditional.
+    if not _drift_alert_already_persisted(store, signature):
+        write_event(
+            store,
+            kind="s5_drift_alert",
+            data={
+                "cycles": cycles,
+                "increases": increases,
+                "first_value": alert["first_value"],
+                "last_value": alert["last_value"],
+            },
+            severity="warning",
+        )
+    return [alert], candidates, processed
+
+
+def _drift_alert_already_persisted(
+    store: MemoryStore, signature: tuple[float, float, int, int],
+) -> bool:
+    recent = query_events(store, kind="s5_drift_alert", limit=1)
+    if not recent:
+        return False
+    data = recent[0].get("data") or {}
+    try:
+        prev = (
+            float(data["first_value"]),
+            float(data["last_value"]),
+            int(data["increases"]),
+            int(data["cycles"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        # Fail open: an unreadable prior row must never suppress a real alert.
+        return False
+    return prev == (
+        float(signature[0]),
+        float(signature[1]),
+        int(signature[2]),
+        int(signature[3]),
+    )
 
 
 def audit_identity_events(

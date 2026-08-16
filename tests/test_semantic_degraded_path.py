@@ -242,6 +242,12 @@ def test_embed_cue_dispatch_warm_stub(hermetic_store: Path) -> None:
         assert isinstance(embedding, list), "embedding must be a list"
         assert len(embedding) == 384, f"embedding must be 384-d, got {len(embedding)}"
 
+        # the process-wide embedder cache must not serve the warm build past
+        # this point, or the fail sub-case below never actually constructs
+        # _FailEmbedder
+        import iai_mcp.embed as _embed_mod
+        _embed_mod._reset_embedder_singleton()
+
         class _FailEmbedder:
             DIM = 384
             def embed(self, text: str) -> list:

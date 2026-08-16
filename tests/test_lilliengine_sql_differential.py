@@ -770,6 +770,130 @@ def test_update_and_delete(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# UPDATE SET <column-referencing RHS> — must read the row's pre-update value,
+# not evaluate against an empty row.
+# ---------------------------------------------------------------------------
+
+_SET_COL_REF_DDL = (
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c TEXT, "
+    "d INTEGER, ts TEXT)"
+)
+_SET_COL_REF_INSERT = "INSERT INTO t (id, a, b, c, d, ts) VALUES (?, ?, ?, ?, ?, ?)"
+_SET_COL_REF_ROW = [(1, 5, None, "hi", None, "2026-01-01T00:00:00")]
+
+
+@pytest.mark.parametrize(
+    "update_sql, select_sql",
+    [
+        ("UPDATE t SET b = a WHERE id = 1", "SELECT b FROM t WHERE id = 1"),
+        ("UPDATE t SET b = t.a WHERE id = 1", "SELECT b FROM t WHERE id = 1"),
+        ("UPDATE t SET b = COALESCE(a, 0) WHERE id = 1", "SELECT b FROM t WHERE id = 1"),
+        ("UPDATE t SET b = COALESCE(a, d) WHERE id = 1", "SELECT b FROM t WHERE id = 1"),
+        ("UPDATE t SET c = DATETIME(ts) WHERE id = 1", "SELECT c FROM t WHERE id = 1"),
+        ("UPDATE t SET b = (a) WHERE id = 1", "SELECT b FROM t WHERE id = 1"),
+        ("UPDATE t SET b = 5 WHERE id = 1", "SELECT b FROM t WHERE id = 1"),
+    ],
+)
+def test_update_set_col_ref_class(tmp_path, update_sql, select_sql) -> None:
+    """Every column-referencing SET RHS form the parser accepts (bare col, dotted
+    col, COALESCE over a col, DATETIME(col), a parenthesized col) reads the row's
+    current value, matching sqlite3; the literal RHS case guards against
+    regressing the already-correct path. Arithmetic BinOp RHS forms (`a+1`) fail
+    loud at parse on this engine and are out of scope.
+    """
+    eng, sq = _both(tmp_path, _SET_COL_REF_DDL, _SET_COL_REF_INSERT, _SET_COL_REF_ROW)
+    for conn in (eng, sq):
+        conn.execute(update_sql)
+    sq.commit()
+    _assert_parity(eng, sq, select_sql)
+
+
+def test_update_set_col_ref_multi_assignment_swap(tmp_path) -> None:
+    """SET a = b, b = a swaps using PRE-update values on both engines (sqlite parity),
+    not a partially-applied read of `updated`."""
+    rows = [(1, 7, 3, "hi", None, "2026-01-01T00:00:00")]
+    eng, sq = _both(tmp_path, _SET_COL_REF_DDL, _SET_COL_REF_INSERT, rows)
+    for conn in (eng, sq):
+        conn.execute("UPDATE t SET a = b, b = a WHERE id = 1")
+    sq.commit()
+    _assert_parity(eng, sq, "SELECT a, b FROM t WHERE id = 1")
+
+
+@pytest.mark.parametrize("rowid_spelling", ["rowid", "ROWID", "RowId"])
+def test_update_set_col_ref_rowid_heal_damaged_shape(tmp_path, rowid_spelling) -> None:
+    """SET vec_label = rowid resolves to the raw storage key on the damaged shape
+    (vec_label a plain non-PK INTEGER, NULL) — the boot heal's actual production
+    shape (`_db.py` `_heal_null_vec_labels`). The expected value is sourced from
+    stdlib's own rowid, never from lilli's own SELECT rowid — on this shape
+    `resolve_rowid` returns the (still NULL, pre-heal) vec_label instead of the
+    raw key, a separately reported divergence, not fixed here. Any case spelling
+    of `rowid` must resolve identically (SQL identifiers are case-insensitive).
+    """
+    ddl = "CREATE TABLE t (vec_label INTEGER, id TEXT NOT NULL UNIQUE)"
+    insert_sql = "INSERT INTO t (vec_label, id) VALUES (?, ?)"
+    eng, sq = _both(tmp_path, ddl, insert_sql, [(None, "r1")])
+    sq.execute("UPDATE t SET vec_label = rowid WHERE vec_label IS NULL")
+    eng.execute(f"UPDATE t SET vec_label = {rowid_spelling} WHERE vec_label IS NULL")
+    sq.commit()
+    expected = sq.execute("SELECT vec_label FROM t WHERE id = 'r1'").fetchone()[0]
+    assert expected is not None
+    got = eng.execute("SELECT vec_label FROM t WHERE id = 'r1'").fetchone()[0]
+    assert got == expected, (
+        f"damaged-shape rowid heal mismatch ({rowid_spelling=}): "
+        f"lilli={got!r} stdlib={expected!r}"
+    )
+
+
+def test_update_set_col_ref_rowid_heal_normal_pk_shape(tmp_path) -> None:
+    """SET vec_label = rowid on a normal INTEGER PRIMARY KEY row is a lilli-only
+    self-consistency check, NOT a stdlib-parity lock: lilli does not alias
+    INTEGER PRIMARY KEY to the storage key (`next_vec_label` high-water mark vs
+    `max_key()+1` are independent allocators), so a divergence from stdlib here
+    is expected, not a regression.
+    """
+    ddl = "CREATE TABLE t (vec_label INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE)"
+    eng = _engine_conn(tmp_path)
+    eng.execute(ddl)
+    eng.execute("INSERT INTO t (id) VALUES (?)", ("r1",))
+    eng.execute("UPDATE t SET vec_label = rowid WHERE id = 'r1'")
+    got = eng.execute("SELECT vec_label FROM t WHERE id = 'r1'").fetchone()[0]
+    assert got == 1, (
+        f"a single fresh insert's raw storage key is the 1-based insertion "
+        f"ordinal (1); got vec_label={got!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "update_sql, select_sql, pre_update_value",
+    [
+        ("UPDATE t SET b = COALESCE(rowid, 0) WHERE id = 1", "SELECT b FROM t WHERE id = 1", None),
+        ("UPDATE t SET c = DATETIME(rowid) WHERE id = 1", "SELECT c FROM t WHERE id = 1", "hi"),
+    ],
+)
+def test_update_set_wrapped_rowid_fails_loud(
+    tmp_path, update_sql, select_sql, pre_update_value
+) -> None:
+    """A `rowid` reference wrapped in COALESCE/DATETIME on a SET RHS raises rather
+    than silently writing NULL — only the bare top-level `rowid` form resolves to
+    the raw storage key. The target column must be left holding its pre-update
+    value, not overwritten with NULL before the raise.
+    """
+    eng = _engine_conn(tmp_path)
+    _seed(eng, _SET_COL_REF_DDL, _SET_COL_REF_INSERT, _SET_COL_REF_ROW)
+    with pytest.raises(Exception) as exc:
+        eng.execute(update_sql)
+    assert "rowid" in str(exc.value).lower(), (
+        f"the rejection message {str(exc.value)!r} does not name rowid"
+    )
+    survived = eng.execute(select_sql).fetchone()[0]
+    assert survived == pre_update_value, (
+        f"a rejected wrapped-rowid SET must leave the column at its pre-update "
+        f"value {pre_update_value!r}, got {survived!r} — the reject must be "
+        f"data-independent (pre-`TxnGuard`), never a partial write"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Error-shape parity: read-only mount, transaction-control guards, CREATE TABLE
 # ---------------------------------------------------------------------------
 

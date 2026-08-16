@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from _live_harness import _send_jsonrpc, _send_raw, _with_socket_server  # noqa: F401
+
 @pytest.fixture
 def short_socket_paths(tmp_path, monkeypatch):
     from iai_mcp import concurrency, daemon_state
@@ -34,82 +36,6 @@ def short_socket_paths(tmp_path, monkeypatch):
             sock_dir.rmdir()
         except OSError:
             pass
-
-async def _send_jsonrpc(
-    sock_path: Path,
-    method: str,
-    params: dict | None = None,
-    req_id: int | str = 1,
-    *,
-    timeout: float = 10.0,
-) -> dict:
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_unix_connection(path=str(sock_path)),
-        timeout=timeout,
-    )
-    try:
-        envelope: dict = {"jsonrpc": "2.0", "id": req_id, "method": method}
-        if params is not None:
-            envelope["params"] = params
-        writer.write((json.dumps(envelope) + "\n").encode("utf-8"))
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-    if not line:
-        raise AssertionError(f"daemon closed without reply (method={method})")
-    return json.loads(line.decode("utf-8"))
-
-async def _send_raw(sock_path: Path, raw_bytes: bytes, *, timeout: float = 5.0) -> dict:
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_unix_connection(path=str(sock_path)),
-        timeout=timeout,
-    )
-    try:
-        writer.write(raw_bytes)
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-    if not line:
-        raise AssertionError("daemon closed without reply")
-    return json.loads(line.decode("utf-8"))
-
-async def _with_socket_server(sock_path: Path, store, coro_fn):
-    from iai_mcp.socket_server import SocketServer
-
-    srv = SocketServer(store, idle_secs=99999)
-    server_task = asyncio.create_task(srv.serve(socket_path=sock_path))
-
-    for _ in range(250):
-        if sock_path.exists():
-            break
-        await asyncio.sleep(0.01)
-    if not sock_path.exists():
-        srv.shutdown_event.set()
-        try:
-            await asyncio.wait_for(server_task, timeout=5)
-        except Exception:
-            pass
-        raise AssertionError("socket never bound")
-
-    try:
-        result = await coro_fn(sock_path, store)
-    finally:
-        srv.shutdown_event.set()
-        try:
-            await asyncio.wait_for(server_task, timeout=5)
-        except Exception:
-            pass
-    return result
 
 def test_memory_recall_routed_over_socket(short_socket_paths):
     _, sock_path, _ = short_socket_paths

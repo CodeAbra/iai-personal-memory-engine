@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
 
+from iai_mcp import core
 from iai_mcp.types import EMBED_DIM, MemoryHit, MemoryRecord
+
+
+@pytest.fixture(autouse=True)
+def _restore_community_names():
+    saved = dict(core._community_names_cache)
+    yield
+    core.set_community_names(saved)
+
 
 def _make_record(
     *,
     text: str = "hello",
     vec: list[float] | None = None,
     tags: list[str] | None = None,
+    community_id: "UUID | None" = None,
     detail_level: int = 2,
     tier: str = "episodic",
     language: str = "en",
@@ -24,7 +35,7 @@ def _make_record(
         literal_surface=text,
         aaak_index="",
         embedding=vec,
-        community_id=None,
+        community_id=community_id,
         centrality=0.0,
         detail_level=detail_level,
         pinned=False,
@@ -202,11 +213,13 @@ def test_monotropic_check_gate_profile_depth(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
+    cid = uuid4()
+    core.set_community_names({str(cid): "coding"})
     v = [0.1] * EMBED_DIM
     new_rec = _make_record(
         text="new deep-interest fact",
         vec=v,
-        tags=["domain:coding"],
+        community_id=cid,
         detail_level=5,
     )
     store.insert(new_rec)
@@ -222,8 +235,10 @@ def test_monotropic_check_gate_detail_level(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
+    cid = uuid4()
+    core.set_community_names({str(cid): "coding"})
     v = [0.1] * EMBED_DIM
-    new_rec = _make_record(vec=v, tags=["domain:coding"], detail_level=3)
+    new_rec = _make_record(vec=v, community_id=cid, detail_level=3)
     store.insert(new_rec)
     profile_state = {"monotropism_depth": {"coding": 0.9}}
 
@@ -237,14 +252,19 @@ def test_monotropic_check_within_domain_only(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
+    coding_cid = uuid4()
+    gardening_cid = uuid4()
+    core.set_community_names({
+        str(coding_cid): "coding", str(gardening_cid): "gardening",
+    })
     v_other = [1.0] + [0.0] * (EMBED_DIM - 1)
     other = _make_record(
-        text="tomato care", vec=v_other, tags=["domain:gardening"]
+        text="tomato care", vec=v_other, community_id=gardening_cid,
     )
     store.insert(other)
 
     new_rec = _make_record(
-        text="refactor method", vec=v_other, tags=["domain:coding"], detail_level=5
+        text="refactor method", vec=v_other, community_id=coding_cid, detail_level=5,
     )
     store.insert(new_rec)
 
@@ -260,17 +280,19 @@ def test_monotropic_check_pairwise_scan_skip_above_100(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
+    cid = uuid4()
+    core.set_community_names({str(cid): "coding"})
     for i in range(101):
         vec = [0.0] * EMBED_DIM
         vec[i % EMBED_DIM] = 1.0
         rec = _make_record(
-            text=f"rec {i}", vec=vec, tags=["domain:coding"], detail_level=1
+            text=f"rec {i}", vec=vec, community_id=cid, detail_level=1,
         )
         store.insert(rec)
 
     vec = [1.0] + [0.0] * (EMBED_DIM - 1)
     new_rec = _make_record(
-        text="new", vec=vec, tags=["domain:coding"], detail_level=5
+        text="new", vec=vec, community_id=cid, detail_level=5,
     )
     store.insert(new_rec)
 
@@ -281,6 +303,9 @@ def test_monotropic_check_pairwise_scan_skip_above_100(tmp_path):
     assert result == []
     events = query_events(store, kind="s4_monotropic_skip")
     assert len(events) >= 1
+    # No topic name in the skip event -- redacted to a non-content token.
+    assert "domain" not in events[0]["data"]
+    assert not events[0]["domain"]
 
 def test_monotropic_check_emits_event_on_hit(tmp_path):
     from iai_mcp.events import query_events
@@ -288,16 +313,18 @@ def test_monotropic_check_emits_event_on_hit(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
+    cid = uuid4()
+    core.set_community_names({str(cid): "coding"})
     v1 = [1.0] + [0.0] * (EMBED_DIM - 1)
     existing = _make_record(
-        text="fact A", vec=v1, tags=["domain:coding"], detail_level=2
+        text="fact A", vec=v1, community_id=cid, detail_level=2,
     )
     store.insert(existing)
 
     new_rec = _make_record(
         text="fact A again",
         vec=v1,
-        tags=["domain:coding"],
+        community_id=cid,
         detail_level=5,
     )
     store.insert(new_rec)
@@ -309,15 +336,32 @@ def test_monotropic_check_emits_event_on_hit(tmp_path):
     assert len(result) >= 1
     events = query_events(store, kind="s4_monotropic_contradiction")
     assert len(events) >= 1
-    assert events[0]["data"]["domain"] == "domain:coding"
+    # No topic name in the contradiction event -- redacted to a non-content token.
+    assert "domain" not in events[0]["data"]
+    assert not events[0]["domain"]
+    # The hint returned to the caller may still name the topic -- it is
+    # displayed to the same user whose content it is, not a stored event.
+    assert "coding" in result[0]["text"]
 
-def test_monotropic_check_missing_domain_tag_returns_empty(tmp_path):
+def test_monotropic_check_missing_community_id_returns_empty(tmp_path):
     from iai_mcp.s4 import monotropic_proactive_check
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
     v = [1.0] + [0.0] * (EMBED_DIM - 1)
-    new_rec = _make_record(text="x", vec=v, tags=[], detail_level=5)
+    new_rec = _make_record(text="x", vec=v, community_id=None, detail_level=5)
+    store.insert(new_rec)
+    profile_state = {"monotropism_depth": {"coding": 0.9}}
+    assert monotropic_proactive_check(store, new_rec, profile_state, session_id="t") == []
+
+def test_monotropic_check_community_id_absent_from_name_map_returns_empty(tmp_path):
+    from iai_mcp.s4 import monotropic_proactive_check
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path)
+    core.set_community_names({})
+    v = [1.0] + [0.0] * (EMBED_DIM - 1)
+    new_rec = _make_record(text="x", vec=v, community_id=uuid4(), detail_level=5)
     store.insert(new_rec)
     profile_state = {"monotropism_depth": {"coding": 0.9}}
     assert monotropic_proactive_check(store, new_rec, profile_state, session_id="t") == []
@@ -327,8 +371,10 @@ def test_monotropic_check_malformed_profile_state_degrades(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
+    cid = uuid4()
+    core.set_community_names({str(cid): "coding"})
     v = [1.0] + [0.0] * (EMBED_DIM - 1)
-    new_rec = _make_record(vec=v, tags=["domain:coding"], detail_level=5)
+    new_rec = _make_record(vec=v, community_id=cid, detail_level=5)
     store.insert(new_rec)
     profile_state = {"monotropism_depth": [0.9]}
     assert monotropic_proactive_check(store, new_rec, profile_state, session_id="t") == []

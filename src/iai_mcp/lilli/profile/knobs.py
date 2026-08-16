@@ -82,14 +82,6 @@ PROFILE_KNOBS: dict[str, KnobSpec] = {
         "bool",
         "AUTIST-10",
     ),
-    "camouflaging_relaxation": KnobSpec(
-        "camouflaging_relaxation",
-        1,
-        0.0,
-        "Detect over-formal writing and gradually relax communication formality",
-        "float_range:0.0..1.0",
-        "AUTIST-13",
-    ),
     "scene_construction_scaffold": KnobSpec(
         "scene_construction_scaffold",
         1,
@@ -120,11 +112,11 @@ DEFERRED_KNOB_NAMES: frozenset[str] = frozenset(
 )
 
 
-assert len(PROFILE_KNOBS) == 11, (
-    "10 autistic-kernel knobs + wake_depth = 11 sealed entries"
+assert len(PROFILE_KNOBS) == 10, (
+    "9 autistic-kernel knobs + wake_depth = 10 sealed entries"
 )
-assert len(LIVE_KNOB_NAMES) == 11, (
-    "10 autistic-kernel knobs + MCP-12 wake_depth are live"
+assert len(LIVE_KNOB_NAMES) == 10, (
+    "9 autistic-kernel knobs + wake_depth are live"
 )
 assert len(DEFERRED_KNOB_NAMES) == 0, "the sealed registry carries no deferred knobs"
 
@@ -223,7 +215,7 @@ def profile_get(knob: str | None, state: dict[str, Any]) -> dict:
                 "requirement_id": spec.requirement_id,
                 "description": spec.description,
             }
-        return {"live": live, "deferred": deferred, "total_knobs": 11}
+        return {"live": live, "deferred": deferred, "total_knobs": 10}
 
     if knob in LIVE_KNOB_NAMES:
         spec = PROFILE_KNOBS[knob]
@@ -247,6 +239,7 @@ def profile_set(
     state: dict[str, Any],
     *,
     store: "object | None" = None,
+    source: str = "user",
 ) -> dict:
     if knob not in PROFILE_KNOBS:
         return {"status": "error", "reason": "unknown knob", "knob": knob}
@@ -285,13 +278,37 @@ def profile_set(
                     "new": value,
                     "requirement_id": spec.requirement_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "source": source,
                 },
                 severity="info",
             )
         except (OSError, RuntimeError, ValueError):
             pass
 
-    return {"status": "ok", "knob": knob, "value": value}
+    persisted = True
+    if store is not None and source == "user":
+        from iai_mcp.lilli.profile.persistence import persist_after_user_set
+        try:
+            persisted = persist_after_user_set(store, state, knob)
+        except (OSError, RuntimeError, ValueError):
+            persisted = False
+        if not persisted:
+            try:
+                from iai_mcp.events import write_event
+                write_event(
+                    store,
+                    kind="profile_state_unreadable",
+                    data={"reason": "persist_after_user_set_failed", "knob": knob},
+                    severity="warning",
+                )
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+    result = {"status": "ok", "knob": knob, "value": value}
+    if store is not None and source == "user" and not persisted:
+        result["status"] = "ok_not_persisted"
+        result["persisted"] = False
+    return result
 
 
 def bayesian_update(
@@ -420,21 +437,20 @@ def profile_modulation_for_record(
     gains: dict[str, float] = {}
 
     md = profile_state.get("monotropism_depth", {})
-    if isinstance(md, dict) and md:
-        for tag in (record.tags or []):
-            if tag.startswith("domain:"):
-                dom = tag.split(":", 1)[1]
-                if dom in md:
-                    depth = md[dom]
-                    try:
-                        gains["monotropism_depth"] = 1.0 + float(depth)
-                    except (TypeError, ValueError):
-                        pass
-                    if knobs_applied is not None:
-                        knobs_applied["AUTIST-01"] = (
-                            "profile.py:profile_modulation_for_record:monotropism_depth"
-                        )
-                    break
+    _record_community_id = getattr(record, "community_id", None)
+    if isinstance(md, dict) and md and _record_community_id is not None:
+        from iai_mcp.core import get_community_names
+        name = get_community_names().get(str(_record_community_id))
+        if name is not None and name in md:
+            depth = md[name]
+            try:
+                gains["monotropism_depth"] = 1.0 + float(depth)
+            except (TypeError, ValueError):
+                pass
+            if knobs_applied is not None:
+                knobs_applied["AUTIST-01"] = (
+                    "profile.py:profile_modulation_for_record:monotropism_depth"
+                )
 
     ib = profile_state.get("interest_boost", 0.0)
     try:

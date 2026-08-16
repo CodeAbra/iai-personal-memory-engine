@@ -511,9 +511,10 @@ def test_unknown_config_model_is_a_selection_refusal(
 def test_sleep_branch_surfaces_refusal_through_dispatch(
     tmp_path, monkeypatch
 ) -> None:
-    """Under SLEEP the refusal must escape from the retrieve tier itself —
-    with the dispatch folded back into the detection guard it would be
-    swallowed and re-raised later by the warm path instead."""
+    """Under SLEEP the refusal must escape from the SLEEP branch's own
+    bounded embedder probe — with the dispatch folded back into the
+    detection guard it would be swallowed and re-raised later by the warm
+    path's separate bounded acquire instead."""
     import traceback
     from datetime import datetime, timezone
     from uuid import uuid4
@@ -554,8 +555,9 @@ def test_sleep_branch_surfaces_refusal_through_dispatch(
             "cue": "probe", "session_id": "s",
         })
     frames = "".join(traceback.format_tb(ei.value.__traceback__))
-    assert "retrieve.py" in frames, (
-        "refusal must originate in the retrieve tier, not the warm path"
+    assert "_embedder_ready_bounded" in frames, (
+        "refusal must originate in the SLEEP branch's own bounded probe, "
+        "not fall through to the warm path's separate bounded acquire"
     )
 
 

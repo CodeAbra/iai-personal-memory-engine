@@ -12,7 +12,7 @@ import numpy as np
 from tests._helpers import short_socket_path as _short_socket_path_base
 
 from iai_mcp.community import CommunityAssignment
-from iai_mcp.daemon import WATCHDOG_PROBE_TIMEOUT_SEC, _probe_status_roundtrip
+from iai_mcp.daemon import _probe_status_roundtrip
 from iai_mcp.socket_server import SocketServer
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryRecord
@@ -212,7 +212,7 @@ def _served_fraction(samples: list[float], ceil: float) -> float:
     served = sum(1 for s in samples if s != float("inf") and s <= ceil)
     return served / len(samples)
 
-def test_on_loop_store_read_under_held_lock_wedges_probe(tmp_path):
+def test_on_loop_store_read_under_held_lock_stays_served(tmp_path):
     store_root = tmp_path / ".iai-mcp"
     store_root.mkdir(parents=True, exist_ok=True)
     store = MemoryStore(path=store_root)
@@ -246,14 +246,20 @@ def test_on_loop_store_read_under_held_lock_wedges_probe(tmp_path):
             await asyncio.sleep(0.2)
 
             arm1_worst, arm1_samples = probe.report()
-            assert block_sec >= _PROBE_READ_TIMEOUT, (
-                "on-loop get did not block long enough to exercise the wedge "
-                f"(block={block_sec:.3f}s, hold={_HOLD_SEC}s)"
+            # an on-loop store read no longer waits on _conn_lock at all: it
+            # streams from a dedicated RO snapshot connection, so it stays
+            # fast even while a writer holds the lock for the full window
+            assert block_sec < _PROBE_READ_TIMEOUT, (
+                "on-loop get blocked behind the held _conn_lock "
+                f"(block={block_sec:.3f}s, hold={_HOLD_SEC}s) — reads must be "
+                "served from the RO snapshot, never wait on the writer lock"
             )
             assert arm1_samples, "ARM-1 probe produced no samples"
-            assert arm1_worst == float("inf") or arm1_worst > WATCHDOG_PROBE_TIMEOUT_SEC, (
-                "ARM-1 probe should have wedged (RTT > timeout) while the loop "
-                f"was blocked on the on-loop get; worst={arm1_worst}"
+            served = _served_fraction(arm1_samples, _SERVED_RTT_CEIL)
+            assert served >= 0.8, (
+                "probe should have stayed served (on-loop get is fast, never "
+                f"blocks the loop) while a worker held _conn_lock; "
+                f"served_fraction={served:.2f} samples={arm1_samples}"
             )
         finally:
             probe.stop()
@@ -304,18 +310,26 @@ def test_off_loop_store_read_under_held_lock_keeps_probe_served(tmp_path):
             assert ok, "worker never acquired _conn_lock"
             ticks_before = ticks["n"]
             worker_get_sec = await asyncio.to_thread(_measured_get, store, rid)
-            ticks_after = ticks["n"]
+            # the RO-snapshot read completes fast (see the assert below), so
+            # ticks across the read alone would no longer be a meaningful
+            # sample -- span the full held-lock window instead, which still
+            # proves the loop never stalls for the writer's hold duration
             await asyncio.to_thread(done.wait, _HOLD_SEC + 10.0)
+            ticks_after = ticks["n"]
             await asyncio.to_thread(worker.join, 5.0)
             await asyncio.sleep(0.2)
 
             arm2_worst, arm2_samples = probe.report()
-            assert worker_get_sec >= _PROBE_READ_TIMEOUT, (
-                "to_thread get should have stalled behind the held _conn_lock "
-                f"(get={worker_get_sec:.3f}s, hold={_HOLD_SEC}s)"
+            # the off-loop get streams from the RO snapshot too: it no longer
+            # waits on _conn_lock, so it stays fast even under a held writer
+            # lock (this is in addition to, not instead of, loop responsiveness)
+            assert worker_get_sec < _PROBE_READ_TIMEOUT, (
+                "to_thread get blocked behind the held _conn_lock "
+                f"(get={worker_get_sec:.3f}s, hold={_HOLD_SEC}s) — reads must "
+                "be served from the RO snapshot, never wait on the writer lock"
             )
             assert ticks_after - ticks_before >= 5, (
-                "the event loop stalled during the off-loop read "
+                "the event loop stalled while a writer held _conn_lock "
                 f"(ticks advanced {ticks_after - ticks_before} over ~{_HOLD_SEC}s)"
             )
             assert arm2_samples, "ARM-2 probe produced no samples"

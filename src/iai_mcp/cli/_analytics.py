@@ -545,14 +545,14 @@ def cmd_audit(args: argparse.Namespace) -> int:
             if isinstance(payload, dict) and "alerts" in payload:
                 alerts = payload["alerts"]
                 if not alerts:
-                    print("drift: no anomaly detected (M4 variance stable)")
+                    print("drift: no anomaly detected (knob movement stable)")
                 else:
                     for a in alerts:
                         print(
-                            f"drift: variance increasing across "
-                            f"{a.get('window_sessions')} sessions; "
-                            f"first={a.get('first_value'):.3f} "
-                            f"last={a.get('last_value'):.3f}"
+                            f"drift: knob movement rising across "
+                            f"{a.get('cycles')} tuning cycles; "
+                            f"first={a['first_value']:.3f} "
+                            f"last={a['last_value']:.3f}"
                         )
                 return 0
 
@@ -562,20 +562,20 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
         try:
             store = MemoryStore()
-            alerts = detect_drift_anomaly(store)
+            alerts, _c, _p = detect_drift_anomaly(store)
         except HippoLockHeldError:
             print("daemon holds store lock; retry when daemon is idle")
             return 0
 
         if not alerts:
-            print("drift: no anomaly detected (M4 variance stable)")
+            print("drift: no anomaly detected (knob movement stable)")
         else:
             for a in alerts:
                 print(
-                    f"drift: variance increasing across "
-                    f"{a.get('window_sessions')} sessions; "
-                    f"first={a.get('first_value'):.3f} "
-                    f"last={a.get('last_value'):.3f}"
+                    f"drift: knob movement rising across "
+                    f"{a.get('cycles')} tuning cycles; "
+                    f"first={a['first_value']:.3f} "
+                    f"last={a['last_value']:.3f}"
                 )
         return 0
 
@@ -586,6 +586,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         "s5_cooldown_block",
         "s5_drift_alert",
         "identity_cross_lingual_warning",
+        "identity_write_rejected",
     )
 
     if sub == "shield":

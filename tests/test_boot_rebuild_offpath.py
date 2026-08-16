@@ -205,6 +205,9 @@ except ImportError:
 # Prod-scale by design: a whole-corpus boot rebuild takes minutes on a loaded
 # serial box; the override keeps a lane-wide short --timeout from killing it.
 @pytest.mark.timeout(900)
+# Wall-clock latency ceiling: opt-in perf lane, out of the default correctness
+# gate.
+@pytest.mark.perf
 @retry_once_on_assertion
 def test_foreground_recall_not_starved_during_boot_rebuild(tmp_path: Path) -> None:
     """A foreground socket recall fired DURING the boot rebuild window must
@@ -290,6 +293,30 @@ def test_foreground_recall_not_starved_during_boot_rebuild(tmp_path: Path) -> No
             f"foreground recall for cue {cue!r} took {elapsed:.3f}s during the "
             f"boot rebuild window (SLA {_WARM_SLA_SEC}s) -- the whole-corpus "
             f"rebuild starved it."
+        )
+
+        # A sub-SLA wall clock alone is not proof of a full-quality answer: a
+        # degraded (no-embedder / cold-structural / cortex-fallback) response
+        # can also be fast. The gate must reject a laundered degrade.
+        _degrade_source = result.get("_source")
+        assert _degrade_source not in (
+            "embedder-build-degrade", "cold-structural-degrade", "cortex-fallback",
+        ), (
+            f"foreground recall for cue {cue!r} was under the SLA but degraded "
+            f"(_source={_degrade_source!r}) -- a fast degrade is not a full-quality "
+            f"pass"
+        )
+
+        # A missing _source alone is still not proof of full quality: a fast
+        # last_good structural read (full hits, degraded rank) carries no
+        # _source of its own. The structural branch must be full-quality too.
+        _structural_branch = result.get("_structural_source")
+        assert _structural_branch in ("normal", "overlay"), (
+            f"foreground recall for cue {cue!r} was under the SLA and "
+            f"non-degraded by _source, but its structural branch was "
+            f"{_structural_branch!r}, not full-quality (normal/overlay) -- a "
+            f"fast last_good/cold_degrade structural read must not pass this "
+            f"gate"
         )
     finally:
         handle.terminate()

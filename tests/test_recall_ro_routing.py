@@ -4,8 +4,9 @@ Covers: non-starvation under a held writer lock (the exact boot-storm
 starvation shape), parity between the RO-served and forced-writer-path
 results, the read-your-writes spy proving find_record_by_tag/reinforce_record
 never borrow from the RO pool, the tombstone fence, the recency-window
-crossing freshness proof (the false-negative gap this phase closes), and
-non-interaction with the hnsw double-buffered swap.
+crossing freshness proof (an aged-out record committed only via the buffered
+flush must still be found through the RO-routed path with no manual
+generation bump), and non-interaction with the hnsw double-buffered swap.
 
 Every test runs under both storage drivers from this one file: lilli-only
 cases are skipped-not-failed under stdlib, mirroring
@@ -30,6 +31,7 @@ import pytest
 
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 _LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
 
@@ -314,13 +316,11 @@ def test_parity_liveness_recall_dispatch_ro_vs_writer_path(tmp_path: Path, monke
     ids = _seed_records_and_edges(store, 15)
     cue = _norm_vec(0)
 
-    import iai_mcp.embed as _embed_mod
-
     class _StubEmbedder:
         def embed(self, _text: str) -> list[float]:
             return list(cue)
 
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: _StubEmbedder())
+    stub_embedder_for_store(monkeypatch, _StubEmbedder())
 
     def _dispatch():
         _pm._last_recall_latency_ms = 0.0
@@ -437,8 +437,10 @@ def test_recency_window_crossing_no_false_negative(tmp_path: Path, monkeypatch) 
     must still be found through the RO-routed path with no manual
     generation bump.
 
-    RED under a funnel-only bump (the buffered flush never calls the
-    funnel); GREEN with the 177-01 CorpusCountCache.on_invalidate union hook.
+    Two independent mechanisms mark the RO pool stale on this commit: the
+    CorpusCountCache.on_invalidate union hook, and the connection-level
+    mutation-signalling proxy that bumps every mutating statement — either
+    alone is sufficient, so this proves the outcome, not one specific wire.
     """
     monkeypatch.setenv("IAI_MCP_RECENCY_BUFFER_MAXLEN", "10")
     # The test's own explicit flush_record_buffer() call (step c) is what this
@@ -524,22 +526,29 @@ def test_recency_window_crossing_no_false_negative(tmp_path: Path, monkeypatch) 
 
 
 @_lilli_only
-def test_recency_window_crossing_fails_under_funnel_only_bump(tmp_path: Path, monkeypatch) -> None:
-    """RED-seam proof: if the RO pool were staleness-bumped ONLY via the
-    store's invalidation funnel (not the CorpusCountCache.on_invalidate hook
-    the buffered flush reaches directly), the aged-out record would be
-    invisible through a stale pre-capture RO snapshot. This test disables the
-    on_invalidate wiring to reproduce that failure mode, proving the
-    mechanism (not a coincidence) is what makes the GREEN test above pass.
+def test_recency_window_crossing_fires_on_invalidate_hook(tmp_path: Path, monkeypatch) -> None:
+    """The CorpusCountCache.on_invalidate union hook actually fires on the
+    buffered flush that ages a record out of the recency buffer — proving
+    this specific wire is live, as one of the (redundant) mechanisms behind
+    the freshness outcome the sibling test asserts end-to-end. A disabled-hook
+    negative is no longer a valid seam here: the connection-level
+    mutation-signalling proxy also marks the RO pool stale on every mutating
+    statement, so disabling only this hook no longer reproduces a failure.
     """
     monkeypatch.setenv("IAI_MCP_RECENCY_BUFFER_MAXLEN", "10")
     monkeypatch.setenv("IAI_MCP_TEST_NO_AUTOFLUSH", "1")
     store = _make_store(tmp_path)
     maxlen = store._recency_buffer._maxlen
 
-    # Disable the union hook: the buffered flush's direct cache.invalidate()
-    # call no longer reaches the RO pool's mark_stale().
-    store._corpus_count_cache.on_invalidate = None
+    hook_calls = {"n": 0}
+    real_hook = store._corpus_count_cache.on_invalidate
+
+    def _spy_hook() -> None:
+        hook_calls["n"] += 1
+        if real_hook is not None:
+            real_hook()
+
+    store._corpus_count_cache.on_invalidate = _spy_hook
 
     with store.db.ro_conn() as conn:
         conn.execute("SELECT COUNT(*) FROM records").fetchone()
@@ -559,12 +568,14 @@ def test_recency_window_crossing_fails_under_funnel_only_bump(tmp_path: Path, mo
     buffer_ids = {m.id for m in store._recency_buffer}
     assert str(earliest_id) not in buffer_ids
 
+    assert hook_calls["n"] > 0, (
+        "CorpusCountCache.on_invalidate must fire on the buffered flush that "
+        "commits an aged-out record — the wiring behind the freshness "
+        "outcome must be live, not merely coincidentally satisfied"
+    )
     got = store.get_batch([earliest_id])
-    assert not got, (
-        "with the on_invalidate hook disabled, the RO pool never learns "
-        "about the buffered-flush commit, so the primed (pre-capture) "
-        "snapshot must NOT see the aged-out record — this is the exact "
-        "false-negative gap plan 01's hook closes"
+    assert earliest_id in got, (
+        "the aged-out record must still be found through the RO-routed path"
     )
     store.close()
 

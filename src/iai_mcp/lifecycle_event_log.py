@@ -12,6 +12,11 @@ from typing import Any
 
 DEFAULT_LOG_DIR: Path = Path.home() / ".iai-mcp" / "logs"
 
+#: schema version of the liveness_candidates/liveness_processed pair carried
+#: on sleep_step_completed and promise_liveness rows; bump when the
+#: candidate/processed semantics change, never for a field-mapping addition.
+_LIVENESS_SPEC_VERSION: int = 1
+
 KNOWN_EVENT_KINDS: frozenset[str] = frozenset(
     {
         "state_transition",
@@ -21,6 +26,7 @@ KNOWN_EVENT_KINDS: frozenset[str] = frozenset(
         "sleep_step_completed",
         "quarantine_entered",
         "quarantine_lifted",
+        "promise_liveness",
     }
 )
 

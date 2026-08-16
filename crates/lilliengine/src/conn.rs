@@ -23,8 +23,8 @@ use crate::ast::Stmt;
 use crate::catalog::Catalog;
 use crate::error::{EngineError, Result};
 use crate::exec::{
-    execute_delete, execute_insert, execute_insert_many, execute_select, execute_update, ColIndex,
-    ConflictIndex, IdIndex, OrderedColIndex, TxnScope, WriteOutcome,
+    execute_delete, execute_insert, execute_insert_many, execute_select, execute_update,
+    ColIndex, ConflictIndex, IdIndex, OrderedColIndex, TxnScope, WriteOutcome,
 };
 use crate::meta::MetaTable;
 use crate::parser::parse;
@@ -286,6 +286,13 @@ pub struct Connection {
     /// never blocks, so this is a reported value, not a wait the engine honors.
     busy_timeout: i64,
     id_caches: HashMap<String, IdIndex>,
+    /// One [`ConflictIndex`] per table. It carries its own lazily-built map per
+    /// key-set internally, so a single cache slot correctly serves every
+    /// UNIQUE/PK key-set the table declares — a probe against one key-set can
+    /// never read a map built over another's serialized keys. An UPDATE/DELETE
+    /// invalidates the whole per-table object, clearing every key-set's map at
+    /// once, so a mixed workload spanning more than one key-set can never
+    /// strand a stale entry.
     conflict_caches: HashMap<String, ConflictIndex>,
     /// Per-table non-unique `column-value → row-keys` indexes for the
     /// `WHERE col IN (...)` recall edge-adjacency lookup. Built lazily and dropped
@@ -312,11 +319,26 @@ pub struct Connection {
     /// mutated state inside an open transaction (see the Select arm), so a
     /// rolled-back in-transaction count can never be served later.
     bare_count_cache: HashMap<String, (i64, i64)>,
-    /// Filtered-COUNT cache: `(table, full SQL text)` -> `(generation, count)`.
-    /// Same generation fence and transaction discipline as the bare-count
-    /// cache; keyed on the exact statement text and populated only for
-    /// parameterless statements, so every distinct predicate self-fences.
-    filtered_count_cache: HashMap<(String, String), (i64, i64)>,
+    /// Filtered-COUNT cache: `(table, full SQL text)` -> `(col_generation,
+    /// content_generation, count)`. `col_generation` is the same cross-connection
+    /// fence the bare-count cache uses; `content_generation` additionally catches
+    /// a same-connection UPDATE that changes filtered-COUNT membership without
+    /// touching a col-indexed column (e.g. a partial-indexed-only column like a
+    /// tombstone toggle) — `col_generation` alone under-fences that case. A hit
+    /// requires BOTH to still match.
+    filtered_count_cache: HashMap<(String, String), (i64, i64, i64)>,
+    /// Per-table write counter, bumped on every committed-matched INSERT/UPDATE/
+    /// DELETE (never gated on `!in_transaction` — a mutation inside an open
+    /// transaction is already visible to this same connection). In-memory only,
+    /// per-connection, not persisted: it catches same-connection staleness
+    /// between two reads. `col_generation` does NOT cover a cross-connection
+    /// non-indexed UPDATE (that never bumps it); cross-connection safety instead
+    /// comes from the only cross-connection reader being an RO mount, whose
+    /// `refresh_read_view` clears both count caches on snapshot advance, so a
+    /// non-refreshing RO reader stays on a consistent old snapshot. Do not merge
+    /// the two counters: `col_generation` also fences RO index adoption, which
+    /// must not re-adopt on every non-indexed UPDATE.
+    content_generation: HashMap<String, i64>,
     /// Parsed-statement cache: trimmed SQL string → its AST.
     ///
     /// The AST is a pure function of the SQL text — `tokenize` + recursive
@@ -447,6 +469,7 @@ impl Connection {
             ordered_caches,
             bare_count_cache: HashMap::new(),
             filtered_count_cache: HashMap::new(),
+            content_generation: HashMap::new(),
             parse_cache: HashMap::new(),
         };
         if read_only {
@@ -1041,6 +1064,17 @@ impl Connection {
         Ok(())
     }
 
+    /// Advance the same-connection filtered-count staleness fence for `table`.
+    /// Called on every matched write regardless of `in_transaction` — the
+    /// mutation is already visible to reads on this connection before an outer
+    /// COMMIT, so a filtered-count entry populated before it must not survive.
+    fn bump_content_generation(&mut self, table: &str) {
+        *self
+            .content_generation
+            .entry(table.to_string())
+            .or_insert(0) += 1;
+    }
+
     /// The transaction scope a single statement runs under: its own store
     /// transaction when no outer transaction is open, else suppressed so the DML
     /// accumulates in the outer transaction.
@@ -1289,11 +1323,21 @@ impl Connection {
                 };
                 if let Some(key) = &filtered_count_key {
                     if !self.in_transaction {
-                        if let (Some(&(cached_gen, cached_count)), Ok(current_gen)) = (
+                        if let (
+                            Some(&(cached_col_gen, cached_content_gen, cached_count)),
+                            Ok(current_col_gen),
+                        ) = (
                             self.filtered_count_cache.get(key),
                             self.meta.col_generation(&self.store, &plan.table),
                         ) {
-                            if cached_gen == current_gen {
+                            let current_content_gen = self
+                                .content_generation
+                                .get(&plan.table)
+                                .copied()
+                                .unwrap_or(0);
+                            if cached_col_gen == current_col_gen
+                                && cached_content_gen == current_content_gen
+                            {
                                 let label = plan
                                     .count_alias
                                     .clone()
@@ -1375,16 +1419,22 @@ impl Connection {
                 }
                 if let Some(key) = filtered_count_key {
                     if !self.in_transaction {
-                        if let (Some(row), Ok(current_gen)) = (
+                        if let (Some(row), Ok(current_col_gen)) = (
                             rs.rows.first(),
                             self.meta.col_generation(&self.store, &plan.table),
                         ) {
                             if let Some((_, Value::Int(count))) = row.first() {
+                                let current_content_gen = self
+                                    .content_generation
+                                    .get(&plan.table)
+                                    .copied()
+                                    .unwrap_or(0);
                                 const FILTERED_COUNT_CACHE_CAP: usize = 64;
                                 if self.filtered_count_cache.len() >= FILTERED_COUNT_CACHE_CAP {
                                     self.filtered_count_cache.clear();
                                 }
-                                self.filtered_count_cache.insert(key, (current_gen, *count));
+                                self.filtered_count_cache
+                                    .insert(key, (current_col_gen, current_content_gen, *count));
                             }
                         }
                     }
@@ -1409,6 +1459,11 @@ impl Connection {
                 let insert_cols = self.catalog_col_index_columns(&table);
                 let result = {
                     let idx = self.id_caches.entry(table.clone()).or_default();
+                    // One conflict-index object per table, holding a lazily-built
+                    // map per key-set internally — the statement's own
+                    // conflict-resolution key-set and/or the table's enforcement
+                    // key-set(s) for a plain INSERT's UNIQUE/PK probe are both
+                    // served by the same object.
                     let cidx = self.conflict_caches.entry(table.clone()).or_default();
                     let colx = if insert_cols.is_empty() {
                         None
@@ -1440,7 +1495,12 @@ impl Connection {
                     )
                 };
                 match result {
-                    Ok(outcome) => Ok(write_cursor(outcome)),
+                    Ok(outcome) => {
+                        if outcome.rowcount > 0 {
+                            self.bump_content_generation(&table);
+                        }
+                        Ok(write_cursor(outcome))
+                    }
                     Err(e) => {
                         if self.in_transaction {
                             self.txn_tainted = true;
@@ -1464,6 +1524,8 @@ impl Connection {
                 let update_cols = self.catalog_col_index_columns(&table);
                 let result = {
                     let idx = self.id_caches.entry(table.clone()).or_default();
+                    // The single per-table object; `execute_update` unconditionally
+                    // invalidates it, clearing every key-set's map at once.
                     let cidx = self.conflict_caches.get_mut(&table);
                     let colx = if update_cols.is_empty() {
                         None
@@ -1491,7 +1553,12 @@ impl Connection {
                     )
                 };
                 match result {
-                    Ok(outcome) => Ok(write_cursor(outcome)),
+                    Ok(outcome) => {
+                        if outcome.rowcount > 0 {
+                            self.bump_content_generation(&table);
+                        }
+                        Ok(write_cursor(outcome))
+                    }
                     Err(e) => {
                         if self.in_transaction {
                             self.txn_tainted = true;
@@ -1511,6 +1578,7 @@ impl Connection {
                 let delete_cols = self.catalog_col_index_columns(&table);
                 let result = {
                     let idx = self.id_caches.entry(table.clone()).or_default();
+                    // See the UPDATE arm above: the single per-table object.
                     let cidx = self.conflict_caches.get_mut(&table);
                     let colx = if delete_cols.is_empty() {
                         None
@@ -1538,7 +1606,12 @@ impl Connection {
                     )
                 };
                 match result {
-                    Ok(outcome) => Ok(write_cursor(outcome)),
+                    Ok(outcome) => {
+                        if outcome.rowcount > 0 {
+                            self.bump_content_generation(&table);
+                        }
+                        Ok(write_cursor(outcome))
+                    }
                     Err(e) => {
                         if self.in_transaction {
                             self.txn_tainted = true;
@@ -1597,6 +1670,9 @@ impl Connection {
             self.ordered_caches.remove(&table);
             self.bare_count_cache.remove(&table);
             self.filtered_count_cache.retain(|(t, _), _| t != &table);
+            // See the single-row INSERT arm above: the single per-table conflict
+            // object, so the map built for row 1's key-set(s) stays valid (and
+            // O(1)) for every later row in the same batch.
             let outcome = {
                 let cidx = self.conflict_caches.entry(table.clone()).or_default();
                 execute_insert_many(

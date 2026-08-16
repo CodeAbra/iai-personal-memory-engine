@@ -229,7 +229,7 @@ def test_aes_ciphertext_at_rest(
         db.open_table("records").add([row])
 
         # Read the STORED bytes raw through the engine registry (no decrypt).
-        raw_conn = get_lilli_raw_conn(db_path)
+        raw_conn = get_lilli_raw_conn(db_path, allow_writer=True)
         assert raw_conn is not None
         stored = raw_conn.execute(
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)

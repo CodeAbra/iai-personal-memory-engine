@@ -1116,3 +1116,152 @@ def check_bb_nightly_insight_mint(*, store: Any = None, now: Any = None) -> Chec
                 _store.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+_BACKGROUND_LIVENESS_CHECK_NAME: str = "(cc) background liveness"
+_BACKGROUND_LIVENESS_LOOKBACK_DAYS: int = 7
+_BACKGROUND_LIVENESS_ALARM_ROWS: int = 3
+
+
+def _row_identity(row: dict[str, Any]) -> str | None:
+    kind = row.get("event")
+    if kind == "sleep_step_completed":
+        step = row.get("step")
+        return str(step) if step else None
+    if kind == "promise_liveness":
+        promise = row.get("promise")
+        return str(promise) if promise else None
+    return None
+
+
+def _classify_liveness_window(rows: list[dict[str, Any]], alarm_rows: int) -> str:
+    """Verdict for one identity's last ``alarm_rows`` recorded rows.
+
+    Returns one of ``"fail"``, ``"warn"``, ``"unknown"``, ``"pass"``. A row
+    carrying ``error`` is excluded from the window entirely (the crashed-step
+    domain is the watchdog/quarantine check, not this one) rather than
+    counted as evidence either way; a row with an unreadable
+    candidate/processed/spec-version triple is excluded the same way but
+    marks the identity unknown so an ambiguous window can never resolve to a
+    silent PASS.
+    """
+    window = sorted(rows, key=lambda r: r.get("ts") or "")[-alarm_rows:]
+
+    usable: list[tuple[int, int]] = []
+    saw_unknown = False
+    for row in window:
+        if row.get("error") is not None:
+            continue
+        candidates = row.get("liveness_candidates")
+        processed = row.get("liveness_processed")
+        if (
+            not isinstance(candidates, int)
+            or not isinstance(processed, int)
+            or not row.get("liveness_spec_version")
+        ):
+            saw_unknown = True
+            continue
+        usable.append((candidates, processed))
+
+    if len(usable) == alarm_rows and all(c > 0 and p == 0 for c, p in usable):
+        return "fail"
+    if len(usable) == alarm_rows and all(c == 0 for c, _p in usable):
+        return "warn"
+    if saw_unknown:
+        return "unknown"
+    return "pass"
+
+
+def check_cc_background_liveness(*, now: Any = None) -> CheckResult:
+    """Row-relative verdict over ``sleep_step_completed`` and ``promise_liveness`` rows.
+
+    Reads the JSONL lifecycle log directly -- no store open, daemon-independent.
+    Each identity (a sleep step by name, or a promise by id) is evaluated over
+    its own last few recorded rows, never a wall-clock day bucket, because the
+    covered promises run on unrelated clocks (per-cycle, hourly, per-session).
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    from iai_mcp.lifecycle_event_log import LifecycleEventLog
+
+    name = _BACKGROUND_LIVENESS_CHECK_NAME
+    now = now or _dt.now(_tz.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_tz.utc)
+
+    log_dir = _resolve_lifecycle_log_dir()
+    if not log_dir.exists():
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no event log yet (fresh install or daemon never run)",
+            status="PASS",
+        )
+
+    log = LifecycleEventLog(log_dir=log_dir)
+
+    rows_by_identity: dict[str, list[dict[str, Any]]] = {}
+    for offset in range(_BACKGROUND_LIVENESS_LOOKBACK_DAYS):
+        date_str = (now - _td(days=offset)).strftime("%Y-%m-%d")
+        try:
+            events = log.read_all(date_str=date_str)
+        except OSError:
+            # Absent or rotated (.jsonl.gz) day-file -- unreadable, not "no work".
+            continue
+        for ev in events:
+            identity = _row_identity(ev)
+            if identity is None:
+                continue
+            rows_by_identity.setdefault(identity, []).append(ev)
+
+    if not rows_by_identity:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no liveness rows recorded yet",
+            status="PASS",
+        )
+
+    fails: list[str] = []
+    warns: list[str] = []
+    unknowns: list[str] = []
+    for identity, rows in sorted(rows_by_identity.items()):
+        verdict = _classify_liveness_window(rows, _BACKGROUND_LIVENESS_ALARM_ROWS)
+        if verdict == "fail":
+            fails.append(identity)
+        elif verdict == "warn":
+            warns.append(identity)
+        elif verdict == "unknown":
+            unknowns.append(identity)
+
+    if fails:
+        detail = (
+            f"{len(fails)} identity(ies) with {_BACKGROUND_LIVENESS_ALARM_ROWS} consecutive "
+            f"no-op runs over a non-empty input: {', '.join(fails)}"
+        )
+        if unknowns:
+            detail += f"; unknown effect: {', '.join(unknowns)}"
+        return CheckResult(name=name, passed=False, detail=detail, status="FAIL")
+
+    if warns:
+        detail = f"possibly-starved input: {', '.join(warns)}"
+        if unknowns:
+            detail += f"; unknown effect: {', '.join(unknowns)}"
+        return CheckResult(name=name, passed=True, detail=detail, status="WARN")
+
+    if unknowns:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"unknown effect: {', '.join(unknowns)}",
+            status="PASS",
+        )
+
+    return CheckResult(
+        name=name,
+        passed=True,
+        detail=f"{len(rows_by_identity)} identity(ies) healthy",
+        status="PASS",
+    )

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 class _DispatchEmbedder:
 
@@ -81,11 +82,10 @@ def fresh_store(tmp_path):
     return MemoryStore(path=tmp_path / "lancedb")
 
 def test_valid_from_set_from_created_at(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "valid_from anchor cue"
     cue_vec = embedder.embed(cue_text)
@@ -123,13 +123,12 @@ def test_valid_from_set_from_created_at(fresh_store, monkeypatch):
     assert hit.valid_to is None
 
 def test_valid_to_none_when_no_contradiction(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
     from iai_mcp import retrieve
     from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "preferences about editor"
     cue_vec = embedder.embed(cue_text)
@@ -164,13 +163,12 @@ def test_valid_to_none_when_no_contradiction(fresh_store, monkeypatch):
     assert hit.valid_to is None
 
 def test_valid_to_set_when_newer_contradiction(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
     from iai_mcp import retrieve
     from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "editor preference"
     cue_vec = embedder.embed(cue_text)
@@ -214,13 +212,12 @@ def test_valid_to_set_when_newer_contradiction(fresh_store, monkeypatch):
     )
 
 def test_older_contradiction_ignored_for_valid_to(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
     from iai_mcp import retrieve
     from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "anomaly cue"
     cue_vec = embedder.embed(cue_text)
@@ -259,13 +256,12 @@ def test_older_contradiction_ignored_for_valid_to(fresh_store, monkeypatch):
     )
 
 def test_multiple_contradictions_use_oldest_newer(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
     from iai_mcp import retrieve
     from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "double contradiction cue"
     cue_vec = embedder.embed(cue_text)
@@ -316,14 +312,13 @@ def test_multiple_contradictions_use_oldest_newer(fresh_store, monkeypatch):
     )
 
 def test_stale_record_downweighted_not_hidden(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
     from iai_mcp.retrieve import STALE_DOWNWEIGHT_FACTOR
     from iai_mcp import retrieve
     from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "downweight test cue"
     surface_text = "shared verbatim surface for stale vs fresh"
@@ -371,11 +366,10 @@ def test_stale_record_downweighted_not_hidden(fresh_store, monkeypatch):
     )
 
 def test_downweight_reranks_order(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "reranking probe cue alpha"
     cue_vec = embedder.embed(cue_text)
@@ -428,11 +422,10 @@ def test_downweight_reranks_order(fresh_store, monkeypatch):
     )
 
 def test_episodic_schema_byte_identical(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     records_tbl = fresh_store.db.open_table("records")
     before_schema_repr = repr(records_tbl.schema)
@@ -473,11 +466,10 @@ def test_episodic_schema_byte_identical(fresh_store, monkeypatch):
 
 def test_json_wire_carries_new_keys(fresh_store, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "wire schema check cue"
     cue_vec = embedder.embed(cue_text)
@@ -524,13 +516,12 @@ def test_json_wire_carries_new_keys(fresh_store, monkeypatch):
         assert "valid_to" in entry, f"anti_hit missing valid_to: {entry}"
 
 def test_reason_string_marked_stale(fresh_store, monkeypatch):
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.aaak import generate_aaak_index
     from iai_mcp import retrieve
     from iai_mcp.pipeline import recall_for_response
 
     embedder = _DispatchEmbedder()
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _s: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     cue_text = "reason suffix cue"
     cue_vec = embedder.embed(cue_text)

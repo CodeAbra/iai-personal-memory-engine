@@ -1,20 +1,21 @@
-"""RED guards for recall-trace observability of the new accuracy marks.
+"""RED guards for SC-2 (recall-trace observability of the new accuracy marks).
 
 With ``IAI_MCP_RECALL_TRACE=1`` set, ``core.dispatch``'s ``memory_recall``
 branch returns a ``_recall_trace_ms`` list of ``(name, cumulative_ms)`` tuples
-(see ``core/__init__.py:_trace_mark``). Four named marks are added to that
-trace as the accompanying mechanisms are wired:
+(see ``core/__init__.py:_trace_mark``). This phase adds four new named marks
+to that trace as the accompanying code plans (02/03/04) wire their mechanisms:
 
-- ``soft_gate`` — graded community-gate bonus
-- ``multi_seed`` — widened seed sources
-- ``cleanup_attractor`` — thresholded cleanup() attractor
-- ``conf_escalate`` — confidence-gated escalation
+- ``soft_gate`` (plan 02 — graded community-gate bonus)
+- ``multi_seed`` (plan 04 — widened seed sources)
+- ``cleanup_attractor`` (plan 04 — thresholded cleanup() attractor)
+- ``conf_escalate`` (plan 03 — confidence-gated escalation)
 
 Every test below asserts one of these mark names is present in the trace.
 All four are RED today (zero occurrences of any of these names anywhere in
-``src/iai_mcp/core/__init__.py`` or ``src/iai_mcp/pipeline.py``). No
-``working_tier_bias`` mark is asserted anywhere in this file: working-tier
-consultation was dropped from the recall path.
+``src/iai_mcp/core/__init__.py`` or ``src/iai_mcp/pipeline.py`` — confirmed
+by grep this session). No ``working_tier_bias`` mark is asserted anywhere in
+this file: working-tier consultation was dropped from the recall path for
+this phase (see 184-04-PLAN.md, revision 1, decision D-C).
 
 Dual-driver: every test parametrizes ``LILLI_STORAGE_DRIVER`` since each
 dispatch exercises a real ``MemoryStore`` insert + recall round-trip.
@@ -30,6 +31,7 @@ import pytest
 
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 _DIM = 16  # small synthetic dim; avoids loading the Rust embedder
 
@@ -126,9 +128,7 @@ def _make_rec(rid: UUID, seed: int, surface: str, *, embedding: list[float] | No
 
 
 def _stub_embedder_for_store(monkeypatch: pytest.MonkeyPatch, vec: list[float]) -> None:
-    import iai_mcp.embed as _embed_mod
-
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: _StubEmbedder(vec))
+    stub_embedder_for_store(monkeypatch, _StubEmbedder(vec))
 
 
 def _dispatch_traced_recall(store: MemoryStore, cue_vec: list[float]) -> dict:
@@ -171,7 +171,7 @@ def _seed_small_corpus(store: MemoryStore, cue_vec: list[float]) -> None:
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_trace_contains_soft_gate_mark(driver, _store, monkeypatch):
-    """IAI_MCP_RECALL_TRACE=1 trace MUST contain a `soft_gate` mark."""
+    """IAI_MCP_RECALL_TRACE=1 trace MUST contain a `soft_gate` mark (plan 02)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _store(driver)
     cue_vec = _seeded_vec(1)
@@ -183,13 +183,13 @@ def test_trace_contains_soft_gate_mark(driver, _store, monkeypatch):
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     assert "soft_gate" in marks, (
         f"expected 'soft_gate' trace mark, got marks={sorted(marks)} — "
-        "graded community-gate bonus not yet wired"
+        "graded community-gate bonus (plan 02) not yet wired"
     )
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_trace_contains_multi_seed_and_cleanup_attractor_marks(driver, _store, monkeypatch):
-    """Same trace MUST contain `multi_seed` and `cleanup_attractor` marks."""
+    """Same trace MUST contain `multi_seed` and `cleanup_attractor` marks (plan 04)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _store(driver)
     cue_vec = _seeded_vec(2)
@@ -201,17 +201,17 @@ def test_trace_contains_multi_seed_and_cleanup_attractor_marks(driver, _store, m
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     assert "multi_seed" in marks, (
         f"expected 'multi_seed' trace mark, got marks={sorted(marks)} — "
-        "widened seed sources not yet wired"
+        "widened seed sources (plan 04) not yet wired"
     )
     assert "cleanup_attractor" in marks, (
         f"expected 'cleanup_attractor' trace mark, got marks={sorted(marks)} — "
-        "thresholded cleanup() attractor not yet wired"
+        "thresholded cleanup() attractor (plan 04) not yet wired"
     )
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_trace_contains_conf_escalate_mark(driver, _store, monkeypatch):
-    """Same trace MUST contain a `conf_escalate` mark."""
+    """Same trace MUST contain a `conf_escalate` mark (plan 03)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _store(driver)
     cue_vec = _seeded_vec(3)
@@ -223,7 +223,7 @@ def test_trace_contains_conf_escalate_mark(driver, _store, monkeypatch):
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     assert "conf_escalate" in marks, (
         f"expected 'conf_escalate' trace mark, got marks={sorted(marks)} — "
-        "confidence-gated escalation not yet wired"
+        "confidence-gated escalation (plan 03) not yet wired"
     )
 
 

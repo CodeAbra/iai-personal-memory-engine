@@ -277,19 +277,31 @@ def cleanup_idem_duplicates(
 
         now_iso = datetime.now(timezone.utc).isoformat()
         tbl = store.db.open_table("records")
+        tombstoned_ids: list[str] = []
         for rid in to_tombstone:
             try:
                 tbl.update(
                     where=f"id = '{rid}'",
-                    values={"tombstoned_at": now_iso},
+                    values={"tombstoned_at": now_iso, "live": 0},
                 )
                 tombstoned += 1
+                tombstoned_ids.append(rid)
             except (OSError, ValueError, RuntimeError) as exc:
                 log.warning("idem dedup tombstone failed for %s: %s", rid, exc)
         try:
             store._invalidate_corpus_count("active")
         except Exception:  # noqa: BLE001 -- count cache refresh is best-effort
             pass
+        _inv_x = getattr(store, "invalidate_exact_index", None)
+        if callable(_inv_x):
+            _inv_x()  # no-raise contract; see MemoryStore.invalidate_exact_index
+        buf = getattr(store, "_recency_buffer", None)
+        if buf is not None:
+            for rid in tombstoned_ids:
+                try:
+                    buf.evict(str(rid))
+                except Exception as exc:  # noqa: BLE001 -- eviction is best-effort
+                    log.debug("recency buffer evict failed for %s: %s", rid, exc)
 
     summary = {
         "mode": "apply" if apply else "dry-run",

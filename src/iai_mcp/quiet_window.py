@@ -14,7 +14,6 @@ MIN_WINDOW_HOURS = 3
 MAX_WINDOW_HOURS = 8
 
 MIN_DAYS_FOR_LEARN = 7
-BOOTSTRAP_IDLE_HOURS = 2
 
 #: Rolling depth of the per-day presence masks the daemon stamps each tick.
 PRESENCE_KEEP_DAYS = 14
@@ -164,16 +163,6 @@ def should_relearn(last_learned_at: Optional[datetime], now: datetime) -> bool:
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     return (now - last_learned_at) >= timedelta(hours=24)
-
-
-def should_bootstrap_trigger(last_session_ts: Optional[datetime], now: datetime) -> bool:
-    if last_session_ts is None:
-        return True
-    if last_session_ts.tzinfo is None:
-        last_session_ts = last_session_ts.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    return (now - last_session_ts) >= timedelta(hours=BOOTSTRAP_IDLE_HOURS)
 
 
 DEFAULT_WINDOW_START_BUCKET = 4   # 2h past local midnight

@@ -125,12 +125,11 @@ def warm_dispatch_surface(store: Any) -> dict:
     load, and the structural-cache decode memo.
 
     These are one-time per-process costs that otherwise land on the FIRST
-    real recall. The daemon runs this BEFORE binding its socket — a memory
-    that answers the socket before its recall surface is resident is not
-    awake yet — then starts the remaining warm-up shapes without repeating
-    this encode. All read-only: an embed produces a vector and discards it,
-    and load_recall_structural only reads/decodes the on-disk cache. Returns
-    a summary dict; never raises.
+    real recall. Runs before the socket binds in the normal arm; only when
+    the total pre-bind deadline overflows does it run post-bind instead —
+    reachability never waits on it past that deadline. All read-only: an
+    embed produces a vector and discards it, and load_recall_structural only
+    reads/decodes the on-disk cache. Returns a summary dict; never raises.
     """
     _t0 = time.perf_counter()
     try:

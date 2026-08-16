@@ -162,7 +162,6 @@ def test_wrapper_lists_all_tools(built_wrapper: Path, daemon_sock: Path) -> None
             "events_query",
             "memory_recall_structural",
             "topology",
-            "camouflaging_status",
             "memory_capture",
             "episodes_recent",
             "memory_temporal_recall",
@@ -192,7 +191,7 @@ def test_wrapper_profile_get_returns_live_knobs(built_wrapper: Path, daemon_sock
         assert payload["live"]["masking_off"] is True
         assert payload["live"]["task_support"] == "cued_recognition"
         assert payload["live"]["scene_construction_scaffold"] is True
-        assert len(payload["live"]) == 11
+        assert len(payload["live"]) == 10
         assert len(payload["deferred"]) == 0
     finally:
         proc.terminate()

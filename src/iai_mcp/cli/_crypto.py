@@ -421,6 +421,10 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
     # queued turn as unreadable ciphertext.
     spool_report = _rotate_spool_lines(old_keys, new_key, store)
 
+    from iai_mcp.lilli.profile.persistence import reencrypt_profile_blob
+
+    profile_rotate = reencrypt_profile_blob(store, old_keys, new_key)
+
     # Retention is keyed to NEED: the sidecar stays only while some row the
     # retained generations can still OPEN remains un-rotated. Undecryptable
     # events open under no retained generation, so keeping key material for
@@ -430,6 +434,7 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
         rotate_failures
         or spool_report["spool_files_skipped"]
         or event_update_failures
+        or profile_rotate == "stranded"
     )
 
     # The record/event snapshots above predate the key swap; a row written
@@ -477,6 +482,7 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
         "spool_lines_re_encrypted": spool_report["spool_lines_re_encrypted"],
         "algorithm": "AES-256-GCM",
         "format": "iai:enc:v1:",
+        "profile_state_rotated": profile_rotate,
     }
     if events_undecryptable:
         result["events_undecryptable"] = events_undecryptable
@@ -490,7 +496,7 @@ def cmd_crypto_rotate(args: argparse.Namespace) -> int:
         if old_generation_still_needed:
             # The un-rotated remainder is still openable with the retained key.
             result["pre_rotate_key_retained"] = str(backup_path)
-        if rotate_failures or late_records:
+        if rotate_failures or late_records or profile_rotate == "stranded":
             # A record under an old generation aborts the next rotate at
             # all_records(); the records must re-key FIRST.
             recovery = (

@@ -568,14 +568,16 @@ def test_recall_index_rebuild_step_position():
         f"CLUSTER_SUMMARY (index={idx_cluster}) in _STEP_ORDER"
     )
     # The rebuild must follow every RECORD-mutating step: the vector index
-    # must contain the summaries minted this cycle. A trailing step may either
-    # touch only edges (never the vector index) or feed the vector index
-    # INCREMENTALLY per row (needing no full rebuild); new steps append at the
+    # must contain the summaries minted this cycle. A trailing step may only
+    # touch edges (never the vector index), feed the vector index
+    # INCREMENTALLY per row (needing no full rebuild), or write metadata that
+    # neither the vector index nor the graph reads; new steps append at the
     # tail so WAL-recovery positions stay frozen.
     may_trail = {
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
+        SleepStep.COMMUNITY_NAMING,
     }
     trailing = set(step_order[idx_rebuild + 1:])
     assert trailing <= may_trail, (

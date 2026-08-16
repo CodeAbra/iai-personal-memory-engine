@@ -1,4 +1,4 @@
-"""Exercise for multi-seed widening.
+"""SC-2 exercise for multi-seed widening (plan 04, Task 1).
 
 ``_pick_seeds`` stays a fixed cosine+centrality blend (n=3); this plan unions
 additional seed ids from ``fts_hits`` (an exact-substring match already
@@ -20,6 +20,7 @@ import pytest
 from iai_mcp.pipeline import MULTI_SEED_CAP
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 _DIM = 16  # small synthetic dim; avoids loading the Rust embedder
 
@@ -110,9 +111,7 @@ def _make_rec(rid: UUID, surface: str, embedding: list[float]) -> MemoryRecord:
 
 
 def _stub_embedder_for_store(monkeypatch: pytest.MonkeyPatch, vec: list[float]) -> None:
-    import iai_mcp.embed as _embed_mod
-
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: _StubEmbedder(vec))
+    stub_embedder_for_store(monkeypatch, _StubEmbedder(vec))
 
 
 def _dispatch_recall(store: MemoryStore, cue_vec: list[float], cue_text: str) -> dict:
@@ -243,7 +242,7 @@ def test_seed_count_never_exceeds_multi_seed_cap(driver, _make_store, monkeypatc
 
     def _spy_two_hop(self, seed_ids, top_k=5):
         spy_calls.append(list(seed_ids))
-        return _orig_two_hop(seed_ids, top_k=top_k)
+        return _orig_two_hop(self, seed_ids, top_k=top_k)
 
     from iai_mcp.graph import MemoryGraph
     _orig_two_hop = MemoryGraph.two_hop_neighborhood.__get__(None, MemoryGraph)

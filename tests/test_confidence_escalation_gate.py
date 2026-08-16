@@ -1,4 +1,4 @@
-"""Guard for the confidence-gated escalation trigger.
+"""RED guard for SC-3 (confidence-gated escalation trigger).
 
 ``iai_mcp.pipeline.escalate_recall_candidates`` (a bounded, single-shot
 ANN-widening step, hard-capped at ``ADAPTIVE_ESCALATION_CAP``) and its
@@ -6,7 +6,7 @@ confidence signal ``compute_spread_depth`` (top cosine / hit-count-above-
 threshold) both exist today with ZERO production callers — the module's own
 comment block documents "NOT YET ON THE RECALL PATH" (``pipeline.py:499``).
 
-This wires ``escalate_recall_candidates`` to fire when
+This phase (plan 03) wires ``escalate_recall_candidates`` to fire when
 ``compute_spread_depth`` signals low confidence (top cosine <
 ``_CONF_HIGH_COSINE_THRESHOLD=0.75`` and hit-count-above-threshold <
 ``_CONF_HIGH_HIT_COUNT_MIN=3``), and to NOT fire on a high-confidence cue.
@@ -15,8 +15,8 @@ This wires ``escalate_recall_candidates`` to fire when
   the function has zero callers.
 - Test 2 (high-confidence cue): GREEN today by default (zero callers means
   it's never called either way) — this test locks the invariant that a
-  high-confidence cue must continue to skip the widen once the
-  low-confidence branch is wired, so the gate doesn't regress into an always-on
+  high-confidence cue must continue to skip the widen once plan 03 wires
+  the low-confidence branch, so the gate doesn't regress into an always-on
   merge.
 
 Dual-driver: both tests parametrize ``LILLI_STORAGE_DRIVER`` since each
@@ -40,6 +40,7 @@ from iai_mcp.pipeline import (
 )
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import MemoryRecord
+from tests._helpers import stub_embedder_for_store
 
 _DIM = 16  # small synthetic dim; avoids loading the Rust embedder
 
@@ -130,9 +131,7 @@ def _make_rec(rid: UUID, surface: str, embedding: list[float]) -> MemoryRecord:
 
 
 def _stub_embedder_for_store(monkeypatch: pytest.MonkeyPatch, vec: list[float]) -> None:
-    import iai_mcp.embed as _embed_mod
-
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store: _StubEmbedder(vec))
+    stub_embedder_for_store(monkeypatch, _StubEmbedder(vec))
 
 
 def _dispatch_recall(store: MemoryStore, cue_vec: list[float]) -> dict:
@@ -212,7 +211,7 @@ def test_low_confidence_cue_triggers_escalation(driver, _make_store, monkeypatch
 
     assert spy.call_count >= 1, (
         "escalate_recall_candidates was not called on a low-confidence cue — "
-        "confidence-gated escalation not yet wired onto the recall path"
+        "confidence-gated escalation (plan 03) not yet wired onto the recall path"
     )
 
 
@@ -222,7 +221,7 @@ def test_high_confidence_cue_does_not_trigger_escalation(driver, _make_store, mo
     hits must NOT trigger escalate_recall_candidates.
 
     Passes today (zero callers means it's never invoked either way) and must
-    remain green once the low-confidence branch is wired — the gate
+    remain green once plan 03 wires the low-confidence branch — the gate
     must correctly skip the widen on a high-confidence cue.
     """
     store = _make_store(driver)

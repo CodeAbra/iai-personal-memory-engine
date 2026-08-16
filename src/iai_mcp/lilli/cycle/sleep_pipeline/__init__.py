@@ -17,6 +17,7 @@ from iai_mcp.exceptions import (
     SleepStepError,
     StoreError,
 )
+from iai_mcp.lifecycle_event_log import _LIVENESS_SPEC_VERSION
 
 if TYPE_CHECKING:
     from iai_mcp.lifecycle_event_log import LifecycleEventLog
@@ -52,6 +53,7 @@ class SleepStep(Enum):
     ENTITY_LINK = 14
     CURIOSITY_MINE = 15
     EMBEDDING_INTEGRITY = 16
+    COMMUNITY_NAMING = 17
 
 
 class SleepPhase(Enum):
@@ -77,6 +79,32 @@ STEP_PHASE: dict[SleepStep, SleepPhase] = {
     SleepStep.ENTITY_LINK: SleepPhase.REM,
     SleepStep.CURIOSITY_MINE: SleepPhase.REM,
     SleepStep.EMBEDDING_INTEGRITY: SleepPhase.NREM,
+    SleepStep.COMMUNITY_NAMING: SleepPhase.REM,
+}
+
+
+#: step -> (candidate payload key, processed payload key), each None when the
+#: step's real return payload carries no independent count. Exhaustive over
+#: SleepStep (test-enforced); a lookup for an unmapped step must degrade to
+#: (None, None), never raise.
+_LIVENESS_SPEC: dict[SleepStep, tuple[str | None, str | None]] = {
+    SleepStep.SCHEMA_MINE: ("schemas_induced", "schemas_persisted"),
+    SleepStep.KNOB_TUNE: (None, None),
+    SleepStep.DREAM_DECAY: (None, None),
+    SleepStep.OPTIMIZE_HIPPO: (None, None),
+    SleepStep.HIPPO_CLEANUP: ("edges_scanned", "orphan_edges_deleted"),
+    SleepStep.ERASURE_AGENT: (None, "count_quarantined"),
+    SleepStep.CLUSTER_REPLAY: ("clusters_replayed", "sequential_pairs"),
+    SleepStep.CRISIS_RECLUSTER: ("total_communities", "communities_dropped"),
+    SleepStep.RECONSOLIDATION: ("records_scanned", "records_reconsolidated"),
+    SleepStep.USER_MODEL_UPDATE: (None, None),
+    SleepStep.DMN_REFLECTION: (None, None),
+    SleepStep.CLUSTER_SUMMARY: (None, None),
+    SleepStep.RECALL_INDEX_REBUILD: (None, None),
+    SleepStep.ENTITY_LINK: (None, None),
+    SleepStep.CURIOSITY_MINE: (None, None),
+    SleepStep.EMBEDDING_INTEGRITY: (None, None),
+    SleepStep.COMMUNITY_NAMING: ("communities_seen", "names_persisted"),
 }
 
 
@@ -306,6 +334,9 @@ class SleepPipeline:
             if isinstance(rss_before, int) and isinstance(rss_after, int)
             else None
         )
+        cand_field, proc_field = _LIVENESS_SPEC.get(step, (None, None))
+        cand = payload.get(cand_field) if cand_field else None
+        proc = payload.get(proc_field) if proc_field else None
         try:
             self._event_log.append({
                 "event": "sleep_step_completed",
@@ -321,7 +352,12 @@ class SleepPipeline:
                 "vm_allocate_kib_after": snap_after.get("vm_allocate_kib"),
                 "numba_nrt_alloc_count_before": snap_before.get("numba_nrt_alloc_count"),
                 "numba_nrt_alloc_count_after": snap_after.get("numba_nrt_alloc_count"),
+                # liveness triple injected after **payload: a step payload key
+                # named liveness_* can never shadow the normalized pair.
                 **payload,
+                "liveness_candidates": cand,
+                "liveness_processed": proc,
+                "liveness_spec_version": _LIVENESS_SPEC_VERSION,
             })
         except (OSError, ValueError) as exc:
             logger.debug("best-effort sleep_step_completed event failed: %s", exc)
@@ -400,6 +436,7 @@ class SleepPipeline:
             SleepStep.ENTITY_LINK: self._step_entity_link,
             SleepStep.CURIOSITY_MINE: self._step_curiosity_mine,
             SleepStep.EMBEDDING_INTEGRITY: self._step_embedding_integrity,
+            SleepStep.COMMUNITY_NAMING: self._step_community_naming,
         }
 
 
@@ -424,6 +461,9 @@ class SleepPipeline:
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
+        # Runs after RECALL_INDEX_REBUILD so the warm lexical index is
+        # current for the keyphrase scoring.
+        SleepStep.COMMUNITY_NAMING,
     )
 
     # Steps whose bodies materialize large transients (clustering / columnar
@@ -636,7 +676,7 @@ from iai_mcp.lilli.cycle.sleep_pipeline import (  # noqa: E402
     _schema_mine, _knob_tune, _dream_decay, _erasure, _optimize, _compact,
     _cluster_replay, _reconsolidation, _user_model, _dmn, _crisis,
     _cluster_summary, _recall_index, _essential_variable, _entity_link,
-    _curiosity_mine, _embed_integrity,
+    _curiosity_mine, _embed_integrity, _topic_naming,
 )
 
 SleepPipeline._step_schema_mine = _schema_mine.step_schema_mine
@@ -657,6 +697,7 @@ SleepPipeline._step_recall_index_rebuild = _recall_index.step_recall_index_rebui
 SleepPipeline._step_entity_link = _entity_link.step_entity_link
 SleepPipeline._step_curiosity_mine = _curiosity_mine.step_curiosity_mine
 SleepPipeline._step_embedding_integrity = _embed_integrity.step_embedding_integrity
+SleepPipeline._step_community_naming = _topic_naming.step_community_naming
 SleepPipeline._run_essential_variable_tracker_hook = _essential_variable.run_essential_variable_tracker_hook
 SleepPipeline._clear_crisis_mode_via_s2_or_fallback = _essential_variable.clear_crisis_mode_via_s2_or_fallback
 SleepPipeline._set_crisis_mode_via_s2_or_fallback = _essential_variable.set_crisis_mode_via_s2_or_fallback

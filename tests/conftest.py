@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import shutil
 import sys
@@ -34,6 +35,14 @@ from _recall_helpers import (  # noqa: E402,F401
     UUID_TWO_HOP,
     UUID_TWO_HOP_SURFACE,
 )
+
+# module-object access (never a `from` import): the recall-stub guard below
+# reads/writes _recall_stub_armed as an attribute. A bare `import _helpers`
+# elsewhere in tests/ resolves to a DISTINCT module object with its own
+# in-process arm list; arming also sets a process-global env var
+# (RECALL_STUB_ACTIVE_ENV) precisely so that split cannot hide an armed stub
+# from this guard.
+import tests._helpers as _stub_helpers  # noqa: E402
 
 
 _TEST_PASSPHRASE = "iai-mcp-test-passphrase"
@@ -263,9 +272,63 @@ def _isolate_embedder_funnel(_pristine_embedder_funnel):
 
     if _embed_mod.embedder_for_store is not _pristine_embedder_funnel:
         _embed_mod.embedder_for_store = _pristine_embedder_funnel
+    # The construction cache is state separate from the function reference
+    # above -- a stubbed Embedder cached by one test must not leak into the
+    # next. getattr, never a bare attribute access: import-poison-safe.
+    _reset = getattr(_embed_mod, "_reset_embedder_singleton", None)
+    _reset and _reset()
     yield
     if _embed_mod.embedder_for_store is not _pristine_embedder_funnel:
         _embed_mod.embedder_for_store = _pristine_embedder_funnel
+    _reset = getattr(_embed_mod, "_reset_embedder_singleton", None)
+    _reset and _reset()
+
+
+@pytest.fixture(autouse=True)
+def _guard_recall_stub_not_degraded():
+    """Fail loud when an armed recall-embedder double silently degraded.
+
+    A stub whose signature no longer matches ``embedder_for_store`` raises
+    TypeError inside the bounded acquire; the pipeline catches it, emits
+    ``recall_pipeline_fallback``, and degrades -- so a broken double can
+    make a test pass-by-degrading on the fallback path instead of failing
+    where the actual break is. Arming is via the shared factory (in-process
+    flag) or the shared env var (the bench / dual-gate plain-assign sites,
+    which do not use monkeypatch). Checking arming inside ``emit`` (not at
+    teardown) is load-bearing: the env var can be cleared by its own
+    context manager's ``__exit__`` before this fixture's teardown runs.
+    """
+    _stub_helpers._recall_stub_armed.clear()
+    tripped: list[tuple[str, str]] = []
+
+    class _Trip(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            msg = record.getMessage()
+            if not msg.startswith("recall_pipeline_fallback"):
+                return
+            armed = bool(_stub_helpers._recall_stub_armed) or bool(
+                os.environ.get(_stub_helpers.RECALL_STUB_ACTIVE_ENV)
+            )
+            if armed:
+                tripped.append((record.threadName, msg))
+
+    handler = _Trip()
+    logger = logging.getLogger("iai_mcp.core")
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        # arm-flag clear + env pop MUST precede pytest.fail: a tripping
+        # test must never leak armed state into the next test.
+        _stub_helpers._recall_stub_armed.clear()
+        os.environ.pop(_stub_helpers.RECALL_STUB_ACTIVE_ENV, None)
+        if tripped:
+            details = "; ".join(f"[{t}] {m}" for t, m in tripped)
+            pytest.fail(
+                "recall embedder stub silently degraded instead of being "
+                f"used -- stub signature is likely stale: {details}"
+            )
 
 
 _AUTOFLUSH_OPT_OUT_ENV = "IAI_MCP_TEST_NO_AUTOFLUSH"
@@ -273,6 +336,18 @@ _AUTOFLUSH_OPT_OUT_ENV = "IAI_MCP_TEST_NO_AUTOFLUSH"
 
 @pytest.fixture(autouse=True)
 def _autoflush_lance_buffers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flush the record/edge/event buffers after every insert in every test.
+
+    This means every OTHER test in the suite does NOT exercise the real
+    production buffered-visibility window: a row is invisible to a reader
+    until its buffer flushes, and this fixture flushes immediately after each
+    insert so that window never appears. A test that needs to assert
+    buffered/unflushed behavior (or the SQL visibility contract across that
+    window) MUST opt out via ``IAI_MCP_TEST_NO_AUTOFLUSH=1`` (see
+    ``_AUTOFLUSH_OPT_OUT_ENV`` below) — set it BEFORE the insert under test,
+    since this fixture reads the environment at insert time, not at fixture
+    setup.
+    """
     try:
         from iai_mcp import store as _store_mod
     except Exception:  # noqa: BLE001 -- env without iai_mcp installed yet

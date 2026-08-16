@@ -316,17 +316,45 @@ def _advance_failed_path(
     return failed_path
 
 
-def _run_shield(text: str) -> tuple[str, list[str]]:
-    try:
-        from iai_mcp.shield import evaluate
+_SHIELD_UNAVAILABLE_REPORTED = False
 
-        result = evaluate(text)
-        verdict = getattr(result, "verdict", "OK")
-        tags = list(getattr(result, "tags", []) or [])
+
+def _run_shield(store: MemoryStore, text: str, *, session_id: str = "-") -> tuple[str, list[str]]:
+    try:
+        from iai_mcp.shield import (
+            SHIELD_SIGNAL_WORDS_MAX_CONFIDENCE,
+            ShieldTier,
+            evaluate_injection_risk,
+        )
+
+        result = evaluate_injection_risk(text, ShieldTier.FLAG_FOR_REVIEW)
+        action_map = {"reject": "HARD_BLOCK", "flag": "FLAG_FOR_REVIEW", "log_allow": "OK"}
+        verdict = action_map.get(result.action, "OK")
+        if verdict == "FLAG_FOR_REVIEW" and result.confidence < SHIELD_SIGNAL_WORDS_MAX_CONFIDENCE:
+            verdict = "OK"
+        tags = list(result.matched_patterns) if verdict == "FLAG_FOR_REVIEW" else []
         return verdict, tags
-    except Exception as exc:  # noqa: BLE001 -- capture fail-safe
-        log.debug("shield_evaluate_failed: %s", exc)
-        return "OK", []
+    except Exception as exc:  # noqa: BLE001 -- capture fail-safe: the write must survive
+        # UNAVAILABLE stays distinct from OK and FLAG_FOR_REVIEW: a dead
+        # shield must never be mistaken for a clean or a flagged verdict.
+        global _SHIELD_UNAVAILABLE_REPORTED
+        if not _SHIELD_UNAVAILABLE_REPORTED:
+            _SHIELD_UNAVAILABLE_REPORTED = True
+            log.error("shield_unavailable: %s", exc)
+            try:
+                from iai_mcp.events import TELEMETRY_SHIELD_UNAVAILABLE, write_event
+
+                write_event(
+                    store,
+                    TELEMETRY_SHIELD_UNAVAILABLE,
+                    {"error_type": type(exc).__name__, "error": str(exc)[:200]},
+                    severity="critical",
+                    domain="security",
+                    session_id=session_id,
+                )
+            except Exception as exc2:  # noqa: BLE001 -- telemetry must not lose the write either
+                log.debug("shield_unavailable_event_failed: %s", exc2)
+        return "UNAVAILABLE", []
 
 
 def _resolve_ts(ts: str | None) -> datetime:
@@ -402,7 +430,7 @@ def capture_turn(
     if len(text) > MAX_CAPTURE_LEN:
         text = text[:MAX_CAPTURE_LEN]
 
-    verdict, shield_tags = _run_shield(text)
+    verdict, shield_tags = _run_shield(store, text, session_id=session_id)
     if verdict == "HARD_BLOCK":
         return {"status": "skipped", "record_id": None, "reason": "shield HARD_BLOCK"}
 
@@ -539,7 +567,9 @@ def capture_turn(
                 _t = str(_t).strip()
                 if _t and _t not in tags:
                     tags.append(_t)
-        if verdict == "FLAG_FOR_REVIEW":
+        if verdict == "UNAVAILABLE":
+            tags.append("shield:unavailable")
+        elif verdict == "FLAG_FOR_REVIEW":
             tags.append("shield:flagged")
             tags.extend(f"shield:{t}" for t in shield_tags[:3])
 
@@ -671,7 +701,7 @@ def _drain_write_pending(
     if len(text) > MAX_CAPTURE_LEN:
         text = text[:MAX_CAPTURE_LEN]
 
-    verdict, shield_tags = _run_shield(text)
+    verdict, shield_tags = _run_shield(store, text, session_id=session_id)
     if verdict == "HARD_BLOCK":
         return {"status": "skipped", "record_id": None, "reason": "shield HARD_BLOCK"}
 
@@ -700,7 +730,9 @@ def _drain_write_pending(
                 }
 
         tags = ["capture", f"role:{role}"]
-        if verdict == "FLAG_FOR_REVIEW":
+        if verdict == "UNAVAILABLE":
+            tags.append("shield:unavailable")
+        elif verdict == "FLAG_FOR_REVIEW":
             tags.append("shield:flagged")
             tags.extend(f"shield:{t}" for t in shield_tags[:3])
         if _is_episodic_conversational(tier, role):

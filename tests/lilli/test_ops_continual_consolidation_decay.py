@@ -99,17 +99,6 @@ def test_decay_structure_edge_91_days():
     result = decay_structure_edge(0, 0, 91)
     assert result == pytest.approx(0.9)
 
-def test_decay_structure_edge_bit_equiv_with_tem():
-    from iai_mcp.tem import decay_structure_edge as tem_decay
-
-    dt_values = [0, 50, 90, 91, 180, 365, 730]
-    for dt in dt_values:
-        lilli_result = decay_structure_edge(0, 0, dt)
-        tem_result = tem_decay(0, 0, dt)
-        assert lilli_result == pytest.approx(tem_result), (
-            f"Mismatch at dt={dt}: lilli={lilli_result}, tem={tem_result}"
-        )
-
 def test_temporal_decay_no_decay_in_grace_window():
     hv = bsc.filler_hv("test-vector")
     assert temporal_decay(hv, 0) == hv

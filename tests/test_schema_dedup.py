@@ -67,8 +67,7 @@ def test_events_module_docstring_lists_schema_reinforced():
     doc = events_mod.__doc__ or ""
     assert "schema_reinforced" in doc, (
         "events.py module docstring missing `schema_reinforced` taxonomy entry. "
-        "Add it after the AUTIST-13 section listing the new event kind, "
-        "payload schema, and source_ids note."
+        "List the event kind, payload schema, and source_ids note."
     )
 
 def test_write_event_accepts_schema_reinforced_kind(tmp_path):

@@ -45,7 +45,6 @@ from iai_mcp.quiet_window import (
     effective_consolidation_window,
     learn_quiet_window_from_presence,
     prune_presence_masks,
-    should_bootstrap_trigger,
     should_relearn,
     stamp_presence_mask,
     within_window,
@@ -1395,6 +1394,15 @@ def _new_efs_holder() -> dict:
     }
 
 
+#: Budget for the pre-bind WARM window (embedder construction + embed_identity
+#: + warm_dispatch_surface), anchored to _daemon_started_monotonic. It bounds
+#: the warm WAIT before the bind, not the preamble that precedes it (profile
+#: hydration is itself unbounded). Must stay under the wrapper's 3.0s
+#: single-probe timeout; a restart loop is separately prevented by the
+#: pid-keyed liveness guards, not by this value.
+_PRE_SERVE_WARM_DEADLINE_SEC = 2.5
+
+
 def _install_warm_embedder_override(store, holder: dict | None = None) -> tuple[object, bool]:
     import iai_mcp.embed as _embed_mod
 
@@ -1893,59 +1901,143 @@ async def main() -> int:
                     exc_info=True,
                 )
 
+        try:
+            from iai_mcp import core as _profile_core
+
+            await asyncio.to_thread(_profile_core.ensure_profile_hydrated, store)
+        except Exception:  # noqa: BLE001 -- boot must never fail on profile hydration
+            log.debug("profile hydration failed at boot", exc_info=True)
+
         mcp_socket = SocketServer(store, state=state)
         # Demand baseline for the HIBERNATION exit check: captured BEFORE
         # serve() is scheduled — last_activity_ts starts at construction
         # time, and a snapshot taken any later would swallow real requests
         # served during the boot window.
         _boot_socket_activity_mono: list[float] = [mcp_socket.last_activity_ts]
+
+        # Bind never waits past the total pre-bind deadline: on overflow
+        # serve anyway; a late identity/config refusal still refuses boot
+        # via the install task's done-callback.
+        import iai_mcp.embed as _embed_mod
+
+        _boot_refuse_exc: list[BaseException | None] = [None]
+        _warm_deadline = _daemon_started_monotonic + _PRE_SERVE_WARM_DEADLINE_SEC
+
+        async def _finish_prebind_warm(*, already_awaited: bool) -> None:
+            """Warm the structural memo and compute embed_identity once the
+            embedder construction resolves, whichever arm resolved it.
+            Shared by the in-budget and serve-anyway arms so this work runs
+            exactly once regardless of which one resolves the install."""
+            if not already_awaited:
+                try:
+                    await install_task
+                except (_embed_mod.EmbedIdentityMismatch, _embed_mod.EmbedderConfigError):
+                    # Refuse-boot already recorded by the done-callback below;
+                    # a surface built on a rejected/misconfigured embedder
+                    # must not be warmed.
+                    return
+                except Exception:  # noqa: BLE001 -- non-fatal prewarm outcome
+                    pass
+            # Computed ONCE at boot and served from state by the status
+            # handler: the status path is the liveness watchdog's signal and
+            # must never block on _conn_lock behind a consolidating writer.
+            try:
+                from iai_mcp.concurrency import _status_embed_identity
+
+                state["embed_identity"] = await asyncio.to_thread(
+                    _status_embed_identity, store
+                )
+            except Exception:  # noqa: BLE001 -- diagnostic block must not fail boot
+                log.debug("boot embed_identity compute failed", exc_info=True)
+                state["embed_identity"] = None
+
+            # Bounded so a pathological store cannot stall the boot tail.
+            try:
+                from iai_mcp.daemon._boot_warmup import warm_dispatch_surface
+
+                # Shield keeps the worker alive: asyncio cannot cancel a
+                # running thread, and retaining the task makes that
+                # continuation explicit and observable until shutdown.
+                _wds_task = asyncio.create_task(
+                    asyncio.to_thread(warm_dispatch_surface, store)
+                )
+                _wds_summary = await asyncio.shield(_wds_task)
+                log.info(
+                    "dispatch surface warmed in %.0fms",
+                    _wds_summary.get("elapsed_ms", -1.0),
+                )
+            except Exception:  # noqa: BLE001 -- warm-up must never block boot
+                log.debug("dispatch surface warm-up failed", exc_info=True)
+
+        install_task = asyncio.create_task(
+            asyncio.to_thread(_install_warm_embedder_override, store, _efs_holder),
+        )
+
+        def _install_refuse_boot_cb(task: "asyncio.Task") -> None:
+            # Retained-task done-callback: the only path that can still
+            # observe an identity/config refusal once it surfaces AFTER the
+            # bind (a refusal surfacing within the budget is re-raised
+            # directly through the await below instead).
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is None:
+                return
+            if isinstance(
+                exc, (_embed_mod.EmbedIdentityMismatch, _embed_mod.EmbedderConfigError)
+            ):
+                log.critical(
+                    "embedder identity/config refusal surfaced post-bind; "
+                    "forcing refuse-boot: %s", exc,
+                )
+                _boot_refuse_exc[0] = exc
+                shutdown.set()
+            else:
+                log.warning(
+                    "embedder prewarm/hold failed post-bind: %s", exc, exc_info=True,
+                )
+
+        install_task.add_done_callback(_install_refuse_boot_cb)
+
+        def _finish_task_done_cb(task: "asyncio.Task") -> None:
+            # Retrieves the exception so a timeout-orphaned finish_task never
+            # emits an "exception was never retrieved" warning.
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                log.warning("post-embedder prebind warm failed: %s", exc, exc_info=exc)
+
+        _remaining = _warm_deadline - time.monotonic()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(install_task), timeout=max(0.0, _remaining),
+            )
+        except asyncio.TimeoutError:
+            # SERVE-ANYWAY: the embedder construction alone already overflowed
+            # the total deadline. finish_task still runs the rest of the warm
+            # work post-bind, single-flight, in the background — never gated
+            # on remaining budget, only its WAIT is.
+            finish_task = asyncio.create_task(_finish_prebind_warm(already_awaited=False))
+            finish_task.add_done_callback(_finish_task_done_cb)
+        else:
+            # Resolved within the budget: an identity/config refusal already
+            # propagated out of this await (refuse boot, caught by the
+            # caller's outer exception handling).
+            finish_task = asyncio.create_task(_finish_prebind_warm(already_awaited=True))
+            finish_task.add_done_callback(_finish_task_done_cb)
+            _remaining = _warm_deadline - time.monotonic()
+            if _remaining > 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(finish_task), timeout=_remaining,
+                    )
+                except asyncio.TimeoutError:
+                    # finish_task keeps running post-bind, shielded above.
+                    pass
+
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
         await asyncio.sleep(0.05)
-
-        # The socket is live before any model construction: liveness must
-        # never wait on a cold embedder build. An identity mismatch still
-        # refuses boot (the await re-raises and the process exits), and a
-        # recall arriving during the build pays the same single-flight cold
-        # cost it always paid — with an honest "up, warming" status instead
-        # of every surface reporting the daemon dead.
-        await asyncio.to_thread(
-            _install_warm_embedder_override, store, _efs_holder,
-        )
-        # Computed ONCE at boot, after the warm funnel install, and served
-        # from state by the status handler: the status path is the liveness
-        # watchdog's signal and must never block on _conn_lock behind a
-        # consolidating writer.
-        try:
-            from iai_mcp.concurrency import _status_embed_identity
-
-            state["embed_identity"] = await asyncio.to_thread(
-                _status_embed_identity, store
-            )
-        except Exception:  # noqa: BLE001 -- diagnostic block must not fail boot
-            log.debug("boot embed_identity compute failed", exc_info=True)
-            state["embed_identity"] = None
-
-        # Warm the remaining first-dispatch surface (imports, structural
-        # decode; the embedder is already warm through the override).
-        # Bounded so a pathological store cannot stall the boot tail.
-        try:
-            from iai_mcp.daemon._boot_warmup import warm_dispatch_surface
-
-            # Shield keeps the worker alive after the bounded wait: asyncio
-            # cannot cancel a running thread, and retaining the task makes
-            # that continuation explicit and observable until shutdown.
-            _wds_task = asyncio.create_task(
-                asyncio.to_thread(warm_dispatch_surface, store)
-            )
-            _wds_summary = await asyncio.wait_for(
-                asyncio.shield(_wds_task), timeout=20.0,
-            )
-            log.info(
-                "dispatch surface warmed in %.0fms",
-                _wds_summary.get("elapsed_ms", -1.0),
-            )
-        except Exception:  # noqa: BLE001 -- warm-up must never block boot
-            log.debug("dispatch surface warm-up failed", exc_info=True)
 
         try:
             from iai_mcp.daemon._boot_warmup import run_boot_warmup
@@ -2929,6 +3021,12 @@ async def main() -> int:
             _efs_holder["abandoned"] = True
             _efs_installed = _efs_holder["installed"]
         _restore_embedder_funnel(_efs_holder["orig"], _efs_installed)
+    # A post-bind identity/config refusal (recorded by the serve-anyway
+    # install's done-callback) refuses boot AFTER the graceful teardown
+    # above completes, not instead of it — re-raising here still exits
+    # non-zero, the same outcome an in-budget refusal produces directly.
+    if _boot_refuse_exc[0] is not None:
+        raise _boot_refuse_exc[0]
     return 0
 
 

@@ -72,14 +72,3 @@ def bind_structure(record: "MemoryRecord") -> bytes:
     pairs.append(("PARENT_ID", filler_hv("root")))
 
     return pack_pairs(pairs)
-
-
-_DECAY_GRACE_DAYS: int = 90
-_DECAY_BASE: float = 0.9
-
-
-def decay_structure_edge(stability: float, difficulty: float, dt_days: float) -> float:
-    age_days = max(0.0, float(dt_days))
-    if age_days <= _DECAY_GRACE_DAYS:
-        return 1.0
-    return _DECAY_BASE ** (age_days - _DECAY_GRACE_DAYS)

@@ -322,6 +322,23 @@ def test_query_events_since_exclusive(tmp_path):
     assert len(exclusive_before) == 1
 
 
+def test_query_events_session_id_filter(tmp_path):
+    from iai_mcp.events import query_events, write_event
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path)
+    write_event(store, kind="scoped", data={"i": 0}, session_id="alpha")
+    write_event(store, kind="scoped", data={"i": 1}, session_id="beta")
+    write_event(store, kind="scoped", data={"i": 2}, session_id="alpha")
+
+    scoped = query_events(store, kind="scoped", session_id="alpha")
+    assert {r["data"]["i"] for r in scoped} == {0, 2}
+    assert all(r["session_id"] == "alpha" for r in scoped)
+
+    unscoped = query_events(store, kind="scoped")
+    assert len(unscoped) == 3
+
+
 @pytest.mark.perf
 def test_query_events_constant_memory_at_10k_events(tmp_path):
     """SQL LIMIT pushdown + per-row decrypt decouples peak memory from corpus

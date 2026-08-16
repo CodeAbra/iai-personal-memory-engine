@@ -165,6 +165,10 @@ def _settled_rss_per_cycle(rca_log: Path) -> dict[int, int]:
 
 @pytest.mark.slow
 def test_rss_steady_state_plateau_bounded() -> None:
+    # This bound is a settled post-GC/post-decommit RSS delta measured across
+    # warm cycles -- load-independent by construction, not an ambient
+    # wall-clock timing gate -- and already runs opt-in via --runslow.
+
     # The harness --out validator accepts /tmp, /private/tmp, /var/folders only;
     # a pytest tmp_path resolves under /private/var/folders which it rejects, so
     # use an explicit /tmp dir we clean up ourselves. This is also the harness

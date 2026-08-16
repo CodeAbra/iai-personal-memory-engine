@@ -91,14 +91,16 @@ def quarantine_notification_blobs(
 
         now_iso = datetime.now(timezone.utc).isoformat()
         tbl = store.db.open_table("records")
+        tombstoned_ids: list[str] = []
         with journal.open("x", encoding="utf-8") as jf:
             for rid_s, head in to_tombstone:
                 try:
                     tbl.update(
                         where=f"id = '{rid_s}'",
-                        values={"tombstoned_at": now_iso},
+                        values={"tombstoned_at": now_iso, "live": 0},
                     )
                     tombstoned += 1
+                    tombstoned_ids.append(rid_s)
                     jf.write(json.dumps({
                         "record_id": rid_s,
                         "tombstoned_at": now_iso,
@@ -113,6 +115,16 @@ def quarantine_notification_blobs(
             store._invalidate_corpus_count("active")
         except Exception:  # noqa: BLE001 -- count cache refresh is best-effort
             pass
+        _inv_x = getattr(store, "invalidate_exact_index", None)
+        if callable(_inv_x):
+            _inv_x()  # no-raise contract; see MemoryStore.invalidate_exact_index
+        buf = getattr(store, "_recency_buffer", None)
+        if buf is not None:
+            for rid_s in tombstoned_ids:
+                try:
+                    buf.evict(str(rid_s))
+                except Exception as exc:  # noqa: BLE001 -- eviction is best-effort
+                    log.debug("recency buffer evict failed for %s: %s", rid_s, exc)
 
     return {
         "mode": "apply" if apply else "dry-run",

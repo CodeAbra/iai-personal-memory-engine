@@ -16,8 +16,7 @@ from _recall_helpers import (  # noqa: E402
     _populate_store,
     _prime_structural_cache,
 )
-
-_TEST_CRYPTO_PASSPHRASE = "iai-mcp-test-passphrase"
+from _live_harness import _TEST_CRYPTO_PASSPHRASE, _hf_cache_root  # noqa: E402
 
 
 def _child_env(store_root: Path, tmp_home: Path) -> dict[str, str]:
@@ -159,13 +158,6 @@ def test_subprocess_iai_recall_daemon_down_returns_store_backed_degraded(
         f"stderr={result.stderr!r}\n"
         "The bank-recall subprocess cannot produce this turn — must be store-backed."
     )
-
-
-def _hf_cache_root() -> Path:
-    hf_home = os.environ.get("HF_HOME")
-    if hf_home:
-        return Path(hf_home)
-    return Path.home() / ".cache" / "huggingface"
 
 
 def _live_gate_child_env(store_root: Path, tmp_home: Path) -> dict[str, str]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import plistlib
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -601,3 +602,368 @@ def test_boot_preload_does_not_call_runtime_graph_cache_save_with_empty_payload(
     assert _rgc_mod.preload_ready.is_set(), "preload_ready must be set after boot_preload completes"
 
     _rgc_mod.preload_ready.clear()
+
+
+# ---------------------------------------------------------------------------
+# Total pre-bind deadline: embedder construction + embed_identity +
+# warm_dispatch_surface all run before the socket binds in the normal arm,
+# bounded by one deadline; overflow at any point serves anyway and the warm
+# work keeps running post-bind; a post-bind identity/config refusal still
+# refuses boot.
+# ---------------------------------------------------------------------------
+
+
+def _recording_serve(events: list, marker: str = "serve_called"):
+    import iai_mcp.socket_server as ss_mod
+
+    real_serve = ss_mod.SocketServer.serve
+
+    async def _wrapped(self, socket_path=None):
+        events.append((marker, time.monotonic()))
+        return await real_serve(self, socket_path)
+
+    return _wrapped
+
+
+def _recording_serve_capturing_state(events: list, captured: list, marker: str = "serve_called"):
+    import iai_mcp.socket_server as ss_mod
+
+    real_serve = ss_mod.SocketServer.serve
+
+    async def _wrapped(self, socket_path=None):
+        events.append((marker, time.monotonic()))
+        captured.append(self._state)
+        return await real_serve(self, socket_path)
+
+    return _wrapped
+
+
+def test_daemon_warms_structural_memo_before_serve_in_normal_arm(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """In the normal arm (embedder + warm work resolve within the total
+    pre-bind deadline), the structural memo decode completes BEFORE the
+    socket accepts connections -- the pre-bind warm ordering that produces
+    full-quality recall#1."""
+    import iai_mcp.embed as _embed_mod
+    import iai_mcp.runtime_graph_cache as _rgc_mod
+    import iai_mcp.socket_server as ss_mod
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp import daemon_state as ds_mod
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
+    monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
+    monkeypatch.setattr(ds_mod, "STATE_PATH", tmp_path / ".daemon-state.json")
+    _short_socket_paths(tmp_path, monkeypatch)
+
+    events: list[tuple[str, float]] = []
+
+    def _fast_funnel(store):
+        events.append(("embedder_construct", time.monotonic()))
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _fast_funnel)
+
+    real_load_recall_structural = _rgc_mod.load_recall_structural
+
+    def _recording_load_recall_structural(store):
+        events.append(("structural_decode", time.monotonic()))
+        return real_load_recall_structural(store)
+
+    monkeypatch.setattr(
+        _rgc_mod, "load_recall_structural", _recording_load_recall_structural
+    )
+    monkeypatch.setattr(
+        ss_mod.SocketServer, "serve", _recording_serve(events),
+    )
+
+    async def runner():
+        task = asyncio.create_task(daemon_mod.main())
+        await asyncio.sleep(1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(runner())
+
+    kinds = [k for k, _ in events]
+    assert "embedder_construct" in kinds, "embedder construction never ran"
+    assert "structural_decode" in kinds, (
+        "structural decode never ran (the post-bind task must still fire)"
+    )
+    assert "serve_called" in kinds, "socket serve never ran"
+
+    serve_ts = min(t for k, t in events if k == "serve_called")
+    construct_ts = min(t for k, t in events if k == "embedder_construct")
+    decode_ts = min(t for k, t in events if k == "structural_decode")
+    assert construct_ts < serve_ts, (
+        "embedder construction must complete before the socket binds "
+        f"(construct={construct_ts}, serve={serve_ts})"
+    )
+    assert decode_ts < serve_ts, (
+        "structural memo decode must complete before the socket binds in "
+        f"the normal arm (decode={decode_ts}, serve={serve_ts})"
+    )
+
+
+def test_daemon_slow_warm_dispatch_cannot_delay_bind(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """A slow warm_dispatch_surface -- even with the embedder construction
+    fast and in-budget -- must never delay the socket bind past the total
+    pre-bind deadline: once it overflows, the daemon serves anyway and
+    warm_dispatch keeps running post-bind."""
+    import iai_mcp.daemon._boot_warmup as _bw_mod
+    import iai_mcp.embed as _embed_mod
+    import iai_mcp.socket_server as ss_mod
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp import daemon_state as ds_mod
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
+    monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
+    monkeypatch.setattr(ds_mod, "STATE_PATH", tmp_path / ".daemon-state.json")
+    _short_socket_paths(tmp_path, monkeypatch)
+
+    def _fast_funnel(store):
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _fast_funnel)
+
+    may_finish_dispatch = threading.Event()
+    dispatch_finished = threading.Event()
+
+    def _slow_warm_dispatch_surface(store):
+        may_finish_dispatch.wait(10)
+        dispatch_finished.set()
+        return {"elapsed_ms": 0.0}
+
+    monkeypatch.setattr(
+        _bw_mod, "warm_dispatch_surface", _slow_warm_dispatch_surface,
+    )
+
+    events: list[tuple[str, float]] = []
+    monkeypatch.setattr(ss_mod.SocketServer, "serve", _recording_serve(events))
+
+    async def runner():
+        t0 = time.monotonic()
+        task = asyncio.create_task(daemon_mod.main())
+        deadline = time.monotonic() + 5.0
+        while not events and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        serve_elapsed = (events[0][1] - t0) if events else None
+        # Prove real ordering, not a latency coincidence: warm_dispatch must
+        # still be blocked (not finished) at the moment the bind was observed.
+        dispatch_finished_before_bind = dispatch_finished.is_set()
+        may_finish_dispatch.set()
+        completed_post_bind = dispatch_finished.wait(5.0)
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return serve_elapsed, dispatch_finished_before_bind, completed_post_bind
+
+    serve_elapsed, dispatch_finished_before_bind, completed_post_bind = asyncio.run(
+        runner()
+    )
+    assert serve_elapsed is not None, "socket never bound while warm_dispatch was slow"
+    assert not dispatch_finished_before_bind, (
+        "warm_dispatch_surface finished before the bind was observed -- this "
+        "proves nothing about post-bind ordering; the injected block must "
+        "still be held when serve() runs"
+    )
+    assert serve_elapsed < 3.0, (
+        f"socket bind took {serve_elapsed:.2f}s while warm_dispatch_surface "
+        f"was slow -- warm_dispatch must never delay the bind past the "
+        f"liveness ceiling"
+    )
+    assert completed_post_bind, (
+        "warm_dispatch_surface never completed after the bind -- the warm work "
+        "must still run to completion post-bind, never be dropped on overflow"
+    )
+
+
+def test_daemon_serves_anyway_on_slow_embedder_construction(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """A construction that blocks past the pre-serve budget must not delay
+    the socket bind past that budget -- reachability never regresses."""
+    import threading
+
+    import iai_mcp.embed as _embed_mod
+    import iai_mcp.socket_server as ss_mod
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp import daemon_state as ds_mod
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
+    monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
+    monkeypatch.setattr(ds_mod, "STATE_PATH", tmp_path / ".daemon-state.json")
+    _short_socket_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(daemon_mod, "_PRE_SERVE_WARM_DEADLINE_SEC", 0.3)
+
+    may_finish = threading.Event()
+
+    def _slow_funnel(store):
+        may_finish.wait(10)
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _slow_funnel)
+
+    events: list[tuple[str, float]] = []
+    monkeypatch.setattr(ss_mod.SocketServer, "serve", _recording_serve(events))
+
+    async def runner():
+        t0 = time.monotonic()
+        task = asyncio.create_task(daemon_mod.main())
+        deadline = time.monotonic() + 5.0
+        while not events and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        serve_elapsed = (events[0][1] - t0) if events else None
+        may_finish.set()
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return serve_elapsed
+
+    serve_elapsed = asyncio.run(runner())
+    assert serve_elapsed is not None, "socket never bound while construction was slow"
+    assert serve_elapsed < 2.0, (
+        f"socket bind took {serve_elapsed:.2f}s while the embedder construction "
+        f"was slow -- the bound must serve anyway, not gate reachability on the "
+        f"construction"
+    )
+
+
+def test_daemon_serve_anyway_still_refuses_boot_on_post_bind_identity_mismatch(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """An EmbedIdentityMismatch surfacing AFTER the serve-anyway bind must
+    still force refuse-boot -- never keep serving cross-generation noise."""
+    import threading
+
+    import iai_mcp.embed as _embed_mod
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp import daemon_state as ds_mod
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
+    monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
+    monkeypatch.setattr(ds_mod, "STATE_PATH", tmp_path / ".daemon-state.json")
+    _short_socket_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(daemon_mod, "_PRE_SERVE_WARM_DEADLINE_SEC", 0.2)
+
+    may_finish = threading.Event()
+
+    def _slow_mismatch_funnel(store):
+        may_finish.wait(10)
+        raise _embed_mod.EmbedIdentityMismatch("simulated post-bind identity refusal")
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _slow_mismatch_funnel)
+
+    async def runner():
+        task = asyncio.create_task(daemon_mod.main())
+        await asyncio.sleep(0.5)
+        may_finish.set()
+        try:
+            return await asyncio.wait_for(task, timeout=15.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            return "TIMED_OUT_NEVER_EXITED"
+
+    with pytest.raises(_embed_mod.EmbedIdentityMismatch):
+        result = asyncio.run(runner())
+        if result == "TIMED_OUT_NEVER_EXITED":
+            pytest.fail(
+                "daemon never refused boot after a post-bind identity "
+                "mismatch -- it kept running instead of exiting"
+            )
+
+
+def test_daemon_binds_and_finishes_warm_when_deadline_already_spent_at_entry(
+    tmp_path, monkeypatch, _restore_embedder_funnel_after
+):
+    """remaining <= 0 at entry (the deadline was already spent by the
+    pre-window preamble) must still bind AND complete embed_identity +
+    warm_dispatch_surface post-bind -- the deadline governs the WAIT, never
+    whether the warm work HAPPENS."""
+    import iai_mcp.daemon._boot_warmup as _bw_mod
+    import iai_mcp.embed as _embed_mod
+    import iai_mcp.socket_server as ss_mod
+    from iai_mcp import daemon as daemon_mod
+    from iai_mcp import daemon_state as ds_mod
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "iai"))
+    monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
+    monkeypatch.setattr(ds_mod, "STATE_PATH", tmp_path / ".daemon-state.json")
+    _short_socket_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(daemon_mod, "_PRE_SERVE_WARM_DEADLINE_SEC", 0.0)
+
+    def _fast_funnel(store):
+        return _IdentityStub()
+
+    monkeypatch.setattr(_embed_mod, "embedder_for_store", _fast_funnel)
+
+    dispatch_ran = threading.Event()
+    real_warm_dispatch_surface = _bw_mod.warm_dispatch_surface
+
+    def _recording_warm_dispatch_surface(store):
+        try:
+            return real_warm_dispatch_surface(store)
+        finally:
+            dispatch_ran.set()
+
+    monkeypatch.setattr(
+        _bw_mod, "warm_dispatch_surface", _recording_warm_dispatch_surface,
+    )
+
+    events: list[tuple[str, float]] = []
+    captured_state: list[dict] = []
+    monkeypatch.setattr(
+        ss_mod.SocketServer, "serve",
+        _recording_serve_capturing_state(events, captured_state),
+    )
+
+    async def runner():
+        t0 = time.monotonic()
+        task = asyncio.create_task(daemon_mod.main())
+        bind_deadline = time.monotonic() + 5.0
+        while not events and time.monotonic() < bind_deadline:
+            await asyncio.sleep(0.02)
+        serve_elapsed = (events[0][1] - t0) if events else None
+        warm_deadline = time.monotonic() + 5.0
+        while not dispatch_ran.is_set() and time.monotonic() < warm_deadline:
+            await asyncio.sleep(0.02)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return serve_elapsed
+
+    serve_elapsed = asyncio.run(runner())
+    assert serve_elapsed is not None, (
+        "socket never bound with the deadline already spent at entry"
+    )
+    assert serve_elapsed < 3.0, (
+        f"socket bind took {serve_elapsed:.2f}s with the deadline already "
+        f"spent at entry -- the warm work must never gate the bind"
+    )
+    assert dispatch_ran.is_set(), (
+        "warm_dispatch_surface never ran -- the warm work must still be "
+        "scheduled and complete post-bind even when remaining <= 0 at entry"
+    )
+    assert captured_state, "state dict was never captured from SocketServer"
+    embed_identity = captured_state[0].get("embed_identity")
+    assert embed_identity != {"state": "warming"}, (
+        "state['embed_identity'] never advanced off {'state': 'warming'} -- "
+        "a dropped finish_task would leave the liveness status field stuck"
+    )

@@ -74,7 +74,7 @@ def test_closed_writer_raw_open_releases_lock(
 
     # Writer-mode raw open takes the exclusive advisory lock; leak it (never
     # close) to mimic a fixture or exception path that skipped the release.
-    raw = get_lilli_raw_conn(path, read_only=False)
+    raw = get_lilli_raw_conn(path, read_only=False, allow_writer=True)
     try:
         db2 = HippoDB(d)  # must not collide with the leaked writer lock
         db2.close()
@@ -136,8 +136,8 @@ def test_borrowed_writer_raw_open_release_is_last_holder_aware(
     path = db._db_path
     db.close()  # registry clear; an on-disk lilli store remains
 
-    raw = get_lilli_raw_conn(path, read_only=False)  # registry miss → writer + lock
-    borrow = get_lilli_raw_conn(path, read_only=False)  # registry hit → shared handle
+    raw = get_lilli_raw_conn(path, read_only=False, allow_writer=True)  # registry miss → writer + lock
+    borrow = get_lilli_raw_conn(path, read_only=False, allow_writer=True)  # registry hit → shared handle
     raw.close()  # owner closes; the live borrow keeps the store/lock alive
 
     # The closed owner is unborrowable, so its registry slot is dropped. The

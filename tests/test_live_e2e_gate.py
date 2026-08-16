@@ -4,27 +4,16 @@ import errno
 from iai_mcp import _flock as fcntl
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
 from uuid import UUID, uuid4
 
 import pytest
 
-from test_bridge_socket_first import (  # type: ignore[import]
-    REPO,
-    _kill_test_daemons,
-    _wait_for_daemon_socket,
-)
-from test_cli_subprocess_daemon_down import (  # type: ignore[import]
-    _TEST_CRYPTO_PASSPHRASE,
-    _hf_cache_root,
-)
+from _live_harness import _TEST_CRYPTO_PASSPHRASE, _hf_cache_root, spawn_live_daemon
 from _recall_helpers import (  # type: ignore[import]
     UUID_TWO_HOP_SURFACE,
     _populate_store,
@@ -33,23 +22,21 @@ from _recall_helpers import (  # type: ignore[import]
 
 pytestmark = pytest.mark.live
 
+_LIVE_GATE_CUE = "User reference gold document semantic recall probe cue"
 
-def _live_daemon_env(tmp_home: Path, sock_path: Path) -> dict[str, str]:
-    store_dir = tmp_home / ".iai-mcp"
-    env = dict(os.environ)
-    env["HOME"] = str(tmp_home)
-    env["IAI_MCP_STORE"] = str(store_dir)
-    env["IAI_DAEMON_SOCKET_PATH"] = str(sock_path)
-    env["IAI_DAEMON_IDLE_SHUTDOWN_SECS"] = "120"
-    env["PYTHONPATH"] = str(REPO / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    env["IAI_MCP_CRYPTO_PASSPHRASE"] = _TEST_CRYPTO_PASSPHRASE
-    env["IAI_MCP_EMBED_OFFLINE"] = "1"
-    env["IAI_MCP_AROUSAL_USE_SHADOW"] = "1"
-    hf_root = _hf_cache_root()
-    env["HF_HOME"] = str(hf_root)
-    env["HF_HUB_CACHE"] = str(hf_root / "hub")
-    env["HUGGINGFACE_HUB_CACHE"] = str(hf_root / "hub")
-    return env
+
+def _seed_two_hop_gold(store, cue_vec: "list | None") -> None:
+    from iai_mcp.pipeline import K_CANDIDATES
+
+    _populate_store(store, cue_vec=cue_vec, n_filler=700)
+    _prime_structural_cache(store)
+
+    ann_top_k = {r.id for r, _ in store.query_similar(cue_vec, k=K_CANDIDATES)}
+    assert UUID(int=5) not in ann_top_k, (
+        f"PRECONDITION FAILED: structural-only gold UUID(5) is a "
+        f"DIRECT ANN top-{K_CANDIDATES} hit — the 2-hop spread is not "
+        f"load-bearing.  store size={store.active_records_count()}."
+    )
 
 
 @pytest.fixture(scope="function")
@@ -57,127 +44,9 @@ def live_daemon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> "SimpleNamespace":
-    hf_cache = _hf_cache_root()
-    weights_dir = hf_cache / "hub" / "models--BAAI--bge-small-en-v1.5"
-    if not weights_dir.exists():
-        pytest.skip(
-            f"bge-small weight cache absent ({weights_dir}); the offline "
-            "live-gate construct cannot run."
-        )
-
-    tmp_home = tmp_path / "home"
-    tmp_home.mkdir(parents=True)
-    store_dir = tmp_home / ".iai-mcp"
-
-    sock_dir = Path(tempfile.mkdtemp(prefix="iai-live-"))
-    sock_path = sock_dir / "d.sock"
-    assert len(str(sock_path).encode()) < 104, (
-        f"sun_path too long ({len(str(sock_path).encode())} >= 104): {sock_path}"
+    yield from spawn_live_daemon(
+        tmp_path, monkeypatch, cue=_LIVE_GATE_CUE, seed=_seed_two_hop_gold,
     )
-
-    proc: subprocess.Popen | None = None
-    try:
-        monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", _TEST_CRYPTO_PASSPHRASE)
-        monkeypatch.setenv("HF_HOME", str(hf_cache))
-        monkeypatch.setenv("HF_HUB_CACHE", str(hf_cache / "hub"))
-        monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hf_cache / "hub"))
-        monkeypatch.setenv("IAI_MCP_EMBED_OFFLINE", "1")
-
-        from iai_mcp.embed import Embedder
-        from iai_mcp.pipeline import K_CANDIDATES
-        from iai_mcp.store import MemoryStore
-
-        cue = "User reference gold document semantic recall probe cue"
-        cue_vec = Embedder().embed(cue)
-
-        store = MemoryStore(str(store_dir))
-        try:
-            _populate_store(store, cue_vec=cue_vec, n_filler=700)
-            _prime_structural_cache(store)
-
-            ann_top_k = {r.id for r, _ in store.query_similar(cue_vec, k=K_CANDIDATES)}
-            assert UUID(int=5) not in ann_top_k, (
-                f"PRECONDITION FAILED: structural-only gold UUID(5) is a "
-                f"DIRECT ANN top-{K_CANDIDATES} hit — the 2-hop spread is not "
-                f"load-bearing.  store size={store.active_records_count()}."
-            )
-        finally:
-            store.close()
-
-        daemon_env = _live_daemon_env(tmp_home, sock_path)
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "iai_mcp.daemon"],
-            cwd=str(REPO),
-            env=daemon_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        bound = _wait_for_daemon_socket(sock_path, timeout_sec=30.0)
-        assert bound, (
-            f"daemon did not bind socket within 30 s: {sock_path}; "
-            f"proc.poll()={proc.poll()!r}"
-        )
-
-        cli_env = dict(daemon_env)
-
-        def iai(*argv: str, timeout: int = 60) -> subprocess.CompletedProcess:
-            return subprocess.run(
-                [sys.executable, "-m", "iai_mcp.iai_cli", *argv],
-                env=cli_env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-
-        def recall_json(cue_str: str) -> dict:
-            result = iai("recall", "--json", "--limit", "50", cue_str)
-            assert result.returncode == 0, (
-                f"iai recall failed (rc={result.returncode}):\n"
-                f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
-            )
-            stdout_lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
-            assert stdout_lines, f"no JSON on stdout; stderr={result.stderr!r}"
-            return json.loads(stdout_lines[-1])
-
-        def wait_until(
-            predicate: Callable[[], bool],
-            timeout: float = 10.0,
-            interval: float = 0.05,
-        ) -> bool:
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                if predicate():
-                    return True
-                time.sleep(interval)
-            return False
-
-        lifecycle_path = store_dir / "lifecycle_state.json"
-
-        ns = SimpleNamespace(
-            cue=cue,
-            store_dir=store_dir,
-            sock_path=sock_path,
-            lifecycle_path=lifecycle_path,
-            proc=proc,
-            iai=iai,
-            recall_json=recall_json,
-            wait_until=wait_until,
-        )
-        yield ns
-
-    finally:
-        try:
-            _kill_test_daemons(sock_path)
-        except Exception:  # noqa: BLE001
-            pass
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=10)
-            except Exception:  # noqa: BLE001
-                pass
-        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 def test_fresh_tmp_store_boots_on_scoped_env(live_daemon: SimpleNamespace) -> None:

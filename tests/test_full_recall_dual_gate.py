@@ -39,6 +39,8 @@ from uuid import UUID, uuid4
 import numpy as np
 import pytest
 
+from tests._helpers import RECALL_STUB_ACTIVE_ENV
+
 _REPO = Path(__file__).resolve().parent.parent
 for _p in (str(_REPO / "src"), str(_REPO)):
     if _p not in sys.path:
@@ -163,16 +165,27 @@ class _EmbedderCtx:
         self._orig = None
 
     def __enter__(self) -> "_EmbedderCtx":
+        import os
+
         import iai_mcp.embed as _emb
         self._emb_mod = _emb
         self._orig = _emb.embedder_for_store
-        _emb.embedder_for_store = lambda _s: self._shim
+        # **_kwargs absorbs allow_identity_mismatch/build_timeout, which the
+        # recall dispatch always passes -- a one-arg shim raises TypeError,
+        # caught by the pipeline as a silent degrade instead of using it.
+        # The env var (not monkeypatch, this class has no fixture in scope)
+        # lets the test-suite degrade guard see this plain-assign stub.
+        _emb.embedder_for_store = lambda _s, **_kwargs: self._shim
+        os.environ[RECALL_STUB_ACTIVE_ENV] = "1"
         return self
 
     def __exit__(self, *_exc) -> None:
+        import os
+
         if self._orig is not None:
             self._emb_mod.embedder_for_store = self._orig
             self._orig = None
+        os.environ.pop(RECALL_STUB_ACTIVE_ENV, None)
 
 
 def _dispatch_ids(store, cue: str) -> list[UUID]:

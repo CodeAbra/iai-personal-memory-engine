@@ -8,8 +8,8 @@ from iai_mcp.profile import (
     profile_set,
 )
 
-def test_registry_has_11_knobs():
-    assert len(PROFILE_KNOBS) == 11
+def test_registry_has_10_knobs():
+    assert len(PROFILE_KNOBS) == 10
 
 def test_wake_depth_knob_exists():
     assert "wake_depth" in PROFILE_KNOBS
