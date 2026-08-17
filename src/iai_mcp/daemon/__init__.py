@@ -1550,7 +1550,11 @@ def _install_boot_signal_trace() -> None:
         except Exception:  # noqa: BLE001 -- re-raise is best-effort
             os._exit(128 + int(signum))
 
-    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    _trace_signals = [signal.SIGTERM, signal.SIGINT]
+    _trace_sighup = getattr(signal, "SIGHUP", None)
+    if _trace_sighup is not None:
+        _trace_signals.append(_trace_sighup)
+    for _sig in _trace_signals:
         try:
             signal.signal(_sig, _trace)
         except (AttributeError, ValueError, OSError):
