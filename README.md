@@ -456,11 +456,11 @@ iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,paus
 
 `entity-backfill` derives `entity:` anchor tags from records captured before anchoring shipped, so names in old turns become matchable; `--refresh` recomputes the whole corpus. `blob-quarantine` tombstones machine-notification blobs that drown real records on any cue sharing their vocabulary. Both are dry-run by default and journal every change when applied.
 
-`doctor` runs 27 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
+`doctor` runs 31 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
 
 ### Deployment surface
 
-- MCP transport is a Unix domain socket. No TCP listener, no bind address, no auth surface to misconfigure.
+- MCP transport is a Unix domain socket on macOS and Linux, with no bind address to misconfigure. Windows has no Unix sockets, so it binds an ephemeral port on `127.0.0.1` instead and requires a token handshake; the token file is ACL-restricted to the current user and the port is never exposed off the loopback interface.
 - Store at `~/.iai-mcp/`, AES-256-GCM per record, key at `.crypto.key` mode `0600`, rotation and prior-key recovery supported.
 - Storage is English-only; non-English text is refused unless declared with a `raw:<lang>` tag. The embedder is swappable for those records — `iai lang add ru` moves it to a multilingual model, thirteen languages covered. See [Languages](#languages).
 - Embedder is swappable beyond that: `IAI_MCP_EMBED_PROVIDER=http` disables the native BGE model entirely (not constructed, not downloaded) and routes to a loopback endpoint, for a domain-specific model without a Python ML stack. Protocol in [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
@@ -642,7 +642,7 @@ config file is something you can read.
 
 ## Doctor
 
-`iai-mcp doctor` runs 27 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
+`iai-mcp doctor` runs 31 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
 
 It also repairs what it finds. `--apply` walks the repairs it can make and asks before anything that touches your memory; corrupt state files and vector indexes are renamed aside so the engine rebuilds them, never deleted. `--auto` is the unattended subset — no prompts, no killed processes, no changes to the store — and your assistant runs it for you if the engine is still unreachable ten seconds into a session. In practice a stalled engine now fixes itself before you notice it stalled.
 
@@ -653,7 +653,7 @@ iai-mcp doctor
 ```
 
 <details>
-<summary><b>All 27 checks, one line each</b></summary>
+<summary><b>All 31 checks, one line each</b></summary>
 
 What it checks:
 
@@ -680,11 +680,15 @@ What it checks:
 | s | hippo schema version | Store schema is current |
 | t | hippo_compacted freshness | Compaction has run recently |
 | u | recall centrality regression | Recall ranking hasn't regressed |
-| v | native Rust embedder | The Rust embedder is built and produces vectors |
+| v | configured embedder | The embedder the store is configured for is built and produces vectors |
 | w | no permanent-failed captures | No capture is stuck after exhausting its retries |
 | x | timestamps not collapsed | Record timestamps span a real range, not all-identical |
 | y | RSS 24h plateau | Resident memory has settled rather than climbing across the last day |
 | z | AVX2 CPU support | CPU supports the instructions the native libs need |
+| aa | capture-state hygiene | No stale or half-written files left in the capture-state directory |
+| bb | nightly insight mint | The nightly pass is actually minting insights, not just running |
+| cc | background liveness | Background sleep steps have completed over the last week |
+| ii | store embed identity | The store's vector-identity stamp matches the embedder the runtime would use |
 | + | update available | A newer release is on PyPI (checked once a day, silently skipped offline) |
 
 </details>
