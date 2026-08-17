@@ -126,10 +126,10 @@ fi
 # ---------------------------------------------------------------------------
 step "building (a few minutes: the Rust engine compiles from source)"
 if [ "${DRY_RUN}" = "1" ]; then
-    printf '   \033[0;36m→\033[0m would run: bash %s/scripts/install.sh\n' "${SRC_DIR}"
+    printf '   \033[0;36m→\033[0m would run: IAI_PYTHON=%s bash %s/scripts/install.sh\n' "${PYTHON}" "${SRC_DIR}"
 else
     [ -f "${SRC_DIR}/scripts/install.sh" ] || die "scripts/install.sh missing from the clone"
-    bash "${SRC_DIR}/scripts/install.sh"
+    IAI_PYTHON="${PYTHON}" bash "${SRC_DIR}/scripts/install.sh"
 fi
 
 IAI_BIN="${SRC_DIR}/.venv/bin/iai-mcp"
