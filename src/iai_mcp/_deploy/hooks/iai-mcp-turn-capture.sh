@@ -17,6 +17,25 @@
 set -u
 # Spool files must never be world-readable.
 umask 077
+
+# Locate a Python 3 interpreter. Prefer the one the MCP host was configured
+# with (IAI_MCP_PYTHON, matching the venv iai-pme installed into); fall back
+# to whatever python3/python resolves on PATH. /usr/bin/python3 does not
+# exist on every platform this hook runs on (e.g. Git Bash on Windows), so
+# it must never be hardcoded. Fail-safe: no interpreter found -> exit 0,
+# same as any other capture failure.
+PYBIN=""
+if [ -n "${IAI_MCP_PYTHON:-}" ] && [ -x "${IAI_MCP_PYTHON:-}" ]; then
+  PYBIN="$IAI_MCP_PYTHON"
+elif command -v python3 >/dev/null 2>&1; then
+  PYBIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYBIN="python"
+fi
+if [ -z "$PYBIN" ]; then
+  exit 0
+fi
+
 input=$(cat 2>/dev/null || true)
 
 # Extract session_id and transcript_path in a single subprocess call.
@@ -24,7 +43,7 @@ _extract_tmp=$(mktemp 2>/dev/null || echo "/tmp/iai-mcp-turn-extract-$$.tmp")
 if command -v jq >/dev/null 2>&1; then
   printf '%s' "$input" | jq -r '(.session_id // "") + "\t" + (.transcript_path // "")' >"$_extract_tmp" 2>/dev/null
 else
-  printf '%s' "$input" | /usr/bin/python3 -c "
+  printf '%s' "$input" | "$PYBIN" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -54,7 +73,6 @@ case "$session_id" in
 esac
 
 PY_SCRIPT='
-import fcntl
 import hashlib
 import json
 import os
@@ -62,6 +80,30 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    from fcntl import LOCK_EX, LOCK_NB, flock
+except ImportError:  # Windows: msvcrt shim, mirrors iai_mcp._flock.
+    # Self-contained on purpose: this script runs under whatever python3
+    # resolves on PATH, which is not guaranteed to be the venv iai-pme is
+    # installed into, so importing the package here is not reliable.
+    import errno as _errno
+    import msvcrt as _msvcrt
+
+    LOCK_EX = 0x2
+    LOCK_NB = 0x4
+
+    def flock(fd, operation):
+        _pos = os.lseek(fd, 0, os.SEEK_CUR)
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            mode = _msvcrt.LK_NBLCK if operation & LOCK_NB else _msvcrt.LK_LOCK
+            try:
+                _msvcrt.locking(fd, mode, 1)
+            except OSError as exc:
+                raise OSError(_errno.EAGAIN, "lock held (msvcrt)") from exc
+        finally:
+            os.lseek(fd, _pos, os.SEEK_SET)
 
 MAX_TURNS = 100_000
 
@@ -127,7 +169,7 @@ _lock_fd = os.open(
     os.O_WRONLY | os.O_CREAT, 0o600,
 )
 try:
-    fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    flock(_lock_fd, LOCK_EX | LOCK_NB)
 except OSError:
     # Another carrier is draining this session right now; its walk covers
     # these lines.
@@ -697,11 +739,11 @@ except Exception:
 '
 
 if command -v timeout >/dev/null 2>&1; then
-  timeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  timeout 5 "$PYBIN" -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  gtimeout 5 "$PYBIN" -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
 else
-  /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  "$PYBIN" -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
 fi
 rc=$?
 
