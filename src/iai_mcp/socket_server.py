@@ -267,8 +267,17 @@ class SocketServer:
             env_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
             socket_path = Path(env_path) if env_path else SOCKET_PATH
 
-        sig = inspect.signature(asyncio.start_unix_server)
-        supports_cleanup_socket = "cleanup_socket" in sig.parameters
+        try:
+            sig = inspect.signature(asyncio.start_unix_server)
+            supports_cleanup_socket = "cleanup_socket" in sig.parameters
+        except AttributeError:
+            # asyncio.start_unix_server does not exist on Windows; the
+            # daemon boot silently swallowed this because serve() runs
+            # as an un-awaited asyncio.create_task(), so the socket
+            # never opened and no traceback ever surfaced. Confirmed
+            # with py-spy dump: MainThread was idle inside run_forever,
+            # not stuck in serve() at all -- the task had already died.
+            supports_cleanup_socket = False
 
         # One JSON-RPC request is one line; a relayed document upload
         # (base64, ≤25 MB raw) must fit the StreamReader line buffer.
