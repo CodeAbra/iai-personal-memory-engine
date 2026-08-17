@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `scripts/bootstrap.sh` probed for a supported interpreter and reported it,
+  then handed off to `scripts/install.sh`, which built the venv with a bare
+  `python3`. On a machine where `python3` resolves to 3.13 or newer the
+  editable install then failed with `requires a different Python`. The
+  installer now selects the interpreter itself (honouring a new `IAI_PYTHON`
+  override), bootstrap passes the one it already validated down, and an
+  existing `.venv` on an unsupported Python is rejected with a message naming
+  the fix instead of failing later in the build. Thanks
+  [@anubissbe](https://github.com/anubissbe).
+
 ## [3.0.2] - 2026-08-15
 
 ### Added
