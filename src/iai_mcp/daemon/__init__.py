@@ -1904,6 +1904,27 @@ async def main() -> int:
         # served during the boot window.
         _boot_socket_activity_mono: list[float] = [mcp_socket.last_activity_ts]
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
+
+        def _on_mcp_socket_task_done(task: "asyncio.Task") -> None:
+            # serve() is fire-and-forget: nothing else awaits this task, and
+            # main() otherwise only observes it at shutdown.wait() -- which
+            # never fires on its own. A serve() failure (like the Windows
+            # AttributeError on asyncio.start_unix_server, previously fixed)
+            # died completely silently: the rest of the daemon kept running,
+            # `daemon status` just said "not running", no traceback anywhere.
+            # Surface it loudly and trigger the normal shutdown path instead
+            # of leaving the process looking alive with no socket forever.
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                log.error(
+                    "mcp socket server task died unexpectedly; shutting down",
+                    exc_info=exc,
+                )
+                shutdown.set()
+
+        mcp_socket_task.add_done_callback(_on_mcp_socket_task_done)
         await asyncio.sleep(0.05)
 
         # The socket is live before any model construction: liveness must
