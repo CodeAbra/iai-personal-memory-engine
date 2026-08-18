@@ -99,7 +99,27 @@ If you need multi-tenant memory for an app you're shipping, use one of them — 
 
 <p align="center"><img src="docs/assets/slides/slide-15.jpg" width="850" alt="iai-pme"></p>
 
-**Install from PyPI** — a prebuilt wheel carries the engine, so no clone and no toolchains:
+**One command wires the whole thing** — engine, capture hooks, MCP server, background daemon. macOS or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine/main/scripts/bootstrap.sh | bash
+```
+
+It checks your prerequisites, clones the repo to `~/.local/share/iai-pme`, builds, installs the background engine and the capture hooks, registers the MCP server with Claude Code, and finishes with a health check. Re-run it any time to update. Prefer to look before you leap: add `--dry-run` to print every step without changing anything, or `--preflight-only` to check just the prerequisites.
+
+**Claude Code users** can go through the plugin instead — it wires the MCP server *and* ambient capture in two lines:
+
+```
+/plugin marketplace add CodeAbra/iai-personal-memory-engine
+/plugin install iai-memory@iai-pme
+```
+
+Restart the session and work normally: capture and recall are automatic from there. (`pip install iai-pme` first — the plugin carries the wiring, the package carries the engine.)
+
+<details>
+<summary><b>Just the package, or the manual build</b></summary>
+
+**From PyPI** — a prebuilt wheel carries the engine, so no clone and no toolchains:
 
 ```bash
 pip install iai-pme
@@ -112,24 +132,7 @@ That gives you the engine, the `iai` CLI, the dashboard and the MCP server. To p
 claude mcp add iai-pme -- node "$(python -c 'from iai_mcp.cli._capture import _resolve_wrapper_path as w; print(w())')"
 ```
 
-**Claude Code users can skip even that** — the plugin wires the MCP server *and* ambient capture in one step:
-
-```
-/plugin marketplace add CodeAbra/iai-personal-memory-engine
-/plugin install iai-memory@iai-pme
-```
-
-Restart the session and work normally: capture and recall are automatic from there. (`pip install iai-pme` first — the plugin carries the wiring, the package carries the engine.)
-
-**Want the whole thing wired for you, including the background engine?** One command, macOS or Linux:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine/main/scripts/bootstrap.sh | bash
-```
-
-It checks your prerequisites, clones the repo to `~/.local/share/iai-pme`, builds, installs the background engine and the capture hooks, registers the MCP server with Claude Code, and finishes with a health check. Re-run it any time to update. Prefer to look before you leap: add `--dry-run` to print every step without changing anything, or `--preflight-only` to check just the prerequisites.
-
-**Or the whole thing by hand** (the Rust engine compiles from source, so give it a few minutes):
+**The whole thing by hand** (the Rust engine compiles from source, so give it a few minutes):
 
 ```bash
 git clone https://github.com/CodeAbra/iai-personal-memory-engine.git && cd iai-personal-memory-engine
@@ -137,6 +140,8 @@ python3.12 -m venv .venv && source .venv/bin/activate && pip install .
 cd mcp-wrapper && npm install && npm run build && cd .. && iai-mcp daemon install && iai-mcp capture-hooks install
 claude mcp add iai-mcp -- node "$(pwd)/mcp-wrapper/dist/index.js"
 ```
+
+</details>
 
 Details, other hosts, and what each step actually does — below.
 
