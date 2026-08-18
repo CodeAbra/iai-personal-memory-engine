@@ -1073,22 +1073,46 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     print(f"Claude Code settings.json SessionStart:     {settings}  {'WIRED' if recall_wired else 'NOT WIRED'}")
     print(f"Claude Code settings.json per-turn recall:  {settings}  {'WIRED' if pt_wired else 'NOT WIRED'}")
 
+    # "MCP registered" (this section) is NOT the same thing as "ambient
+    # capture active": registering iai-mcp as an MCP server in
+    # claude_desktop_config.json makes it reachable from the Chat tab, which
+    # has no hook mechanism at all and produces zero ambient captures no
+    # matter how long a session runs. Real ambient capture in Desktop only
+    # exists in Cowork sessions, wired separately via `iai-mcp cowork
+    # install` — checked below, delegating to `cowork status`'s own logic.
     desktop_cfg = _cli._claude_desktop_config_path()
     if desktop_cfg is None:
-        desktop_line = "Claude Desktop: not installed"
-        desktop_wired = False
+        desktop_line = "Claude Desktop MCP registered:   not installed"
+        desktop_mcp_registered = False
     elif not desktop_cfg.exists():
-        desktop_line = f"Claude Desktop: {desktop_cfg} MISSING"
-        desktop_wired = False
+        desktop_line = f"Claude Desktop MCP registered:   {desktop_cfg} MISSING"
+        desktop_mcp_registered = False
     else:
         try:
             d = _json.loads(desktop_cfg.read_text(encoding="utf-8"))
-            desktop_wired = "iai-mcp" in d.get("mcpServers", {})
-            desktop_line = f"Claude Desktop: {desktop_cfg}  {'WIRED' if desktop_wired else 'NOT WIRED'}"
+            desktop_mcp_registered = "iai-mcp" in d.get("mcpServers", {})
+            desktop_line = (
+                f"Claude Desktop MCP registered:   {desktop_cfg}  "
+                f"{'WIRED' if desktop_mcp_registered else 'NOT WIRED'}"
+            )
         except (OSError, ValueError):
-            desktop_line = f"Claude Desktop: {desktop_cfg} (unreadable)"
-            desktop_wired = False
+            desktop_line = f"Claude Desktop MCP registered:   {desktop_cfg} (unreadable)"
+            desktop_mcp_registered = False
     print(desktop_line)
+
+    from iai_mcp.cli._cowork import _discover_cowork_homes, _home_wired
+
+    cowork_homes = _discover_cowork_homes()
+    cowork_ambient_active = bool(cowork_homes) and any(
+        _home_wired(home) for home in cowork_homes
+    )
+    if not cowork_homes:
+        print("Claude Desktop ambient capture (Cowork): no Cowork homes found — skipped")
+    else:
+        print(
+            "Claude Desktop ambient capture (Cowork): "
+            f"{'ACTIVE' if cowork_ambient_active else 'NOT WIRED'} — details: iai-mcp cowork status"
+        )
 
     ok = (
         dst.exists() and wired
@@ -1096,11 +1120,13 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
         and dst_recall.exists() and recall_wired
         and pt_dst.exists() and pt_wired
     )
-    desktop_problem = desktop_cfg is not None and desktop_cfg.exists() and not desktop_wired
+    desktop_problem = (
+        desktop_cfg is not None and desktop_cfg.exists() and not desktop_mcp_registered
+    )
 
     if ok and not desktop_problem:
         print(f"\nstatus: ACTIVE — Stop + UserPromptSubmit + SessionStart + per-turn hooks wired "
-              f"(Claude Code{'; Desktop also wired' if desktop_wired else ''})")
+              f"(Claude Code{'; Desktop Cowork ambient capture also active' if cowork_ambient_active else ''})")
         return 0
     msg = []
     if not ok:
