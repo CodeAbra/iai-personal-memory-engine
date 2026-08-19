@@ -20,6 +20,7 @@ import pytest
 from iai_mcp.store._exact_index import ExactCosineIndex
 
 EMBED_DIM = 384
+_TOP_K_TIE_TOL = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -82,14 +83,68 @@ def _random_cue(seed: int, dim: int = EMBED_DIM) -> np.ndarray:
     return rng.random(dim).astype(np.float32)
 
 
+def _assert_top_k_tie_tolerant(
+    expected: list[tuple[str, float]],
+    got: list[tuple[str, float]],
+    *,
+    k: int,
+    cue_seed: int,
+    tol: float = _TOP_K_TIE_TOL,
+) -> None:
+    """Compare a brute-force reference top-k against an index result: scores
+    are checked positionally within tol (a real rank error carries its own
+    far-off score into that slot, so this still catches it); the full top-k
+    id multiset must match exactly (membership is never weakened); and
+    within each contiguous run of adjacent EXPECTED-score gaps under tol,
+    only the id SET over that run must match — a within-tolerance tie is a
+    legitimate floating-point id-order coin-flip, not a rank error."""
+    assert len(got) == len(expected), (
+        f"k={k} cue_seed={cue_seed}: length mismatch "
+        f"expected={len(expected)} got={len(got)}"
+    )
+    n = len(expected)
+
+    for i in range(n):
+        exp_score = expected[i][1]
+        got_score = got[i][1]
+        assert abs(exp_score - got_score) < tol, (
+            f"k={k} cue_seed={cue_seed}: score mismatch at position {i} "
+            f"expected={exp_score} got={got_score}"
+        )
+
+    expected_ids = sorted(rid for rid, _ in expected)
+    got_ids = sorted(rid for rid, _ in got)
+    assert got_ids == expected_ids, (
+        f"k={k} cue_seed={cue_seed}: top-k id membership diverged from "
+        f"reference expected={expected_ids} got={got_ids}"
+    )
+
+    start = 0
+    while start < n:
+        end = start
+        while end + 1 < n and abs(expected[end + 1][1] - expected[end][1]) < tol:
+            end += 1
+        expected_group = sorted(rid for rid, _ in expected[start : end + 1])
+        got_group = sorted(rid for rid, _ in got[start : end + 1])
+        assert got_group == expected_group, (
+            f"k={k} cue_seed={cue_seed}: id set mismatch over tie-group "
+            f"positions {start}-{end} expected={expected_group} "
+            f"got={got_group}"
+        )
+        start = end + 1
+
+
 # ---------------------------------------------------------------------------
 # Build + top_k exactness
 # ---------------------------------------------------------------------------
 
 
 def test_build_top_k_matches_brute_force_reference():
-    """build 500 rows, query 50 cues at k in {1, 5, 10, 200}; ids and scores
-    match the brute-force reference exactly in order, scores within 1e-6."""
+    """build 500 rows, query 50 cues at k in {1, 5, 10, 200}: scores are
+    checked positionally against the brute-force reference within 1e-6, and
+    the full top-k id multiset must match exactly; id order is exact except
+    within a score-tie group (adjacent expected scores within 1e-6), where
+    float rounding may reorder the tied entries."""
     rows = _random_rows(500, seed=1)
     idx = ExactCosineIndex(embed_dim=EMBED_DIM)
     idx.build(rows)
@@ -102,16 +157,7 @@ def test_build_top_k_matches_brute_force_reference():
             expected = _brute_force_top_k(rows, cue, k)
             got = idx.top_k(cue, k)
             assert got is not None
-            assert len(got) == len(expected)
-            for (exp_id, exp_score), (got_id, got_score) in zip(expected, got):
-                assert got_id == exp_id, (
-                    f"k={k} cue_seed={cue_seed}: id mismatch "
-                    f"expected={exp_id} got={got_id}"
-                )
-                assert abs(exp_score - got_score) < 1e-6, (
-                    f"k={k} cue_seed={cue_seed}: score mismatch for {exp_id} "
-                    f"expected={exp_score} got={got_score}"
-                )
+            _assert_top_k_tie_tolerant(expected, got, k=k, cue_seed=cue_seed)
 
 
 def test_top_k_boundary_tie_matches_stable_argsort_reference_exactly():
@@ -718,3 +764,58 @@ def test_module_import_does_not_pull_in_hippo_subprocess():
         f"subprocess import check failed:\nstdout={result.stdout}\nstderr={result.stderr}"
     )
     assert "OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Tie-tolerant comparison helper
+# ---------------------------------------------------------------------------
+
+
+def test_tie_tolerant_comparison_accepts_intra_tie_flip_and_rejects_real_errors():
+    """Exercise `_assert_top_k_tie_tolerant` directly on hand-built (id,
+    score) lists: an intra-tie id-order flip is accepted, a real rank error
+    (a differently-scored id in a slot) is rejected by the positional score
+    check, and a membership change (an id absent from the reference) is
+    rejected by the multiset check."""
+    expected = [
+        ("a", 0.90),
+        ("b", 0.70),
+        ("c", 0.50000000),
+        ("d", 0.49999995),
+        ("e", 0.30),
+    ]
+
+    # Case A: adjacent within-tolerance-tied entries (c, d) swapped in
+    # position — accepted.
+    intra_tie_flip = [
+        ("a", 0.90),
+        ("b", 0.70),
+        ("d", 0.49999995),
+        ("c", 0.50000000),
+        ("e", 0.30),
+    ]
+    _assert_top_k_tie_tolerant(expected, intra_tie_flip, k=5, cue_seed=0)
+
+    # Case B: a real rank error — two far-apart-scored entries swapped.
+    real_rank_error = [
+        ("e", 0.30),
+        ("b", 0.70),
+        ("c", 0.50000000),
+        ("d", 0.49999995),
+        ("a", 0.90),
+    ]
+    with pytest.raises(AssertionError):
+        _assert_top_k_tie_tolerant(expected, real_rank_error, k=5, cue_seed=0)
+
+    # Case C: a membership change — an id absent from expected, placed at a
+    # within-tolerance score slot so the positional score check alone would
+    # pass.
+    membership_error = [
+        ("a", 0.90),
+        ("b", 0.70),
+        ("z", 0.50000000),
+        ("d", 0.49999995),
+        ("e", 0.30),
+    ]
+    with pytest.raises(AssertionError):
+        _assert_top_k_tie_tolerant(expected, membership_error, k=5, cue_seed=0)
