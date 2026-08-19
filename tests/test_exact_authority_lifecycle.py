@@ -700,3 +700,192 @@ def test_s12_query_similar_still_returns_k_live_results_after_tombstoning(
         "query_similar must never return a tombstoned id even though it "
         f"remains in the raw ANN index: overlap={result_ids & tombstoned_ids}"
     )
+
+
+# ---------------------------------------------------------------------------
+# S13 — non-finite coercion telemetry (store emit sites)
+# ---------------------------------------------------------------------------
+
+
+def test_s13_coerced_cue_emits_telemetry_and_recall_survives(
+    store: MemoryStore, monkeypatch
+) -> None:
+    """A NaN/inf cue at ``exact_top_k`` is coerced, the store emits exactly
+    one ``TELEMETRY_EMBED_NONFINITE`` (source=cue, action=coerced,
+    severity=warning), and recall still returns a list with no NaN scores."""
+    recs = [_make_rec(1000 + i) for i in range(6)]
+    for r in recs:
+        store.insert(r)
+    flush_record_buffer(store)
+
+    # Warm the index with a healthy cue first — a cold index would build
+    # inside this same call and could double-count the coercion.
+    store.exact_top_k(recs[0].embedding, k=5)
+    assert store._exact_index.is_warm is True
+
+    import iai_mcp.events as _events
+    from iai_mcp.events import TELEMETRY_EMBED_NONFINITE
+
+    original_emit = _events.emit_best_effort
+    captured: list[dict] = []
+
+    def _spy(store_arg, kind, data, **kwargs):
+        captured.append({"kind": kind, "data": data, "severity": kwargs.get("severity")})
+        return original_emit(store_arg, kind, data, **kwargs)
+
+    monkeypatch.setattr(_events, "emit_best_effort", _spy)
+
+    nan_cue = np.full(EMBED_DIM, np.nan, dtype=np.float32).tolist()
+    result = store.exact_top_k(nan_cue, k=5)
+    assert isinstance(result, list)
+    for _uid, score in result:
+        assert score == score  # not NaN
+
+    cue_events = [
+        c for c in captured
+        if c["kind"] == TELEMETRY_EMBED_NONFINITE and c["data"].get("action") == "coerced"
+    ]
+    assert len(cue_events) == 1
+    assert cue_events[0]["data"]["source"] == "cue"
+    assert cue_events[0]["severity"] == "warning"
+
+
+def test_s13_coerced_row_at_cold_build_emits_telemetry_and_isolates_scores(
+    store: MemoryStore, monkeypatch
+) -> None:
+    """A NaN row that reaches SQL WITHOUT the write-path guard (a stub
+    embedder over ``reembed_pending_rows``, mirroring a legacy pre-guard
+    row) is coerced at the first cold build; the store emits exactly one
+    event (source=row, context=build) and the coerced row does not corrupt
+    the other ids' scores."""
+    recs = [_make_rec(1100 + i) for i in range(6)]
+    for r in recs:
+        store.insert(r)
+    flush_record_buffer(store)
+    assert store._exact_index.is_warm is False
+
+    pid = _insert_pending(store, "legacy bad row text")
+    embedder = _StubEmbedder([float("nan")] * EMBED_DIM)
+    n = store.db.reembed_pending_rows(embedder)
+    assert n == 1
+    # The feed callback fires on the still-cold index — upsert is a no-op
+    # while cold, so the bad row is picked up only by the first build below.
+    assert store._exact_index.is_warm is False
+
+    import iai_mcp.events as _events
+    from iai_mcp.events import TELEMETRY_EMBED_NONFINITE
+
+    original_write = _events.write_event
+    captured: list[dict] = []
+
+    def _spy(store_arg, kind, data, **kwargs):
+        captured.append({"kind": kind, "data": data, "severity": kwargs.get("severity")})
+        return original_write(store_arg, kind, data, **kwargs)
+
+    monkeypatch.setattr(_events, "write_event", _spy)
+
+    cue = recs[0].embedding
+    got = store.exact_top_k(cue, k=10)
+    assert store._exact_index.is_warm is True
+    got_scores = {str(uid): score for uid, score in got}
+    assert got_scores[pid] == 0.0
+
+    cue_arr = np.asarray(cue, dtype=np.float32)
+    cue_unit = cue_arr / np.linalg.norm(cue_arr)
+    for r in recs:
+        rec_vec = np.asarray(r.embedding, dtype=np.float32)
+        rec_unit = rec_vec / np.linalg.norm(rec_vec)
+        expected_score = float(rec_unit @ cue_unit)
+        assert got_scores[str(r.id)] == pytest.approx(expected_score, abs=1e-5)
+
+    row_events = [
+        c for c in captured
+        if c["kind"] == TELEMETRY_EMBED_NONFINITE and c["data"].get("action") == "coerced"
+    ]
+    assert len(row_events) == 1
+    assert row_events[0]["data"]["source"] == "row"
+    assert row_events[0]["data"]["context"] == "build"
+    assert row_events[0]["severity"] == "warning"
+
+
+def test_s13_coerced_row_via_feed_upsert_is_buffered_not_immediate(
+    store: MemoryStore,
+) -> None:
+    """The feed/upsert coercion emit is buffered, never immediate: NOT
+    queryable right after the feed call, queryable only after
+    ``flush_event_buffer``. This is the proof of the hard "never immediate
+    at the feed site" constraint."""
+    recs = [_make_rec(1200 + i) for i in range(4)]
+    for r in recs:
+        store.insert(r)
+    flush_record_buffer(store)
+
+    store.exact_top_k(recs[0].embedding, k=5)  # warm the index first
+    assert store._exact_index.is_warm is True
+
+    from iai_mcp.events import (
+        TELEMETRY_EMBED_NONFINITE,
+        flush_event_buffer,
+        query_events,
+    )
+
+    before_total = store._exact_index.coerced_row_total
+    nan_vec = [float("nan")] * EMBED_DIM
+    store._feed_exact_index("feed-nan-id", nan_vec)
+    assert store._exact_index.coerced_row_total == before_total + 1
+
+    def _coerced_upsert_events() -> list[dict]:
+        events = query_events(store, kind=TELEMETRY_EMBED_NONFINITE)
+        return [
+            e for e in events
+            if (e.get("data") or {}).get("action") == "coerced"
+            and (e.get("data") or {}).get("context") == "upsert"
+        ]
+
+    assert not _coerced_upsert_events(), (
+        "the feed-site emit must not be immediately queryable — it is "
+        "buffered, not written through _conn_lock synchronously"
+    )
+
+    flush_event_buffer(store)
+
+    after_flush = _coerced_upsert_events()
+    assert len(after_flush) == 1
+    assert after_flush[0]["data"]["source"] == "row"
+    assert after_flush[0]["severity"] == "warning"
+
+
+def test_s13_emit_failure_isolated_from_recall_build_and_feed(
+    store: MemoryStore, monkeypatch
+) -> None:
+    """A raising write_event/emit_best_effort at any of the three sites must
+    never break the caller: cue recall still returns a list, a build with a
+    coerced row still installs and warms, feed upsert still returns."""
+    recs = [_make_rec(1300 + i) for i in range(6)]
+    for r in recs:
+        store.insert(r)
+    flush_record_buffer(store)
+
+    import iai_mcp.events as _events
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated event-store outage")
+
+    monkeypatch.setattr(_events, "write_event", _boom)
+    monkeypatch.setattr(_events, "emit_best_effort", _boom)
+
+    nan_cue = np.full(EMBED_DIM, np.nan, dtype=np.float32).tolist()
+    result = store.exact_top_k(nan_cue, k=5)
+    assert isinstance(result, list)
+    assert store._exact_index.is_warm is True
+
+    _insert_pending(store, "outage-era pending text")
+    embedder = _StubEmbedder([float("nan")] * EMBED_DIM)
+    n = store.db.reembed_pending_rows(embedder)
+    assert n == 1
+    store.invalidate_exact_index()
+    got = store.exact_top_k(recs[0].embedding, k=10)
+    assert isinstance(got, list)
+    assert store._exact_index.is_warm is True
+
+    store._feed_exact_index("feed-nan-outage", [float("nan")] * EMBED_DIM)  # must not raise

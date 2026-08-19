@@ -15,6 +15,7 @@ import sys
 import threading
 
 import numpy as np
+import pytest
 
 from iai_mcp.store._exact_index import ExactCosineIndex
 
@@ -50,13 +51,12 @@ def _decode_matrix(rows: list[tuple[str, bytes]], dim: int = EMBED_DIM) -> np.nd
 
 
 def _normalize_rows(m: np.ndarray) -> np.ndarray:
-    """L2-normalize row by row, matching build/upsert bit-for-bit."""
-    out = np.zeros_like(m, dtype=np.float32)
-    for index, row in enumerate(m):
-        norm = float(np.linalg.norm(row))
-        if norm != 0.0:
-            out[index] = (row / norm).astype(np.float32)
-    return out
+    """L2-normalize each row; zero-norm rows stay zero."""
+    norms = np.linalg.norm(m, axis=1, keepdims=True)
+    safe = np.where(norms == 0, 1.0, norms)
+    out = m / safe
+    out[norms.squeeze(-1) == 0] = 0.0
+    return out.astype(np.float32)
 
 
 def _brute_force_top_k(
@@ -413,6 +413,166 @@ def test_zero_norm_row_accepted_and_never_raises_or_outranks():
     got2 = idx.top_k(cue, len(idx))
     assert got2 is not None
     assert dict(got2)["zero-id-2"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Non-finite coercion
+# ---------------------------------------------------------------------------
+
+
+def test_nonfinite_row_build_coerced_to_zeros_and_counted():
+    """A NaN row and an inf row in the build set are coerced to zeros, ranked
+    below every positive-cos row, and counted; the clean rows' scores are
+    unchanged vs a rebuild with only the clean rows."""
+    clean_rows = _random_rows(20, seed=80)
+    nan_row = ("nan-id", _vec_to_blob(np.full(EMBED_DIM, np.nan, dtype=np.float32)))
+    inf_row = ("inf-id", _vec_to_blob(np.full(EMBED_DIM, np.inf, dtype=np.float32)))
+    rows = clean_rows + [nan_row, inf_row]
+
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)  # must not raise
+    assert idx.coerced_row_total == 2
+
+    cue = _random_cue(seed=81)
+    got = idx.top_k(cue, len(rows))
+    assert got is not None
+    scores = dict(got)
+    assert scores["nan-id"] == 0.0
+    assert scores["inf-id"] == 0.0
+
+    order_ids = [rid for rid, _ in got]
+    positive_ids = [rid for rid in order_ids if rid not in ("nan-id", "inf-id") and scores[rid] > 0]
+    if positive_ids:
+        best_positive_rank = min(order_ids.index(rid) for rid in positive_ids)
+        assert order_ids.index("nan-id") > best_positive_rank
+        assert order_ids.index("inf-id") > best_positive_rank
+
+    clean_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    clean_idx.build(clean_rows)
+    clean_scores = dict(clean_idx.top_k(cue, len(clean_rows)))
+    for rid, score in clean_scores.items():
+        assert scores[rid] == score
+
+
+def test_nonfinite_row_upsert_coerced_and_counted():
+    """A NaN row upserted into a warm index scores 0.0, is counted, never
+    raises, and does not poison the other ids' scores."""
+    rows = _random_rows(20, seed=82)
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+    before = idx.coerced_row_total
+
+    nan_vec = np.full(EMBED_DIM, np.nan, dtype=np.float32)
+    idx.upsert("nan-upsert-id", nan_vec)  # must not raise
+
+    assert idx.coerced_row_total == before + 1
+
+    cue = _random_cue(seed=83)
+    got = idx.top_k(cue, len(idx))
+    assert got is not None
+    scores = dict(got)
+    assert scores["nan-upsert-id"] == 0.0
+
+    clean_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    clean_idx.build(rows)
+    clean_scores = dict(clean_idx.top_k(cue, len(rows)))
+    for rid, score in clean_scores.items():
+        assert scores[rid] == score
+
+
+def test_nonfinite_cue_fully_coerced_no_nan_scores():
+    """An all-NaN/inf cue coerces to zero, top_k returns no NaN, every score
+    is 0.0, the result is deterministic across repeats, and each call is
+    counted."""
+    rows = _random_rows(30, seed=84)
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+    before = idx.coerced_cue_total
+
+    nan_cue = np.full(EMBED_DIM, np.nan, dtype=np.float32)
+    for _ in range(3):
+        got = idx.top_k(nan_cue, 10)
+        assert got is not None
+        scores = [s for _, s in got]
+        assert not any(np.isnan(s) for s in scores)
+        assert all(s == 0.0 for s in scores)
+
+    assert idx.coerced_cue_total == before + 3
+
+
+def test_partial_nonfinite_cue_keeps_finite_direction():
+    """A cue with SOME non-finite components zeroes only those; the finite
+    components still normalize to a real direction, producing a meaningful
+    (non-all-zero) ranking with no NaN."""
+    rows = _random_rows(30, seed=85)
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+
+    rng = np.random.default_rng(86)
+    cue = rng.random(EMBED_DIM).astype(np.float32)
+    cue[:10] = np.nan
+    cue[10:15] = np.inf
+
+    got = idx.top_k(cue, 10)
+    assert got is not None
+    scores = [s for _, s in got]
+    assert not any(np.isnan(s) for s in scores)
+    assert any(s != 0.0 for s in scores), (
+        "partial-nonfinite cue produced an all-zero ranking"
+    )
+
+    coerced_cue = cue.copy()
+    coerced_cue[:15] = 0.0
+    expected = _brute_force_top_k(rows, coerced_cue, 10)
+    assert [i for i, _ in got] == [i for i, _ in expected]
+
+
+def test_healthy_normalization_bit_identical():
+    """Over ~300 healthy float32 vectors, `_normalize_row` is a bit-identical
+    no-op vs the pre-coercion three-line reference, and neither counter moves
+    across a full build/top_k/upsert cycle on clean data."""
+    from iai_mcp.store._exact_index import _normalize_row
+
+    rng = np.random.default_rng(87)
+    vecs = [rng.standard_normal(EMBED_DIM).astype(np.float32) for _ in range(300)]
+
+    for v in vecs:
+        unit, coerced = _normalize_row(v)
+        assert coerced is False
+        norm = float(np.linalg.norm(v))
+        ref = (
+            np.zeros_like(v, dtype=np.float32)
+            if norm == 0.0
+            else (v / norm).astype(np.float32)
+        )
+        assert unit.tobytes() == ref.tobytes()
+
+    rows = [(f"healthy-{i}", _vec_to_blob(v)) for i, v in enumerate(vecs)]
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+    idx.top_k(vecs[0], 5)
+    idx.upsert("healthy-extra", vecs[1])
+
+    assert idx.coerced_cue_total == 0
+    assert idx.coerced_row_total == 0
+
+
+def test_build_upsert_bit_identical_same_vector():
+    """The same vector normalized via build vs via upsert produces byte-
+    identical resident rows (direct byte-identity, complementing the
+    score-level rebuild test above)."""
+    v = _random_cue(seed=88)
+
+    built_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    built_idx.build([("same-id", _vec_to_blob(v))])
+
+    upsert_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    upsert_idx.build([("seed-id", _vec_to_blob(_random_cue(seed=89)))])
+    upsert_idx.upsert("same-id", v)
+
+    built_row = built_idx._m[built_idx._id_to_row["same-id"]]
+    upsert_row = upsert_idx._m[upsert_idx._id_to_row["same-id"]]
+    assert built_row.tobytes() == upsert_row.tobytes()
 
 
 # ---------------------------------------------------------------------------

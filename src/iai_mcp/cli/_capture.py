@@ -273,15 +273,15 @@ def cmd_capture_transcript(args: argparse.Namespace) -> int:
     from iai_mcp.store import MemoryStore
 
     try:
-        store = MemoryStore()
-        counts = capture_transcript(
-            store,
-            args.transcript_path,
-            session_id=args.session_id,
-            max_turns=args.max_turns,
-        )
-        _stamp_capture_batch_liveness(counts)
-        print(json.dumps(counts, ensure_ascii=False))
+        with MemoryStore() as store:
+            counts = capture_transcript(
+                store,
+                args.transcript_path,
+                session_id=args.session_id,
+                max_turns=args.max_turns,
+            )
+            _stamp_capture_batch_liveness(counts)
+            print(json.dumps(counts, ensure_ascii=False))
         return 0
     except Exception as e:
         logger.error("capture-transcript inline failed: %s", e)

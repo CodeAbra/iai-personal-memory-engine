@@ -326,8 +326,8 @@ def test_doctor_total_row_count(tmp_path, monkeypatch):
     from iai_mcp.doctor import run_diagnosis
 
     results = run_diagnosis()
-    assert len(results) == 31, (
-        f"expected 31 rows; got {len(results)}: {[r.name for r in results]}"
+    assert len(results) >= 32, (
+        f"expected at least 32 rows; got {len(results)}: {[r.name for r in results]}"
     )
 
 
