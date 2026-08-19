@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 
 import pytest
 
-EXPECTED_VERSION = "3.0.2"
+EXPECTED_VERSION = "3.0.3"
 
 
 def test_canonical_version_is_expected():

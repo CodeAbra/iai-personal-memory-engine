@@ -1,6 +1,6 @@
 [project]
 name = "iai-pme"
-version = "3.0.2"
+version = "3.0.3"
 description = "MCP server giving Claude persistent autistic-style memory + learning"
 authors = [{ name = "Areg Noya" }]
 requires-python = ">=3.11,<3.13"
