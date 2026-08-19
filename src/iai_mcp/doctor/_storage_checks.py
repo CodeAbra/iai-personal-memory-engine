@@ -906,6 +906,87 @@ def check_v_native_embedder() -> CheckResult:
     )
 
 
+def check_dd_exact_index_coercions() -> CheckResult:
+    """WARN when a non-finite (NaN/inf) row or query cue has been coerced to
+    zero at the exact-cosine authority index — the degradation is countable,
+    not invisible. Reads persisted ``TELEMETRY_EMBED_NONFINITE`` events
+    read-only; never the live in-process counter (a doctor-opened store gets
+    its own cold index with zero counters), never by calling ``exact_top_k``
+    or ``_build_exact_index_sync`` (a diagnostic must not trigger a
+    whole-corpus build)."""
+    name = "(dd) exact-index coercions"
+    if not _store_file_present():
+        return CheckResult(name=name, passed=True, detail="no store yet (skip)")
+
+    store = None
+    try:
+        from iai_mcp.events import TELEMETRY_EMBED_NONFINITE, query_events
+        from iai_mcp.hippo import AccessMode
+        from iai_mcp.store import MemoryStore
+
+        store = MemoryStore(access_mode=AccessMode.SHARED, read_only=True)
+        # No `since` window: legacy bad rows surface at the first cold build
+        # after ANY daemon start, so a 24h window on a long-up daemon would
+        # falsely PASS a still-degraded ranking.
+        events = query_events(
+            store, kind=TELEMETRY_EMBED_NONFINITE, severity="warning", limit=500
+        )
+        coerced = [
+            e for e in events if (e.get("data") or {}).get("action") == "coerced"
+        ]
+        if not coerced:
+            return CheckResult(
+                name=name,
+                passed=True,
+                detail="no non-finite coercions recorded",
+                status="PASS",
+            )
+
+        # A single build/cue emit can cover multiple coercions in one event
+        # (`count`), so event-count != coercion-count — the payload's own
+        # running `total` is exact on both lanes.
+        row_total = max(
+            (
+                int(e["data"].get("total", 0))
+                for e in coerced
+                if e["data"].get("source") == "row"
+            ),
+            default=0,
+        )
+        cue_total = max(
+            (
+                int(e["data"].get("total", 0))
+                for e in coerced
+                if e["data"].get("source") == "cue"
+            ),
+            default=0,
+        )
+        latest = max((e.get("ts") for e in coerced), default=None)
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=(
+                f"non-finite coercions observed (cue={cue_total}, row={row_total}); "
+                f"latest {latest} — a stored row or cue carried NaN/inf; "
+                "ranking degraded, not crashed"
+            ),
+            status="WARN",
+        )
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic must never crash the run
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"events query failed: {type(exc).__name__}: {exc}",
+            status="WARN",
+        )
+    finally:
+        if store is not None and hasattr(store, "close"):
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _store_file_present() -> bool:
     """True when the store's database file already exists.
 

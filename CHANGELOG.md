@@ -5,9 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.3] - 2026-08-18
 
 ### Fixed
+- A stored embedding or a query cue carrying a non-finite value (`NaN` or
+  `±inf`) no longer poisons exact-cosine recall. The value is coerced to zero
+  at the single normalization point, so a corrupt row degrades to cosine 0
+  instead of flattening the whole ranking; the coercion is counted and
+  surfaced by a new `doctor` check rather than failing silently, and the read
+  path never raises. Thanks [@Acroaticum](https://github.com/Acroaticum).
+- `iai-mcp capture-transcript` reported records it never persisted — it built
+  a store, wrote through the buffer, and exited without closing it, so records
+  below the autoflush threshold were dropped while the command still printed
+  them as inserted. The command now closes the store on every path, so the
+  reported count matches what reaches disk. Thanks
+  [@chrismartinsoares](https://github.com/chrismartinsoares).
+- Running the test suite on Windows could read and write the operator's real
+  store. The hermetic fixture patched only `HOME`, which Windows ignores in
+  favour of `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH`, so the sandbox was a no-op
+  there. The fixture now redirects all of them, keeping the suite off the real
+  store on every platform. Thanks
+  [@chrismartinsoares](https://github.com/chrismartinsoares).
 - `scripts/bootstrap.sh` probed for a supported interpreter and reported it,
   then handed off to `scripts/install.sh`, which built the venv with a bare
   `python3`. On a machine where `python3` resolves to 3.13 or newer the

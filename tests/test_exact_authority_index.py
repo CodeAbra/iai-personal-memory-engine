@@ -15,10 +15,12 @@ import sys
 import threading
 
 import numpy as np
+import pytest
 
 from iai_mcp.store._exact_index import ExactCosineIndex
 
 EMBED_DIM = 384
+_TOP_K_TIE_TOL = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -50,13 +52,12 @@ def _decode_matrix(rows: list[tuple[str, bytes]], dim: int = EMBED_DIM) -> np.nd
 
 
 def _normalize_rows(m: np.ndarray) -> np.ndarray:
-    """L2-normalize row by row, matching build/upsert bit-for-bit."""
-    out = np.zeros_like(m, dtype=np.float32)
-    for index, row in enumerate(m):
-        norm = float(np.linalg.norm(row))
-        if norm != 0.0:
-            out[index] = (row / norm).astype(np.float32)
-    return out
+    """L2-normalize each row; zero-norm rows stay zero."""
+    norms = np.linalg.norm(m, axis=1, keepdims=True)
+    safe = np.where(norms == 0, 1.0, norms)
+    out = m / safe
+    out[norms.squeeze(-1) == 0] = 0.0
+    return out.astype(np.float32)
 
 
 def _brute_force_top_k(
@@ -82,14 +83,68 @@ def _random_cue(seed: int, dim: int = EMBED_DIM) -> np.ndarray:
     return rng.random(dim).astype(np.float32)
 
 
+def _assert_top_k_tie_tolerant(
+    expected: list[tuple[str, float]],
+    got: list[tuple[str, float]],
+    *,
+    k: int,
+    cue_seed: int,
+    tol: float = _TOP_K_TIE_TOL,
+) -> None:
+    """Compare a brute-force reference top-k against an index result: scores
+    are checked positionally within tol (a real rank error carries its own
+    far-off score into that slot, so this still catches it); the full top-k
+    id multiset must match exactly (membership is never weakened); and
+    within each contiguous run of adjacent EXPECTED-score gaps under tol,
+    only the id SET over that run must match — a within-tolerance tie is a
+    legitimate floating-point id-order coin-flip, not a rank error."""
+    assert len(got) == len(expected), (
+        f"k={k} cue_seed={cue_seed}: length mismatch "
+        f"expected={len(expected)} got={len(got)}"
+    )
+    n = len(expected)
+
+    for i in range(n):
+        exp_score = expected[i][1]
+        got_score = got[i][1]
+        assert abs(exp_score - got_score) < tol, (
+            f"k={k} cue_seed={cue_seed}: score mismatch at position {i} "
+            f"expected={exp_score} got={got_score}"
+        )
+
+    expected_ids = sorted(rid for rid, _ in expected)
+    got_ids = sorted(rid for rid, _ in got)
+    assert got_ids == expected_ids, (
+        f"k={k} cue_seed={cue_seed}: top-k id membership diverged from "
+        f"reference expected={expected_ids} got={got_ids}"
+    )
+
+    start = 0
+    while start < n:
+        end = start
+        while end + 1 < n and abs(expected[end + 1][1] - expected[end][1]) < tol:
+            end += 1
+        expected_group = sorted(rid for rid, _ in expected[start : end + 1])
+        got_group = sorted(rid for rid, _ in got[start : end + 1])
+        assert got_group == expected_group, (
+            f"k={k} cue_seed={cue_seed}: id set mismatch over tie-group "
+            f"positions {start}-{end} expected={expected_group} "
+            f"got={got_group}"
+        )
+        start = end + 1
+
+
 # ---------------------------------------------------------------------------
 # Build + top_k exactness
 # ---------------------------------------------------------------------------
 
 
 def test_build_top_k_matches_brute_force_reference():
-    """build 500 rows, query 50 cues at k in {1, 5, 10, 200}; ids and scores
-    match the brute-force reference exactly in order, scores within 1e-6."""
+    """build 500 rows, query 50 cues at k in {1, 5, 10, 200}: scores are
+    checked positionally against the brute-force reference within 1e-6, and
+    the full top-k id multiset must match exactly; id order is exact except
+    within a score-tie group (adjacent expected scores within 1e-6), where
+    float rounding may reorder the tied entries."""
     rows = _random_rows(500, seed=1)
     idx = ExactCosineIndex(embed_dim=EMBED_DIM)
     idx.build(rows)
@@ -102,16 +157,7 @@ def test_build_top_k_matches_brute_force_reference():
             expected = _brute_force_top_k(rows, cue, k)
             got = idx.top_k(cue, k)
             assert got is not None
-            assert len(got) == len(expected)
-            for (exp_id, exp_score), (got_id, got_score) in zip(expected, got):
-                assert got_id == exp_id, (
-                    f"k={k} cue_seed={cue_seed}: id mismatch "
-                    f"expected={exp_id} got={got_id}"
-                )
-                assert abs(exp_score - got_score) < 1e-6, (
-                    f"k={k} cue_seed={cue_seed}: score mismatch for {exp_id} "
-                    f"expected={exp_score} got={got_score}"
-                )
+            _assert_top_k_tie_tolerant(expected, got, k=k, cue_seed=cue_seed)
 
 
 def test_top_k_boundary_tie_matches_stable_argsort_reference_exactly():
@@ -416,6 +462,166 @@ def test_zero_norm_row_accepted_and_never_raises_or_outranks():
 
 
 # ---------------------------------------------------------------------------
+# Non-finite coercion
+# ---------------------------------------------------------------------------
+
+
+def test_nonfinite_row_build_coerced_to_zeros_and_counted():
+    """A NaN row and an inf row in the build set are coerced to zeros, ranked
+    below every positive-cos row, and counted; the clean rows' scores are
+    unchanged vs a rebuild with only the clean rows."""
+    clean_rows = _random_rows(20, seed=80)
+    nan_row = ("nan-id", _vec_to_blob(np.full(EMBED_DIM, np.nan, dtype=np.float32)))
+    inf_row = ("inf-id", _vec_to_blob(np.full(EMBED_DIM, np.inf, dtype=np.float32)))
+    rows = clean_rows + [nan_row, inf_row]
+
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)  # must not raise
+    assert idx.coerced_row_total == 2
+
+    cue = _random_cue(seed=81)
+    got = idx.top_k(cue, len(rows))
+    assert got is not None
+    scores = dict(got)
+    assert scores["nan-id"] == 0.0
+    assert scores["inf-id"] == 0.0
+
+    order_ids = [rid for rid, _ in got]
+    positive_ids = [rid for rid in order_ids if rid not in ("nan-id", "inf-id") and scores[rid] > 0]
+    if positive_ids:
+        best_positive_rank = min(order_ids.index(rid) for rid in positive_ids)
+        assert order_ids.index("nan-id") > best_positive_rank
+        assert order_ids.index("inf-id") > best_positive_rank
+
+    clean_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    clean_idx.build(clean_rows)
+    clean_scores = dict(clean_idx.top_k(cue, len(clean_rows)))
+    for rid, score in clean_scores.items():
+        assert scores[rid] == score
+
+
+def test_nonfinite_row_upsert_coerced_and_counted():
+    """A NaN row upserted into a warm index scores 0.0, is counted, never
+    raises, and does not poison the other ids' scores."""
+    rows = _random_rows(20, seed=82)
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+    before = idx.coerced_row_total
+
+    nan_vec = np.full(EMBED_DIM, np.nan, dtype=np.float32)
+    idx.upsert("nan-upsert-id", nan_vec)  # must not raise
+
+    assert idx.coerced_row_total == before + 1
+
+    cue = _random_cue(seed=83)
+    got = idx.top_k(cue, len(idx))
+    assert got is not None
+    scores = dict(got)
+    assert scores["nan-upsert-id"] == 0.0
+
+    clean_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    clean_idx.build(rows)
+    clean_scores = dict(clean_idx.top_k(cue, len(rows)))
+    for rid, score in clean_scores.items():
+        assert scores[rid] == score
+
+
+def test_nonfinite_cue_fully_coerced_no_nan_scores():
+    """An all-NaN/inf cue coerces to zero, top_k returns no NaN, every score
+    is 0.0, the result is deterministic across repeats, and each call is
+    counted."""
+    rows = _random_rows(30, seed=84)
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+    before = idx.coerced_cue_total
+
+    nan_cue = np.full(EMBED_DIM, np.nan, dtype=np.float32)
+    for _ in range(3):
+        got = idx.top_k(nan_cue, 10)
+        assert got is not None
+        scores = [s for _, s in got]
+        assert not any(np.isnan(s) for s in scores)
+        assert all(s == 0.0 for s in scores)
+
+    assert idx.coerced_cue_total == before + 3
+
+
+def test_partial_nonfinite_cue_keeps_finite_direction():
+    """A cue with SOME non-finite components zeroes only those; the finite
+    components still normalize to a real direction, producing a meaningful
+    (non-all-zero) ranking with no NaN."""
+    rows = _random_rows(30, seed=85)
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+
+    rng = np.random.default_rng(86)
+    cue = rng.random(EMBED_DIM).astype(np.float32)
+    cue[:10] = np.nan
+    cue[10:15] = np.inf
+
+    got = idx.top_k(cue, 10)
+    assert got is not None
+    scores = [s for _, s in got]
+    assert not any(np.isnan(s) for s in scores)
+    assert any(s != 0.0 for s in scores), (
+        "partial-nonfinite cue produced an all-zero ranking"
+    )
+
+    coerced_cue = cue.copy()
+    coerced_cue[:15] = 0.0
+    expected = _brute_force_top_k(rows, coerced_cue, 10)
+    assert [i for i, _ in got] == [i for i, _ in expected]
+
+
+def test_healthy_normalization_bit_identical():
+    """Over ~300 healthy float32 vectors, `_normalize_row` is a bit-identical
+    no-op vs the pre-coercion three-line reference, and neither counter moves
+    across a full build/top_k/upsert cycle on clean data."""
+    from iai_mcp.store._exact_index import _normalize_row
+
+    rng = np.random.default_rng(87)
+    vecs = [rng.standard_normal(EMBED_DIM).astype(np.float32) for _ in range(300)]
+
+    for v in vecs:
+        unit, coerced = _normalize_row(v)
+        assert coerced is False
+        norm = float(np.linalg.norm(v))
+        ref = (
+            np.zeros_like(v, dtype=np.float32)
+            if norm == 0.0
+            else (v / norm).astype(np.float32)
+        )
+        assert unit.tobytes() == ref.tobytes()
+
+    rows = [(f"healthy-{i}", _vec_to_blob(v)) for i, v in enumerate(vecs)]
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build(rows)
+    idx.top_k(vecs[0], 5)
+    idx.upsert("healthy-extra", vecs[1])
+
+    assert idx.coerced_cue_total == 0
+    assert idx.coerced_row_total == 0
+
+
+def test_build_upsert_bit_identical_same_vector():
+    """The same vector normalized via build vs via upsert produces byte-
+    identical resident rows (direct byte-identity, complementing the
+    score-level rebuild test above)."""
+    v = _random_cue(seed=88)
+
+    built_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    built_idx.build([("same-id", _vec_to_blob(v))])
+
+    upsert_idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    upsert_idx.build([("seed-id", _vec_to_blob(_random_cue(seed=89)))])
+    upsert_idx.upsert("same-id", v)
+
+    built_row = built_idx._m[built_idx._id_to_row["same-id"]]
+    upsert_row = upsert_idx._m[upsert_idx._id_to_row["same-id"]]
+    assert built_row.tobytes() == upsert_row.tobytes()
+
+
+# ---------------------------------------------------------------------------
 # Thread safety
 # ---------------------------------------------------------------------------
 
@@ -558,3 +764,58 @@ def test_module_import_does_not_pull_in_hippo_subprocess():
         f"subprocess import check failed:\nstdout={result.stdout}\nstderr={result.stderr}"
     )
     assert "OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Tie-tolerant comparison helper
+# ---------------------------------------------------------------------------
+
+
+def test_tie_tolerant_comparison_accepts_intra_tie_flip_and_rejects_real_errors():
+    """Exercise `_assert_top_k_tie_tolerant` directly on hand-built (id,
+    score) lists: an intra-tie id-order flip is accepted, a real rank error
+    (a differently-scored id in a slot) is rejected by the positional score
+    check, and a membership change (an id absent from the reference) is
+    rejected by the multiset check."""
+    expected = [
+        ("a", 0.90),
+        ("b", 0.70),
+        ("c", 0.50000000),
+        ("d", 0.49999995),
+        ("e", 0.30),
+    ]
+
+    # Case A: adjacent within-tolerance-tied entries (c, d) swapped in
+    # position — accepted.
+    intra_tie_flip = [
+        ("a", 0.90),
+        ("b", 0.70),
+        ("d", 0.49999995),
+        ("c", 0.50000000),
+        ("e", 0.30),
+    ]
+    _assert_top_k_tie_tolerant(expected, intra_tie_flip, k=5, cue_seed=0)
+
+    # Case B: a real rank error — two far-apart-scored entries swapped.
+    real_rank_error = [
+        ("e", 0.30),
+        ("b", 0.70),
+        ("c", 0.50000000),
+        ("d", 0.49999995),
+        ("a", 0.90),
+    ]
+    with pytest.raises(AssertionError):
+        _assert_top_k_tie_tolerant(expected, real_rank_error, k=5, cue_seed=0)
+
+    # Case C: a membership change — an id absent from expected, placed at a
+    # within-tolerance score slot so the positional score check alone would
+    # pass.
+    membership_error = [
+        ("a", 0.90),
+        ("b", 0.70),
+        ("z", 0.50000000),
+        ("d", 0.49999995),
+        ("e", 0.30),
+    ]
+    with pytest.raises(AssertionError):
+        _assert_top_k_tie_tolerant(expected, membership_error, k=5, cue_seed=0)

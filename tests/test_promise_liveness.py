@@ -352,7 +352,11 @@ class TestCaptureBatchLiveness:
         monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
 
         class FakeStore:
-            pass
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
 
         def fake_capture_transcript(store, transcript_path, *, session_id, max_turns):
             return {"inserted": 3, "reinforced": 0, "skipped": 2, "errors": 1}

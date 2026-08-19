@@ -76,6 +76,14 @@ def _lilli_fast_fsync():
         os.environ["LILLI_FSYNC_MODE"] = prior
 
 
+def _sandbox_home_env(monkeypatch: pytest.MonkeyPatch, base: Path) -> None:
+    drive, tail = os.path.splitdrive(str(base))
+    monkeypatch.setenv("HOME", str(base))
+    monkeypatch.setenv("USERPROFILE", str(base))
+    monkeypatch.setenv("HOMEDRIVE", drive)
+    monkeypatch.setenv("HOMEPATH", tail)
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     base = tmp_path_factory.mktemp("iai-hermetic")
@@ -88,7 +96,7 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HF_HUB_CACHE", str(_real_cache / "hub"))
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(_real_cache / "hub"))
 
-    monkeypatch.setenv("HOME", str(base))
+    _sandbox_home_env(monkeypatch, base)
     # The operator's real IAI_MCP_STORE (e.g. after `iai lang add`) must never
     # leak model selection into hermetic tests.
     monkeypatch.delenv("IAI_MCP_STORE", raising=False)
@@ -505,7 +513,7 @@ def hermetic_store(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyP
     store_root = tmp_path / ".iai-mcp"
     store_root.mkdir(parents=True, exist_ok=True)
     dead_socket = tmp_path / "no-such.sock"
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _sandbox_home_env(monkeypatch, tmp_path)
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(dead_socket))
     yield store_root

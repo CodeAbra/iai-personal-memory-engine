@@ -415,6 +415,7 @@ def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
         check_t_hippo_compacted_freshness(),
         check_u_recall_centrality_regression(),
         check_v_native_embedder(),
+        check_dd_exact_index_coercions(),
         check_ii_embed_identity(),
         check_w_no_permanent_failed(),
         check_x_no_collapsed_timestamps(),
@@ -1176,6 +1177,7 @@ from iai_mcp.doctor._lifecycle_checks import (
     check_y_rss_24h_plateau,
 )
 from iai_mcp.doctor._storage_checks import (
+    check_dd_exact_index_coercions,
     check_h_crypto_file_state,
     check_i_hippo_db_size,
     check_ii_embed_identity,
@@ -1208,6 +1210,7 @@ __all__ = [
     "check_b_socket_fresh",
     "check_c_lock_healthy",
     "check_d_no_orphan_core",
+    "check_dd_exact_index_coercions",
     "check_e_state_file_valid",
     "check_f_hippo_readable",
     "check_g_no_dup_binders",

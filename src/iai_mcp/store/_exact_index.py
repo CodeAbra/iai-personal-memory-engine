@@ -27,14 +27,21 @@ import numpy as np
 __all__ = ["ExactCosineIndex"]
 
 
-def _normalize_row(vec: np.ndarray) -> np.ndarray:
-    """L2-normalize a single vector; a zero-norm vector stays all-zeros
-    (cosine similarity 0 against any cue, never ranks above a positive
-    match, never raises a divide-by-zero)."""
-    norm = float(np.linalg.norm(vec))
+def _normalize_row(vec: np.ndarray) -> tuple[np.ndarray, bool]:
+    """L2-normalize a single vector; a zero-norm (or fully non-finite)
+    vector stays all-zeros (cosine similarity 0 against any cue, never
+    ranks above a positive match, never raises a divide-by-zero). Returns
+    ``(unit, coerced)``: ``coerced`` is True when a non-finite component
+    was zeroed before normalization."""
+    v = np.asarray(vec, dtype=np.float32)
+    coerced = False
+    if not bool(np.isfinite(v).all()):
+        v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)  # copy=True: vec may be a read-only frombuffer view
+        coerced = True
+    norm = float(np.linalg.norm(v))
     if norm == 0.0:
-        return np.zeros_like(vec, dtype=np.float32)
-    return (vec / norm).astype(np.float32)
+        return np.zeros_like(v, dtype=np.float32), coerced
+    return (v / norm).astype(np.float32), coerced
 
 
 class ExactCosineIndex:
@@ -59,6 +66,8 @@ class ExactCosineIndex:
         self._id_to_row: dict[str, int] = {}
         self._warm = False
         self._generation = 0
+        self._coerced_cue_total = 0
+        self._coerced_row_total = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -83,6 +92,18 @@ class ExactCosineIndex:
         """
         with self._lock:
             return self._generation
+
+    @property
+    def coerced_cue_total(self) -> int:
+        """Count of query cues coerced from non-finite to zero. Lock-free
+        read; incremented under ``self._lock``."""
+        return self._coerced_cue_total
+
+    @property
+    def coerced_row_total(self) -> int:
+        """Count of stored rows (build or upsert) coerced from non-finite to
+        zero. Lock-free read; incremented under ``self._lock``."""
+        return self._coerced_row_total
 
     def build(
         self,
@@ -113,6 +134,7 @@ class ExactCosineIndex:
         id_to_row: dict[str, int] = {}
 
         row_idx = 0
+        coerced_rows = 0
         for record_id, blob in rows:
             if not blob or len(blob) != expected_len:
                 continue  # malformed row: excluded from the matrix, never fatal
@@ -121,7 +143,10 @@ class ExactCosineIndex:
             # `_normalize_row` (the determinism contract: an upserted row and
             # a rebuilt row produce the same score) — a vectorized batch norm
             # accumulates differently in the low bits and breaks it.
-            matrix[row_idx] = _normalize_row(vec)
+            unit, coerced = _normalize_row(vec)
+            matrix[row_idx] = unit
+            if coerced:
+                coerced_rows += 1
             ids.append(record_id)
             id_to_row[record_id] = row_idx
             row_idx += 1
@@ -137,6 +162,7 @@ class ExactCosineIndex:
             self._id_to_row = id_to_row
             self._count = row_idx
             self._warm = True
+            self._coerced_row_total += coerced_rows
             return True
 
     def top_k(
@@ -147,9 +173,11 @@ class ExactCosineIndex:
         Computed fully under the internal lock (sub-ms hold).
         """
         cue = np.asarray(vec, dtype=np.float32)
-        cue_unit = _normalize_row(cue)
+        cue_unit, cue_coerced = _normalize_row(cue)
 
         with self._lock:
+            if cue_coerced:
+                self._coerced_cue_total += 1
             if not self._warm or self._m is None:
                 return None
             count = self._count
@@ -180,11 +208,13 @@ class ExactCosineIndex:
         capacity-doubling growth). No-op when cold.
         """
         cue = np.asarray(vec, dtype=np.float32)
-        unit = _normalize_row(cue)
+        unit, coerced = _normalize_row(cue)
 
         with self._lock:
             if not self._warm or self._m is None:
                 return
+            if coerced:
+                self._coerced_row_total += 1
 
             existing_row = self._id_to_row.get(record_id)
             if existing_row is not None:

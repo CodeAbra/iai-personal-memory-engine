@@ -64,3 +64,19 @@ def test_path_store_is_consistent(tmp_path: Path) -> None:
     assert store.root == tmp_path
     assert store.db._store_root == tmp_path
     assert _under(store.db._hippo_dir, tmp_path)
+
+
+def test_all_four_home_vars_under_tmp() -> None:
+    base = Path(os.environ["HOME"])
+    assert Path(os.environ["USERPROFILE"]) == base
+    drive, tail = os.path.splitdrive(str(base))
+    assert os.environ["HOMEDRIVE"] == drive
+    assert os.environ["HOMEPATH"] == tail
+
+
+def test_hermetic_store_patches_all_four_home_vars(hermetic_store, tmp_path: Path) -> None:
+    assert Path(os.environ["HOME"]) == tmp_path
+    assert Path(os.environ["USERPROFILE"]) == tmp_path
+    drive, tail = os.path.splitdrive(str(tmp_path))
+    assert os.environ["HOMEDRIVE"] == drive
+    assert os.environ["HOMEPATH"] == tail

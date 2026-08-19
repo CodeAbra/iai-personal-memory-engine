@@ -329,6 +329,9 @@ class MemoryStore:
         # (a warm-up probe racing a first recall) must never run two
         # whole-corpus builds of the same matrix side by side.
         self._exact_index_build_lock = threading.Lock()
+        # Rate-limit gate for the cue-coercion telemetry emit (recall is a
+        # hot path; an upstream NaN-cue source must not emit every call).
+        self._last_cue_nonfinite_emit_at = 0.0
         # Register the reembed-flip feed callback eagerly, mirroring the
         # recency-buffer and count-cache registrations above: bound through a
         # weakref so HippoDB never holds a strong reference back to this store.
@@ -2100,6 +2103,30 @@ class MemoryStore:
         return conn
 
     _EXACT_INDEX_BUILD_BACKOFF_SEC = 30.0
+    _CUE_NONFINITE_EMIT_WINDOW_SEC = 60.0
+
+    def _maybe_emit_cue_nonfinite(self, count: int, total: int) -> None:
+        """Rate-limited, buffered ``TELEMETRY_EMBED_NONFINITE`` emit for a
+        coerced query cue. The first coercion always emits (``total ==
+        count``); subsequent ones are suppressed within the window, but
+        ``total`` stays the exact running count regardless."""
+        now = time.monotonic()
+        if total > count and (now - self._last_cue_nonfinite_emit_at) < self._CUE_NONFINITE_EMIT_WINDOW_SEC:
+            return
+        self._last_cue_nonfinite_emit_at = now
+        from iai_mcp.events import TELEMETRY_EMBED_NONFINITE, emit_best_effort
+        emit_best_effort(
+            self,
+            TELEMETRY_EMBED_NONFINITE,
+            {
+                "source": "cue",
+                "action": "coerced",
+                "context": "cue",
+                "count": count,
+                "total": total,
+            },
+            severity="warning",
+        )
 
     def _build_exact_index_sync(self) -> None:
         """Single-flight cold build of the resident exact-cosine matrix.
@@ -2163,6 +2190,7 @@ class MemoryStore:
                     with self.db.ro_conn() as conn:
                         rows = conn.execute(_sql).fetchall()
                 build_rows = [(row["id"], row["embedding"]) for row in rows]
+                _before_row = self._exact_index.coerced_row_total
                 try:
                     self._exact_index.build(build_rows, expected_generation=_expected_gen)
                 except Exception:
@@ -2174,6 +2202,30 @@ class MemoryStore:
                         self._EXACT_INDEX_BUILD_BACKOFF_SEC,
                         exc_info=True,
                     )
+                else:
+                    _after_row = self._exact_index.coerced_row_total
+                    if _after_row > _before_row:
+                        try:
+                            from iai_mcp.events import (
+                                TELEMETRY_EMBED_NONFINITE,
+                                write_event,
+                            )
+                            write_event(
+                                self,
+                                TELEMETRY_EMBED_NONFINITE,
+                                {
+                                    "source": "row",
+                                    "action": "coerced",
+                                    "context": "build",
+                                    "count": _after_row - _before_row,
+                                    "total": _after_row,
+                                },
+                                severity="warning",
+                            )
+                        except Exception:  # noqa: BLE001 -- a telemetry emit
+                            # must never turn a successful build into a
+                            # reported failure.
+                            pass
             except Exception:  # noqa: BLE001 -- no-raise contract
                 logger.debug("exact-cosine matrix build failed", exc_info=True)
 
@@ -2319,7 +2371,15 @@ class MemoryStore:
                 else:
                     self._schedule_exact_index_build()
                     return []
+            _before_cue = self._exact_index.coerced_cue_total
             result = self._exact_index.top_k(vec, k)
+            _after_cue = self._exact_index.coerced_cue_total
+            if _after_cue > _before_cue:
+                try:
+                    self._maybe_emit_cue_nonfinite(_after_cue - _before_cue, _after_cue)
+                except Exception:  # noqa: BLE001 -- a telemetry emit must
+                    # never discard the ranking already computed above.
+                    pass
             if result is None:
                 return []
             return [(UUID(rid), score) for rid, score in result]
@@ -2335,7 +2395,27 @@ class MemoryStore:
         while cold); the next exact_top_k call rebuilds from live SQL instead.
         """
         try:
+            _before_row = self._exact_index.coerced_row_total
             self._exact_index.upsert(record_id, vec)
+            _after_row = self._exact_index.coerced_row_total
+            if _after_row > _before_row:
+                try:
+                    from iai_mcp.events import TELEMETRY_EMBED_NONFINITE, emit_best_effort
+                    emit_best_effort(
+                        self,
+                        TELEMETRY_EMBED_NONFINITE,
+                        {
+                            "source": "row",
+                            "action": "coerced",
+                            "context": "upsert",
+                            "count": _after_row - _before_row,
+                            "total": _after_row,
+                        },
+                        severity="warning",
+                    )
+                except Exception:  # noqa: BLE001 -- a telemetry emit must
+                    # never turn a successful upsert into a reported failure.
+                    pass
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "exact-index upsert failed for %s: %s",
