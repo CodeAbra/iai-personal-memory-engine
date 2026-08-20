@@ -16,7 +16,6 @@ pub mod generators;
 pub mod shortest;
 
 use pyo3::prelude::*;
-use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 
 use crate::error::GraphError;
 
@@ -70,7 +69,7 @@ pub fn validate_csr(indptr: &[i64], indices: &[i64], n_nodes: usize) -> Result<(
 /// the next wave will replace. The `module = "iai_mcp_native.graph"`
 /// argument tells pyo3-stub-gen where to place this function in the
 /// generated `.pyi`.
-#[gen_stub_pyfunction(module = "iai_mcp_native.graph")]
+#[cfg_attr(feature = "stubgen", pyo3_stub_gen::derive::gen_stub_pyfunction(module = "iai_mcp_native.graph"))]
 #[pyfunction]
 pub fn answer() -> i64 {
     42
@@ -95,6 +94,3 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     Ok(())
 }
-
-// Stub-metadata gatherer used by the wrapper crate's stub_gen binary.
-define_stub_info_gatherer!(stub_info);

@@ -204,7 +204,8 @@ class _BuildWithWrapper(_OrigBuildPy):
                 "Native extension stub(s) missing from "
                 f"{_NATIVE_STUB_SRC}: {missing}. A wheel must never ship "
                 "without native stubs; regenerate via "
-                "'cargo run --bin stub_gen -p iai_mcp_native' and flatten "
+                "'cargo run --bin stub_gen -p iai_mcp_native --features stubgen' "
+                "and flatten "
                 "the staged output into the tracked stub files."
             )
 

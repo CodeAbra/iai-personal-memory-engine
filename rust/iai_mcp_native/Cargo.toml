@@ -11,18 +11,20 @@ name       = "iai_mcp_native"
 crate-type = ["cdylib", "rlib"]    # cdylib ships the wheel; rlib lets the stub_gen binary link
 
 [[bin]]
-name = "stub_gen"
-path = "src/bin/stub_gen.rs"
+name              = "stub_gen"
+path              = "src/bin/stub_gen.rs"
+required-features = ["stubgen"]
 
 [features]
 default          = []
 accelerate       = ["iai_mcp_embed_core/accelerate"]
 metal            = ["iai_mcp_embed_core/metal"]
 extension-module = ["pyo3/extension-module"]   # opt-in; activated by maturin via pyproject.toml ONLY
+stubgen          = ["dep:pyo3-stub-gen", "iai_mcp_embed_core/stubgen", "iai_mcp_graph_core/stubgen"]
 
 [dependencies]
 pyo3                = { workspace = true }
-pyo3-stub-gen       = { workspace = true }
+pyo3-stub-gen       = { workspace = true, optional = true }
 iai_mcp_embed_core  = { path = "../iai_mcp_embed_core" }
 iai_mcp_graph_core  = { path = "../iai_mcp_graph_core" }
 iai_mcp_vec_core    = { path = "../iai_mcp_vec_core" }

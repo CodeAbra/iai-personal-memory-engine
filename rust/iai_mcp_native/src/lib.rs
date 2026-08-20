@@ -23,7 +23,6 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3_stub_gen::define_stub_info_gatherer;
 
 #[pymodule]
 fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -83,15 +82,10 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-// Stub-metadata gatherer for the `stub_gen` binary. The macro walks the
-// `#[gen_stub_*]` attributes declared in the consumed core crates because
-// each crate runs its own `define_stub_info_gatherer!(stub_info)` and the
-// wrapper aggregates them at build time.
-define_stub_info_gatherer!(stub_info);
-
 // Must be defined here, not in the `stub_gen` binary — pyo3-stub-gen requires
 // the calling crate be the linked PyO3 library crate for `inventory` to see
 // its registered items.
+#[cfg(feature = "stubgen")]
 pub fn stub_info_staged() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
     // is_mixed_layout=true bypasses the Pure-Rust single-module validation
     // WITHOUT touching [tool.maturin]; project_root is a dedicated staging

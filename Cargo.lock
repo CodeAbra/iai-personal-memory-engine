@@ -1633,7 +1633,6 @@ dependencies = [
  "numpy",
  "proptest",
  "pyo3",
- "pyo3-stub-gen",
  "serde_json",
  "sha2",
 ]
@@ -1662,7 +1661,6 @@ dependencies = [
  "parking_lot",
  "proptest",
  "pyo3",
- "pyo3-stub-gen",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -1675,7 +1673,6 @@ dependencies = [
  "lillibrain",
  "proptest",
  "pyo3",
- "pyo3-stub-gen",
  "serde",
  "tempfile",
  "thiserror 2.0.18",

@@ -1,7 +1,7 @@
 //! Emits the `.pyi` stubs for the native wrapper module.
 //!
 //! Invocation:
-//!   cargo run --bin stub_gen -p iai_mcp_native
+//!   cargo run --bin stub_gen -p iai_mcp_native --features stubgen
 //!
 //! Output:
 //!   rust/iai_mcp_native/stubs/iai_mcp_native/{__init__,embed/__init__,graph/__init__}.pyi

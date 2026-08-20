@@ -9,9 +9,9 @@
 [graph]
 # Restrict transitive resolution to macOS + Linux. Without this, cargo-deny
 # also walks the aarch64-pc-windows-msvc graph, which can pull windows-sys /
-# windows as target-conditional deps from pyo3-stub-gen or the tokenizer
-# crate's transitives — firing the ban check spuriously on a clean macOS
-# workstation where those crates are never actually compiled.
+# windows as target-conditional deps from the tokenizer crate's transitives —
+# firing the ban check spuriously on a clean macOS workstation where those
+# crates are never actually compiled.
 targets = [
     { triple = "x86_64-apple-darwin" },
     { triple = "aarch64-apple-darwin" },
@@ -83,17 +83,4 @@ ignore = [
     # used only for a bench/download progress bar, never on the shipped
     # runtime path. No code fix exists upstream.
     "RUSTSEC-2025-0119",
-    # unic-char-property / unic-char-range / unic-common / unic-emoji-char /
-    # unic-ucd-ident / unic-ucd-version: all six are the open-i18n/rust-unic
-    # project, unmaintained as a whole. Pulled transitively via pyo3-stub-gen's
-    # rustpython-parser dependency (Python-syntax parsing for the `.pyi`
-    # stub-file generator). No code fix exists upstream; re-evaluate when
-    # pyo3-stub-gen migrates off rustpython-parser or rustpython-parser
-    # migrates off rust-unic.
-    "RUSTSEC-2025-0081",
-    "RUSTSEC-2025-0075",
-    "RUSTSEC-2025-0080",
-    "RUSTSEC-2025-0090",
-    "RUSTSEC-2025-0100",
-    "RUSTSEC-2025-0098",
 ]

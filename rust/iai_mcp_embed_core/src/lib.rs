@@ -25,7 +25,6 @@ pub mod bert;
 pub mod error;
 
 use pyo3::prelude::*;
-use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 
 use crate::bert::BertEmbedder;
 
@@ -39,13 +38,13 @@ use crate::bert::BertEmbedder;
 /// in the generated `.pyi` stub — pyo3-stub-gen derives parent/child module
 /// relationships from these dotted names so a single stub file can describe
 /// the sub-module tree consumed at runtime.
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "stubgen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass(module = "iai_mcp_native.embed")]
 pub struct Embedder {
     inner: BertEmbedder,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "stubgen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl Embedder {
     /// Load bge-small-en-v1.5 weights from the HF cache (lazy download on miss
@@ -86,8 +85,3 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Embedder>()?;
     Ok(())
 }
-
-// Required by pyo3-stub-gen: collects stub metadata from all #[gen_stub_*]
-// macros and exposes a `stub_info()` function for the wrapper crate's
-// stub_gen binary to consume.
-define_stub_info_gatherer!(stub_info);

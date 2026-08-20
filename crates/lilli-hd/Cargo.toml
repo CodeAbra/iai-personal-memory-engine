@@ -11,7 +11,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 pyo3 = { workspace = true }
-pyo3-stub-gen = { workspace = true }
 numpy = { workspace = true }
 sha2 = "0.10"
 lilli-parity = { path = "../lilli-parity" }
