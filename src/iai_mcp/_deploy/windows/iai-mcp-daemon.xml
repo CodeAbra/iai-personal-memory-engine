@@ -7,10 +7,12 @@
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <UserId>{USER_ID}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
+      <UserId>{USER_ID}</UserId>
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
