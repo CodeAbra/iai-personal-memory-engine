@@ -723,7 +723,7 @@ def render_findings_md(
 
     lines.append("## Threshold Suggestion")
     lines.append("")
-    lines.append("Theoretical warm plateau target:")
+    lines.append("Theoretical warm plateau target (post-fix):")
     lines.append("")
     lines.append("| Contributor | Bytes |")
     lines.append("|-------------|-------|")
@@ -734,7 +734,7 @@ def render_findings_md(
     lines.append("| HNSW standby index (same) | ~38 MB |")
     lines.append("| SQLite page cache (capped 64 MB) | ~64 MB |")
     lines.append("| Drain peak transient (250 events × ~10 KB) | ~3 MB |")
-    lines.append("| SCHEMA_MINE intermediate (streaming) | ~5 MB |")
+    lines.append("| SCHEMA_MINE intermediate (post-fix streaming) | ~5 MB |")
     lines.append("| HippoDB connection + label_map | ~20 MB |")
     lines.append("| Misc Python objects (gc heap, asyncio loop, etc) | ~150 MB |")
     lines.append("| **Subtotal** | **~650 MB** |")

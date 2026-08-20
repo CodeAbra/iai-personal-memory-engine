@@ -89,6 +89,23 @@ def _drain_rss_bytes() -> int:
 # stacking. The per-file ``.processing-{pid}`` claim still guards double-
 # processing; this guards double resident cost.
 _DRAIN_SINGLE_FLIGHT_LOCK = threading.Lock()
+# Same rail for the live-spool pass: two overlapping passes read the same
+# drain-offset and re-capture the same lines (idempotent, but the reinforce path
+# would count each duplicate as a re-seen turn).
+_LIVE_DRAIN_SINGLE_FLIGHT_LOCK = threading.Lock()
+
+# Drain-count keys that mean "captured events may still be waiting on disk":
+# a caller that needs a complete promotion (the per-turn refresh reply) must
+# treat any of them as not caught up.
+_DRAIN_INCOMPLETE_KEYS = (
+    "skipped_single_flight",
+    "disabled",
+    "cap_hit",
+    "files_failed",
+    "files_key_deferred",
+    "files_corrupt",
+    "events_skipped_insert_failed",
+)
 
 _LIVE_ACTIVE_RE = re.compile(r"\.live\.jsonl$")
 
@@ -862,9 +879,15 @@ def capture_transcript(
     return counts
 
 
+# Mirror of the inline hook's _NOISE_STARTSWITH / _NOISE_EQUALS — keep the
+# two in lockstep.
 _NOISE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("startswith", "<command-message>"),
     ("startswith", "<command-name>"),
+    ("startswith", "<command-args>"),
+    ("startswith", "<local-command-caveat>"),
+    ("startswith", "<local-command-stdout>"),
+    ("startswith", "<local-command-stderr>"),
     ("startswith", "Base directory for this skill:"),
     ("startswith", "<task-notification>"),
     ("equals",     "[Request interrupted by user]"),
@@ -1096,9 +1119,16 @@ def _parse_transcript_obj(
         text = str(content).strip()
     if not text:
         return None
-    if _is_noise(text):
+    # isMeta marks host-injected pseudo-turns (skill bodies, local-command
+    # caveats); they are never dialogue whatever their text says.
+    if obj.get("isMeta") is True or _is_noise(text):
         return None
-    return role, text, obj.get("uuid"), obj.get("timestamp")
+    # A role:user line's promptId is the same key the immediate stdin
+    # capture stamps (source_uuid=prompt_id); role:assistant stays on the
+    # per-line uuid — assistant lines of one prompt share promptId, so
+    # keying them by it would collapse a whole response into one idem.
+    src_uuid = (obj.get("promptId") if role == "user" else None) or obj.get("uuid")
+    return role, text, src_uuid, obj.get("timestamp")
 
 
 # Spool lines are AES-GCM-encrypted with the store's key FILE only — never
@@ -1733,6 +1763,12 @@ def drain_capture_backlog(store: MemoryStore) -> dict[str, int]:
     return counts
 
 
+def drain_left_pending(counts: dict[str, int]) -> bool:
+    """True when a drain pass may have left captured events on disk (skipped,
+    disabled, capped, failed, key-deferred or corrupt files)."""
+    return any(counts.get(k) for k in _DRAIN_INCOMPLETE_KEYS)
+
+
 def drain_deferred_captures(store: MemoryStore) -> dict[str, int]:
     counts = {
         "files_drained": 0,
@@ -2198,6 +2234,8 @@ def _drain_deferred_captures_locked(
     except Exception:  # noqa: BLE001 -- best-effort fail-safe boundary
         log.warning("bank-recent prune failed", exc_info=True)
 
+    if cap_hit:
+        counts["cap_hit"] = 1
     if rss_soft_cap_hit:
         counts["rss_soft_cap_hit"] = 1
         try:
@@ -2451,8 +2489,6 @@ def drain_active_live_captures(
     *,
     exclude_session_id: str,
 ) -> dict[str, int]:
-    deferred_dir = deferred_captures_dir()
-    state_dir = Path.home() / ".iai-mcp" / ".capture-state"
     counts: dict[str, int] = {
         "files_drained": 0,
         "events_inserted": 0,
@@ -2460,6 +2496,25 @@ def drain_active_live_captures(
         "events_skipped": 0,
         "files_corrupt": 0,
     }
+    if not _LIVE_DRAIN_SINGLE_FLIGHT_LOCK.acquire(blocking=False):
+        counts["skipped_single_flight"] = 1
+        return counts
+    try:
+        return _drain_active_live_captures_locked(
+            store, exclude_session_id=exclude_session_id, counts=counts
+        )
+    finally:
+        _LIVE_DRAIN_SINGLE_FLIGHT_LOCK.release()
+
+
+def _drain_active_live_captures_locked(
+    store: MemoryStore,
+    *,
+    exclude_session_id: str,
+    counts: dict[str, int],
+) -> dict[str, int]:
+    deferred_dir = deferred_captures_dir()
+    state_dir = Path.home() / ".iai-mcp" / ".capture-state"
     if not deferred_dir.exists():
         return counts
 
@@ -2484,6 +2539,7 @@ def drain_active_live_captures(
             header = json.loads(_decode_spool_line(complete_lines[0]))
         except SpoolKeyUnavailable:
             # Leave the file AND its offset untouched for a keyed pass.
+            counts["files_key_deferred"] = counts.get("files_key_deferred", 0) + 1
             continue
         except (json.JSONDecodeError, ValueError):
             counts["files_corrupt"] += 1
@@ -2519,6 +2575,7 @@ def drain_active_live_captures(
             except SpoolKeyUnavailable:
                 # The offset must NOT advance past a line this process
                 # cannot decrypt — a keyed pass picks up exactly here.
+                counts["files_key_deferred"] = counts.get("files_key_deferred", 0) + 1
                 break
             except (json.JSONDecodeError, ValueError):
                 new_offset += 1
@@ -2535,11 +2592,20 @@ def drain_active_live_captures(
                 source_uuid=ev.get("source_uuid"),
             )
             status = result.get("status", "skipped")
+            reason = str(result.get("reason", ""))
             if status == "inserted":
                 counts["events_inserted"] += 1
                 file_had_insert = True
             elif status == "reinforced":
                 counts["events_reinforced"] += 1
+            elif status == "skipped" and reason.startswith("insert-failed:"):
+                # Offset must NOT advance past a line the store failed to
+                # persist — a later pass retries; mirrors the deferred
+                # drain's insert-failed handling so caught_up fails closed.
+                counts["events_skipped_insert_failed"] = (
+                    counts.get("events_skipped_insert_failed", 0) + 1
+                )
+                break
             else:
                 counts["events_skipped"] += 1
             new_offset += 1

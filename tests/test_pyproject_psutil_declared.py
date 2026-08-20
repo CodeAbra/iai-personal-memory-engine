@@ -16,13 +16,11 @@ def test_psutil_declared_in_project_dependencies() -> None:
     project_block = text[project_marker:section_end]
     assert "psutil" in project_block, (
         "psutil missing from [project] block. The declaration exists so a "
-        "clean `pip install -e .` reaches psutil "
-        "without the [compress] extra. Restore the line."
+        "clean `pip install -e .` reaches psutil at runtime. Restore the line."
     )
     import re
     match = re.search(r'"\s*psutil\s*>=\s*\d+', project_block)
     assert match, (
         'Expected `"psutil>=X.Y.Z"` style declaration in [project] '
-        "dependencies. The floor >=5.9.0 matches the "
-        "accelerate transitive-floor and stay broad."
+        "dependencies."
     )

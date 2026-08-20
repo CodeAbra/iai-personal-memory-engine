@@ -1809,24 +1809,39 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         return _payload_to_json(payload)
 
     if method == "session_refresh_if_stale":
-        from iai_mcp.capture import drain_active_live_captures, drain_deferred_captures
+        from iai_mcp.capture import (
+            drain_active_live_captures,
+            drain_deferred_captures,
+            drain_left_pending,
+        )
         from iai_mcp.session import max_record_created_at, render_session_delta
 
         caller_watermark = params.get("watermark") or ""
         refreshing_session_id = params.get("session_id", "-")
 
+        # caught_up: every promotion step ran to completion, so new_max_ts covers
+        # everything captured so far and the caller may advance its watermark.
+        # Any skipped/partial/failed step fails closed — an advanced watermark
+        # would hide the still-pending turns from every later delta.
+        caught_up = True
         try:
-            drain_deferred_captures(store)
+            if drain_left_pending(drain_deferred_captures(store)):
+                caught_up = False
         except Exception as _drain_exc:  # noqa: BLE001
             logger.warning(
                 "session_refresh_drain_failed",
                 extra={"err": str(_drain_exc)[:120]},
             )
-            return {"rendered": "", "new_max_ts": ""}
+            return {"rendered": "", "new_max_ts": "", "caught_up": False}
 
         try:
-            drain_active_live_captures(store, exclude_session_id=refreshing_session_id)
+            _live_counts = drain_active_live_captures(
+                store, exclude_session_id=refreshing_session_id
+            )
+            if drain_left_pending(_live_counts):
+                caught_up = False
         except Exception as _live_drain_exc:  # noqa: BLE001
+            caught_up = False
             logger.warning(
                 "session_refresh_live_drain_failed",
                 extra={"err": str(_live_drain_exc)[:120]},
@@ -1836,6 +1851,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             from iai_mcp.store import flush_record_buffer
             flush_record_buffer(store)
         except Exception as _flush_exc:  # noqa: BLE001
+            caught_up = False
             logger.warning(
                 "session_refresh_flush_failed",
                 extra={"err": str(_flush_exc)[:120]},
@@ -1857,12 +1873,14 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         _wm_norm = _norm(caller_watermark) if caller_watermark else ""
 
         if not new_max_ts or (caller_watermark and _new_max_norm <= _wm_norm):
-            return {"rendered": "", "new_max_ts": new_max_ts or ""}
+            return {"rendered": "", "new_max_ts": new_max_ts or "", "caught_up": caught_up}
 
         now_monotonic = _time.monotonic()
         last_render = _SESSION_REFRESH_LAST_RENDER.get(refreshing_session_id, 0.0)
         if now_monotonic - last_render < _SESSION_REFRESH_DEBOUNCE_S:
-            return {"rendered": "", "new_max_ts": new_max_ts}
+            # Suppressed, not caught up: the caller must keep its watermark so
+            # the delta renders on the next prompt past the window.
+            return {"rendered": "", "new_max_ts": new_max_ts, "caught_up": False}
 
         rendered = render_session_delta(
             store, caller_watermark, session_id=refreshing_session_id,
@@ -1872,7 +1890,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             _SESSION_REFRESH_LAST_RENDER.move_to_end(refreshing_session_id)
             if len(_SESSION_REFRESH_LAST_RENDER) > _SESSION_REFRESH_MAX_ENTRIES:
                 _SESSION_REFRESH_LAST_RENDER.popitem(last=False)
-        return {"rendered": rendered, "new_max_ts": new_max_ts}
+        return {"rendered": rendered, "new_max_ts": new_max_ts, "caught_up": caught_up}
 
     if method == "episodes_recent":
         from iai_mcp.capture import read_pending_live_events

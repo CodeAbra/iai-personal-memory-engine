@@ -255,6 +255,16 @@ def _rich_club_segment_with_budget(
     return "\n".join(lines)
 
 
+def _candidate_session_id(rec: object) -> str:
+    try:
+        for entry in getattr(rec, "provenance", None) or []:
+            if isinstance(entry, dict) and entry.get("session_id"):
+                return str(entry["session_id"])
+        return str(getattr(rec, "session_id", "") or "")
+    except Exception:  # noqa: BLE001 -- attribution must never break the payload
+        return ""
+
+
 def _origin_label(rec: object) -> str:
     # Ambient feeds mix every session and project; an unlabeled line reads as
     # "my recent work" and a parallel session's thread gets adopted as this
@@ -433,6 +443,10 @@ def render_session_delta(
     for r in candidates:
         r_norm = _norm_delta_ts(r.created_at)
         if watermark_norm and r_norm <= watermark_norm:
+            continue
+        # The delta is cross-session memory: the caller's own turns are
+        # already in its context and would only echo back.
+        if session_id != "-" and _candidate_session_id(r) == session_id:
             continue
         cleaned = _clean_surface(r.literal_surface)
         if not cleaned:

@@ -541,8 +541,10 @@ class BrainView:
 
             lc_path = lifecycle_state_path(self.root)
             if lc_path.is_file():
-                state = json.loads(lc_path.read_text(encoding="utf-8"))
-                return state.get("current_state") or "awake"
+                return (
+                    json.loads(lc_path.read_text(encoding="utf-8")).get("state")
+                    or "awake"
+                )
         except Exception:  # noqa: BLE001 -- display is cosmetic
             pass
         return "awake"
@@ -825,7 +827,18 @@ class BrainView:
             if cov is not None:
                 counts["coverage"] = round(cov, 4)
 
-        lifecycle = self._lifecycle_label()
+        lifecycle = "awake"
+        try:
+            from iai_mcp.lifecycle_state import lifecycle_state_path
+
+            lc_path = lifecycle_state_path(self.store.root)
+            if lc_path.is_file():
+                lifecycle = (
+                    json.loads(lc_path.read_text(encoding="utf-8")).get("state")
+                    or "awake"
+                )
+        except Exception:  # noqa: BLE001 -- lifecycle display is cosmetic
+            lifecycle = "awake"
 
         daemon_up = False
         try:
@@ -1335,8 +1348,6 @@ class BrainView:
             s.connect(_addr)
             send_sync_auth_token(s)
             req = {"type": ctype, "ts": datetime.now(timezone.utc).isoformat()}
-            if ctype == "user_initiated_sleep":
-                req["reason"] = "BrainView dashboard control"
             s.sendall((json.dumps(req) + "\n").encode("utf-8"))
             buf = b""
             while not buf.endswith(b"\n") and len(buf) < 65536:
@@ -1348,15 +1359,7 @@ class BrainView:
             resp = json.loads(buf or b"{}")
             # Require an explicit ok:true — an empty/EOF reply (daemon crashed
             # mid-request) must NOT read as success.
-            # Sleep is a desired-state command.  A dashboard poll can lag the
-            # daemon by one tick, so a second click may race with the first
-            # request and arrive after SLEEP has already been entered.  Treat
-            # that reply as idempotent success instead of showing the generic
-            # failure toast for a state the user explicitly requested.
-            already_at_target = (
-                action == "sleep" and resp.get("reason") == "already_sleeping"
-            )
-            if resp.get("ok") is True or already_at_target:
+            if resp.get("ok") is True:
                 return {"status": "ok", "action": action, "result": resp}
             return {"status": "error",
                     "reason": str(resp.get("reason") or resp.get("error")

@@ -78,6 +78,32 @@ def _count_live_turns(deferred_dir: Path, session_id: str) -> int:
                 pass
     return count
 
+def _run_py_script_with_prompt(
+    py_script: str,
+    session_id: str,
+    transcript_path: Path,
+    home_dir: Path,
+    prompt: str,
+    prompt_id: str,
+) -> tuple[int, float]:
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    payload_tmp = home_dir / f"{session_id}-payload.json"
+    payload_tmp.write_text(
+        json.dumps({"prompt": prompt, "prompt_id": prompt_id}), encoding="utf-8"
+    )
+    t0 = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", py_script, session_id, str(transcript_path),
+         str(payload_tmp), prompt_id],
+        env=env,
+        capture_output=True,
+        timeout=15,
+    )
+    elapsed = time.monotonic() - t0
+    return result.returncode, elapsed
+
+
 def _live_contains_text(deferred_dir: Path, session_id: str, text: str) -> bool:
     live_file = deferred_dir / f"{session_id}.live.jsonl"
     if not live_file.exists():
@@ -229,6 +255,10 @@ def test_stale_path_scan_fallback_captures_turns():
         )
 
 def test_missing_transcript_everywhere_exits_cleanly():
+    """No transcript resolvable anywhere (no prompt_id supplied either): the
+    walk has nothing to do, equivalent to a run with a transcript but zero
+    new lines — offset is still published (0, a no-op value), but no turn
+    is written to the live spool."""
     py_script = _extract_py_script()
     sid = "test-missing-everywhere"
 
@@ -245,7 +275,7 @@ def test_missing_transcript_everywhere_exits_cleanly():
         rc, _ = _run_py_script(py_script, sid, stale_path, home)
 
         assert rc == 0
-        assert _read_offset(state_dir, sid) == -1, "offset must not be created"
+        assert _read_offset(state_dir, sid) == 0, "offset publishes as a no-op 0"
         assert _count_live_turns(deferred_dir, sid) == 0, "live file must not be created"
 
 def test_present_but_empty_stdin_uses_canonical_and_writes_nonce():
@@ -484,7 +514,7 @@ def test_hook_then_cli_share_one_fingerprint(tmp_path, monkeypatch):
 
     rows = [
         {"type": "user", "message": {"role": "user",
-         "content": f"один общий поток строка {i} с не-ASCII"}}
+         "content": f"один общий поток строка {i} с не-ASCII"}}  # non-English fixture data: ru round-trip under test
         for i in range(2)
     ]
     transcript = tmp_path / "t.jsonl"
@@ -501,7 +531,7 @@ def test_hook_then_cli_share_one_fingerprint(tmp_path, monkeypatch):
     transcript.write_text(
         transcript.read_text(encoding="utf-8") + json.dumps(
             {"type": "user", "message": {"role": "user",
-             "content": "хвост потока для второго носителя"}},
+             "content": "хвост потока для второго носителя"}},  # non-English fixture data: ru round-trip under test
             ensure_ascii=False,
         ) + "\n",
         encoding="utf-8",
@@ -518,7 +548,7 @@ def test_hook_then_cli_share_one_fingerprint(tmp_path, monkeypatch):
     deferred_dir = home / ".iai-mcp" / ".deferred-captures"
     live = deferred_dir / "s-xc.live.jsonl"
     body = live.read_text(encoding="utf-8") if live.exists() else ""
-    assert body.count("строка 0") <= 1, "re-emission across carriers"
+    assert body.count("строка 0") <= 1, "re-emission across carriers"  # non-English fixture data: ru round-trip under test
 
 
 def test_py_script_heredoc_contains_no_apostrophes():
@@ -589,6 +619,187 @@ def test_rotate_and_regrow_past_old_offset_is_caught_by_fingerprint(tmp_path):
     assert not _live_contains_text(deferred_dir, "s-fp", "[tools:"), (
         "pending from the dead stream must not trail a replacement-stream turn"
     )
+
+
+def test_immediate_prompt_capture_writes_one_line_keyed_by_prompt_id(tmp_path):
+    py_script = _extract_py_script()
+    sid = "test-immediate-prompt"
+    prompt_id = "e2b1a111-2222-3333-4444-555566667777"
+    prompt = "please tighten the immediate capture path for this test case"
+
+    home = tmp_path / "home"
+    home.mkdir()
+    state_dir = home / ".iai-mcp" / ".capture-state"
+    state_dir.mkdir(parents=True)
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    deferred_dir.mkdir(parents=True)
+
+    transcript = home / "transcript.jsonl"
+    _make_transcript(transcript, 4)
+
+    rc, _ = _run_py_script_with_prompt(py_script, sid, transcript, home, prompt, prompt_id)
+    assert rc == 0
+
+    live_file = deferred_dir / f"{sid}.live.jsonl"
+    events = [json.loads(ln) for ln in live_file.read_text().splitlines() if ln.strip()]
+    matches = [e for e in events if e.get("source_uuid") == prompt_id]
+    assert len(matches) == 1, (
+        f"expected exactly one immediate line keyed by prompt_id, got {matches}"
+    )
+    assert matches[0]["text"] == prompt
+    assert matches[0]["role"] == "user"
+
+
+def test_immediate_prompt_capture_skipped_when_prompt_id_absent(tmp_path):
+    py_script = _extract_py_script()
+    sid = "test-immediate-no-prompt-id"
+    prompt = "this prompt arrives with no prompt_id at all, zero regression"
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".iai-mcp" / ".capture-state").mkdir(parents=True)
+    deferred_dir = home / ".iai-mcp" / ".deferred-captures"
+    deferred_dir.mkdir(parents=True)
+
+    transcript = home / "transcript.jsonl"
+    _make_transcript(transcript, 4)
+
+    rc, _ = _run_py_script_with_prompt(py_script, sid, transcript, home, prompt, "")
+    assert rc == 0
+
+    live_file = deferred_dir / f"{sid}.live.jsonl"
+    events = (
+        [json.loads(ln) for ln in live_file.read_text().splitlines() if ln.strip()]
+        if live_file.exists() else []
+    )
+    assert not any(prompt == e.get("text") for e in events), (
+        "prompt_id-absent must skip the immediate capture entirely (current behavior)"
+    )
+
+
+def _build_prompt_submit_payload(sid: str, transcript: Path, prompt: str, prompt_id: str, cwd: Path) -> dict:
+    return {
+        "cwd": str(cwd),
+        "hook_event_name": "UserPromptSubmit",
+        "permission_mode": "default",
+        "prompt": prompt,
+        "prompt_id": prompt_id,
+        "session_id": sid,
+        "session_title": "test",
+        "transcript_path": str(transcript),
+    }
+
+
+def _run_full_hook_shell(payload: dict, home: Path, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["IAI_MCP_TURN_INJECT_DISABLED"] = "1"
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["bash", str(HOOK_FILE)],
+        input=json.dumps(payload),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_full_hook_shell_immediate_capture_multiline_prompt(tmp_path):
+    """Bash-level: a multi-line prompt with an embedded tab must survive the
+    shell's stdin extraction verbatim — a naive tab-joined single-line read
+    of .prompt would truncate or shift fields on this input."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".iai-mcp" / ".capture-state").mkdir(parents=True)
+    (home / ".iai-mcp" / ".deferred-captures").mkdir(parents=True)
+    project_dir = home / ".claude" / "projects" / "-proj"
+    project_dir.mkdir(parents=True)
+    sid = "full-shell-multiline"
+    transcript = project_dir / f"{sid}.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "filler assistant reply text"}]},
+    }) + "\n")
+
+    prompt_id = "11111111-2222-3333-4444-555566667777"
+    prompt_text = "first line of a multi-line prompt\nsecond line has a literal\ttab too"
+    payload = _build_prompt_submit_payload(sid, transcript, prompt_text, prompt_id, tmp_path)
+
+    proc = _run_full_hook_shell(payload, home)
+    assert proc.returncode == 0, proc.stderr
+
+    live = home / ".iai-mcp" / ".deferred-captures" / f"{sid}.live.jsonl"
+    assert live.exists()
+    events = [json.loads(ln) for ln in live.read_text().splitlines() if ln.strip()]
+    matches = [e for e in events if e.get("source_uuid") == prompt_id]
+    assert len(matches) == 1, matches
+    assert matches[0]["text"] == prompt_text, (
+        "multi-line/tab prompt must survive the shell extraction byte-identical"
+    )
+
+
+def test_full_hook_shell_immediate_capture_without_jq(tmp_path):
+    """Same multi-line/tab prompt through the python-fallback extraction
+    path (PATH stripped of jq)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".iai-mcp" / ".capture-state").mkdir(parents=True)
+    (home / ".iai-mcp" / ".deferred-captures").mkdir(parents=True)
+    project_dir = home / ".claude" / "projects" / "-proj"
+    project_dir.mkdir(parents=True)
+    sid = "full-shell-no-jq"
+    transcript = project_dir / f"{sid}.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "filler assistant reply text"}]},
+    }) + "\n")
+
+    prompt_id = "22222222-3333-4444-5555-666677778888"
+    prompt_text = "no-jq fallback line one\nno-jq fallback line two with a\ttab"
+    payload = _build_prompt_submit_payload(sid, transcript, prompt_text, prompt_id, tmp_path)
+
+    proc = _run_full_hook_shell(payload, home, extra_env={"PATH": "/usr/bin:/bin"})
+    assert proc.returncode == 0, proc.stderr
+
+    live = home / ".iai-mcp" / ".deferred-captures" / f"{sid}.live.jsonl"
+    assert live.exists()
+    events = [json.loads(ln) for ln in live.read_text().splitlines() if ln.strip()]
+    matches = [e for e in events if e.get("source_uuid") == prompt_id]
+    assert len(matches) == 1, matches
+    assert matches[0]["text"] == prompt_text
+
+
+def test_full_hook_shell_immediate_capture_first_fire_no_transcript(tmp_path):
+    """First fire of a brand new session: no canonical transcript under
+    ~/.claude/projects and a nonexistent transcript_path. The immediate
+    stdin-prompt capture needs no transcript and must still write the
+    prompt_id-keyed line the same turn it lands."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".iai-mcp" / ".capture-state").mkdir(parents=True)
+    (home / ".iai-mcp" / ".deferred-captures").mkdir(parents=True)
+    sid = "first-fire-no-transcript"
+    transcript = home / "does-not-exist" / f"{sid}.jsonl"
+
+    prompt_id = "33333333-4444-5555-6666-777788889999"
+    prompt_text = "the very first prompt of a brand new session with no transcript yet"
+    payload = _build_prompt_submit_payload(sid, transcript, prompt_text, prompt_id, tmp_path)
+
+    proc = _run_full_hook_shell(payload, home)
+    assert proc.returncode == 0, proc.stderr
+
+    live = home / ".iai-mcp" / ".deferred-captures" / f"{sid}.live.jsonl"
+    assert live.exists(), (
+        "first-fire immediate capture must still write to the live spool "
+        "even though no transcript is resolvable yet"
+    )
+    events = [json.loads(ln) for ln in live.read_text().splitlines() if ln.strip()]
+    matches = [e for e in events if e.get("source_uuid") == prompt_id]
+    assert len(matches) == 1, matches
+    assert matches[0]["text"] == prompt_text
+    assert matches[0]["role"] == "user"
 
 
 def test_rotation_clears_stale_pending_from_dead_stream(tmp_path):

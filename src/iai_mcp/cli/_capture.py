@@ -224,7 +224,11 @@ def cmd_session_refresh_if_stale(args: argparse.Namespace) -> int:
 
         result = resp.get("result") or {}
         rendered: str = result.get("rendered") or ""
-        new_max: str = result.get("new_max_ts") or current
+        new_max_ts: str = result.get("new_max_ts") or ""
+        # Mirror of the inline hook: sidecars advance only on an explicit
+        # caught_up reply; a missing flag, a debounced reply or a partial
+        # drain keeps them.
+        caught_up = result.get("caught_up") is True
 
         if rendered:
             payload = {
@@ -234,7 +238,9 @@ def cmd_session_refresh_if_stale(args: argparse.Namespace) -> int:
                 }
             }
             _cli.sys.stdout.write(json.dumps(payload, ensure_ascii=False))
-            write_watermark(session_id, new_max)
+        if caught_up and new_max_ts:
+            if _utc_iso(new_max_ts) > _utc_iso(wm):
+                write_watermark(session_id, new_max_ts)
             write_live_fingerprint(session_id, live_size)
 
         return 0

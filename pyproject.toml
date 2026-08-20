@@ -1,6 +1,6 @@
 [project]
 name = "iai-pme"
-version = "3.0.4"
+version = "3.0.5"
 description = "MCP server giving Claude persistent autistic-style memory + learning"
 authors = [{ name = "Areg Noya" }]
 requires-python = ">=3.11,<3.13"
@@ -15,11 +15,7 @@ dependencies = [
   # in ``[project.optional-dependencies.dev]`` to double-duty as the
   # σ-baseline oracle and the MemoryGraph test backend.
   "scipy>=1.13.0",      # CSR build glue for the σ assembly helpers.
-  "numba>=0.59",        # Numba JIT for custom MIT Leiden kernels. BSD-2 license, MIT-compatible. Ruled out as a replacement target: numba already JITs to LLVM machine code.
-  # `python-igraph` and `leidenalg` were REMOVED in full. They cannot be
-  # installed via this package (not even as an optional extra). The sole
-  # community-detection backend is now MOSAIC (`src/iai_mcp/mosaic.py`,
-  # pure-MIT). See CHANGELOG v7.1 and the README MOSAIC section.
+  "numba>=0.59",        # Numba JIT for the community-detection kernels. BSD-2 license, MIT-compatible.
   # anthropic SDK removed in v7.5: subscription-billed `claude -p`
   # subprocess replaces api.anthropic.com direct calls. Bench harness uses
   # the tiktoken cl100k proxy for token counting where needed.

@@ -1,4 +1,5 @@
-"""Cleanup-attractor with rejection threshold.
+"""SC-2 exercise for the cleanup-attractor with rejection threshold (plan 04,
+Task 2).
 
 ``_cleanup_if_confident`` (``lilli/ops/cleanup.py``) wraps the existing
 ``cleanup()`` primitive with a Hamming-distance rejection threshold

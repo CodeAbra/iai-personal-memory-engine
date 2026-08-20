@@ -420,6 +420,7 @@ def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
         check_w_no_permanent_failed(),
         check_x_no_collapsed_timestamps(),
         check_aa_capture_state_hygiene(),
+        check_ee_deferred_capture_backlog_at_rest(),
         check_y_rss_24h_plateau(),
         check_bb_nightly_insight_mint(),
         check_cc_background_liveness(),
@@ -1178,6 +1179,7 @@ from iai_mcp.doctor._lifecycle_checks import (
 )
 from iai_mcp.doctor._storage_checks import (
     check_dd_exact_index_coercions,
+    check_ee_deferred_capture_backlog_at_rest,
     check_h_crypto_file_state,
     check_i_hippo_db_size,
     check_ii_embed_identity,
@@ -1211,6 +1213,7 @@ __all__ = [
     "check_c_lock_healthy",
     "check_d_no_orphan_core",
     "check_dd_exact_index_coercions",
+    "check_ee_deferred_capture_backlog_at_rest",
     "check_e_state_file_valid",
     "check_f_hippo_readable",
     "check_g_no_dup_binders",

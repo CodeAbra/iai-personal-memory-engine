@@ -14,7 +14,7 @@
 <p align="center">每一项声明都附带可复现的基准测试脚本。你可以自己跑一遍验证。</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v3.0.4-1f6feb?style=flat-square" alt="Release v3.0.4">
+  <img src="https://img.shields.io/badge/release-v3.0.5-1f6feb?style=flat-square" alt="Release v3.0.5">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux">
@@ -210,7 +210,7 @@ tail ~/.iai-mcp/logs/capture-$(date -u +%Y-%m-%d).log
 | 组件 | 功能 |
 |---|---|
 | **Hippo** | 存储引擎 —— 加密记录、向量索引、图，全部在一个本地存储里。 |
-| **MOSAIC** | 我的社区发现算法 —— Leiden 家族方法（CPM 目标函数），用纯 MIT 许可的 Python 重写，替代 GPL 协议的 `leidenalg`/`igraph` 依赖。它对记忆图做聚类，让召回能扩散到正确的邻域，让睡眠能重放连贯的情景 —— 专为小型、异构权重、每个周期都在变化的图调优，社区身份在拆分和合并中保持稳定。 |
+| **MOSAIC** | 我的社区发现算法 —— Leiden 家族方法（CPM 目标函数），用纯 Python 从零编写。它对记忆图做聚类，让召回能扩散到正确的邻域，让睡眠能重放连贯的情景 —— 专为小型、异构权重、每个周期都在变化的图调优，社区身份在拆分和合并中保持稳定。 |
 | **Lilli HD** | 超维记忆基底 —— 情景 / 语义 / 程序性记忆各有独立表示，支持结构性召回（按记忆的*形状*召回，而不只是它的嵌入向量）。 |
 | **Native engine** | Rust 内核 —— 嵌入器和图核。延迟主要来自这里。 |
 

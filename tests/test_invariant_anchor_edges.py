@@ -13,7 +13,7 @@ def _anchor(s5_trust_score: float = 0.9) -> MemoryRecord:
     return MemoryRecord(
         id=uuid4(),
         tier="semantic",
-        literal_surface="User identity: Alice",
+        literal_surface="User identity: alice",
         aaak_index="",
         embedding=[1.0] + [0.0] * (EMBED_DIM - 1),
         community_id=None,

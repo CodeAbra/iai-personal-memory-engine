@@ -78,7 +78,7 @@ def test_w5_provenance_overflow_sustained_load(tmp_path, monkeypatch):
 
     cues = [p[1]["cue"] for p in flushed]
     assert sorted(cues) == [f"sustained-{i}" for i in range(10)], (
-        f"expected all 10 cues exactly once; got {sorted(cues)}"
+        f"MEM-05 violated: expected all 10 cues exactly once; got {sorted(cues)}"
     )
     overflow_dir = store.root / ".provenance-overflow"
     assert list(overflow_dir.glob("*.jsonl")) == []
@@ -106,7 +106,7 @@ def test_w5_capture_drain_partial_failure_preserves_evidence(tmp_path, monkeypat
             "tier": "episodic", "role": "user",
         }) + "\n"
         + json.dumps({
-            "cue": "poison", "text": "INSERT_FAIL_SENTINEL_SOAK middle event",
+            "cue": "poison", "text": "INSERT_FAIL_SENTINEL_W5_SOAK middle event",
             "tier": "episodic", "role": "user",
         }) + "\n"
         + json.dumps({
@@ -126,7 +126,7 @@ def test_w5_capture_drain_partial_failure_preserves_evidence(tmp_path, monkeypat
     real_drain_write_pending = capture_mod._drain_write_pending
 
     def drain_or_fail(store, *, text, **kwargs):
-        if "INSERT_FAIL_SENTINEL_SOAK" in text:
+        if "INSERT_FAIL_SENTINEL_W5_SOAK" in text:
             return {
                 "status": "skipped",
                 "record_id": None,
@@ -160,7 +160,7 @@ def test_w5_graph_cache_encryption_no_plaintext_canary(tmp_path):
     store.root = tmp_path
 
     rid = uuid4()
-    canary = "PLAINTEXT_CANARY_SOAK_aaak"
+    canary = "PLAINTEXT_CANARY_W5_SOAK_aaak_07_9"
     node_payload = {
         str(rid): {
             "embedding": [0.1] * 384,

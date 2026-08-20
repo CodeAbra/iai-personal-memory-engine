@@ -19,23 +19,36 @@ set -u
 umask 077
 input=$(cat 2>/dev/null || true)
 
-# Extract session_id and transcript_path in a single subprocess call.
+# The full stdin payload is staged to a file for the immediate-capture block
+# below to read .prompt from: prompt text may contain newlines/tabs, and a
+# `read` line-split (used for session_id/transcript_path/prompt_id below)
+# would truncate or shift fields on such input.
+_payload_tmp=$(mktemp 2>/dev/null || echo "/tmp/iai-mcp-turn-payload-$$.tmp")
+_extract_tmp=""
+# Registered before either tmp file is populated so every exit path below
+# (including the early guards) cleans up: a plaintext prompt copy must
+# never be orphaned in TMPDIR.
+trap 'rm -f "$_payload_tmp" "$_extract_tmp" 2>/dev/null || true' EXIT
+printf '%s' "$input" > "$_payload_tmp" 2>/dev/null || true
+
+# Extract session_id, transcript_path and prompt_id in a single subprocess
+# call. prompt_id is UUID-ish (no newlines/tabs expected); its shape is
+# re-validated in PY_SCRIPT before use.
 _extract_tmp=$(mktemp 2>/dev/null || echo "/tmp/iai-mcp-turn-extract-$$.tmp")
 if command -v jq >/dev/null 2>&1; then
-  printf '%s' "$input" | jq -r '(.session_id // "") + "\t" + (.transcript_path // "")' >"$_extract_tmp" 2>/dev/null
+  printf '%s' "$input" | jq -r '(.session_id // "") + "\t" + (.transcript_path // "") + "\t" + (.prompt_id // "")' >"$_extract_tmp" 2>/dev/null
 else
   printf '%s' "$input" | /usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
-    print((d.get('session_id') or '') + '\t' + (d.get('transcript_path') or ''))
+    print((d.get('session_id') or '') + '\t' + (d.get('transcript_path') or '') + '\t' + (d.get('prompt_id') or ''))
 except Exception:
-    print('\t')
+    print('\t\t')
 " >"$_extract_tmp" 2>/dev/null
 fi
 _TAB=$(printf '\t')
-IFS="$_TAB" read -r session_id transcript_path < "$_extract_tmp"
-rm -f "$_extract_tmp" 2>/dev/null || true
+IFS="$_TAB" read -r session_id transcript_path prompt_id < "$_extract_tmp"
 
 mkdir -p "$HOME/.iai-mcp/logs" 2>/dev/null || true
 log="$HOME/.iai-mcp/logs/turn-capture-$(date -u +%Y-%m-%d).log"
@@ -84,7 +97,9 @@ home = Path(os.environ.get("HOME", str(Path.home())))
 # canonical file exists and is non-empty, use it — it is guaranteed to contain
 # this session only.  Fall back to the stdin path only when the canonical file
 # is absent or empty (early first-fire timing race).  If neither source has
-# content, exit cleanly — the Stop hook will capture at session end.
+# content, there is nothing to walk yet — the immediate stdin-prompt capture
+# below still runs (it needs no transcript) and the Stop hook covers the rest
+# at session end.
 #
 # This makes offset accounting safe: the offset is always relative to one
 # consistent file (canonical > stdin), preventing line-number skew across fires.
@@ -106,7 +121,7 @@ if canonical is not None:
 elif stdin_path.exists() and stdin_path.stat().st_size > 0:
     transcript_path = stdin_path
 else:
-    sys.exit(0)
+    transcript_path = None
 
 deferred_dir = home / ".iai-mcp" / ".deferred-captures"
 state_dir = home / ".iai-mcp" / ".capture-state"
@@ -170,33 +185,46 @@ else:
     prev = legacy
     pending_tools = []
 
-with transcript_path.open(encoding="utf-8") as fh:
-    lines = fh.readlines()
-total = len(lines)
-# Fingerprint the RAW first-line bytes: the fp is shared between carriers
-# through the snapshot, and hashing a decoded string would couple it to
-# each carrier decode setting.
-with transcript_path.open("rb") as fh_raw:
-    _first_raw = fh_raw.readline()
-stream_fp = hashlib.sha256(_first_raw).hexdigest()[:16] if _first_raw else ""
-# A changed first line means a different stream at the same path: the
-# stored offset and pending belong to a dead transcript even when the new
-# one already regrew past the old length. The length fence stays as the
-# backstop for fingerprint-less legacy snapshots and same-stream
-# truncation. Restarting at zero re-walks the new stream; replays dedup
-# on source-uuid idempotency keys where the host provides them and are
-# absorbed by the cosine gate for text-keyed hosts.
-if (snap_fp and stream_fp and snap_fp != stream_fp) or prev > total:
-    prev = 0
-    pending_tools = []
+if transcript_path is not None:
+    with transcript_path.open(encoding="utf-8") as fh:
+        lines = fh.readlines()
+    total = len(lines)
+    # Fingerprint the RAW first-line bytes: the fp is shared between carriers
+    # through the snapshot, and hashing a decoded string would couple it to
+    # each carrier decode setting.
+    with transcript_path.open("rb") as fh_raw:
+        _first_raw = fh_raw.readline()
+    stream_fp = hashlib.sha256(_first_raw).hexdigest()[:16] if _first_raw else ""
+    # A changed first line means a different stream at the same path: the
+    # stored offset and pending belong to a dead transcript even when the new
+    # one already regrew past the old length. The length fence stays as the
+    # backstop for fingerprint-less legacy snapshots and same-stream
+    # truncation. Restarting at zero re-walks the new stream; replays dedup
+    # on source-uuid idempotency keys where the host provides them and are
+    # absorbed by the cosine gate for text-keyed hosts.
+    if (snap_fp and stream_fp and snap_fp != stream_fp) or prev > total:
+        prev = 0
+        pending_tools = []
+else:
+    # First fire of a session: no transcript resolvable yet. The immediate
+    # stdin-prompt capture below runs regardless; the walk below is a no-op
+    # (total stays 0) and the next fire covers this prompt via its own walk.
+    lines = []
+    total = 0
+    stream_fp = snap_fp
 
 cwd = os.getcwd()
 emitted = 0
 consumed = 0
 
+# Mirror of capture._NOISE_PATTERNS — keep the two in lockstep.
 _NOISE_STARTSWITH = (
     "<command-message>",
     "<command-name>",
+    "<command-args>",
+    "<local-command-caveat>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
     "Base directory for this skill:",
     "<task-notification>",
 )
@@ -318,7 +346,11 @@ def parse_line(raw):
             ]
     else:
         text = str(content).strip()
-    src_uuid = obj.get("uuid") or None
+    # role:user keys by promptId, the immediate stdin capture join key;
+    # role:assistant stays on the per-line uuid — assistant lines of one
+    # prompt share promptId, so keying them by it would collapse a whole
+    # response into one idem.
+    src_uuid = ((obj.get("promptId") if role == "user" else None) or obj.get("uuid")) or None
     src_ts = obj.get("timestamp") or None
     if not text:
         # Action-only assistant entries carry the mechanics of the episode;
@@ -328,7 +360,9 @@ def parse_line(raw):
         if role == "assistant" and tools:
             return role, "", src_uuid, src_ts, tools
         return None
-    if _is_noise(text):
+    # isMeta marks host-injected pseudo-turns (skill bodies, local-command
+    # caveats); they are never dialogue whatever their text says.
+    if obj.get("isMeta") is True or _is_noise(text):
         # Noise text never becomes a record, but an assistant noise entry
         # may still carry tool calls, and a user noise entry is still a
         # conversational boundary; both signal via empty text.
@@ -353,6 +387,56 @@ def _tools_trailer(names):
         return ""
     extra = f" +{len(seen) - 8}" if len(seen) > 8 else ""
     return "\n[tools: " + ", ".join(seen[:8]) + extra + "]"
+
+# Immediate stdin-prompt capture, keyed by prompt_id: stamped as
+# source_uuid=prompt_id so the later transcript walk (role:user keyed by
+# promptId above) collapses onto the same idem tag instead of
+# double-inserting. Runs regardless of whether a transcript is resolvable
+# yet — it needs none. Wrapped so a bad prompt can never abort the offset
+# publish below (capture is best-effort by contract).
+try:
+    _raw_prompt_id = sys.argv[4] if len(sys.argv) > 4 else ""
+    if _raw_prompt_id and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", _raw_prompt_id):
+        _immediate_prompt_id = _raw_prompt_id
+    else:
+        _immediate_prompt_id = ""
+    _immediate_prompt_text = ""
+    if _immediate_prompt_id and len(sys.argv) > 3 and sys.argv[3]:
+        try:
+            _payload_obj = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+            if isinstance(_payload_obj, dict):
+                _immediate_prompt_text = str(_payload_obj.get("prompt") or "")
+        except Exception:
+            _immediate_prompt_text = ""
+    if (
+        _immediate_prompt_id
+        and _immediate_prompt_text
+        and not os.environ.get("IAI_MCP_IMMEDIATE_PROMPT_DISABLED")
+        and not _immediate_prompt_text.lstrip().startswith("/")
+        and not _is_noise(_immediate_prompt_text)
+        and len(_immediate_prompt_text) >= 12
+    ):
+        _need_header_immediate = (not live.exists()) or live.stat().st_size == 0
+        with live.open("a") as _out_immediate:
+            if _need_header_immediate:
+                _header_immediate = {
+                    "version": 1,
+                    "deferred_at": datetime.now(timezone.utc).isoformat(),
+                    "session_id": session_id,
+                    "cwd": cwd,
+                }
+                _out_immediate.write(json.dumps(_header_immediate, ensure_ascii=False) + "\n")
+            _event_immediate = {
+                "text": _immediate_prompt_text,
+                "cue": f"session {session_id} turn",
+                "tier": "episodic",
+                "role": "user",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "source_uuid": _immediate_prompt_id,
+            }
+            _out_immediate.write(json.dumps(_event_immediate, ensure_ascii=False) + "\n")
+except Exception:
+    pass
 
 if total > prev:
     need_header = (not live.exists()) or live.stat().st_size == 0
@@ -661,7 +745,14 @@ try:
                                 resp_obj = json.loads(frame.decode("utf-8"))
                                 result_obj = resp_obj.get("result") or {}
                                 rendered = result_obj.get("rendered") or ""
-                                new_max = result_obj.get("new_max_ts") or current
+                                new_max_ts = result_obj.get("new_max_ts") or ""
+                                # Sidecars advance ONLY on an explicit caught_up
+                                # reply: the daemon promoted everything pending
+                                # and did not suppress a delta. A missing flag
+                                # (older daemon), a debounced reply or a partial
+                                # drain keeps them, or the still-pending turns
+                                # would fall below the watermark for good.
+                                caught_up = result_obj.get("caught_up") is True
                                 if rendered:
                                     payload = {
                                         "hookSpecificOutput": {
@@ -672,7 +763,9 @@ try:
                                     _sys.stdout.write(
                                         json.dumps(payload, ensure_ascii=False)
                                     )
-                                    _gate_write_watermark(session_id, new_max)
+                                if caught_up and new_max_ts:
+                                    if _gate_utc_iso(new_max_ts) > _gate_utc_iso(wm):
+                                        _gate_write_watermark(session_id, new_max_ts)
                                     _gate_write_fingerprint(session_id, live_size)
                             except Exception:
                                 pass
@@ -697,13 +790,14 @@ except Exception:
 '
 
 if command -v timeout >/dev/null 2>&1; then
-  timeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  timeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  gtimeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
 else
-  /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" 2>/dev/null
+  /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
 fi
 rc=$?
+# _payload_tmp / _extract_tmp cleanup runs via the EXIT trap above.
 
 echo "$ts session=$session_id rc=$rc" >> "$log" 2>/dev/null
 

@@ -108,6 +108,8 @@ pub fn execute_select_instrumented(
         .get(table)
         .ok_or_else(|| EngineError::parse(format!("execute: unknown table {table:?}")))?;
     let col_names = catalog.column_names(table)?;
+    let cols = catalog.get(table)?;
+    let vec_label_is_rowid_alias = has_autoincrement_vec_label(cols);
 
     // Bind placeholders in textual order: select-list exprs, then WHERE, then
     // LIMIT, then OFFSET. A count mismatch fails loud like the reference.
@@ -147,6 +149,7 @@ pub fn execute_select_instrumented(
             effective_offset,
             indexed_rows,
             plan,
+            vec_label_is_rowid_alias,
         )?;
         return Ok((rs, ScanStats { decoded_rows: true }));
     }
@@ -309,7 +312,12 @@ pub fn execute_select_instrumented(
                 } else {
                     first_id_match_by_scan(store, root, &col_names, &id_val, where_expr)?
                 };
-                let out = project_rows(matched, &plan.columns, &col_names);
+                let out = project_rows(
+                    matched,
+                    &plan.columns,
+                    &col_names,
+                    vec_label_is_rowid_alias,
+                );
                 let cols = output_columns(&plan.columns, &col_names);
                 return Ok((
                     ResultSet {
@@ -364,7 +372,14 @@ pub fn execute_select_instrumented(
                     }
                 }
             }
-            let rs = finish_row_pipeline(rows, plan, &col_names, effective_limit, effective_offset);
+            let rs = finish_row_pipeline(
+                rows,
+                plan,
+                &col_names,
+                effective_limit,
+                effective_offset,
+                vec_label_is_rowid_alias,
+            );
             return Ok((rs, ScanStats { decoded_rows: true }));
         }
     }
@@ -408,7 +423,14 @@ pub fn execute_select_instrumented(
                     rows.push(row);
                 }
             }
-            let rs = finish_row_pipeline(rows, plan, &col_names, effective_limit, effective_offset);
+            let rs = finish_row_pipeline(
+                rows,
+                plan,
+                &col_names,
+                effective_limit,
+                effective_offset,
+                vec_label_is_rowid_alias,
+            );
             return Ok((rs, ScanStats { decoded_rows: true }));
         }
     }
@@ -444,7 +466,14 @@ pub fn execute_select_instrumented(
                     }
                 }
             }
-            let rs = finish_row_pipeline(rows, plan, &col_names, effective_limit, effective_offset);
+            let rs = finish_row_pipeline(
+                rows,
+                plan,
+                &col_names,
+                effective_limit,
+                effective_offset,
+                vec_label_is_rowid_alias,
+            );
             return Ok((rs, ScanStats { decoded_rows: true }));
         }
     }
@@ -489,8 +518,14 @@ pub fn execute_select_instrumented(
                         break; // bucket boundary: the tie group is complete
                     }
                 }
-                let rs =
-                    finish_row_pipeline(rows, plan, &col_names, effective_limit, effective_offset);
+                let rs = finish_row_pipeline(
+                    rows,
+                    plan,
+                    &col_names,
+                    effective_limit,
+                    effective_offset,
+                    vec_label_is_rowid_alias,
+                );
                 return Ok((rs, ScanStats { decoded_rows: true }));
             }
         }
@@ -592,7 +627,7 @@ pub fn execute_select_instrumented(
     // rowid resolution for the projection.
     if plan.columns.iter().any(|c| c == ROWID) {
         for r in &mut rows {
-            resolve_rowid(r);
+            resolve_rowid(r, vec_label_is_rowid_alias);
         }
     }
 
@@ -613,7 +648,7 @@ pub fn execute_select_instrumented(
         }
     }
 
-    let out = project_rows(rows, &plan.columns, &col_names);
+    let out = project_rows(rows, &plan.columns, &col_names, vec_label_is_rowid_alias);
     let cols = output_columns(&plan.columns, &col_names);
     Ok((
         ResultSet {
@@ -627,12 +662,14 @@ pub fn execute_select_instrumented(
 /// The shared tail of the plain-row SELECT pipeline: ORDER BY → (LIMIT 0) →
 /// rowid resolution → OFFSET → LIMIT → projection. Byte-identical to the standard
 /// scan path's tail, so the indexed `IN` fast path produces the same ResultSet.
+#[allow(clippy::too_many_arguments)]
 fn finish_row_pipeline(
     mut rows: Vec<Row>,
     plan: &SelectPlan,
     col_names: &[String],
     effective_limit: Option<i64>,
     effective_offset: Option<i64>,
+    vec_label_is_alias: bool,
 ) -> ResultSet {
     if plan.order_by.is_some() {
         order_rows(&mut rows, plan, col_names);
@@ -645,7 +682,7 @@ fn finish_row_pipeline(
     }
     if plan.columns.iter().any(|c| c == ROWID) {
         for r in &mut rows {
-            resolve_rowid(r);
+            resolve_rowid(r, vec_label_is_alias);
         }
     }
     if let Some(off) = effective_offset {
@@ -663,7 +700,7 @@ fn finish_row_pipeline(
             rows.truncate(lim as usize);
         }
     }
-    let out = project_rows(rows, &plan.columns, col_names);
+    let out = project_rows(rows, &plan.columns, col_names, vec_label_is_alias);
     let cols = output_columns(&plan.columns, col_names);
     ResultSet {
         rows: out,
@@ -923,6 +960,14 @@ fn collect_expr_columns(expr: &Expr, out: &mut std::collections::HashSet<String>
     match expr {
         Expr::Column(c) | Expr::Excluded(c) => {
             out.insert(c.clone());
+            // A dotted `table.col` reference: also mark the unqualified tail, so
+            // mask_from_names (which tests against undotted catalog names) does
+            // not decode-skip the real column. Mirrors eval_expr's exact-first/
+            // tail-fallback resolution (eval.rs). Over-including an absent name
+            // is a no-op — mask_from_names is a membership OR.
+            if let Some((_, tail)) = c.rsplit_once('.') {
+                out.insert(tail.to_string());
+            }
         }
         Expr::BinOp { left, right, .. } => {
             collect_expr_columns(left, out);
@@ -1287,7 +1332,12 @@ fn composite_key(
 /// Project rows to the requested columns. `SELECT *` passes the schema columns
 /// through (stripping the reserved rowkey / rowid bookkeeping); a named-column
 /// list selects those columns (resolving rowid first when present).
-fn project_rows(rows: Vec<Row>, columns: &[String], col_names: &[String]) -> Vec<OutRow> {
+fn project_rows(
+    rows: Vec<Row>,
+    columns: &[String],
+    col_names: &[String],
+    vec_label_is_alias: bool,
+) -> Vec<OutRow> {
     let select_star = columns == ["*"] || columns.is_empty();
     let mut out = Vec::with_capacity(rows.len());
     for mut row in rows {
@@ -1299,7 +1349,7 @@ fn project_rows(rows: Vec<Row>, columns: &[String], col_names: &[String]) -> Vec
             out.push(pairs);
         } else {
             if columns.iter().any(|c| c == ROWID) {
-                resolve_rowid(&mut row);
+                resolve_rowid(&mut row, vec_label_is_alias);
             }
             let pairs: Vec<(String, Value)> = columns
                 .iter()
@@ -1320,10 +1370,13 @@ fn output_columns(columns: &[String], col_names: &[String]) -> Vec<String> {
     }
 }
 
-/// Resolve `rowid` for a row: prefer the vec_label column, fall back to the raw
-/// B-tree key.
-fn resolve_rowid(row: &mut Row) {
-    let v = if row.contains(ROWID_SOURCE) {
+/// Resolve `rowid` for a row: the vec_label column value when `vec_label` is a
+/// genuine `INTEGER PRIMARY KEY` alias (sqlite's rowid-alias rule — the
+/// AUTOINCREMENT high-water mark), else the raw B-tree key (sqlite's implicit
+/// rowid). Gated on PK-alias-ness, never column presence — a plain non-PK
+/// `vec_label` column must not shadow the real rowid.
+fn resolve_rowid(row: &mut Row, vec_label_is_alias: bool) {
+    let v = if vec_label_is_alias {
         row.get_or_null(ROWID_SOURCE)
     } else {
         row.get_or_null(ROWKEY)
@@ -1456,6 +1509,7 @@ fn indexed_candidate_rows(
     Ok(Some(rows))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_select_exprs(
     store: &Store,
     root: u32,
@@ -1466,6 +1520,7 @@ fn execute_select_exprs(
     effective_offset: Option<i64>,
     indexed_rows: Option<Vec<Row>>,
     plan: &SelectPlan,
+    vec_label_is_alias: bool,
 ) -> Result<ResultSet> {
     let aliases: Vec<String> = bound_select_exprs.iter().map(|(_, a)| a.clone()).collect();
     let has_order_by = plan.order_by.is_some();
@@ -1530,7 +1585,7 @@ fn execute_select_exprs(
     };
     // rowid may be referenced by a projected expression; resolve it on each row.
     for r in &mut rows {
-        resolve_rowid(r);
+        resolve_rowid(r, vec_label_is_alias);
     }
 
     // ORDER BY sorts the survivor rows before projection (and before OFFSET/LIMIT),
@@ -1790,6 +1845,7 @@ fn execute_sqlite_master(plan: &SelectPlan, catalog: &Catalog) -> Result<ResultS
         &col_names,
         effective_limit,
         effective_offset,
+        false, // sqlite_master has no vec_label column, never a PK alias
     ))
 }
 

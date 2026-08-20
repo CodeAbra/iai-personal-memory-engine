@@ -290,3 +290,112 @@ def test_folded_gate_failure_does_not_abort_capture():
         )
     finally:
         shutil.rmtree(str(home), ignore_errors=True)
+
+
+def _serve_one_reply(sock_path: str, reply_obj: dict) -> threading.Event:
+    reply_frame = (json.dumps(reply_obj) + "\n").encode("utf-8")
+    accept_done = threading.Event()
+
+    def _listener():
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(1)
+        srv.settimeout(0.1)
+        try:
+            while not accept_done.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+                try:
+                    conn.settimeout(1.0)
+                    buf = b""
+                    while b"\n" not in buf:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    conn.sendall(reply_frame)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                break
+        finally:
+            try:
+                srv.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_listener, daemon=True).start()
+    time.sleep(0.05)
+    return accept_done
+
+
+def _read_sidecar(home: Path, sid: str, suffix: str) -> str:
+    return (home / ".iai-mcp" / ".capture-state" / f"{sid}.{suffix}").read_text().strip()
+
+
+def test_folded_gate_sidecars_advance_only_on_explicit_caught_up_reply():
+    _skip_guards()
+
+    home = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        sid = "gate-empty-" + uuid.uuid4().hex[:8]
+        past_ts = "2026-01-01T00:00:00+00:00"
+        old_wm = "2025-12-31T23:59:59+00:00"
+        future_ts = "2026-06-01T00:00:00+00:00"
+
+        _seed_db_and_watermark(home, sid, past_ts, old_wm)
+        transcript = _write_transcript(home, sid)
+        (home / ".iai-mcp" / ".capture-state" / f"{sid}.live-fingerprint").write_text("0")
+
+        sock_path = str(home / "fake.sock")
+        done = _serve_one_reply(
+            sock_path,
+            {"result": {"rendered": "", "new_max_ts": future_ts, "caught_up": True}},
+        )
+        result = _run_hook(home, sid, transcript, {"IAI_DAEMON_SOCKET_PATH": sock_path})
+        done.set()
+        assert result.returncode == 0, result.stderr
+        assert "additionalContext" not in result.stdout, "empty render must not inject"
+        assert _read_sidecar(home, sid, "watermark").startswith("2026-06-01T00:00:00"), (
+            "caught-up empty reply must advance the watermark"
+        )
+
+        # Not caught up (debounced / partial drain): sidecars stay.
+        os.unlink(sock_path)
+        _seed_db_and_watermark(home, sid, "2026-07-01T00:00:00+00:00", old_wm)
+        done = _serve_one_reply(
+            sock_path,
+            {"result": {"rendered": "", "new_max_ts": "2026-07-01T00:00:00+00:00",
+                        "caught_up": False}},
+        )
+        result = _run_hook(home, sid, transcript, {"IAI_DAEMON_SOCKET_PATH": sock_path})
+        done.set()
+        assert result.returncode == 0, result.stderr
+        assert _read_sidecar(home, sid, "watermark").startswith("2025-12-31T23:59:59"), (
+            "not-caught-up reply still owes the delta — watermark must stay"
+        )
+
+        # Older daemon build with no flag at all: fail closed, even on a render.
+        os.unlink(sock_path)
+        done = _serve_one_reply(
+            sock_path,
+            {"result": {"rendered": "## New since last turn\n- other session turn",
+                        "new_max_ts": "2026-07-01T00:00:00+00:00"}},
+        )
+        result = _run_hook(home, sid, transcript, {"IAI_DAEMON_SOCKET_PATH": sock_path})
+        done.set()
+        assert result.returncode == 0, result.stderr
+        assert "other session turn" in result.stdout, "a rendered delta is still injected"
+        assert _read_sidecar(home, sid, "watermark").startswith("2025-12-31T23:59:59"), (
+            "reply without caught_up must not advance the watermark"
+        )
+    finally:
+        shutil.rmtree(str(home), ignore_errors=True)

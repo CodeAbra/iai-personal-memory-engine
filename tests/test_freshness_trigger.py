@@ -173,7 +173,7 @@ def test_trigger_when_newer(iai_home, monkeypatch):
 
     def fake_rpc(method, params, **_kw):
         rpc_calls.append((method, params))
-        return {"result": {"rendered": "## Memory refreshed\n\nalice shipped the parser refactor", "new_max_ts": new_max_ts_returned}}
+        return {"result": {"rendered": "## Memory refreshed\n\nalice shipped the parser refactor", "new_max_ts": new_max_ts_returned, "caught_up": True}}
 
     monkeypatch.setattr(cli, "_send_jsonrpc_request", fake_rpc)
 
@@ -481,6 +481,36 @@ def test_drain_active_live_no_double_insert(iai_home):
     )
 
 
+def test_drain_active_live_insert_failure_holds_offset(iai_home, monkeypatch):
+    from iai_mcp import capture as capture_mod
+    from iai_mcp.capture import drain_active_live_captures, drain_left_pending
+
+    store = _open_store(iai_home)
+    b_session = "session-b-insertfail"
+    _write_live_file(
+        iai_home,
+        b_session,
+        ["alice hit a transient insert failure while the store was under load"],
+    )
+
+    def _always_insert_failed(*_args, **_kwargs):
+        return {"status": "skipped", "record_id": None, "reason": "insert-failed: RuntimeError"}
+
+    monkeypatch.setattr(capture_mod, "capture_turn", _always_insert_failed)
+
+    counts = drain_active_live_captures(store, exclude_session_id="session-a")
+
+    assert counts["events_skipped_insert_failed"] >= 1, counts
+    assert counts.get("events_inserted", 0) == 0, counts
+    assert drain_left_pending(counts) is True, counts
+
+    offset_path = iai_home / ".iai-mcp" / ".capture-state" / f"{b_session}.drain-offset"
+    assert offset_path.exists(), ".drain-offset sidecar must be written even on hold"
+    assert int(offset_path.read_text().strip()) == 0, (
+        "offset must NOT advance past a line the store failed to persist"
+    )
+
+
 def test_sc3_b_still_open_surfaces_via_refresh(iai_home, monkeypatch):
     from iai_mcp import cli
     from iai_mcp.cli import write_watermark
@@ -575,6 +605,7 @@ def test_live_growth_only_trips_gate(iai_home, monkeypatch):
             "result": {
                 "rendered": "## Memory refreshed\n\nalice live-growth gate fired",
                 "new_max_ts": baseline_max,
+                "caught_up": True,
             }
         }
 
@@ -735,3 +766,105 @@ def test_first_prompt_live_fingerprint_baseline(iai_home, monkeypatch):
     assert fp is not None, "Fingerprint sidecar must be written on first look"
     expected = cli.get_other_sessions_live_size("session-a-fp-first")
     assert fp == expected, "Fingerprint must equal current live size"
+
+
+def _run_refresh_with_reply(iai_home, monkeypatch, session_id: str, reply: dict) -> tuple[str, list]:
+    import argparse
+
+    from iai_mcp import cli
+
+    rpc_calls: list = []
+
+    def fake_rpc(method, params, **_kw):
+        rpc_calls.append((method, params))
+        return reply
+
+    monkeypatch.setattr(cli, "_send_jsonrpc_request", fake_rpc)
+    captured = StringIO()
+    monkeypatch.setattr(sys, "stdout", captured)
+    rc = cli.cmd_session_refresh_if_stale(argparse.Namespace(session_id=session_id))
+    assert rc == 0
+    return captured.getvalue(), rpc_calls
+
+
+def _seed_advanced_store(iai_home, session_id: str) -> tuple[str, str]:
+    from iai_mcp.cli import write_watermark
+    from iai_mcp.session import max_record_created_at
+
+    store = _open_store(iai_home)
+    _insert_record(store, "alice seeded the watermark record for the empty-render probe")
+    old_max = max_record_created_at(store)
+    assert old_max is not None
+    write_watermark(session_id, old_max)
+    time.sleep(0.2)
+    _insert_record(store, "alice own-session turn promoted by the wake sweep after the watermark")
+    new_max = max_record_created_at(store)
+    assert new_max is not None and new_max > old_max
+    return old_max, new_max
+
+
+def test_empty_render_advances_watermark_when_caught_up(iai_home, monkeypatch):
+    from iai_mcp.cli import _utc_iso, read_watermark
+
+    sid = "empty-render-session"
+    old_max, new_max = _seed_advanced_store(iai_home, sid)
+
+    out, calls = _run_refresh_with_reply(
+        iai_home, monkeypatch, sid,
+        {"result": {"rendered": "", "new_max_ts": new_max, "caught_up": True}},
+    )
+    assert out == "", "nothing rendered means nothing injected"
+    assert len(calls) == 1
+    assert _utc_iso(read_watermark(sid)) == _utc_iso(new_max), (
+        "caught-up reply must advance the watermark or the RPC re-fires every prompt"
+    )
+
+    out, calls = _run_refresh_with_reply(
+        iai_home, monkeypatch, sid,
+        {"result": {"rendered": "", "new_max_ts": new_max, "caught_up": True}},
+    )
+    assert calls == [], "advanced watermark must not re-fire the RPC on the next prompt"
+
+
+@pytest.mark.parametrize(
+    "reply, why",
+    [
+        ({"rendered": "", "new_max_ts": "NEW", "caught_up": False},
+         "suppressed or partial reply still owes the delta"),
+        ({"rendered": "", "new_max_ts": "NEW"},
+         "a daemon that does not report caught_up (older build) must fail closed"),
+        ({"rendered": "", "new_max_ts": "", "caught_up": False},
+         "drain-failure reply carries no new_max_ts"),
+        ({"rendered": "## New since last turn\n- other session turn", "new_max_ts": "NEW",
+          "caught_up": False},
+         "a rendered delta over a partial drain must not advance past the pending turns"),
+    ],
+)
+def test_not_caught_up_reply_keeps_watermark(iai_home, monkeypatch, reply, why):
+    from iai_mcp.cli import _utc_iso, read_watermark
+
+    sid = "not-caught-up-session"
+    old_max, new_max = _seed_advanced_store(iai_home, sid)
+    reply = dict(reply)
+    if reply.get("new_max_ts") == "NEW":
+        reply["new_max_ts"] = new_max
+
+    out, calls = _run_refresh_with_reply(iai_home, monkeypatch, sid, {"result": reply})
+    assert len(calls) == 1
+    if reply["rendered"]:
+        assert "other session turn" in out, "a rendered delta is still injected"
+    assert _utc_iso(read_watermark(sid)) == _utc_iso(old_max), why
+
+
+def test_rendered_and_caught_up_reply_advances_watermark(iai_home, monkeypatch):
+    from iai_mcp.cli import _utc_iso, read_watermark
+
+    sid = "rendered-caught-up-session"
+    _old_max, new_max = _seed_advanced_store(iai_home, sid)
+    out, _calls = _run_refresh_with_reply(
+        iai_home, monkeypatch, sid,
+        {"result": {"rendered": "## New since last turn\n- other session turn",
+                    "new_max_ts": new_max, "caught_up": True}},
+    )
+    assert "other session turn" in out
+    assert _utc_iso(read_watermark(sid)) == _utc_iso(new_max)

@@ -68,7 +68,7 @@ def storage_driver(request, monkeypatch):
 
     The driver is read from the environment at connection-open time, so setting
     it here ensures the concurrency bodies exercise BOTH the stdlib sqlite3 path
-    and the vendored engine's serialization.
+    (current) and the vendored engine (post-fix serialization).
     """
     driver = request.param
     if driver == "lilli":

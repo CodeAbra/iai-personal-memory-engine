@@ -82,16 +82,12 @@ the above (e.g. `cryptography` is "Apache-2.0 OR BSD-3-Clause"; `structlog` is
 "MIT OR Apache-2.0").
 
 All of these are compatible with this project's MIT license declared in
-`LICENSE`. There are no copyleft (GPL / LGPL / AGPL) runtime dependencies in
-the shipped distribution.
+`LICENSE`.
 
-A custom MIT-licensed Leiden implementation removed the
-project's previous dependence on `leidenalg` and `python-igraph`, both of
-which were copyleft-licensed. The replacement MOSAIC community-detection
-backend (`src/iai_mcp/mosaic.py`) is original code under the project's MIT
-license, with the Numba JIT runtime (BSD-2-Clause) as its only Numba-specific
-dep. After that change the repository is fully MIT-compatible for both static
-distribution and dynamic linking.
+The MOSAIC community-detection backend (`src/iai_mcp/mosaic.py`) is original
+code under the project's MIT license, with the Numba JIT runtime (BSD-2-Clause)
+as its only Numba-specific dep. The repository is fully MIT-compatible for both
+static distribution and dynamic linking.
 
 ## Updating this file
 

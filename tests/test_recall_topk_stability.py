@@ -12,7 +12,7 @@ NOISE_SEED = 20260419
 def _seed_store(tmp_path, n_pinned: int, n_noise: int, dim: int = EMBED_DIM):
     store = MemoryStore(path=tmp_path)
     pinned_texts = [
-        f"Alice pinned verbatim day {i}: phrase-{i}-{'x' * 10}"
+        f"alice pinned verbatim day {i}: phrase-{i}-{'x' * 10}"
         for i in range(n_pinned)
     ]
     pinned_records = [_make_pinned(t, dim=dim) for t in pinned_texts]
@@ -65,7 +65,7 @@ def test_topk_rank_identical_across_sequential_queries(tmp_path):
         updated = store.get(rec.id)
         assert updated is not None, f"pinned record {rec.id} vanished"
         assert len(updated.provenance) >= 20, (
-            f"pinned {rec.id} has "
+            f"MEM-05 violation: pinned {rec.id} has "
             f"{len(updated.provenance)} provenance entries after 20 recalls "
             f"(expected >= 20)."
         )
@@ -89,7 +89,7 @@ def test_topk_contains_all_pinned_at_runbook_profile(tmp_path):
     pinned_ids = {r.id for r in pinned}
     missing = pinned_ids - hit_ids
     assert not missing, (
-        f"runbook profile: "
+        f"OPS-04 violation at runbook profile: "
         f"{len(missing)}/{len(pinned_ids)} pinned records missing from top-60. "
         f"Missing surface (first 3): "
         f"{sorted(str(m)[:8] for m in list(missing)[:3])}"
@@ -118,6 +118,6 @@ def test_no_literal_surface_mutation(tmp_path):
     assert pre.keys() == post.keys()
     for rid in pre:
         assert pre[rid] == post[rid], (
-            f"literal_surface of record {rid} mutated "
+            f"C5 MEM-01 violation: literal_surface of record {rid} mutated "
             f"by recall path. Before={pre[rid]!r}, after={post[rid]!r}."
         )

@@ -40,9 +40,14 @@ def _insert_pending(store, surface: str) -> str:
     return pid
 
 
-def test_pending_to_embedded_flip_invalidates_snapshot(hermetic_store: Path) -> None:
-    """Pending rows do not churn the graph key; becoming active unlinks its snapshot."""
-    from iai_mcp.runtime_graph_cache import _cache_key, _cache_path
+def test_pending_lifecycle_freshness_travels_by_unlink_not_key(hermetic_store: Path) -> None:
+    """Pending rows are deliberately INVISIBLE to _cache_key: they are never
+    graph nodes, and keying on them re-keyed the warm bundle on every ambient
+    capture. The flip's freshness demand travels as an explicit unlink of the
+    warm-graph cache instead — driven through the PRODUCTION write paths.
+    """
+    from iai_mcp import runtime_graph_cache as rgc
+    from iai_mcp.runtime_graph_cache import _cache_key
     from iai_mcp.store import MemoryStore, flush_record_buffer
 
     store = MemoryStore(hermetic_store)
@@ -53,30 +58,28 @@ def test_pending_to_embedded_flip_invalidates_snapshot(hermetic_store: Path) -> 
 
         key_no_pending = _cache_key(store)
 
-        # Pending appearance through the production write path (fires cb('pending')).
+        # Pending appearance through the production write path: NO key change.
         _insert_pending(store, "pending probe surface carrying real text")
-        key_with_pending = _cache_key(store)
-        assert key_with_pending == key_no_pending
+        assert _cache_key(store) == key_no_pending, (
+            "an ambient capture landing as pending must not re-key the bundle"
+        )
 
-        # Give the production invalidation boundary a real snapshot to remove.
-        cache_path = _cache_path(store)
-        cache_path.write_text("{}")
-        assert cache_path.exists()
+        # A cache file exists so the unlink assertion below has teeth.
+        rgc._cache_path(store).parent.mkdir(parents=True, exist_ok=True)
+        rgc._cache_path(store).write_text("{}", encoding="utf-8")
 
-        # Re-embed flip 1->0 through the production wake sequence
-        # (fires cb('active','pending')).
+        # Re-embed flip 1->0 through the production wake sequence.
         result = store.db.pending_embeddings_wake_sequence(
             embedder=_DeterministicEmbedder()
         )
         assert result.get("action") == "wake_sequence", result
         assert result.get("reembed_count") == 1, result
 
-        key_after_reembed = _cache_key(store)
-
-        # The +1 active row remains in the same quantized count bucket, so the
-        # explicit unlink — not key churn — carries the freshness demand.
-        assert key_after_reembed == key_with_pending
-        assert not cache_path.exists()
+        # The load-bearing assertion: the flip UNLINKS the warm-graph cache,
+        # which no key term can miss and no stale serve can survive.
+        assert not rgc._cache_path(store).exists(), (
+            "the wake sequence must unlink the warm-graph cache after a flip"
+        )
     finally:
         store.close()
 
@@ -110,9 +113,9 @@ def test_ordinary_insert_within_window_keeps_key_stable(
 
 
 def test_cache_key_parity_triple_still_addressable(hermetic_store: Path) -> None:
-    """The parity components (schema, embed_dim, cache_version) sit at the new
-    positions [2],[3],[4] and CACHE_VERSION is still the last element — the
-    insertion-point invariant the legacy [:-1] slice and the parity gates rely on.
+    """The parity components (schema, embed_dim, cache_version) are the key's
+    TAIL whatever its arity, and CACHE_VERSION is the last element — the
+    invariant the legacy [:-1] slice and the shape-agnostic parity gates use.
     """
     from iai_mcp import runtime_graph_cache as rgc
     from iai_mcp.runtime_graph_cache import _cache_key, _parity_components
@@ -121,11 +124,8 @@ def test_cache_key_parity_triple_still_addressable(hermetic_store: Path) -> None
     store = MemoryStore(hermetic_store)
     try:
         key = _cache_key(store)
-        assert len(key) == 5
-        schema, embed_dim, cache_version = _parity_components(store)
-        assert key[2] == schema
-        assert key[3] == embed_dim
-        assert key[4] == cache_version
+        assert len(key) >= 3
+        assert tuple(key[-3:]) == tuple(_parity_components(store))
         assert key[-1] == rgc.CACHE_VERSION
     finally:
         store.close()
