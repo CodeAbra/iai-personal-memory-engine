@@ -72,4 +72,28 @@ deny = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste is unmaintained (author archived the repo); no drop-in replacement
+    # has been adopted upstream by its transitive consumers (candle's gemm /
+    # gemm-c32 / gemm-c64 / gemm-f16 / gemm-f32 / gemm-f64, and tokenizers'
+    # macro_rules_attribute). No code fix exists; re-evaluate when candle or
+    # tokenizers migrate off it.
+    "RUSTSEC-2024-0436",
+    # number_prefix is unmaintained. Pulled transitively by indicatif <- hf-hub,
+    # used only for a bench/download progress bar, never on the shipped
+    # runtime path. No code fix exists upstream.
+    "RUSTSEC-2025-0119",
+    # unic-char-property / unic-char-range / unic-common / unic-emoji-char /
+    # unic-ucd-ident / unic-ucd-version: all six are the open-i18n/rust-unic
+    # project, unmaintained as a whole. Pulled transitively via pyo3-stub-gen's
+    # rustpython-parser dependency (Python-syntax parsing for the `.pyi`
+    # stub-file generator). No code fix exists upstream; re-evaluate when
+    # pyo3-stub-gen migrates off rustpython-parser or rustpython-parser
+    # migrates off rust-unic.
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0090",
+    "RUSTSEC-2025-0100",
+    "RUSTSEC-2025-0098",
+]
