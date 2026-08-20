@@ -234,7 +234,7 @@ impl Row {
             .iter()
             .map(|v| value_to_py(py, v))
             .collect();
-        let list = pyo3::types::PyList::new(py, &vals).unwrap();
+        let list = pyo3::types::PyList::new(py, &vals)?;
         Ok(list.as_any().try_iter()?.into())
     }
 
@@ -258,10 +258,11 @@ fn description_tuple<'py>(py: Python<'py>, desc: &[ColumnDesc]) -> Bound<'py, Py
                 py.None().into_bound(py),
                 py.None().into_bound(py),
             ];
-            PyTuple::new(py, &slots).unwrap()
+            PyTuple::new(py, &slots)
+                .expect("PyTuple::new: allocation failure building description slot")
         })
         .collect();
-    PyTuple::new(py, &cols).unwrap()
+    PyTuple::new(py, &cols).expect("PyTuple::new: allocation failure building description tuple")
 }
 
 /// The error text raised when an op is issued against a closed cursor/connection,
