@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.4] - 2026-08-19
+
+### Fixed
+- The bundled MCP wrapper reported its version as `3.0.2` regardless of the
+  release it shipped in — the version was hardcoded in the TypeScript source
+  and was not part of the release bump, so a `3.0.3` install still announced
+  `3.0.2` over the protocol. The wrapper version now tracks the release, and a
+  test asserts it stays in step with `mcp-wrapper/package.json` so it cannot
+  drift again. Thanks [@gepenniman](https://github.com/gepenniman).
+
 ## [3.0.3] - 2026-08-18
 
 ### Fixed
