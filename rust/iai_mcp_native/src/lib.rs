@@ -89,10 +89,13 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 // wrapper aggregates them at build time.
 define_stub_info_gatherer!(stub_info);
 
-// Must live in this lib crate, not the `stub_gen` binary — `from_project_root`
-// walks the process-wide `inventory` registry, which only contains the
-// `#[gen_stub_*]` items linked in via this crate's dependency graph.
+// Must be defined here, not in the `stub_gen` binary — pyo3-stub-gen requires
+// the calling crate be the linked PyO3 library crate for `inventory` to see
+// its registered items.
 pub fn stub_info_staged() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
+    // is_mixed_layout=true bypasses the Pure-Rust single-module validation
+    // WITHOUT touching [tool.maturin]; project_root is a dedicated staging
+    // dir, never the live installed package dir.
     pyo3_stub_gen::StubInfo::from_project_root(
         "iai_mcp_native".to_string(),
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stubs"),
