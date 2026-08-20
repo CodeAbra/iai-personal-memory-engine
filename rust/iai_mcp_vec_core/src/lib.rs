@@ -294,7 +294,7 @@ impl ExactIndex {
                 labels.len()
             )));
         }
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut inner = self.inner.lock().unwrap();
             for (row, &label) in rows.iter().zip(labels.iter()) {
                 inner.add_one(row, label).map_err(PyRuntimeError::new_err)?;
@@ -316,7 +316,7 @@ impl ExactIndex {
             ));
         }
         let query = rows.into_iter().next().unwrap();
-        let (labels, dists) = py.allow_threads(|| {
+        let (labels, dists) = py.detach(|| {
             let inner = self.inner.lock().unwrap();
             inner.top_k(&query, k)
         });
@@ -326,8 +326,8 @@ impl ExactIndex {
         let dists_arr = Array2::from_shape_vec((1, n), dists)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok((
-            labels_arr.into_pyarray_bound(py).into_any(),
-            dists_arr.into_pyarray_bound(py).into_any(),
+            labels_arr.into_pyarray(py).into_any(),
+            dists_arr.into_pyarray(py).into_any(),
         ))
     }
 
@@ -421,7 +421,7 @@ impl ExactIndex {
     }
 
     fn save_index(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-        py.allow_threads(|| {
+        py.detach(|| {
             let inner = self.inner.lock().unwrap();
             inner
                 .save(Path::new(path))

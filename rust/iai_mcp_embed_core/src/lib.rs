@@ -69,9 +69,7 @@ impl Embedder {
             .transpose()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let inner = py
-            .allow_threads(|| {
-                BertEmbedder::load_with(model_id.as_deref(), revision.as_deref(), pooling)
-            })
+            .detach(|| BertEmbedder::load_with(model_id.as_deref(), revision.as_deref(), pooling))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
@@ -83,7 +81,7 @@ impl Embedder {
     /// their inference in parallel. `BertEmbedder::encode` is pure Rust and
     /// holds no Python objects, making this safe.
     fn encode(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
-        py.allow_threads(|| self.inner.encode(text))
+        py.detach(|| self.inner.encode(text))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }

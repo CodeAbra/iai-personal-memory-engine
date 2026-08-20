@@ -56,7 +56,7 @@ fn to_pyerr(py: Python<'_>, e: EngineError) -> PyErr {
     if matches!(e, EngineError::SnapshotFence(_)) {
         return SnapshotFenceError::new_err(msg);
     }
-    let errors_mod = match py.import_bound("iai_mcp.errors") {
+    let errors_mod = match py.import("iai_mcp.errors") {
         Ok(m) => m,
         Err(_) => return PyRuntimeError::new_err(msg),
     };
@@ -68,7 +68,7 @@ fn to_pyerr(py: Python<'_>, e: EngineError) -> PyErr {
     };
     match errors_mod.getattr(exc_name) {
         Ok(exc) => match exc.call1((msg.clone(),)) {
-            Ok(inst) => PyErr::from_value_bound(inst),
+            Ok(inst) => PyErr::from_value(inst),
             Err(_) => PyRuntimeError::new_err(msg),
         },
         Err(_) => PyRuntimeError::new_err(msg),
@@ -106,7 +106,7 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(s) = obj.extract::<String>() {
         return Ok(Value::Text(s));
     }
-    if let Ok(b) = obj.downcast::<PyBytes>() {
+    if let Ok(b) = obj.cast::<PyBytes>() {
         return Ok(Value::Blob(b.as_bytes().to_vec()));
     }
     // datetime / date bind: mirror the stdlib sqlite3 default adapters so a
@@ -126,7 +126,7 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 /// a date as its bare `isoformat()`. Returns `None` for any non-datetime object.
 fn datetime_to_iso(obj: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     let py = obj.py();
-    let dt_mod = py.import_bound("datetime")?;
+    let dt_mod = py.import("datetime")?;
     let datetime_cls = dt_mod.getattr("datetime")?;
     let date_cls = dt_mod.getattr("date")?;
     // datetime is a subclass of date, so check datetime first.
@@ -146,10 +146,10 @@ fn datetime_to_iso(obj: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
 fn value_to_py<'py>(py: Python<'py>, value: &Value) -> Bound<'py, PyAny> {
     match value {
         Value::Null => py.None().into_bound(py),
-        Value::Int(i) => i.into_py(py).into_bound(py),
-        Value::Float(f) => f.into_py(py).into_bound(py),
-        Value::Text(s) => s.into_py(py).into_bound(py),
-        Value::Blob(b) => PyBytes::new_bound(py, b).into_any(),
+        Value::Int(i) => i.into_pyobject(py).unwrap().into_any(),
+        Value::Float(f) => f.into_pyobject(py).unwrap().into_any(),
+        Value::Text(s) => s.into_pyobject(py).unwrap().into_any(),
+        Value::Blob(b) => PyBytes::new(py, b).into_any(),
     }
 }
 
@@ -170,7 +170,7 @@ fn extract_binds(params: Option<&Bound<'_, PyAny>>) -> PyResult<Binds> {
         return Ok(Binds::Positional(Vec::new()));
     }
     // A dict is the :name channel.
-    if let Ok(dict) = p.downcast::<pyo3::types::PyDict>() {
+    if let Ok(dict) = p.cast::<pyo3::types::PyDict>() {
         let mut map = std::collections::HashMap::new();
         for (key, val) in dict.iter() {
             let key: String = key.extract()?;
@@ -180,7 +180,7 @@ fn extract_binds(params: Option<&Bound<'_, PyAny>>) -> PyResult<Binds> {
     }
     // Otherwise a positional sequence (tuple / list).
     let mut out = Vec::new();
-    for item in p.iter()? {
+    for item in p.try_iter()? {
         out.push(py_to_value(&item?)?);
     }
     Ok(Binds::Positional(out))
@@ -234,8 +234,8 @@ impl Row {
             .iter()
             .map(|v| value_to_py(py, v))
             .collect();
-        let list = pyo3::types::PyList::new_bound(py, &vals);
-        Ok(list.as_any().iter()?.into())
+        let list = pyo3::types::PyList::new(py, &vals).unwrap();
+        Ok(list.as_any().try_iter()?.into())
     }
 
     /// The column names in order (sqlite3.Row.keys()).
@@ -250,7 +250,7 @@ fn description_tuple<'py>(py: Python<'py>, desc: &[ColumnDesc]) -> Bound<'py, Py
         .iter()
         .map(|c| {
             let slots: Vec<Bound<'py, PyAny>> = vec![
-                c.name.clone().into_py(py).into_bound(py),
+                c.name.clone().into_pyobject(py).unwrap().into_any(),
                 py.None().into_bound(py),
                 py.None().into_bound(py),
                 py.None().into_bound(py),
@@ -258,10 +258,10 @@ fn description_tuple<'py>(py: Python<'py>, desc: &[ColumnDesc]) -> Bound<'py, Py
                 py.None().into_bound(py),
                 py.None().into_bound(py),
             ];
-            PyTuple::new_bound(py, &slots)
+            PyTuple::new(py, &slots).unwrap()
         })
         .collect();
-    PyTuple::new_bound(py, &cols)
+    PyTuple::new(py, &cols).unwrap()
 }
 
 /// The error text raised when an op is issued against a closed cursor/connection,
@@ -464,7 +464,7 @@ impl RawConn {
             Some(c) => Arc::clone(c),
             None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
         };
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             let mut guard = lock(&conn);
             guard.refresh_read_view()
         });
@@ -508,7 +508,7 @@ impl RawConn {
             Some(c) => Arc::clone(c),
             None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
         };
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             let mut guard = lock(&conn);
             guard.publish_read_models()
         });
@@ -573,7 +573,7 @@ impl Connection {
     /// Opening replays the persisted DDL and loads the on-disk column-index
     /// sidecar (a CBOR decode that scales with the corpus size -- tens of
     /// megabytes at production scale). Both `path`/`embed_dim` are plain,
-    /// `Send` Rust values, so the whole open runs inside `py.allow_threads`:
+    /// `Send` Rust values, so the whole open runs inside `py.detach`:
     /// without it this call holds the GIL for the full sidecar decode,
     /// blocking every other Python thread in the process (including a
     /// foreground recall in a sibling worker thread) for as long as the open
@@ -583,7 +583,7 @@ impl Connection {
     #[pyo3(signature = (path, embed_dim=0))]
     fn open(py: Python<'_>, path: &str, embed_dim: i64) -> PyResult<Connection> {
         let inner = py
-            .allow_threads(|| conn::Connection::open(path, embed_dim))
+            .detach(|| conn::Connection::open(path, embed_dim))
             .map_err(|e| to_pyerr(py, e))?;
         Ok(Connection {
             inner: Some(Arc::new(Mutex::new(inner))),
@@ -604,7 +604,7 @@ impl Connection {
     #[pyo3(signature = (path, embed_dim=0))]
     fn open_read_only(py: Python<'_>, path: &str, embed_dim: i64) -> PyResult<Connection> {
         let inner = py
-            .allow_threads(|| conn::Connection::open_read_only(path, embed_dim))
+            .detach(|| conn::Connection::open_read_only(path, embed_dim))
             .map_err(|e| to_pyerr(py, e))?;
         Ok(Connection {
             inner: Some(Arc::new(Mutex::new(inner))),
@@ -668,7 +668,7 @@ impl Connection {
     /// writer must never stall the whole interpreter through this call.
     fn export_built_indexes(&self, py: Python<'_>) -> PyResult<IndexSnapshot> {
         let arc = self.arc()?;
-        let inner = py.allow_threads(move || {
+        let inner = py.detach(move || {
             let guard = lock(&arc);
             guard.export_built_indexes()
         });
@@ -699,7 +699,7 @@ impl Connection {
     fn adopt_built_indexes(&self, py: Python<'_>, snapshot: &IndexSnapshot) -> PyResult<()> {
         let arc = self.arc()?;
         let inner = snapshot.inner.clone();
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut guard = lock(&arc);
             guard.adopt_built_indexes(&inner);
         });
@@ -817,7 +817,7 @@ impl Connection {
     /// connections adopt them instead of paying per-query scans.
     fn publish_read_models(&self, py: Python<'_>) -> PyResult<()> {
         let inner = Arc::clone(self.arc()?);
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             let mut guard = lock(&inner);
             guard.publish_read_models()
         });
@@ -953,7 +953,7 @@ fn run_execute(
     let binds = extract_binds(params)?;
     // Release the GIL for the pure-Rust lock + execute span. The closure
     // captures only Send data: binds by move, conn and sql by shared ref.
-    let result = py.allow_threads(|| {
+    let result = py.detach(|| {
         let mut guard = lock(conn);
         match binds {
             Binds::Positional(p) => guard.execute(sql, p),
@@ -978,16 +978,16 @@ fn run_executemany(
 ) -> PyResult<CursorState> {
     // Marshal the sequence of parameter rows under the GIL before releasing it.
     let mut seq: Vec<Vec<Value>> = Vec::new();
-    for row in seq_of_params.iter()? {
+    for row in seq_of_params.try_iter()? {
         let row = row?;
         let mut params = Vec::new();
-        for item in row.iter()? {
+        for item in row.try_iter()? {
             params.push(py_to_value(&item?)?);
         }
         seq.push(params);
     }
     // Release the GIL for the pure-Rust lock + executemany span.
-    let result = py.allow_threads(|| {
+    let result = py.detach(|| {
         let mut guard = lock(conn);
         guard.executemany(sql, seq)
     });
@@ -1011,7 +1011,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IndexSnapshot>()?;
     m.add(
         "SnapshotFenceError",
-        m.py().get_type_bound::<SnapshotFenceError>(),
+        m.py().get_type::<SnapshotFenceError>(),
     )?;
     Ok(())
 }

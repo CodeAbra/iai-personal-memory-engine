@@ -11,7 +11,7 @@
 //! CHANGELOG entry that ships alongside the σ-assembly plan.
 //!
 //! The PyO3 entry point releases the GIL during the Rust kernel via
-//! `py.allow_threads(move || ...)`. Brandes at N≥10k can take seconds,
+//! `py.detach(move || ...)`. Brandes at N≥10k can take seconds,
 //! and the daemon's status handler must stay responsive on multi-second
 //! kernels — same discipline as `shortest::average_shortest_path_length`.
 //!
@@ -123,7 +123,7 @@ fn build_graph_from_csr(
 /// numpy.ndarray[i64])`.
 ///
 /// Build an undirected graph from the CSR buffers, run rustworkx-core's
-/// Brandes 2001 kernel under `py.allow_threads(...)`, and return the
+/// Brandes 2001 kernel under `py.detach(...)`, and return the
 /// centrality scalars plus an explicit CSR-row-index array so the Python
 /// consumer can map each scalar back to its node identifier without
 /// assuming a coincidence between insertion order and CSR row order.
@@ -155,12 +155,12 @@ pub fn betweenness_centrality(
 
     // Snapshot the numpy borrows into owned `Vec<i64>` so the compute
     // kernel can drop the GIL — `PyReadonlyArray1` borrows are GIL-bound
-    // and cannot survive `py.allow_threads`. Copying ~10^4 i64 entries
+    // and cannot survive `py.detach`. Copying ~10^4 i64 entries
     // is cheap relative to the O(V·(V+E)) Brandes BFS that follows.
     let indptr_owned: Vec<i64> = indptr_slice.to_vec();
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
-    let centrality_vec = py.allow_threads(move || -> Result<Vec<f64>, GraphError> {
+    let centrality_vec = py.detach(move || -> Result<Vec<f64>, GraphError> {
         let graph = build_graph_from_csr(&indptr_owned, &indices_owned, n_nodes)?;
         // include_endpoints=false matches networkx's
         // `betweenness_centrality` default; the differential parity gate
@@ -182,8 +182,8 @@ pub fn betweenness_centrality(
     // correct because each scalar carries its row index alongside.
     let node_indices_vec: Vec<i64> = (0..n_nodes as i64).collect();
 
-    let centrality_py: Py<PyArray1<f64>> = centrality_vec.into_pyarray_bound(py).unbind();
-    let node_indices_py: Py<PyArray1<i64>> = node_indices_vec.into_pyarray_bound(py).unbind();
+    let centrality_py: Py<PyArray1<f64>> = centrality_vec.into_pyarray(py).unbind();
+    let node_indices_py: Py<PyArray1<i64>> = node_indices_vec.into_pyarray(py).unbind();
 
     Ok((centrality_py, node_indices_py))
 }

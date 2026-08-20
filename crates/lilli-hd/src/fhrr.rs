@@ -123,14 +123,14 @@ pub fn similarity_impl(a: &[u8], b: &[u8]) -> f64 {
 #[pyo3(name = "fhrr_bind")]
 pub fn bind<'py>(py: Python<'py>, a: &[u8], b: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let out = bind_impl(a, b)?;
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]
 #[pyo3(name = "fhrr_unbind")]
 pub fn unbind<'py>(py: Python<'py>, bound: &[u8], key: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let out = unbind_impl(bound, key)?;
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]
@@ -143,15 +143,15 @@ pub fn bundle<'py>(
         .iter()
         .map(|item| item.extract::<Vec<u8>>())
         .collect::<PyResult<_>>()?;
-    let out = py.allow_threads(|| bundle_impl(&mats))?;
-    Ok(PyBytes::new_bound(py, &out))
+    let out = py.detach(|| bundle_impl(&mats))?;
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]
 #[pyo3(name = "fhrr_permute")]
 pub fn permute<'py>(py: Python<'py>, hv: &[u8], shift: i64) -> PyResult<Bound<'py, PyBytes>> {
     let out = permute_impl(hv, shift);
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]

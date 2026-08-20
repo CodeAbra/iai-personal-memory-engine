@@ -139,6 +139,6 @@ pub fn project<'py>(
     emb: PyReadonlyArray1<'py, f32>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let emb = emb.as_slice()?;
-    let packed = py.allow_threads(|| project_impl(emb))?;
-    Ok(PyBytes::new_bound(py, &packed))
+    let packed = py.detach(|| project_impl(emb))?;
+    Ok(PyBytes::new(py, &packed))
 }

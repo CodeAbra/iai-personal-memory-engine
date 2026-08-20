@@ -35,47 +35,44 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // would otherwise derive the attribute from the dotted __name__.
 
     // Embedder sub-module — Bert / bge-small-en-v1.5 forward pass.
-    let embed = PyModule::new_bound(py, "iai_mcp_native.embed")?;
+    let embed = PyModule::new(py, "iai_mcp_native.embed")?;
     iai_mcp_embed_core::register(py, &embed)?;
     m.add("embed", &embed)?;
 
     // Graph sub-module — pure-Rust algorithms layer (currently a wiring
     // probe; real algorithm work begins in later plans).
-    let graph = PyModule::new_bound(py, "iai_mcp_native.graph")?;
+    let graph = PyModule::new(py, "iai_mcp_native.graph")?;
     iai_mcp_graph_core::register(py, &graph)?;
     m.add("graph", &graph)?;
 
     // Vector-index sub-module — exact cosine search over the record
     // embeddings, the recall index under Hippo.
-    let vec = PyModule::new_bound(py, "iai_mcp_native.vec")?;
+    let vec = PyModule::new(py, "iai_mcp_native.vec")?;
     iai_mcp_vec_core::register(py, &vec)?;
     m.add("vec", &vec)?;
 
     // Hypervector sub-module — BSC / FHRR / sparse VSA bit-kernels plus the
     // frozen SimHash projection-apply.
-    let hd = PyModule::new_bound(py, "iai_mcp_native.hd")?;
+    let hd = PyModule::new(py, "iai_mcp_native.hd")?;
     lilli_hd::register(py, &hd)?;
     m.add("hd", &hd)?;
 
     // Store sub-module — the paged record store (pager + B-tree + write-ahead
     // log) exposed for storage-level differential testing.
-    let store = PyModule::new_bound(py, "iai_mcp_native.store")?;
+    let store = PyModule::new(py, "iai_mcp_native.store")?;
     lillibrain::register(py, &store)?;
     m.add("store", &store)?;
 
     // Engine sub-module — the sqlite3-shaped SQL engine (Connection / Cursor /
     // Row / RawConn) over the record store, the storage driver under Hippo.
-    let engine = PyModule::new_bound(py, "iai_mcp_native.engine")?;
+    let engine = PyModule::new(py, "iai_mcp_native.engine")?;
     lilliengine::register(py, &engine)?;
     m.add("engine", &engine)?;
 
     // Register the dotted sub-module names in `sys.modules` so a separate
     // `import iai_mcp_native.embed` statement also resolves. Without this
     // step, only `from iai_mcp_native import embed` works.
-    let sys_modules: Bound<'_, PyDict> = py
-        .import_bound("sys")?
-        .getattr("modules")?
-        .downcast_into()?;
+    let sys_modules: Bound<'_, PyDict> = py.import("sys")?.getattr("modules")?.cast_into()?;
     sys_modules.set_item("iai_mcp_native.embed", &embed)?;
     sys_modules.set_item("iai_mcp_native.graph", &graph)?;
     sys_modules.set_item("iai_mcp_native.vec", &vec)?;
