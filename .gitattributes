@@ -1,0 +1,3 @@
+
+# iai-pme (windows-adapt): shell hooks MUST stay LF or bash fails on Windows
+*.sh text eol=lf

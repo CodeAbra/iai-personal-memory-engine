@@ -267,9 +267,6 @@ class SocketServer:
             env_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
             socket_path = Path(env_path) if env_path else SOCKET_PATH
 
-        sig = inspect.signature(asyncio.start_unix_server)
-        supports_cleanup_socket = "cleanup_socket" in sig.parameters
-
         # One JSON-RPC request is one line; a relayed document upload
         # (base64, ≤25 MB raw) must fit the StreamReader line buffer.
         _line_limit = 64 * 1024 * 1024
@@ -286,6 +283,13 @@ class SocketServer:
             finally:
                 shutdown_ipc()
             return
+
+        # POSIX only past here: asyncio.start_unix_server is absent on Windows,
+        # so read its signature AFTER the IS_WINDOWS early return. Reading it
+        # before crashed serve() with AttributeError on Windows, silently
+        # killing the IPC listener (no .daemon.port; status "not running").
+        sig = inspect.signature(asyncio.start_unix_server)
+        supports_cleanup_socket = "cleanup_socket" in sig.parameters
         inherited = _inherit_activated_socket()
         if inherited is not None:
             server = await asyncio.start_unix_server(

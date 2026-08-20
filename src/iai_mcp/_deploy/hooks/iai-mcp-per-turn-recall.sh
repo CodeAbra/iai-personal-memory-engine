@@ -1,4 +1,22 @@
 #!/bin/bash
+# --- iai-pme: portable Python interpreter resolution (Windows/macOS/Linux) ---
+# Honors IAI_MCP_PYTHON when set by the installer; otherwise resolves a real
+# python3/python, skipping the Windows Store "python3" App-Execution-Alias stub
+# (WindowsApps), and finally falls back to the Windows "py" launcher. The result
+# is an absolute interpreter path usable as "$PYBIN" -c '...'.
+PYBIN="${IAI_MCP_PYTHON:-}"
+if [ -z "$PYBIN" ]; then
+  for _c in python3 python; do
+    _p=$(command -v "$_c" 2>/dev/null) || continue
+    case "$_p" in *WindowsApps*) continue ;; esac
+    PYBIN="$_p"; break
+  done
+fi
+if [ -z "$PYBIN" ] && command -v py >/dev/null 2>&1; then
+  PYBIN=$(py -3 -c "import sys; print(sys.executable)" 2>/dev/null)
+fi
+[ -n "$PYBIN" ] || PYBIN=/usr/bin/python3
+# --- end iai-pme interpreter resolution ---
 # Per-turn context injection for Claude Code (UserPromptSubmit hook).
 #
 # Daemon-independent by construction: reads ONLY daemon-emitted cache files
@@ -35,7 +53,7 @@ json_field() {
 # above takes the LAST occurrence on the line, so pasted text containing a
 # "session_id" key could redirect pack selection. Parse real JSON for the
 # session id; the sed stays as fallback for our own trusted state files.
-SESS_IN=$(printf '%s' "$STDIN_JSON" | /usr/bin/python3 -c '
+SESS_IN=$(printf '%s' "$STDIN_JSON" | "$PYBIN" -c '
 import json, sys
 try:
     print(str(json.load(sys.stdin).get("session_id", "") or ""))
