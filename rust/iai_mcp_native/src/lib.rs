@@ -88,3 +88,15 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 // each crate runs its own `define_stub_info_gatherer!(stub_info)` and the
 // wrapper aggregates them at build time.
 define_stub_info_gatherer!(stub_info);
+
+// Must live in this lib crate, not the `stub_gen` binary — `from_project_root`
+// walks the process-wide `inventory` registry, which only contains the
+// `#[gen_stub_*]` items linked in via this crate's dependency graph.
+pub fn stub_info_staged() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
+    pyo3_stub_gen::StubInfo::from_project_root(
+        "iai_mcp_native".to_string(),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stubs"),
+        true,
+        pyo3_stub_gen::StubGenConfig::default(),
+    )
+}

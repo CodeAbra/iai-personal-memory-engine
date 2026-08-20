@@ -1,19 +1,17 @@
-//! Emits the `.pyi` stub for the native wrapper module.
+//! Emits the `.pyi` stubs for the native wrapper module.
 //!
 //! Invocation:
 //!   cargo run --bin stub_gen -p iai_mcp_native
 //!
 //! Output:
-//!   rust/iai_mcp_native/iai_mcp_native.pyi
+//!   rust/iai_mcp_native/stubs/iai_mcp_native/{__init__,embed/__init__,graph/__init__}.pyi
 //!
-//! The generated stub is the source of truth for `mypy --strict` checks
-//! against the Rust-facing Python surface. `maturin build` bundles it
-//! into the wheel.
+//! Generated stubs are staged here, not written to the live installed
+//! package dir; flatten them into the tracked `.pyi` copies by hand.
 
 use pyo3_stub_gen::Result;
 
 fn main() -> Result<()> {
-    let stub = iai_mcp_native::stub_info()?;
-    stub.generate()?;
+    iai_mcp_native::stub_info_staged()?.generate()?;
     Ok(())
 }
