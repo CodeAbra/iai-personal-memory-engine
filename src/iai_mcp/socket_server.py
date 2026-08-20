@@ -267,9 +267,6 @@ class SocketServer:
             env_path = os.environ.get("IAI_DAEMON_SOCKET_PATH")
             socket_path = Path(env_path) if env_path else SOCKET_PATH
 
-        sig = inspect.signature(asyncio.start_unix_server)
-        supports_cleanup_socket = "cleanup_socket" in sig.parameters
-
         # One JSON-RPC request is one line; a relayed document upload
         # (base64, ≤25 MB raw) must fit the StreamReader line buffer.
         _line_limit = 64 * 1024 * 1024
@@ -286,6 +283,17 @@ class SocketServer:
             finally:
                 shutdown_ipc()
             return
+
+        # POSIX only, and it MUST stay below the Windows return: asyncio
+        # exposes start_unix_server only on platforms with AF_UNIX, so
+        # probing it above the branch raises AttributeError on Windows
+        # before the loopback path can bind. serve() runs as a
+        # fire-and-forget task, so the failure is silent: the daemon
+        # boots, warms, and ticks its FSM while serving nothing, the
+        # port file is never written, and the watchdog kills the
+        # process as wedged when the cold-start grace expires.
+        sig = inspect.signature(asyncio.start_unix_server)
+        supports_cleanup_socket = "cleanup_socket" in sig.parameters
         inherited = _inherit_activated_socket()
         if inherited is not None:
             server = await asyncio.start_unix_server(
