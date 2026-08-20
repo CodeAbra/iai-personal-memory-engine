@@ -24,20 +24,12 @@ class Embedder:
     def __new__(cls, model_id: typing.Optional[builtins.str] = None, revision: typing.Optional[builtins.str] = None, pool: typing.Optional[builtins.str] = None) -> Embedder:
         r"""
         Load bge-small-en-v1.5 weights from the HF cache (lazy download on miss
-        unless `IAI_MCP_EMBED_OFFLINE=1`).
-        
-        The GIL is released for the duration of the model load so that
-        background warm threads cannot block the main thread.
-        `BertEmbedder::load` is pure Rust and holds no Python objects,
-        making this safe.
+        unless `IAI_MCP_EMBED_OFFLINE=1`). Releases the GIL during the model load.
         """
     def encode(self, text: builtins.str) -> builtins.list[builtins.float]:
         r"""
         Encode a single text string to a 384-dim L2-normalized vector.
-        
-        The GIL is released for the duration of the BERT forward pass so that
-        concurrent socket clients dispatched via `asyncio.to_thread` can run
-        their inference in parallel. `BertEmbedder::encode` is pure Rust and
-        holds no Python objects, making this safe.
+        Releases the GIL during the forward pass so concurrent callers can
+        run inference in parallel.
         """
 

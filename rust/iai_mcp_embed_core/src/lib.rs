@@ -49,12 +49,7 @@ pub struct Embedder {
 #[pymethods]
 impl Embedder {
     /// Load bge-small-en-v1.5 weights from the HF cache (lazy download on miss
-    /// unless `IAI_MCP_EMBED_OFFLINE=1`).
-    ///
-    /// The GIL is released for the duration of the model load so that
-    /// background warm threads cannot block the main thread.
-    /// `BertEmbedder::load` is pure Rust and holds no Python objects,
-    /// making this safe.
+    /// unless `IAI_MCP_EMBED_OFFLINE=1`). Releases the GIL during the model load.
     #[new]
     #[pyo3(signature = (model_id=None, revision=None, pool=None))]
     fn py_new(
@@ -75,11 +70,8 @@ impl Embedder {
     }
 
     /// Encode a single text string to a 384-dim L2-normalized vector.
-    ///
-    /// The GIL is released for the duration of the BERT forward pass so that
-    /// concurrent socket clients dispatched via `asyncio.to_thread` can run
-    /// their inference in parallel. `BertEmbedder::encode` is pure Rust and
-    /// holds no Python objects, making this safe.
+    /// Releases the GIL during the forward pass so concurrent callers can
+    /// run inference in parallel.
     fn encode(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
         py.detach(|| self.inner.encode(text))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
