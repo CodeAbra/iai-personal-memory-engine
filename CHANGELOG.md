@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.5] - 2026-08-20
+
+### Fixed
+- Turns captured just before a forced sleep (an explicit sleep request or a
+  forced eviction) could strand in the spool instead of being written. The
+  deferred-capture drain only ran on a natural drowsy transition, so a forced
+  sleep skipped it while `doctor` still exited 0. Deferred captures now drain on
+  every entry into sleep, and the drain telemetry names the edge that fired it.
+  Thanks [@Volevanius](https://github.com/Volevanius).
+- The bench token-cost suite failed with `ModuleNotFoundError: No module named
+  'anthropic'` on any machine where `ANTHROPIC_API_KEY` is set but the anthropic
+  SDK (optional since v7.5) is not installed — which is every shell inside a
+  Claude Code session. The exact-counter path is now gated on the SDK being
+  importable and falls back to the tiktoken proxy otherwise. Thanks
+  [@gepenniman](https://github.com/gepenniman).
+
+### Changed
+- The daemon now binds its socket and starts serving before the embedder
+  finishes building, governed by a single boot-anchored deadline, so a cold
+  start no longer blocks the first response on model load. Warm dispatch and
+  identity assembly move to after the socket is up.
+
 ## [3.0.4] - 2026-08-19
 
 ### Fixed

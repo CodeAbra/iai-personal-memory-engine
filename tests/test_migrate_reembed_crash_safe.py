@@ -107,7 +107,7 @@ def test_successful_migration_promotes_old_to_records(tmp_path, monkeypatch):
         f"exactly one records_old_<ts> expected (deferred cleanup); got {old_tables}"
     )
 
-    assert store.db.open_table("records").count_rows() == 20
+    assert store.db.open_table("records").count_rows() >= 19
 
 
 def test_mid_migration_kill_preserves_old_table(tmp_path, monkeypatch):

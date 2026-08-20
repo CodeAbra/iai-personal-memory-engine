@@ -95,7 +95,7 @@ def test_dirty_fuse_scales_with_corpus():
         _fuse_dirty_threshold,
     )
 
-    # Small (test-scale) corpora keep the base constant exactly.
+    # Small (test-scale) corpora keep the historical constant exactly.
     assert _fuse_dirty_threshold(_KeyProbeStore(100, 0)) == _FUSE_DIRTY_THRESHOLD
     # At production scale the fuse widens (~2% of the corpus): 50 ambient
     # writes at 37k records must not declare the warm bundle stale.

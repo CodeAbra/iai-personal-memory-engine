@@ -863,6 +863,137 @@ def test_update_set_col_ref_rowid_heal_normal_pk_shape(tmp_path) -> None:
     )
 
 
+def test_select_rowid_plain_column_shape(tmp_path) -> None:
+    """SELECT rowid on a plain-vec_label (non-PK) shape returns the raw B-tree key,
+    matching stdlib's implicit rowid — never the vec_label column value. A
+    delete+insert forces the raw key to diverge from vec_label so the two are
+    distinguishable; the expected raw-key value is sourced from stdlib's own
+    rowid, never from lilli's own SELECT rowid.
+    """
+    ddl = "CREATE TABLE t (vec_label INTEGER, id TEXT NOT NULL UNIQUE)"
+    insert_sql = "INSERT INTO t (vec_label, id) VALUES (?, ?)"
+    rows = [(None, "r1"), (5, "r2"), (None, "r3")]
+    eng, sq = _both(tmp_path, ddl, insert_sql, rows)
+    for conn in (eng, sq):
+        conn.execute("DELETE FROM t WHERE id = 'r2'")
+        conn.execute(insert_sql, (99, "r4"))
+    sq.commit()
+    _assert_parity(eng, sq, "SELECT rowid FROM t ORDER BY id")
+
+    eng_rowid_r4 = eng.execute("SELECT rowid FROM t WHERE id = 'r4'").fetchone()[0]
+    eng_vec_label_r4 = eng.execute("SELECT vec_label FROM t WHERE id = 'r4'").fetchone()[0]
+    assert eng_rowid_r4 != eng_vec_label_r4, (
+        f"plain-column shape: rowid ({eng_rowid_r4!r}) must be the raw storage key, "
+        f"distinct from the vec_label column value ({eng_vec_label_r4!r})"
+    )
+
+
+def test_select_rowid_pk_alias_independence(tmp_path) -> None:
+    """SELECT rowid on the canonical PK-alias shape (vec_label INTEGER PRIMARY KEY
+    AUTOINCREMENT) returns the vec_label column value — the monotonic high-water
+    mark, matching stdlib's INTEGER PRIMARY KEY rowid-alias semantics — never the
+    engine's internal gap-reusing B-tree key. Deleting the MAX row (not the middle)
+    is what makes the two diverge: the HWM keeps climbing while `max_key()+1` drops
+    back into the freed gap. This is the regression guard for the HARD invariant: a
+    fix that aliases INTEGER PRIMARY KEY to the raw storage key would return the
+    gap value (3) here instead of the climbing HWM (4), and fail loudly.
+    """
+    ddl = "CREATE TABLE t (vec_label INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE)"
+    insert_sql = "INSERT INTO t (id) VALUES (?)"
+    eng, sq = _both(tmp_path, ddl, insert_sql, [("r1",), ("r2",), ("r3",)])
+    for conn in (eng, sq):
+        conn.execute("DELETE FROM t WHERE id = 'r3'")  # delete the MAX, not the middle
+        conn.execute(insert_sql, ("r4",))
+    sq.commit()
+    _assert_parity(eng, sq, "SELECT rowid FROM t ORDER BY vec_label")
+
+    eng_rowid = _norm(eng.execute("SELECT rowid FROM t ORDER BY vec_label").fetchall())
+    eng_vec_label = _norm(eng.execute("SELECT vec_label FROM t ORDER BY vec_label").fetchall())
+    assert eng_rowid == eng_vec_label, (
+        f"PK-alias shape: rowid must equal the vec_label column value "
+        f"(rowid={eng_rowid!r}, vec_label={eng_vec_label!r})"
+    )
+
+    # r4's rowid must be the climbing AUTOINCREMENT high-water mark, sourced from
+    # stdlib's own oracle (never hardcoded) — NOT the freed gap key a raw-storage-key
+    # collapse would return.
+    sq_rowid_r4 = sq.execute("SELECT rowid FROM t WHERE id = 'r4'").fetchone()[0]
+    eng_rowid_r4 = eng.execute("SELECT rowid FROM t WHERE id = 'r4'").fetchone()[0]
+    assert eng_rowid_r4 == sq_rowid_r4, (
+        f"r4's rowid must match stdlib's AUTOINCREMENT high-water mark "
+        f"({sq_rowid_r4!r}), got {eng_rowid_r4!r}"
+    )
+
+
+_DOTTED_WHERE_DDL = "CREATE TABLE t (id TEXT PRIMARY KEY, a INTEGER)"
+_DOTTED_WHERE_INSERT = "INSERT INTO t (id, a) VALUES (?, ?)"
+_DOTTED_WHERE_ROWS = [("r1", 1), ("r2", 5), ("r3", 9)]
+
+
+def test_dotted_where_select(tmp_path) -> None:
+    """A dotted/qualified column in a SELECT WHERE resolves to the real column
+    (single-table, no JOIN, so the qualifier is unambiguous) — matching stdlib.
+    Pre-fix, the qualified name is decode-skipped and the predicate resolves
+    NULL, so the row is dropped.
+    """
+    eng, sq = _both(tmp_path, _DOTTED_WHERE_DDL, _DOTTED_WHERE_INSERT, _DOTTED_WHERE_ROWS)
+    _assert_parity(eng, sq, "SELECT id FROM t WHERE t.a = 5")
+
+
+def test_dotted_where_delete(tmp_path) -> None:
+    """A dotted/qualified column in a DELETE WHERE resolves to the real column,
+    matching stdlib. DELETE full-decodes every row (no two-pass mask); this pins
+    DELETE-WHERE dotted-column parity as regression coverage — it was already
+    green pre-fix.
+    """
+    eng, sq = _both(tmp_path, _DOTTED_WHERE_DDL, _DOTTED_WHERE_INSERT, _DOTTED_WHERE_ROWS)
+    for conn in (eng, sq):
+        conn.execute("DELETE FROM t WHERE t.a = 5")
+    sq.commit()
+    _assert_parity(eng, sq, "SELECT id FROM t ORDER BY id")
+
+
+def test_dotted_where_permissive_qualifier(tmp_path) -> None:
+    """Known, regression-locked divergence: lilli (single-table, no JOIN, no table
+    alias syntax) resolves ANY qualifier to the bare column, so a wrong qualifier
+    is unambiguous and accepted; stdlib raises 'no such column' for an unknown
+    qualifier. A future phase may tighten this to validate the qualifier against
+    the table name; validating it here would thread table-name context into
+    collect_expr_columns and eval, widening the surface beyond this phase's
+    surgical mandate.
+    """
+    eng, sq = _both(tmp_path, _DOTTED_WHERE_DDL, _DOTTED_WHERE_INSERT, _DOTTED_WHERE_ROWS)
+    with pytest.raises(Exception):
+        sq.execute("SELECT id FROM t WHERE x.a = 5").fetchall()
+    eng_rows = _norm(eng.execute("SELECT id FROM t WHERE x.a = 5").fetchall())
+    assert eng_rows == [("r2",)], (
+        f"lilli must permissively resolve the wrong qualifier's tail 'a' and "
+        f"return the matching row, got {eng_rows!r}"
+    )
+
+
+def test_select_list_dotted_values(tmp_path) -> None:
+    """A dotted column in the SELECT list parses and evaluates to the real
+    column's values, matching stdlib (which accepts `SELECT t.a`). Pre-fix,
+    the parser leaves the '.' unconsumed and fails loud at the FROM check.
+    """
+    eng, sq = _both(tmp_path, _DOTTED_WHERE_DDL, _DOTTED_WHERE_INSERT, _DOTTED_WHERE_ROWS)
+    _assert_parity(eng, sq, "SELECT t.a FROM t ORDER BY a")
+
+
+def test_select_list_dotted_output_name(tmp_path) -> None:
+    """A dotted, un-aliased SELECT-list item's output column name matches
+    stdlib's default (read empirically from the sqlite3 cursor, not hardcoded).
+    """
+    eng, sq = _both(tmp_path, _DOTTED_WHERE_DDL, _DOTTED_WHERE_INSERT, _DOTTED_WHERE_ROWS)
+    eng_cursor = eng.execute("SELECT t.a FROM t")
+    sq_cursor = sq.execute("SELECT t.a FROM t")
+    assert eng_cursor.description[0][0] == sq_cursor.description[0][0], (
+        f"output column name mismatch: engine={eng_cursor.description[0][0]!r} "
+        f"sqlite={sq_cursor.description[0][0]!r}"
+    )
+
+
 @pytest.mark.parametrize(
     "update_sql, select_sql, pre_update_value",
     [

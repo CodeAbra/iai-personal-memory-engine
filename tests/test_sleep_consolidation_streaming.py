@@ -92,15 +92,10 @@ def test_tier0_schema_surfacing_uses_iter_record_columns_not_all_records(
         cols = args[0]
     else:
         cols = kwargs.get("columns")
-    # The projection must stay off the encrypted columns — reading either one
-    # costs an AES-GCM decrypt per row. Plaintext columns (the tombstone filter)
-    # are free and may be added.
-    assert "tags_json" in cols, f"tags_json must be projected; got {cols!r}"
-    encrypted = {"literal_surface", "provenance_json"}
-    leaked = encrypted.intersection(cols)
-    assert not leaked, (
-        f"projection must carry no encrypted column (zero AES-GCM cost); "
-        f"got {sorted(leaked)} in columns={cols!r}"
+    assert cols == ["tags_json", "tombstoned_at"], (
+        "projection must stay metadata-only — tags for the counts, "
+        "tombstoned_at for the liveness skip; neither column is encrypted, "
+        f"so the zero-AES-GCM cost holds. got columns={cols!r}"
     )
 
 def test_tier0_schema_surfacing_zero_decrypt_calls(

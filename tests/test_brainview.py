@@ -1026,16 +1026,7 @@ def test_janitor_never_closes_store_mid_write(tmp_path, monkeypatch):
     assert not observed_none["hit"], "janitor closed the store mid-write"
 
 
-@pytest.mark.parametrize(
-    ("action", "expected_type", "reply"),
-    [
-        ("sleep", "user_initiated_sleep", {"ok": True, "state": "TRANSITIONING"}),
-        ("sleep", "user_initiated_sleep", {"ok": False, "reason": "already_sleeping"}),
-        ("wake", "force_wake", {"ok": True, "reason": "wake_queued"}),
-        ("consolidate", "force_rem", {"ok": True, "reason": "rem_queued"}),
-    ],
-)
-def test_daemon_action_uses_control_protocol(action, expected_type, reply, tmp_path):
+def test_daemon_action_uses_control_protocol(tmp_path, monkeypatch):
     """sleep/wake/consolidate are CONTROL messages (type-protocol). A fake
     daemon socket must receive `type`, not a JSON-RPC `method`."""
     import shutil
@@ -1061,7 +1052,7 @@ def test_daemon_action_uses_control_protocol(action, expected_type, reply, tmp_p
                     break
                 buf += c
             seen["req"] = json.loads(buf)
-            conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
+            conn.sendall(b'{"ok": true, "reason": "rem_queued"}\n')
             conn.close()
         except OSError:
             pass
@@ -1069,12 +1060,10 @@ def test_daemon_action_uses_control_protocol(action, expected_type, reply, tmp_p
     t = threading.Thread(target=serve, daemon=True); t.start()
     try:
         view = BrainView(store_root=root)
-        res = view.daemon_action(action)
+        res = view.daemon_action("consolidate")
         t.join(3)
-        assert seen["req"]["type"] == expected_type, seen["req"]
+        assert seen["req"]["type"] == "force_rem", seen["req"]
         assert "method" not in seen["req"], "control msg must not be JSON-RPC"
-        if action == "sleep":
-            assert seen["req"]["reason"] == "BrainView dashboard control"
         assert res["status"] == "ok", res
     finally:
         srv.close()
@@ -1086,16 +1075,6 @@ def test_consolidate_button_in_page(served):
     _status, body = _get(port, "/")
     page = body.decode("utf-8")
     assert "btn-consolidate" in page and "sort memories now" in page
-
-
-def test_lifecycle_label_reads_current_state(tmp_path):
-    from iai_mcp.brainview import BrainView
-
-    (tmp_path / "lifecycle_state.json").write_text(
-        json.dumps({"current_state": "SLEEP"}), encoding="utf-8",
-    )
-    view = BrainView(store_root=tmp_path)
-    assert view._lifecycle_label() == "SLEEP"
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])

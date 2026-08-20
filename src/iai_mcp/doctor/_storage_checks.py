@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 from iai_mcp import _sqlite_stdlib
@@ -232,6 +233,123 @@ def check_w_no_permanent_failed() -> CheckResult:
             "run 'iai-mcp drain-permanent-failed' to recover"
         ),
         status="WARN",
+    )
+
+
+def _deferred_at_rest_age_sec() -> float:
+    try:
+        return max(0.0, float(os.environ.get("IAI_MCP_DEFERRED_AT_REST_AGE_SEC", "300")))
+    except ValueError:
+        return 300.0
+
+
+def _live_spool_pending(deferred_dir: Path) -> "tuple[int, list[str]]":
+    """Read-only pending-beyond-persisted-offset count for stale live spools.
+
+    Only ``.live.jsonl`` files older than ``_deferred_at_rest_age_sec()`` are
+    considered -- a fresher file is normal ~30s wake-sweep cadence lag on an
+    actively-capturing session, not a stranded spool.
+    """
+    from iai_mcp.capture import _LIVE_ACTIVE_RE, capture_state_dir
+
+    total_pending = 0
+    pending_names: list[str] = []
+    age_threshold = _deferred_at_rest_age_sec()
+    now = time.time()
+    state_dir = capture_state_dir()
+
+    try:
+        entries = list(os.scandir(deferred_dir))
+    except OSError:
+        return 0, []
+
+    for entry in entries:
+        if not entry.is_file() or not _LIVE_ACTIVE_RE.search(entry.name):
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime < age_threshold:
+            continue
+
+        session_id = _LIVE_ACTIVE_RE.sub("", entry.name)
+        try:
+            with open(entry.path, "r", encoding="utf-8") as fh:
+                raw_lines = fh.readlines()
+        except OSError:
+            continue
+        # Completeness rule must match the drain writer (capture.py): a torn tail is not drainable.
+        complete_lines = [ln for ln in raw_lines if ln.endswith("\n")]
+        event_lines = max(0, len(complete_lines) - 1)
+
+        offset_path = state_dir / f"{session_id}.drain-offset"
+        offset = 0
+        try:
+            if offset_path.exists():
+                offset = int(offset_path.read_text(encoding="utf-8").strip() or "0")
+        except (ValueError, OSError):
+            offset = 0
+
+        pending = max(0, event_lines - offset)
+        if pending > 0:
+            total_pending += pending
+            pending_names.append(entry.name)
+
+    return total_pending, pending_names
+
+
+def check_ee_deferred_capture_backlog_at_rest() -> CheckResult:
+    """FAIL when the deferred-capture spool holds undrained events at rest.
+
+    Covers both the rotated/crashed/quarantine backlog (`enumerate_backlog`)
+    AND stale `.live.jsonl` files past their persisted drain offset -- the
+    latter is structurally invisible to `check_w_no_permanent_failed`.
+    """
+    from iai_mcp.capture import deferred_captures_dir
+    from iai_mcp.deferred_drain import _count_events, enumerate_backlog
+
+    name = "(ee) deferred-capture backlog at rest"
+    deferred_dir = deferred_captures_dir()
+
+    if not deferred_dir.exists():
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="deferred-captures dir absent — nothing at rest",
+            status="PASS",
+        )
+
+    try:
+        rotated_count = sum(_count_events(f) for f in enumerate_backlog(deferred_dir))
+    except OSError as exc:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"could not scan deferred-capture backlog: {exc}",
+            status="WARN",
+        )
+    live_count, live_files = _live_spool_pending(deferred_dir)
+    total = rotated_count + live_count
+
+    if total == 0:
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="no undrained capture events at rest",
+            status="PASS",
+        )
+
+    return CheckResult(
+        name=name,
+        passed=False,
+        detail=(
+            f"{total} undrained capture event(s) at rest "
+            f"(rotated backlog={rotated_count}, stale live spool={live_count}"
+            + (f" [{', '.join(live_files)}]" if live_files else "")
+            + ") — run 'iai-mcp deferred-drain' or restart the daemon"
+        ),
+        status="FAIL",
     )
 
 

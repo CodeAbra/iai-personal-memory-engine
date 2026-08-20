@@ -50,7 +50,6 @@ def test_notice_exists_and_lists_runtime_deps() -> None:
         "pyarrow",
         "numpy",
         "pydantic",
-        "torch-hd",
         "structlog",
         "networkx",
         "numba",
@@ -70,7 +69,7 @@ def test_notice_exists_and_lists_runtime_deps() -> None:
 
 @pytest.mark.skipif(
     _planning_is_tracked(_REPO_ROOT),
-    reason="a checkout that tracks .planning/ opts out of the ignore convention",
+    reason="private repo tracks .planning/ by design; the gitignore convention is a public-release check",
 )
 def test_planning_dir_is_gitignored() -> None:
     result = subprocess.run(

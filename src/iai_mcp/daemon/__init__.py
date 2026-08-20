@@ -167,6 +167,11 @@ def _should_drain_on_drowsy_edge(prev, current) -> bool:
     return prev is _L.WAKE and current is _L.DROWSY
 
 
+def _should_drain_before_sleep(prev, current) -> bool:
+    from iai_mcp.lifecycle_state import LifecycleState as _L
+    return prev is not _L.SLEEP and current is _L.SLEEP
+
+
 #: Post-read courtesy tail for the sleep pipeline: a foreground read that
 #: finished this recently still defers the next chunk (a turn usually issues
 #: several reads back to back). Kept short on purpose — pipeline steps now
@@ -747,7 +752,7 @@ def _capture_drain_budget_sec() -> float | None:
     return val if val > 0 else None
 
 
-def _run_bounded_capture_queue_drain(store, *, write_event_fn) -> None:
+def _run_bounded_capture_queue_drain(store, *, write_event_fn, phase: str = "drowsy") -> None:
     """One bounded pass over the persistent capture queue. Same bounds as the
     boot pass, so a backlog the boot pass left behind converges edge by edge."""
     try:
@@ -781,7 +786,7 @@ def _run_bounded_capture_queue_drain(store, *, write_event_fn) -> None:
                 store,
                 "capture_queue_drained",
                 {
-                    "phase": "drowsy",
+                    "phase": phase,
                     "ingested": ingested,
                     "remaining": queue.pending_count(),
                 },
@@ -791,7 +796,7 @@ def _run_bounded_capture_queue_drain(store, *, write_event_fn) -> None:
         log.warning("bounded capture-queue drain failed: %s", e, exc_info=True)
 
 
-def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
+def _run_drowsy_drain(store, *, drain_fn, write_event_fn, phase: str = "drowsy") -> None:
     try:
         result = drain_fn(store)
     except Exception as e:  # noqa: BLE001 -- lifecycle_tick MUST NOT crash
@@ -800,7 +805,7 @@ def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
             write_event_fn(
                 store,
                 "deferred_drain_failed",
-                {"error": str(e)[:200], "phase": "drowsy"},
+                {"error": str(e)[:200], "phase": phase},
                 severity="warning",
             )
         except Exception:  # noqa: BLE001 -- event write inside boundary guard
@@ -812,12 +817,180 @@ def _run_drowsy_drain(store, *, drain_fn, write_event_fn) -> None:
         try:
             write_event_fn(
                 store,
-                "deferred_drain_drowsy",
-                result,
+                f"deferred_drain_{phase}",
+                {**result, "phase": phase},
                 severity="info",
             )
         except Exception:  # noqa: BLE001 -- event write non-critical
-            log.debug("failed to write deferred_drain_drowsy event")
+            log.debug("failed to write deferred_drain_%s event", phase)
+
+
+async def _maybe_drain_on_lifecycle_edge(
+    prev,
+    current,
+    store,
+    *,
+    drain_fn,
+    write_event_fn,
+    queue_drain_fn,
+) -> bool:
+    """Drain the deferred-capture spool on the WAKE->DROWSY edge (natural
+    dwell) and on every entry into SLEEP (natural DROWSY->SLEEP and the
+    forced WAKE->SLEEP collapse from force_rem/user_sleep_request dispatching
+    FORCE_SLEEP twice in one tick). Bare (not wrapped by
+    background_store_work) on purpose: that gate can skip-and-retry-next-
+    cadence, and SLEEP has no periodic sweep to retry on -- wrapping here
+    would reopen the stranding this fixes.
+    """
+    is_drowsy_edge = _should_drain_on_drowsy_edge(prev, current)
+    is_sleep_edge = _should_drain_before_sleep(prev, current)
+    if not (is_drowsy_edge or is_sleep_edge):
+        return False
+    phase = "drowsy" if is_drowsy_edge else "sleep_edge"
+    try:
+        await asyncio.to_thread(
+            _run_drowsy_drain,
+            store,
+            drain_fn=drain_fn,
+            write_event_fn=write_event_fn,
+            phase=phase,
+        )
+        await asyncio.to_thread(
+            queue_drain_fn,
+            store,
+            write_event_fn=write_event_fn,
+            phase=phase,
+        )
+    except Exception:  # noqa: BLE001 -- drain (drowsy/sleep edge) non-fatal
+        log.debug("lifecycle_tick drain (drowsy/sleep edge) failed", exc_info=True)
+    return True
+
+
+def _wake_spool_sweep_interval_sec() -> float:
+    try:
+        return max(0.0, float(os.environ.get("IAI_MCP_WAKE_SPOOL_SWEEP_SEC", "30")))
+    except ValueError:
+        return 30.0
+
+
+def _precache_refresh_min_sec() -> float:
+    try:
+        return max(0.0, float(os.environ.get("IAI_MCP_PRECACHE_REFRESH_MIN_SEC", "300")))
+    except ValueError:
+        return 300.0
+
+
+def _spool_signature(spool_dir: Path) -> tuple[int, int, int] | None:
+    """Cheap change detector for the capture spool: (file count, newest mtime_ns,
+    total bytes). None when the directory is absent."""
+    try:
+        with os.scandir(spool_dir) as it:
+            count = 0
+            newest = 0
+            total = 0
+            for entry in it:
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                count += 1
+                total += st.st_size
+                if st.st_mtime_ns > newest:
+                    newest = st.st_mtime_ns
+    except OSError:
+        return None
+    return (count, newest, total)
+
+
+def _wake_sweep_window_open(
+    current,
+    *,
+    now_mono: float,
+    last_mono: float,
+    inflight: bool,
+    interval_sec: float,
+) -> bool:
+    """Cheap gates only — evaluated before the spool is stat-sampled."""
+    from iai_mcp.lifecycle_state import LifecycleState as _L
+
+    return (
+        interval_sec > 0
+        and current is not _L.SLEEP
+        and not inflight
+        and (now_mono - last_mono) >= interval_sec
+    )
+
+
+def _should_run_wake_spool_sweep(
+    current,
+    *,
+    now_mono: float,
+    last_mono: float,
+    inflight: bool,
+    interval_sec: float,
+    signature,
+    last_signature,
+) -> bool:
+    return (
+        _wake_sweep_window_open(
+            current,
+            now_mono=now_mono,
+            last_mono=last_mono,
+            inflight=inflight,
+            interval_sec=interval_sec,
+        )
+        and signature is not None
+        and signature != last_signature
+    )
+
+
+def _run_wake_spool_sweep(store, *, drain_fn, write_event_fn) -> dict:
+    """Returns the drain counts, or ``{"error": ...}`` when the drain raised."""
+    try:
+        result = drain_fn(store)
+    except Exception as e:  # noqa: BLE001 -- sweep MUST NOT crash the daemon
+        log.warning("wake spool sweep failed: %s", e, exc_info=True)
+        try:
+            write_event_fn(
+                store,
+                "deferred_drain_failed",
+                {"error": str(e)[:200], "phase": "wake"},
+                severity="warning",
+            )
+        except Exception:  # noqa: BLE001 -- event write inside boundary guard
+            log.debug("failed to write deferred_drain_failed event: %s", e)
+        return {"error": str(e)[:200]}
+    return result if isinstance(result, dict) else {}
+
+
+def _wake_sweep_report(status: str, result: dict | None = None, *, error: str = "") -> dict:
+    report = {"at": datetime.now(timezone.utc).isoformat(), "status": status}
+    if result:
+        # Both promotion lanes: rotated/deferred files and still-open live spools.
+        report["files_drained"] = int(result.get("files_drained", 0) or 0) + int(
+            result.get("live_files_drained", 0) or 0
+        )
+        report["events_inserted"] = _sweep_inserted_records(result)
+    if error:
+        report["error"] = error[:200]
+    return report
+
+
+def _sweep_inserted_records(result: dict) -> int:
+    return int(result.get("events_inserted", 0) or 0) + int(
+        result.get("live_events_inserted", 0) or 0
+    )
+
+
+def _should_refresh_precache_after_sweep(
+    result: dict, *, now_mono: float, last_mono: float, min_interval_sec: float
+) -> bool:
+    return (
+        _sweep_inserted_records(result) > 0
+        and (now_mono - last_mono) >= min_interval_sec
+    )
 
 
 def _kick_drowsy_rgc_rebuild(store) -> None:
@@ -1040,13 +1213,24 @@ def _write_session_start_cache(store, *, cache_path: Path = SESSION_START_CACHE_
             rendered = rendered[:SESSION_START_CACHE_MAX_CHARS]
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(rendered)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, cache_path)
+        # Writer-unique tmp: the wake sweep and the post-sleep wake hook may
+        # both refresh the cache; a shared tmp name would interleave them.
+        tmp_path = cache_path.with_suffix(
+            f"{cache_path.suffix}.tmp{os.getpid()}.{threading.get_ident()}"
+        )
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(rendered)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, cache_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
     except Exception as exc:  # noqa: BLE001 -- cache write MUST NOT crash the REM loop
         log.warning("session start cache write failed: %s", exc, exc_info=True)
         try:
@@ -2305,6 +2489,13 @@ async def main() -> int:
                 log.debug("sleep_cycle_baseline_at persist failed", exc_info=True)
         _last_pending_embed_mono: list[float] = [0.0]
         _pending_embed_inflight: list[bool] = [False]
+        WAKE_SPOOL_SWEEP_SEC: float = _wake_spool_sweep_interval_sec()
+        PRECACHE_REFRESH_MIN_SEC: float = _precache_refresh_min_sec()
+        _last_wake_sweep_mono: list[float] = [0.0]
+        _wake_sweep_inflight: list[bool] = [False]
+        _last_spool_signature: list = [None]
+        _last_precache_refresh_mono: list[float] = [0.0]
+        _last_wake_sweep_report: list[dict] = [{}]
 
         def _pending_embed_pass_sync() -> None:
             from iai_mcp import runtime_graph_cache as _rgc
@@ -2555,24 +2746,18 @@ async def main() -> int:
                                 pass
 
                     current = _state_machine.current_state
+                    from iai_mcp.capture import drain_capture_backlog
+
+                    await _maybe_drain_on_lifecycle_edge(
+                        _prev_lifecycle_state[0],
+                        current,
+                        store,
+                        drain_fn=drain_capture_backlog,
+                        write_event_fn=write_event,
+                        queue_drain_fn=_run_bounded_capture_queue_drain,
+                    )
+
                     if _should_drain_on_drowsy_edge(_prev_lifecycle_state[0], current):
-                        try:
-                            from iai_mcp.capture import drain_capture_backlog
-
-                            await asyncio.to_thread(
-                                _run_drowsy_drain,
-                                store,
-                                drain_fn=drain_capture_backlog,
-                                write_event_fn=write_event,
-                            )
-                            await asyncio.to_thread(
-                                _run_bounded_capture_queue_drain,
-                                store,
-                                write_event_fn=write_event,
-                            )
-                        except Exception:  # noqa: BLE001 -- drowsy drain non-fatal
-                            log.debug("lifecycle_tick drowsy drain failed", exc_info=True)
-
                         try:
                             _last_pending_embed_mono[0] = now_mono
                             await _pending_embed_pass()
@@ -2624,6 +2809,98 @@ async def main() -> int:
                             name="pending-embed-floor",
                             daemon=True,
                         ).start()
+                    # Awake spool promotion: cheap gates before the spool
+                    # stat-sample, single-flight, never in SLEEP (the pipeline
+                    # owns the store), heavy body only under the store gate.
+                    _spool_sig = None
+                    if _wake_sweep_window_open(
+                        current,
+                        now_mono=now_mono,
+                        last_mono=_last_wake_sweep_mono[0],
+                        inflight=_wake_sweep_inflight[0],
+                        interval_sec=WAKE_SPOOL_SWEEP_SEC,
+                    ):
+                        try:
+                            from iai_mcp.capture import deferred_captures_dir as _spool_dir_fn
+                            _spool_sig = _spool_signature(_spool_dir_fn())
+                        except Exception:  # noqa: BLE001 -- signature is best-effort
+                            _spool_sig = None
+                    if _should_run_wake_spool_sweep(
+                        current,
+                        now_mono=now_mono,
+                        last_mono=_last_wake_sweep_mono[0],
+                        inflight=_wake_sweep_inflight[0],
+                        interval_sec=WAKE_SPOOL_SWEEP_SEC,
+                        signature=_spool_sig,
+                        last_signature=_last_spool_signature[0],
+                    ):
+                        _last_wake_sweep_mono[0] = now_mono
+                        _last_spool_signature[0] = _spool_sig
+                        _wake_sweep_inflight[0] = True
+
+                        def _wake_spool_sweep() -> None:
+                            try:
+                                from iai_mcp import retrieve as _retrieve_sweep
+                                from iai_mcp.capture import drain_capture_backlog as _sweep_drain
+
+                                with _retrieve_sweep.background_store_work(
+                                    "wake_spool_sweep"
+                                ) as _gate_ok:
+                                    if not _gate_ok:
+                                        # Gate busy: forget the signature so the
+                                        # next tick retries instead of waiting
+                                        # for the spool to change again.
+                                        _last_spool_signature[0] = None
+                                        _last_wake_sweep_report[0] = _wake_sweep_report(
+                                            "gate_busy"
+                                        )
+                                        return
+                                    result = _run_wake_spool_sweep(
+                                        store,
+                                        drain_fn=_sweep_drain,
+                                        write_event_fn=write_event,
+                                    )
+                                    _last_wake_sweep_report[0] = _wake_sweep_report(
+                                        "error" if "error" in result else "ok",
+                                        result,
+                                        error=str(result.get("error", "")),
+                                    )
+                                    if _sweep_inserted_records(result):
+                                        log.debug("wake spool sweep: %s", result)
+                                    # Precache rebuild streams the corpus: heavy
+                                    # store work, so it stays inside the gate.
+                                    _sweep_now = time.monotonic()
+                                    if _should_refresh_precache_after_sweep(
+                                        result,
+                                        now_mono=_sweep_now,
+                                        last_mono=_last_precache_refresh_mono[0],
+                                        min_interval_sec=PRECACHE_REFRESH_MIN_SEC,
+                                    ):
+                                        _last_precache_refresh_mono[0] = _sweep_now
+                                        _write_session_start_cache(store)
+                            except Exception as _sweep_exc:  # noqa: BLE001 -- sweep non-fatal
+                                log.warning(
+                                    "wake spool sweep failed: %s", _sweep_exc, exc_info=True
+                                )
+                                _last_wake_sweep_report[0] = _wake_sweep_report(
+                                    "error", error=str(_sweep_exc)
+                                )
+                            finally:
+                                _wake_sweep_inflight[0] = False
+
+                        try:
+                            threading.Thread(
+                                target=_wake_spool_sweep,
+                                name="wake-spool-sweep",
+                                daemon=True,
+                            ).start()
+                        except Exception as _start_exc:  # noqa: BLE001 -- thread start non-fatal
+                            _wake_sweep_inflight[0] = False
+                            _last_spool_signature[0] = None
+                            _last_wake_sweep_report[0] = _wake_sweep_report(
+                                "error", error=str(_start_exc)
+                            )
+                            log.warning("wake spool sweep thread start failed: %s", _start_exc)
                     if (
                         not _lock_downgraded_to_shared[0]
                         and current in (
@@ -2656,8 +2933,9 @@ async def main() -> int:
                                 getattr(_hp_pool, "writer_fallback_count", 0) or 0
                             ),
                         }
+                        state["wake_spool_sweep"] = dict(_last_wake_sweep_report[0])
                         await asyncio.to_thread(
-                            _persist_keys, state, "ann_pool_health",
+                            _persist_keys, state, "ann_pool_health", "wake_spool_sweep",
                         )
                     except Exception:  # noqa: BLE001 -- health publish is best-effort
                         pass
@@ -3095,6 +3373,15 @@ __all__ = [
     "_raise_fd_limit",
     "_run_drowsy_drain",
     "_should_drain_on_drowsy_edge",
+    "_wake_spool_sweep_interval_sec",
+    "_precache_refresh_min_sec",
+    "_spool_signature",
+    "_wake_sweep_window_open",
+    "_should_run_wake_spool_sweep",
+    "_run_wake_spool_sweep",
+    "_wake_sweep_report",
+    "_sweep_inserted_records",
+    "_should_refresh_precache_after_sweep",
     "_kick_drowsy_rgc_rebuild",
     "_wake_hook_rebuild_if_cold",
     "_store_is_empty",

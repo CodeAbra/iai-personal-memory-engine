@@ -326,7 +326,7 @@ def test_no_cache_recall_smoke(
 
     cache_path = dst_root / runtime_graph_cache.CACHE_FILENAME
     # Force the no-cache condition regardless of whether pre-warm wrote one --
-    # this test isolates recall correctness with an absent cache, not
+    # this test isolates SC-2 (recall correctness with an absent cache), not
     # the invalidation step itself.
     cache_path.unlink(missing_ok=True)
     assert not cache_path.exists()
@@ -341,7 +341,7 @@ def test_no_cache_recall_smoke(
     try:
         # Query with the EXACT vector used for record 0 at insert time -- a
         # deterministic ANN self-match, independent of any embedder model, so
-        # this test isolates the recall-path/cache-absence behavior
+        # this test isolates the recall-path/cache-absence behavior (SC-2)
         # rather than embedding-quality.
         hits = store.query_similar(first_vec, k=5)
         assert len(hits) > 0, (

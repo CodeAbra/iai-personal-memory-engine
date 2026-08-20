@@ -396,3 +396,153 @@ def test_delta_overflow_marker_and_ceiling(iai_home):
     assert rendered != "", "vacuous render"
     assert "elided" in rendered, "truncation marker missing on overflow burst"
     assert _approx_tokens(rendered) <= DELTA_MAX_TOKENS, "overflow render exceeds token ceiling"
+
+
+def test_caught_up_flag_marks_complete_promotion_and_clears_on_debounce(iai_home):
+    from iai_mcp.core import dispatch
+    from iai_mcp.session import max_record_created_at
+
+    store = _open_store()
+    _insert_record(store, "alice seed record placed before the caught-up flag probe watermark")
+    watermark = max_record_created_at(store)
+    assert watermark is not None
+
+    _insert_record(store, "alice caught-up flag probe distinct fresh record after the watermark")
+    first = dispatch(store, "session_refresh_if_stale", {
+        "watermark": watermark,
+        "session_id": "caught-up-flag-session",
+    })
+    assert first["rendered"] != ""
+    assert first["caught_up"] is True
+
+    second = dispatch(store, "session_refresh_if_stale", {
+        "watermark": watermark,
+        "session_id": "caught-up-flag-session",
+    })
+    assert second["rendered"] == ""
+    assert second["caught_up"] is False, "suppressed render must not let callers advance their watermark"
+    assert second["new_max_ts"] == first["new_max_ts"]
+
+    caught_up = dispatch(store, "session_refresh_if_stale", {
+        "watermark": first["new_max_ts"],
+        "session_id": "another-session",
+    })
+    assert caught_up["rendered"] == ""
+    assert caught_up["caught_up"] is True
+
+
+def test_caught_up_is_false_while_another_drain_holds_the_spool(iai_home):
+    from iai_mcp import capture as capture_mod
+    from iai_mcp.core import dispatch
+    from iai_mcp.session import max_record_created_at
+
+    store = _open_store()
+    _insert_record(store, "alice seed record placed before the held-lock probe watermark")
+    watermark = max_record_created_at(store)
+    assert watermark is not None
+    _write_drainable_deferred(
+        iai_home, "held-lock-other-session",
+        "alice HELDLOCK distinct turn still waiting in a rotated spool file",
+    )
+
+    # A concurrent promoter (the wake sweep) owns the deferred drain: the RPC
+    # skips its own pass, so nothing may tell the caller it is caught up.
+    assert capture_mod._DRAIN_SINGLE_FLIGHT_LOCK.acquire(blocking=False)
+    try:
+        held = dispatch(store, "session_refresh_if_stale", {
+            "watermark": watermark,
+            "session_id": "held-lock-session",
+        })
+    finally:
+        capture_mod._DRAIN_SINGLE_FLIGHT_LOCK.release()
+    assert held["caught_up"] is False
+    assert "HELDLOCK" not in held["rendered"]
+
+    assert capture_mod._LIVE_DRAIN_SINGLE_FLIGHT_LOCK.acquire(blocking=False)
+    try:
+        live_held = dispatch(store, "session_refresh_if_stale", {
+            "watermark": watermark,
+            "session_id": "held-lock-session-2",
+        })
+    finally:
+        capture_mod._LIVE_DRAIN_SINGLE_FLIGHT_LOCK.release()
+    assert live_held["caught_up"] is False
+
+    released = dispatch(store, "session_refresh_if_stale", {
+        "watermark": watermark,
+        "session_id": "held-lock-session-3",
+    })
+    assert released["caught_up"] is True
+    assert "HELDLOCK" in released["rendered"], released["rendered"]
+
+
+def test_caught_up_is_false_when_a_live_turn_fails_to_store(iai_home, monkeypatch):
+    from iai_mcp import capture as capture_mod
+    from iai_mcp.core import dispatch
+    from iai_mcp.session import max_record_created_at
+
+    store = _open_store()
+    _insert_record(store, "alice seed record placed before the insert-failure probe watermark")
+    watermark = max_record_created_at(store)
+    assert watermark is not None
+
+    sentinel = "alice INSERTFAILSENTINEL turn the store fails to persist on this pass"
+    _write_drainable_deferred(
+        iai_home, "insertfail-other-session", sentinel,
+    ).rename(
+        iai_home / ".iai-mcp" / ".deferred-captures" / "insertfail-other-session.live.jsonl"
+    )
+
+    real_capture_turn = capture_mod.capture_turn
+
+    def _fail_only_sentinel(store, *, text="", **kwargs):
+        if sentinel in text:
+            return {"status": "skipped", "record_id": None, "reason": "insert-failed: RuntimeError"}
+        return real_capture_turn(store, text=text, **kwargs)
+
+    monkeypatch.setattr(capture_mod, "capture_turn", _fail_only_sentinel)
+
+    result = dispatch(store, "session_refresh_if_stale", {
+        "watermark": watermark,
+        "session_id": "insertfail-refreshing-session",
+    })
+    assert result["caught_up"] is False
+
+
+def test_delta_excludes_refreshing_sessions_own_turns(iai_home):
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.core import dispatch
+    from iai_mcp.session import max_record_created_at
+    from iai_mcp.store import flush_record_buffer
+
+    store = _open_store()
+    _insert_record(store, "alice seed record placed before the own-turn exclusion watermark")
+    watermark = max_record_created_at(store)
+    assert watermark is not None
+
+    own = capture_turn(
+        store, text="alice OWNTURN distinct prompt typed in the refreshing session itself",
+        cue="", tier="episodic", role="user", session_id="refresh-own-session",
+    )
+    other = capture_turn(
+        store, text="alice OTHERTURN distinct prompt typed in a parallel session",
+        cue="", tier="episodic", role="user", session_id="parallel-session",
+    )
+    assert own["status"] == "inserted" and other["status"] == "inserted"
+    flush_record_buffer(store)
+
+    _write_drainable_deferred(
+        iai_home, "refresh-own-session",
+        "alice OWNPENDING distinct still-open turn of the refreshing session",
+    ).rename(
+        iai_home / ".iai-mcp" / ".deferred-captures" / "refresh-own-session.live.jsonl"
+    )
+
+    result = dispatch(store, "session_refresh_if_stale", {
+        "watermark": watermark,
+        "session_id": "refresh-own-session",
+    })
+    rendered = result["rendered"]
+    assert "OTHERTURN" in rendered, rendered
+    assert "OWNTURN" not in rendered, "own stored turn echoed back into its own session"
+    assert "OWNPENDING" not in rendered, "own pending live turn echoed back into its own session"

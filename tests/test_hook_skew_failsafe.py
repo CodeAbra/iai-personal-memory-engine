@@ -158,3 +158,60 @@ class TestHeredocHooksAreImportless:
             "iai-mcp-session-recall.sh", "iai-mcp-session-capture.sh",
             "iai-mcp-per-turn-recall.sh", "iai-mcp-turn-capture.sh",
         } <= names
+
+
+class TestOldDaemonToleratesImmediateEvent:
+    """The immediate-capture block re-keys role:user to promptId and stamps
+    source_uuid on the spool event. A daemon predating this change already
+    reads source_uuid via ev.get (never a required key), so draining an
+    event carrying it must not crash — the true skew is the key-scheme
+    change, shipped in lockstep with the hook, not this field."""
+
+    def test_drain_reads_source_uuid_field_without_crashing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+        monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-hook-skew-passphrase")
+        monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / ".iai-mcp"))
+        import keyring.core
+        keyring.core._keyring_backend = None
+
+        from iai_mcp.capture import drain_active_live_captures
+        from iai_mcp.store import MemoryStore
+
+        session_id = "old-daemon-tolerance-session"
+        text = "an immediate stdin-captured prompt for the old-daemon tolerance probe"
+        deferred_dir = tmp_path / ".iai-mcp" / ".deferred-captures"
+        deferred_dir.mkdir(parents=True)
+        # The immediate-capture block writes to {session_id}.live.jsonl, the
+        # same active-spool shape the per-turn hook already uses — drained by
+        # drain_active_live_captures, not the rotated-file deferred drain.
+        live = deferred_dir / f"{session_id}.live.jsonl"
+        header = {
+            "version": 1, "deferred_at": "2026-08-18T09:00:00.000Z",
+            "session_id": session_id, "cwd": "/tmp",
+        }
+        event = {
+            "text": text,
+            "cue": f"session {session_id} turn",
+            "tier": "episodic",
+            "role": "user",
+            "ts": "2026-08-18T09:00:00.000Z",
+            "source_uuid": "immediate-prompt-id-old-daemon-probe",
+        }
+        with live.open("w") as fh:
+            fh.write(json.dumps(header) + "\n")
+            fh.write(json.dumps(event) + "\n")
+
+        store = MemoryStore()
+        try:
+            counts = drain_active_live_captures(store, exclude_session_id="drainer-session")
+        except Exception as exc:  # noqa: BLE001 -- the assertion below is the real check
+            pytest.fail(f"drain must tolerate the source_uuid-bearing immediate event: {exc!r}")
+
+        assert counts.get("events_inserted", 0) == 1, counts
+
+        turns = store.recent_user_turns(n=10, session_id=session_id)
+        matches = [t for t in turns if text in (t.literal_surface or "")]
+        assert len(matches) == 1, (
+            f"expected exactly 1 stored row for the immediate event; found {len(matches)}"
+        )

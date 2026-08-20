@@ -524,3 +524,31 @@ def test_first_turn_seeds_verbatim_goal():
         "the fresh task's goal must be the verbatim (bounded) first-turn content"
     )
     assert entry.goal != "", "a write-seam-opened task must not be goal-less"
+
+
+# ---------------------------------------------------------------------------
+# An immediate-capture record surfaces the same turn it lands
+# ---------------------------------------------------------------------------
+
+def test_immediate_prompt_record_surfaces_in_working_tier_same_turn():
+    """The record the immediate stdin capture produces (recent created_at,
+    role:user) flows through update_from_record and appears in
+    _render_snapshot's 'recent turns' the same turn it lands — no wait for
+    the transcript walk. Pure in-RAM — no driver param."""
+    from iai_mcp import working_tier as wt
+    from iai_mcp.working_tier import _render_snapshot
+
+    session_id = "sess-immediate-surface-probe"
+    prompt_text = "the immediate stdin prompt for the surfacing probe test"
+    record = _make_record(prompt_text)
+    record.provenance = [{"session_id": session_id}]
+
+    wt.update_from_record(record)
+
+    entry = wt.read_task()
+    assert entry is not None
+    assert entry.session_id == session_id
+
+    rendered = _render_snapshot(entry)
+    assert "recent turns:" in rendered
+    assert prompt_text in rendered

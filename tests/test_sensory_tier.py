@@ -1,9 +1,10 @@
 """Dual-driver safety net for the sensory tier (`.live.jsonl` pre-encode buffer).
 
-Covers the bounded-read cap, the recall-critical-path no-op proof, and the
-permission-hardening RED guard. The permission test is EXPECTED TO FAIL on
-current HEAD (files are created mode 0644) — it guards a follow-up fix; it
-must not be xfail-marked so it flips visibly GREEN once the fix lands.
+Covers the bounded-read cap, the recall-critical-path no-op proof (SC-d),
+and the permission-hardening RED guard (SC-e). The permission test is
+EXPECTED TO FAIL on current HEAD (files are created mode 0644) — it guards
+the fix that lands in the follow-up plan; it must not be xfail-marked so it
+flips visibly GREEN once the fix lands.
 
 No production source file is modified by this test file.
 """
@@ -86,7 +87,7 @@ def _seed_one_record(store: MemoryStore, text: str = "reference content") -> Non
 
 
 # ---------------------------------------------------------------------------
-# bounded-tail read cap (files + lines)
+# SC-b: bounded-tail read cap (files + lines)
 # ---------------------------------------------------------------------------
 
 def test_bounded_tail_read_caps_lines_and_files(tmp_path, monkeypatch):
@@ -124,7 +125,7 @@ def test_bounded_tail_read_caps_lines_and_files(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# recall critical path never calls sensory-tier functions
+# SC-d: recall critical path never calls sensory-tier functions
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
@@ -133,7 +134,7 @@ def test_recall_path_no_sensory_calls(driver, tmp_path, monkeypatch):
 
     Monkeypatches the three sensory-tier entry points to raise if called, then
     invokes the production recall dispatch. The dispatch must return normally
-    (no raise) -- a measurable no-op proof.
+    (no raise) -- a measurable no-op proof for SC-d.
     """
     if driver == "lilli":
         try:
@@ -175,7 +176,7 @@ def test_recall_path_no_sensory_calls(driver, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# permission hardening RED guard (guards a follow-up fix)
+# SC-e: permission hardening RED guard (guards a follow-up fix)
 # ---------------------------------------------------------------------------
 
 def test_live_jsonl_permission_mode_is_0600(tmp_path, monkeypatch):
@@ -300,7 +301,7 @@ def test_compaction_preserves_concurrent_append(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# write-side bound -- lossless wins over bounded when nothing promoted;
+# SC-2: write-side bound -- lossless wins over bounded when nothing promoted;
 # compaction removes only already-promoted lines when a drain succeeds.
 # ---------------------------------------------------------------------------
 
@@ -411,7 +412,7 @@ def test_write_side_bound_compacts_only_promoted_lines(driver, tmp_path, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# raw content lands pre-encode -- resident in the sensory buffer before
+# SC-a: raw content lands pre-encode -- resident in the sensory buffer before
 # any embed/HD-encode call.
 # ---------------------------------------------------------------------------
 
@@ -465,7 +466,7 @@ def test_content_lands_pre_encode(driver, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# a sensory entry is traceable end-to-end into a resulting Hippo
+# SC-c: a sensory entry is traceable end-to-end into a resulting Hippo
 # record via the drain -> capture_turn -> embed -> store.insert chain.
 # ---------------------------------------------------------------------------
 
@@ -516,7 +517,7 @@ def test_promotion_observable_end_to_end(driver, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# promotion preserves literal_surface byte-for-byte, modulo only the
+# SC-e: promotion preserves literal_surface byte-for-byte, modulo only the
 # existing leading/trailing strip + MAX_CAPTURE_LEN truncate.
 # ---------------------------------------------------------------------------
 

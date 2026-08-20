@@ -184,6 +184,34 @@ def test_invalid_session_id_never_touches_state(tmp_path, monkeypatch):
     assert not (tmp_path / ".iai-mcp" / ".deferred-captures").exists()
 
 
+def test_user_turn_keyed_by_prompt_id_via_cli_mirror(tmp_path, monkeypatch):
+    """cmd_capture_turn_deferred shares _parse_transcript_obj with the daemon
+    walk, so the promptId re-key for role:user must propagate here with no
+    separate edit — the join key the CLI surface stamps must match the one
+    the immediate stdin capture would have stamped for the same prompt."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from iai_mcp.cli import cmd_capture_turn_deferred
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": "cli mirror key scheme parity test text here"},
+        "uuid": "cli-mirror-per-line-uuid",
+        "promptId": "cli-mirror-per-prompt-id",
+    }) + "\n")
+
+    rc = cmd_capture_turn_deferred(_build_args("S10", transcript))
+    assert rc == 0
+
+    live = tmp_path / ".iai-mcp" / ".deferred-captures" / "S10.live.jsonl"
+    lines = live.read_text().splitlines()
+    event = json.loads(lines[1])
+    assert event["role"] == "user"
+    assert event["source_uuid"] == "cli-mirror-per-prompt-id", (
+        f"expected the promptId key to propagate to the CLI mirror; got {event!r}"
+    )
+
+
 def test_contended_lock_gives_up_without_consuming(tmp_path, monkeypatch):
     import os
 

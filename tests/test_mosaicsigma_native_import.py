@@ -61,8 +61,7 @@ def test_both_submodules_share_one_so() -> None:
     pkg_dir = Path(iai_mcp_native.__file__).parent
     binaries = [
         f for f in os.listdir(pkg_dir)
-        if f.startswith("iai_mcp_native")
-        and f.endswith((".so", ".dylib"))
+        if f.endswith((".so", ".dylib"))
     ]
     assert len(binaries) == 1, (
         f"expected exactly one extension binary in {pkg_dir}, got {binaries}"

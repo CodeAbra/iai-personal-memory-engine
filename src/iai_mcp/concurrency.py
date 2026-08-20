@@ -260,6 +260,11 @@ async def _dispatch_socket_request(
             "daemon_started_at": started_at,
             "scheduler_paused": bool(state.get("scheduler_paused", False)),
             "ann_pool_health": state.get("ann_pool_health"),
+            "wake_spool_sweep": (
+                state.get("wake_spool_sweep")
+                if isinstance(state.get("wake_spool_sweep"), dict)
+                else None
+            ),
             # Coerced to None unless it is a plain dict: a wrong-typed value
             # (a stray coroutine from a broken boot wire) would make
             # json.dumps fail OUTSIDE the dispatcher's guard and take every
