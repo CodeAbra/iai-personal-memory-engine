@@ -1,5 +1,6 @@
 [toolchain]
-# pyo3-stub-gen's transitive `time` dependency requires rustc >= 1.88.
+# Floor: pyo3-stub-gen's transitive `time` dependency requires rustc >= 1.88.
+# Channel pins above that floor to a verified toolchain version, not the floor itself.
 channel = "1.94"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
