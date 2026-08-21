@@ -1,7 +1,7 @@
 {
   "name": "iai-memory",
   "displayName": "iai-pme — personal memory engine",
-  "version": "3.0.5",
+  "version": "3.0.6",
   "description": "Persistent local memory for your assistant: every turn captured verbatim, relevant memory injected at session start and before each turn, and fifteen memory tools over MCP. Requires the iai-pme package (pip install iai-pme).",
   "author": {
     "name": "Areg Aramovich Noya",
