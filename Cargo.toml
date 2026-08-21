@@ -26,10 +26,10 @@ tokenizers     = "0.23.1"
 # defaults) — keeps native-tls/openssl-sys/reqwest/tokio out of the tree, so
 # manylinux wheel builds need no OpenSSL headers.
 hf-hub         = { version = "0.4.1", default-features = false, features = ["ureq"] }
-pyo3           = "0.22"
-numpy          = "0.22"
+pyo3           = "0.29"
+numpy          = "0.29.0"
 accelerate-src = "0.3.2"
-pyo3-stub-gen  = "0.6"
+pyo3-stub-gen  = "0.23"
 serde          = { version = "1", features = ["derive", "rc"] }
 serde_json     = "1"
 thiserror      = "2"

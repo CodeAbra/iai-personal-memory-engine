@@ -9,9 +9,9 @@
 [graph]
 # Restrict transitive resolution to macOS + Linux. Without this, cargo-deny
 # also walks the aarch64-pc-windows-msvc graph, which can pull windows-sys /
-# windows as target-conditional deps from pyo3-stub-gen or the tokenizer
-# crate's transitives — firing the ban check spuriously on a clean macOS
-# workstation where those crates are never actually compiled.
+# windows as target-conditional deps from the tokenizer crate's transitives —
+# firing the ban check spuriously on a clean macOS workstation where those
+# crates are never actually compiled.
 targets = [
     { triple = "x86_64-apple-darwin" },
     { triple = "aarch64-apple-darwin" },
@@ -72,4 +72,15 @@ deny = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste is unmaintained (author archived the repo); no drop-in replacement
+    # has been adopted upstream by its transitive consumers (candle's gemm /
+    # gemm-c32 / gemm-c64 / gemm-f16 / gemm-f32 / gemm-f64, and tokenizers'
+    # macro_rules_attribute). No code fix exists; re-evaluate when candle or
+    # tokenizers migrate off it.
+    "RUSTSEC-2024-0436",
+    # number_prefix is unmaintained. Pulled transitively by indicatif <- hf-hub,
+    # used only for a bench/download progress bar, never on the shipped
+    # runtime path. No code fix exists upstream.
+    "RUSTSEC-2025-0119",
+]

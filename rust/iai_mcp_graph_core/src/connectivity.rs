@@ -22,7 +22,7 @@
 //!
 //! ## GIL release
 //!
-//! Pure-Rust kernels run inside `Python::allow_threads` — Python threads can
+//! Pure-Rust kernels run inside `Python::detach` — Python threads can
 //! make progress while the BFS runs.
 
 use numpy::PyReadonlyArray1;
@@ -117,7 +117,7 @@ pub fn connected_components(
     let indptr_slice = indptr.as_slice()?;
     let indices_slice = indices.as_slice()?;
 
-    let result = py.allow_threads(|| -> Result<Vec<Vec<i64>>, GraphError> {
+    let result = py.detach(|| -> Result<Vec<Vec<i64>>, GraphError> {
         let g = build_graph_from_csr(indptr_slice, indices_slice, n_nodes)?;
         let components = rwx_cc(&g);
         let mut out: Vec<Vec<i64>> = components
@@ -160,7 +160,7 @@ pub fn is_connected(
     let indptr_slice = indptr.as_slice()?;
     let indices_slice = indices.as_slice()?;
 
-    let result = py.allow_threads(|| -> Result<bool, GraphError> {
+    let result = py.detach(|| -> Result<bool, GraphError> {
         let g = build_graph_from_csr(indptr_slice, indices_slice, n_nodes)?;
         Ok(rwx_cc(&g).len() == 1)
     })?;
@@ -183,7 +183,7 @@ pub fn selfloop_edges(
     let indptr_slice = indptr.as_slice()?;
     let indices_slice = indices.as_slice()?;
 
-    let result = py.allow_threads(|| -> Result<Vec<(i64, i64)>, GraphError> {
+    let result = py.detach(|| -> Result<Vec<(i64, i64)>, GraphError> {
         if indptr_slice.len() != n_nodes + 1 {
             return Err(GraphError::InvalidNodeId(format!(
                 "indptr length {} != n_nodes + 1 ({})",

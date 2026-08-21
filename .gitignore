@@ -13,6 +13,8 @@ mcp-wrapper/dist-bundle/
 !plugin/.mcp.json
 # Rust extension compiled in-tree by maturin develop or pip wheel
 src/iai_mcp_native*.so
+# stub_gen generator output staging dir — flattened by hand into tracked .pyi copies
+rust/iai_mcp_native/stubs/
 build/
 dist/
 downloads/

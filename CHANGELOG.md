@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.6] - 2026-08-20
+
+### Security
+- The native Rust engine now builds against `pyo3` 0.29 (up from 0.22), closing
+  three advisories in the Python↔Rust binding layer: RUSTSEC-2025-0020,
+  RUSTSEC-2026-0177, and RUSTSEC-2026-0204. The fix ships in the compiled
+  wheels, so reinstalling picks it up. `numpy`, `pyo3-stub-gen`, and
+  `crossbeam-epoch` move in lockstep, and the build toolchain floor rises to
+  Rust 1.94.
+
 ## [3.0.5] - 2026-08-20
 
 ### Fixed

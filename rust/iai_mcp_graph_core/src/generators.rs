@@ -41,7 +41,7 @@
 //!
 //! ## GIL release
 //!
-//! The compute kernel runs inside ``Python::allow_threads`` — Python
+//! The compute kernel runs inside ``Python::detach`` — Python
 //! threads (e.g. the daemon's status handler) can make progress while
 //! the sampler runs.
 
@@ -146,7 +146,7 @@ pub fn gnm_random_graph(
     m: usize,
     seed: u64,
 ) -> PyResult<(Vec<i64>, Vec<i64>)> {
-    py.allow_threads(|| gnm_random_graph_core(n, m, seed))
+    py.detach(|| gnm_random_graph_core(n, m, seed))
         .map_err(PyValueError::new_err)
 }
 

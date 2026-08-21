@@ -13,7 +13,6 @@ crate-type = ["rlib"]
 lillibrain = { path = "../lillibrain" }
 thiserror = { workspace = true }
 pyo3 = { workspace = true }
-pyo3-stub-gen = { workspace = true }
 serde = { workspace = true }
 ciborium = "0.2"
 

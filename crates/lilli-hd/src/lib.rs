@@ -20,7 +20,6 @@ pub mod projection;
 pub mod sparse;
 
 use pyo3::prelude::*;
-use pyo3_stub_gen::define_stub_info_gatherer;
 
 /// Register the hypervector kernels on a Python module owned by the wrapper
 /// crate. Mirrors the embedder and graph crates so the wrapper mounts all
@@ -47,5 +46,3 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sparse::similarity, m)?)?;
     Ok(())
 }
-
-define_stub_info_gatherer!(stub_info);

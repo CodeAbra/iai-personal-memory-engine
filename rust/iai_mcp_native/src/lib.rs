@@ -23,7 +23,6 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3_stub_gen::define_stub_info_gatherer;
 
 #[pymodule]
 fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -35,47 +34,44 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // would otherwise derive the attribute from the dotted __name__.
 
     // Embedder sub-module — Bert / bge-small-en-v1.5 forward pass.
-    let embed = PyModule::new_bound(py, "iai_mcp_native.embed")?;
+    let embed = PyModule::new(py, "iai_mcp_native.embed")?;
     iai_mcp_embed_core::register(py, &embed)?;
     m.add("embed", &embed)?;
 
     // Graph sub-module — pure-Rust algorithms layer (currently a wiring
     // probe; real algorithm work begins in later plans).
-    let graph = PyModule::new_bound(py, "iai_mcp_native.graph")?;
+    let graph = PyModule::new(py, "iai_mcp_native.graph")?;
     iai_mcp_graph_core::register(py, &graph)?;
     m.add("graph", &graph)?;
 
     // Vector-index sub-module — exact cosine search over the record
     // embeddings, the recall index under Hippo.
-    let vec = PyModule::new_bound(py, "iai_mcp_native.vec")?;
+    let vec = PyModule::new(py, "iai_mcp_native.vec")?;
     iai_mcp_vec_core::register(py, &vec)?;
     m.add("vec", &vec)?;
 
     // Hypervector sub-module — BSC / FHRR / sparse VSA bit-kernels plus the
     // frozen SimHash projection-apply.
-    let hd = PyModule::new_bound(py, "iai_mcp_native.hd")?;
+    let hd = PyModule::new(py, "iai_mcp_native.hd")?;
     lilli_hd::register(py, &hd)?;
     m.add("hd", &hd)?;
 
     // Store sub-module — the paged record store (pager + B-tree + write-ahead
     // log) exposed for storage-level differential testing.
-    let store = PyModule::new_bound(py, "iai_mcp_native.store")?;
+    let store = PyModule::new(py, "iai_mcp_native.store")?;
     lillibrain::register(py, &store)?;
     m.add("store", &store)?;
 
     // Engine sub-module — the sqlite3-shaped SQL engine (Connection / Cursor /
     // Row / RawConn) over the record store, the storage driver under Hippo.
-    let engine = PyModule::new_bound(py, "iai_mcp_native.engine")?;
+    let engine = PyModule::new(py, "iai_mcp_native.engine")?;
     lilliengine::register(py, &engine)?;
     m.add("engine", &engine)?;
 
     // Register the dotted sub-module names in `sys.modules` so a separate
     // `import iai_mcp_native.embed` statement also resolves. Without this
     // step, only `from iai_mcp_native import embed` works.
-    let sys_modules: Bound<'_, PyDict> = py
-        .import_bound("sys")?
-        .getattr("modules")?
-        .downcast_into()?;
+    let sys_modules: Bound<'_, PyDict> = py.import("sys")?.getattr("modules")?.cast_into()?;
     sys_modules.set_item("iai_mcp_native.embed", &embed)?;
     sys_modules.set_item("iai_mcp_native.graph", &graph)?;
     sys_modules.set_item("iai_mcp_native.vec", &vec)?;
@@ -86,8 +82,18 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-// Stub-metadata gatherer for the `stub_gen` binary. The macro walks the
-// `#[gen_stub_*]` attributes declared in the consumed core crates because
-// each crate runs its own `define_stub_info_gatherer!(stub_info)` and the
-// wrapper aggregates them at build time.
-define_stub_info_gatherer!(stub_info);
+// Must be defined here, not in the `stub_gen` binary — pyo3-stub-gen requires
+// the calling crate be the linked PyO3 library crate for `inventory` to see
+// its registered items.
+#[cfg(feature = "stubgen")]
+pub fn stub_info_staged() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
+    // is_mixed_layout=true bypasses the Pure-Rust single-module validation
+    // WITHOUT touching [tool.maturin]; project_root is a dedicated staging
+    // dir, never the live installed package dir.
+    pyo3_stub_gen::StubInfo::from_project_root(
+        "iai_mcp_native".to_string(),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stubs"),
+        true,
+        pyo3_stub_gen::StubGenConfig::default(),
+    )
+}

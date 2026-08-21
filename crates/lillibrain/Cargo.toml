@@ -16,7 +16,6 @@ bytemuck = "1.25.0"
 parking_lot = "0.12.5"
 thiserror = { workspace = true }
 pyo3 = { workspace = true }
-pyo3-stub-gen = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

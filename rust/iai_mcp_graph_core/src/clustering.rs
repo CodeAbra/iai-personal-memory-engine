@@ -32,7 +32,7 @@
 //! transitivity submodule never appears in this crate's source tree.
 //!
 //! The PyO3 entry point copies the input CSR slices to owned `Vec`s
-//! BEFORE entering `py.allow_threads(|| ...)` so the compute kernel
+//! BEFORE entering `py.detach(|| ...)` so the compute kernel
 //! holds no Python-bound borrows -- releasing the GIL during the kernel
 //! lets the daemon's status handler and other async tasks remain
 //! responsive on multi-second computations over N=10^4 graphs.
@@ -154,7 +154,7 @@ fn compute_average_clustering(indptr: &[i64], indices: &[i64], n_nodes: usize) -
 /// Raises `ValueError` on `indptr.len() != n_nodes + 1`.
 ///
 /// GIL release: the Python-bound `PyReadonlyArray1` borrows are
-/// consumed into owned `Vec<i64>` BEFORE `py.allow_threads(...)` so
+/// consumed into owned `Vec<i64>` BEFORE `py.detach(...)` so
 /// the compute kernel holds no Python references. This lets the
 /// daemon's status handler stay responsive while the kernel runs on
 /// large graphs.
@@ -177,14 +177,14 @@ pub fn average_clustering(
     let indices_slice = indices.as_slice()?;
     crate::validate_csr(indptr_slice, indices_slice, n_nodes)?;
 
-    // Copy to owned buffers BEFORE allow_threads -- the closure must
+    // Copy to owned buffers BEFORE detach -- the closure must
     // not hold Python-bound borrows because the GIL is released for
     // its duration.
     let indptr_owned: Vec<i64> = indptr_slice.to_vec();
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
-    let result = py
-        .allow_threads(move || compute_average_clustering(&indptr_owned, &indices_owned, n_nodes));
+    let result =
+        py.detach(move || compute_average_clustering(&indptr_owned, &indices_owned, n_nodes));
 
     Ok(result)
 }

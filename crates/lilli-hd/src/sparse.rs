@@ -159,7 +159,7 @@ pub fn bundle(hvs: &Bound<'_, PyList>) -> PyResult<Vec<u16>> {
     let lists: Vec<Vec<u16>> = hvs
         .iter()
         .map(|item| {
-            let inner = item.downcast::<PyList>()?;
+            let inner = item.cast::<PyList>()?;
             extract_indices(inner)
         })
         .collect::<PyResult<_>>()?;

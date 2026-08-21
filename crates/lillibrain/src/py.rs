@@ -152,7 +152,7 @@ impl PyStore {
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let store = self.locked()?;
         let value = store.tree(tree_root).get(key).map_err(to_pyerr)?;
-        Ok(value.map(|bytes| PyBytes::new_bound(py, &bytes)))
+        Ok(value.map(|bytes| PyBytes::new(py, &bytes)))
     }
 
     /// Remove `key`. Idempotent when the key is absent.
@@ -195,7 +195,7 @@ impl PyStore {
     ) -> PyResult<Bound<'py, PyList>> {
         let store = self.locked()?;
         let problems = store.check_integrity(tree_root).map_err(to_pyerr)?;
-        Ok(PyList::new_bound(py, problems))
+        PyList::new(py, problems)
     }
 
     /// The total page count in the store file.
@@ -246,9 +246,9 @@ fn pairs_to_pylist<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let items: Vec<(i64, Bound<'py, PyBytes>)> = pairs
         .into_iter()
-        .map(|(key, value)| (key, PyBytes::new_bound(py, &value)))
+        .map(|(key, value)| (key, PyBytes::new(py, &value)))
         .collect();
-    Ok(PyList::new_bound(py, items))
+    PyList::new(py, items)
 }
 
 /// Register the record-store surface on a host module.

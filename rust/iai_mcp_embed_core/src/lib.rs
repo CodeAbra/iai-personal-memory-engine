@@ -25,7 +25,6 @@ pub mod bert;
 pub mod error;
 
 use pyo3::prelude::*;
-use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 
 use crate::bert::BertEmbedder;
 
@@ -39,22 +38,17 @@ use crate::bert::BertEmbedder;
 /// in the generated `.pyi` stub — pyo3-stub-gen derives parent/child module
 /// relationships from these dotted names so a single stub file can describe
 /// the sub-module tree consumed at runtime.
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "stubgen", pyo3_stub_gen::derive::gen_stub_pyclass)]
 #[pyclass(module = "iai_mcp_native.embed")]
 pub struct Embedder {
     inner: BertEmbedder,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "stubgen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl Embedder {
     /// Load bge-small-en-v1.5 weights from the HF cache (lazy download on miss
-    /// unless `IAI_MCP_EMBED_OFFLINE=1`).
-    ///
-    /// The GIL is released for the duration of the model load so that
-    /// background warm threads cannot block the main thread.
-    /// `BertEmbedder::load` is pure Rust and holds no Python objects,
-    /// making this safe.
+    /// unless `IAI_MCP_EMBED_OFFLINE=1`). Releases the GIL during the model load.
     #[new]
     #[pyo3(signature = (model_id=None, revision=None, pool=None))]
     fn py_new(
@@ -69,21 +63,16 @@ impl Embedder {
             .transpose()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let inner = py
-            .allow_threads(|| {
-                BertEmbedder::load_with(model_id.as_deref(), revision.as_deref(), pooling)
-            })
+            .detach(|| BertEmbedder::load_with(model_id.as_deref(), revision.as_deref(), pooling))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
     /// Encode a single text string to a 384-dim L2-normalized vector.
-    ///
-    /// The GIL is released for the duration of the BERT forward pass so that
-    /// concurrent socket clients dispatched via `asyncio.to_thread` can run
-    /// their inference in parallel. `BertEmbedder::encode` is pure Rust and
-    /// holds no Python objects, making this safe.
+    /// Releases the GIL during the forward pass so concurrent callers can
+    /// run inference in parallel.
     fn encode(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
-        py.allow_threads(|| self.inner.encode(text))
+        py.detach(|| self.inner.encode(text))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }
@@ -96,8 +85,3 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Embedder>()?;
     Ok(())
 }
-
-// Required by pyo3-stub-gen: collects stub metadata from all #[gen_stub_*]
-// macros and exposes a `stub_info()` function for the wrapper crate's
-// stub_gen binary to consume.
-define_stub_info_gatherer!(stub_info);

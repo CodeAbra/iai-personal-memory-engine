@@ -192,10 +192,22 @@ class _BuildWithWrapper(_OrigBuildPy):
         ``Path(iai_mcp_native.__file__).parent`` after installation.
         """
         build_lib_root = Path(self.build_lib)
+        missing = []
         for src_name, dest_name in _NATIVE_STUB_FILES:
             src = _NATIVE_STUB_SRC / src_name
             if src.exists():
                 shutil.copy2(src, build_lib_root / dest_name)
+            else:
+                missing.append(str(src))
+        if missing:
+            raise RuntimeError(
+                "Native extension stub(s) missing from "
+                f"{_NATIVE_STUB_SRC}: {missing}. A wheel must never ship "
+                "without native stubs; regenerate via "
+                "'cargo run --bin stub_gen -p iai_mcp_native --features stubgen' "
+                "and flatten "
+                "the staged output into the tracked stub files."
+            )
 
 
 setup(

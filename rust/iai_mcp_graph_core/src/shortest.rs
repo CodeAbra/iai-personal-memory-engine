@@ -10,7 +10,7 @@
 //! coefficient implementation.
 //!
 //! The PyO3 entry point releases the GIL during the Rust kernel via
-//! `py.allow_threads(|| ...)`. `distance_matrix` is O(V·(V+E)) and at the
+//! `py.detach(|| ...)`. `distance_matrix` is O(V·(V+E)) and at the
 //! N≥2000 scale the daemon's status handler must stay responsive.
 //!
 //! Unreachable-cell handling: `distance_matrix` accepts a `null_value: f64`
@@ -137,13 +137,12 @@ fn average_shortest_path_length_on_connected_subgraph(subgraph: &UnGraphMap<i64,
 ///
 /// Build an undirected graph from the CSR buffers, take its largest
 /// connected component, and return the average shortest path length on
-/// that component. The Rust kernel runs under `py.allow_threads(|| ...)`
+/// that component. The Rust kernel runs under `py.detach(|| ...)`
 /// so the daemon's other Python callers stay responsive on N≥2000
 /// inputs.
 ///
 /// **Stub-gen note:** `#[gen_stub_pyfunction]` is intentionally NOT
-/// applied here. `pyo3-stub-gen 0.6` (the only line compatible with the
-/// workspace's `pyo3 0.22` pin) does not implement `PyStubType` for
+/// applied here. `pyo3-stub-gen` does not implement `PyStubType` for
 /// `numpy::PyReadonlyArray1<T>`; annotating the function emits a `the
 /// trait bound … : PyStubType is not satisfied` compile error.
 /// Downstream callers that need a typed `.pyi` entry should treat the
@@ -170,7 +169,7 @@ pub fn average_shortest_path_length(
     let indptr_owned: Vec<i64> = indptr_slice.to_vec();
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
-    let result = py.allow_threads(move || {
+    let result = py.detach(move || {
         let graph = build_ungraph_from_csr(&indptr_owned, &indices_owned, n_nodes);
         let largest_cc = largest_connected_component_subgraph(&graph);
         average_shortest_path_length_on_connected_subgraph(&largest_cc)
@@ -254,7 +253,7 @@ pub fn average_shortest_path_length_sampled(
     let indptr_owned: Vec<i64> = indptr_slice.to_vec();
     let indices_owned: Vec<i64> = indices_slice.to_vec();
 
-    let result = py.allow_threads(move || {
+    let result = py.detach(move || {
         let graph = build_ungraph_from_csr(&indptr_owned, &indices_owned, n_nodes);
         let largest_cc = largest_connected_component_subgraph(&graph);
         sampled_apsl_on_connected_subgraph(&largest_cc, n_sources)

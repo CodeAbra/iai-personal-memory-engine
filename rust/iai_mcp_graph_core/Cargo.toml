@@ -16,9 +16,12 @@ crate-type = ["rlib"]    # only the native wrapper crate (iai_mcp_native) ships 
 # ML tensor backend such as PyTorch / ONNX runtime). Policy is enforced
 # declaratively by cargo-deny [bans] at the workspace root.
 
+[features]
+stubgen = ["dep:pyo3-stub-gen"]
+
 [dependencies]
 pyo3           = { workspace = true }
-pyo3-stub-gen  = { workspace = true }
+pyo3-stub-gen  = { workspace = true, optional = true }
 petgraph       = { version = "0.6", features = ["rayon"] }
 rustworkx-core = "0.17"
 rayon          = "1.10"
