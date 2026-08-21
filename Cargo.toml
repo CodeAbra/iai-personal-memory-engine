@@ -20,7 +20,7 @@ repository = "https://github.com/CodeAbra/iai-personal-memory-engine"
 [workspace.dependencies]
 candle-core    = "0.10.2"
 candle-nn      = "0.10.2"
-safetensors    = "0.7.0"
+safetensors    = "0.8.0"
 tokenizers     = "0.23.1"
 # default-features off: only the sync ureq API is used (rustls under ureq's
 # defaults) — keeps native-tls/openssl-sys/reqwest/tokio out of the tree, so
