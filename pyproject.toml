@@ -5,7 +5,7 @@ description = "MCP server giving Claude persistent autistic-style memory + learn
 authors = [{ name = "Areg Noya" }]
 requires-python = ">=3.11,<3.13"
 dependencies = [
-  "numpy>=1.26.0,<2.3.0",
+  "numpy>=1.26.0,<2.5.0",
   # networkx evicted from main deps. The σ assembly and the
   # graph-algorithm consumer surface route through the native Rust
   # ``iai_mcp_native.graph`` namespace + the pure-Python rich-club
