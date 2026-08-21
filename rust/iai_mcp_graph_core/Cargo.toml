@@ -23,7 +23,7 @@ stubgen = ["dep:pyo3-stub-gen"]
 pyo3           = { workspace = true }
 pyo3-stub-gen  = { workspace = true, optional = true }
 petgraph       = { version = "0.6", features = ["rayon"] }
-rustworkx-core = "0.17"
+rustworkx-core = "0.18"
 rayon          = "1.10"
 fixedbitset    = "0.5"
 rand           = { version = "0.9", default-features = false, features = ["std"] }
