@@ -1,0 +1,23 @@
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  cargo-deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      # Default features only — the stub-gen tooling that pulls the unmaintained
+      # unic-* chain is behind the opt-in `stubgen` feature and is never shipped,
+      # so it stays out of the advisory/license surface.
+      - name: cargo deny check
+        run: cargo deny check

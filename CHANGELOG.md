@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.7] - 2026-08-21
+
+### Security
+- The bundled MCP wrapper moves `fast-uri` to 3.1.5, closing three
+  host-confusion advisories in its URI validation — the only advisory-flagged
+  dependency that reaches the shipped wheel. The rest of the wrapper's
+  dependency tree (`hono`, `ip-address`, `@hono/node-server`, and, via npm
+  `overrides`, `qs`, `body-parser`, `esbuild`) is pinned to patched versions so
+  `npm audit` reports zero; those packages are tree-shaken out of the shipped
+  bundle and never reached users.
+
+### Changed
+- CI now runs `cargo deny check` (advisories, bans, licenses) on every push and
+  pull request, adds a CodeQL workflow over the Python and TypeScript sources,
+  and schedules weekly Dependabot updates across cargo, pip, npm, and GitHub
+  Actions.
+
 ## [3.0.6] - 2026-08-20
 
 ### Security
