@@ -3,6 +3,7 @@ name    = "iai_mcp_vec_core"
 version = "0.1.0"
 edition = "2021"
 authors.workspace = true
+license.workspace = true
 
 [lib]
 name       = "iai_mcp_vec_core"
