@@ -20,7 +20,7 @@ jobs:
     # build time and re-installing the components the action already placed
     # (detected conflict: bin/cargo-clippy, then "can't find Rust compiler").
     env:
-      RUSTUP_TOOLCHAIN: "1.87"
+      RUSTUP_TOOLCHAIN: "1.94"
       # Fresh stores default to the stdlib oracle; the prod engine runs only
       # when this is set, so CI must set it or it tests the fallback, not lilli.
       LILLI_STORAGE_DRIVER: "lilli"
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - name: Install with dev extras

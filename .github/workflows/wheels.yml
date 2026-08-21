@@ -57,7 +57,7 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
             | CARGO_HOME=/opt/iai-rust/cargo RUSTUP_HOME=/opt/iai-rust/rustup
-            sh -s -- -y --default-toolchain 1.87 --profile minimal --no-modify-path &&
+            sh -s -- -y --default-toolchain 1.94 --profile minimal --no-modify-path &&
             (yum install -y pkgconfig || true)
           # RUSTUP_TOOLCHAIN pins the toolchain directly: without it rustup
           # re-reads rust-toolchain.toml at build time and re-installs the
@@ -67,7 +67,7 @@ jobs:
             PATH="/opt/iai-rust/cargo/bin:$PATH"
             CARGO_HOME=/opt/iai-rust/cargo
             RUSTUP_HOME=/opt/iai-rust/rustup
-            RUSTUP_TOOLCHAIN=1.87
+            RUSTUP_TOOLCHAIN=1.94
           CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
           # A freshly built native wheel must import before it ships.
           CIBW_TEST_COMMAND: 'python -c "import iai_mcp, iai_mcp_native"'
