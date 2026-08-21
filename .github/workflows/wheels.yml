@@ -37,7 +37,7 @@ jobs:
           npm run bundle
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21
+        uses: pypa/cibuildwheel@v4.2
         env:
           CIBW_BUILD: "cp311-* cp312-*"
           CIBW_SKIP: "*-musllinux_* *_i686 *_ppc64le *_s390x *-win32 *-win_arm64"
