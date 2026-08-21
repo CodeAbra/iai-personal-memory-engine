@@ -11,7 +11,7 @@ dependencies = [
   # ``iai_mcp_native.graph`` namespace + the pure-Python rich-club
   # helper. The legacy MemoryGraph storage backend lazy-imports
   # networkx inside ``__init__``; it remains an internal
-  # implementation detail and is pinned exactly to ``networkx==3.3``
+  # implementation detail and is pinned exactly to ``networkx==3.6.1``
   # in ``[project.optional-dependencies.dev]`` to double-duty as the
   # σ-baseline oracle and the MemoryGraph test backend.
   "scipy>=1.13.0",      # CSR build glue for the σ assembly helpers.
@@ -53,7 +53,7 @@ dev = [
   # (the locked SHA-pinned fixture was generated via networkx 3.3); it also
   # backs MemoryGraph's lazy-imported internal storage. Exact pin so the
   # baseline reproducibility check stays stable.
-  "networkx==3.3",
+  "networkx==3.6.1",
   # Differential property-based harness for the σ baseline oracle.
   "hypothesis-networkx>=0.3",
   # sklearn.metrics oracle for the mosaic LFR gauntlet (was previously a
