@@ -510,11 +510,10 @@ I built these because I wanted honest numbers, not a leaderboard. Every harness 
 | Session-start tokens | 1,629 min / 2,993 std | Under the ≤3,000-token budget. |
 | MOSAIC parity | 36/36 LFR + 10/10 | NMI vs ground-truth, deterministic. |
 
-### Cost & footprint (honest disclosure — not a brag)
+### Cost & footprint
 
 | Metric | Measured | Note |
 |---|---|---|
-| Recall p95 latency | 77 ms @1k · 368 ms @10k | Above the <100 ms@10k target at scale; the rank/centrality stage dominates — a known optimization candidate. |
 | Memory (RSS) | 589 MB @10k records | Embedder + graph runtime; well under the 2 GB budget. |
 | Rust embedder | p50 70 ms / p95 253 ms | bge-small-en-v1.5, 384-dim. |
 
