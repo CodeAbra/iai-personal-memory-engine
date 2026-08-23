@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.8] - 2026-08-23
+
+### Fixed
+- `iai-mcp capture-hooks status` relabels the Claude Desktop line to
+  "Claude Desktop MCP tools:" so it no longer implies ambient capture hooks
+  are wired when the check only reflects MCP server registration. Reported
+  by @oscampo (#114).
+- README doctor table now lists all 33 checks, adding `dd` (exact-index
+  coercions) and `ee` (deferred-capture backlog at rest). Reported by
+  @oscampo (#113).
+
 ## [3.0.7] - 2026-08-21
 
 ### Security

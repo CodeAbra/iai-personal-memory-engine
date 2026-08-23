@@ -14,7 +14,7 @@
 <p align="center">每一项声明都附带可复现的基准测试脚本。你可以自己跑一遍验证。</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v3.0.7-1f6feb?style=flat-square" alt="Release v3.0.7">
+  <img src="https://img.shields.io/badge/release-v3.0.8-1f6feb?style=flat-square" alt="Release v3.0.7">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux">
@@ -226,7 +226,7 @@ tail ~/.iai-mcp/logs/capture-$(date -u +%Y-%m-%d).log
 
 - **基准测试细节**（LongMemEval-S 对比 mempalace、Rescue@10、漂移、整合、延迟、内存占用） → [README.md#benchmarks](./README.md#benchmarks)
 - **配置项**（环境变量、调优旋钮） → [README.md#configuration](./README.md#configuration)
-- **Doctor 自检**（31 项健康检查清单） → [README.md#doctor](./README.md#doctor)
+- **Doctor 自检**（33 项健康检查清单） → [README.md#doctor](./README.md#doctor)
 - **故障排查** → [README.md#troubleshooting](./README.md#troubleshooting)
 - **状态与限制** → [README.md#status-and-limitations](./README.md#status-and-limitations)
 - **兼容性**（Claude Code / Codex CLI / Gemini CLI / Cursor CLI / Claude Desktop） → [README.md#compatibility](./README.md#compatibility)

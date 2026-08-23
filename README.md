@@ -7,7 +7,7 @@
 <h3 align="center">Give your coding agent a brain that remembers exactly what you said — forever, on your machine.</h3>
 <p align="center"><b>The best open-source personal memory engine for AI coding assistants.</b><br>Pays for itself in tokens: an injected memory pack costs ≈88% less than the agent search it displaces.<br>Every claim ships with the harness that proves it — run the benchmarks yourself.</p>
 
-<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi&v=281" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v3.0.7-1f6feb?style=flat-square" alt="Release v3.0.7"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
+<p align="center"><a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi&v=281" alt="iai-pme on PyPI"></a> <img src="https://img.shields.io/badge/release-v3.0.8-1f6feb?style=flat-square" alt="Release v3.0.7"> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a> <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12"> <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux"> <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta"> <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine"></p>
 <p align="center"><img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962"> <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000"> <img src="https://img.shields.io/badge/memory_pack-%E2%89%8888%25_cheaper_than_search-2ea043?style=flat-square" alt="An injected memory pack costs ≈88% less than the agent search it displaces"> <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM"> <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry"> <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible"> <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a></p>
 <p align="center"><a href="#quick-start"><b>Quick start</b></a> · <a href="#benchmarks"><b>Benchmarks</b></a> · <a href="#watch-it-think"><b>Dashboard</b></a> · <a href="https://github.com/CodeAbra/iai-personal-memory-engine/discussions"><b>Discussions</b></a> · <a href="./README_zh-CN.md"><b>中文</b></a></p>
 
@@ -461,7 +461,7 @@ iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,paus
 
 `entity-backfill` derives `entity:` anchor tags from records captured before anchoring shipped, so names in old turns become matchable; `--refresh` recomputes the whole corpus. `blob-quarantine` tombstones machine-notification blobs that drown real records on any cue sharing their vocabulary. Both are dry-run by default and journal every change when applied.
 
-`doctor` runs 31 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
+`doctor` runs 33 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
 
 ### Deployment surface
 
@@ -647,7 +647,7 @@ config file is something you can read.
 
 ## Doctor
 
-`iai-mcp doctor` runs 31 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
+`iai-mcp doctor` runs 33 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
 
 It also repairs what it finds. `--apply` walks the repairs it can make and asks before anything that touches your memory; corrupt state files and vector indexes are renamed aside so the engine rebuilds them, never deleted. `--auto` is the unattended subset — no prompts, no killed processes, no changes to the store — and your assistant runs it for you if the engine is still unreachable ten seconds into a session. In practice a stalled engine now fixes itself before you notice it stalled.
 
@@ -658,7 +658,7 @@ iai-mcp doctor
 ```
 
 <details>
-<summary><b>All 31 checks, one line each</b></summary>
+<summary><b>All 33 checks, one line each</b></summary>
 
 What it checks:
 
@@ -686,11 +686,13 @@ What it checks:
 | t | hippo_compacted freshness | Compaction has run recently |
 | u | recall centrality regression | Recall ranking hasn't regressed |
 | v | configured embedder | The embedder the store is configured for is built and produces vectors |
+| dd | exact-index coercions | No non-finite (NaN/inf) vectors have been coerced to zero at the exact-cosine index |
 | w | no permanent-failed captures | No capture is stuck after exhausting its retries |
 | x | timestamps not collapsed | Record timestamps span a real range, not all-identical |
 | y | RSS 24h plateau | Resident memory has settled rather than climbing across the last day |
 | z | AVX2 CPU support | CPU supports the instructions the native libs need |
 | aa | capture-state hygiene | No stale or half-written files left in the capture-state directory |
+| ee | deferred-capture backlog at rest | No undrained events sitting in the deferred-capture spool |
 | bb | nightly insight mint | The nightly pass is actually minting insights, not just running |
 | cc | background liveness | Background sleep steps have completed over the last week |
 | ii | store embed identity | The store's vector-identity stamp matches the embedder the runtime would use |
