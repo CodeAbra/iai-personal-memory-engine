@@ -1,0 +1,60 @@
+# iai-pme
+
+> Local, MIT-licensed personal memory engine for MCP-compatible AI assistants. Captures every conversation turn verbatim (write-once), consolidates in the background, and injects a small relevant memory pack into the assistant at session start and per turn. No account, no API key, no telemetry.
+
+Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memory-engine. Current release: 3.0.7.
+
+## What it is
+
+- An MCP-over-stdio server plus a local background engine (called `daemon` in the CLI).
+- Storage, clustering (MOSAIC), hyperdimensional substrate and the native engine are first-party Rust/Python code; no external vector DB or graph DB is required.
+- Store is encrypted at rest with AES-256-GCM and lives in `~/.iai-mcp/`.
+- Embeddings run locally (bge-small-en-v1.5, 384-dim, Rust embedder).
+
+## What it is not
+
+- Not a note-taking app; nothing is written by hand.
+- Not a cloud service; no hosted view, no cross-machine sync.
+- Not a memory layer for multi-tenant products (see Mem0, Letta, Graphiti for that).
+- Not multilingual storage: English-only by design; other languages are accepted as tagged raw records with a swappable embedder.
+
+## Key facts (verifiable in this repo)
+
+- Rescue@10 after contradiction: 1.000. Historical-verbatim hit@10: 1.000. Flat-cosine baseline for the same test: ~0.71. Harness: `python -m bench.contradiction_longitudinal`.
+- LongMemEval-S, 500 questions, raw retrieval: R@5 0.962 (product embedder), 0.966 with all-MiniLM-L6-v2 — an exact tie with mempalace v3.3.6 on the matched embedder. No win claimed. Harness: `python -m bench.longmemeval_blind`.
+- Personal-fact drift recall@10: 0.9933 (50 facts / 50 sessions / 30 intervening). Harness: `python -m bench.personal_fact_drift`.
+- Session-start memory pack: 1,629–2,993 tokens. Ambient pack averages ~350 tokens vs ~2,850 for the agent search it displaces (author's store, lower-bound formula). Do not apply the ~88% figure to an explicit `memory_recall` call, which is budget-bounded (default 1,500 tokens).
+- Recall p95 latency: 77 ms at 1k records, 368 ms at 10k. RSS at 10k records: 589 MB. Measured on Apple M2 Max.
+- All numbers: [README.md#benchmarks](README.md#benchmarks). All harnesses: `bench/`.
+
+## Known limitations
+
+- Recall quality is mediocre for roughly the first 10 sessions; the engine needs material to consolidate.
+- Recall latency at 10k records is above the stated <100 ms target.
+- Cold start takes a few seconds while the engine loads the embedding model.
+- Solo-maintained, no SLA. Windows support is beta.
+- Full list: [README.md#status-and-limitations](README.md#status-and-limitations).
+
+## Hosts
+
+Claude Code (primary, ambient capture), Codex CLI, Cursor, Antigravity, Hermes (ambient capture), Claude Desktop, Gemini CLI and any other MCP-over-stdio client (tools only). Details: [README.md#compatibility](README.md#compatibility).
+
+## Install
+
+- One-line bootstrap (macOS/Linux): `scripts/bootstrap.sh` — supports `--dry-run` and `--preflight-only`.
+- Claude Code plugin: `/plugin marketplace add CodeAbra/iai-personal-memory-engine` then `/plugin install iai-memory@iai-pme`, after `pip install iai-pme`.
+- Health check: `iai-mcp doctor`. Engine status: `iai-mcp daemon status`.
+
+## MCP tools
+
+`memory_recall` (returns hits and anti-hits), `memory_temporal_recall`, `memory_recall_structural`, `memory_search`, `memory_capture`, `memory_contradict`, `memory_reinforce`, `memory_consolidate`, `profile_get_set`, plus introspection: `topology`, `schema_list`, `events_query`, `episodes_recent`, `curiosity_pending`.
+
+## Docs
+
+- [README.md](README.md): full documentation, English.
+- [README_zh-CN.md](README_zh-CN.md): Chinese.
+- [CHANGELOG.md](CHANGELOG.md): release history.
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): deployment.
+- [docs/EMBEDDERS.md](docs/EMBEDDERS.md): swappable embedders and languages.
+- `bench/`: benchmark harnesses (run commands in README.md#benchmarks).
+- CI: `.github/workflows/` (tests, CodeQL, cargo-deny, wheels, publish).

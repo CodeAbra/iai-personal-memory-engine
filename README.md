@@ -378,7 +378,7 @@ Everything lives at `~/.iai-mcp/`.
 
 ## MCP tools
 
-Fifteen tools, all local, all against the same store. The ones you'll feel:
+Fourteen tools, all local, all against the same store. The ones you'll feel:
 
 | Tool | What it does |
 |---|---|
@@ -391,7 +391,7 @@ Fifteen tools, all local, all against the same store. The ones you'll feel:
 | `memory_reinforce` | Strengthen a memory's recall pathways. |
 | `memory_consolidate` | Run a consolidation pass now instead of waiting for idle. |
 | `profile_get_set` | The eleven sealed procedural knobs the engine learns about you. |
-| `topology` · `schema_list` · `events_query` · `episodes_recent` · `curiosity_pending` · `camouflaging_status` | Introspection: the memory graph, induced patterns, engine events, recent episodes, open curiosity questions, masking status. |
+| `topology` · `schema_list` · `events_query` · `episodes_recent` · `curiosity_pending` | Introspection: the memory graph, induced patterns, engine events, recent episodes, open curiosity questions. |
 
 ---
 
