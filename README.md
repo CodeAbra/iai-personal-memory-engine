@@ -461,7 +461,7 @@ iai-mcp    doctor · self-update · daemon {install,start,stop,restart,logs,paus
 
 `entity-backfill` derives `entity:` anchor tags from records captured before anchoring shipped, so names in old turns become matchable; `--refresh` recomputes the whole corpus. `blob-quarantine` tombstones machine-notification blobs that drown real records on any cue sharing their vocabulary. Both are dry-run by default and journal every change when applied.
 
-`doctor` runs 31 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
+`doctor` runs 33 checks and repairs: `--apply` prompts before anything touching the store and renames corrupt state aside rather than deleting it; `--auto` is the unattended read-only subset your assistant invokes when the socket is unreachable 10s into a session. `self-update` upgrades the wheel, restarts the daemon and verifies by querying the running engine's version; it refuses source checkouts and leaves the running engine untouched if pip fails.
 
 ### Deployment surface
 
@@ -647,7 +647,7 @@ config file is something you can read.
 
 ## Doctor
 
-`iai-mcp doctor` runs 31 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
+`iai-mcp doctor` runs 33 checks against the local engine, the store, the native engine, and the runtime state. Output is one line per check: PASS, WARN, or FAIL.
 
 It also repairs what it finds. `--apply` walks the repairs it can make and asks before anything that touches your memory; corrupt state files and vector indexes are renamed aside so the engine rebuilds them, never deleted. `--auto` is the unattended subset — no prompts, no killed processes, no changes to the store — and your assistant runs it for you if the engine is still unreachable ten seconds into a session. In practice a stalled engine now fixes itself before you notice it stalled.
 
@@ -658,7 +658,7 @@ iai-mcp doctor
 ```
 
 <details>
-<summary><b>All 31 checks, one line each</b></summary>
+<summary><b>All 33 checks, one line each</b></summary>
 
 What it checks:
 
@@ -686,11 +686,13 @@ What it checks:
 | t | hippo_compacted freshness | Compaction has run recently |
 | u | recall centrality regression | Recall ranking hasn't regressed |
 | v | configured embedder | The embedder the store is configured for is built and produces vectors |
+| dd | exact-index coercions | No non-finite (NaN/inf) vectors have been coerced to zero at the exact-cosine index |
 | w | no permanent-failed captures | No capture is stuck after exhausting its retries |
 | x | timestamps not collapsed | Record timestamps span a real range, not all-identical |
 | y | RSS 24h plateau | Resident memory has settled rather than climbing across the last day |
 | z | AVX2 CPU support | CPU supports the instructions the native libs need |
 | aa | capture-state hygiene | No stale or half-written files left in the capture-state directory |
+| ee | deferred-capture backlog at rest | No undrained events sitting in the deferred-capture spool |
 | bb | nightly insight mint | The nightly pass is actually minting insights, not just running |
 | cc | background liveness | Background sleep steps have completed over the last week |
 | ii | store embed identity | The store's vector-identity stamp matches the embedder the runtime would use |

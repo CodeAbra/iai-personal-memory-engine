@@ -226,7 +226,7 @@ tail ~/.iai-mcp/logs/capture-$(date -u +%Y-%m-%d).log
 
 - **基准测试细节**（LongMemEval-S 对比 mempalace、Rescue@10、漂移、整合、延迟、内存占用） → [README.md#benchmarks](./README.md#benchmarks)
 - **配置项**（环境变量、调优旋钮） → [README.md#configuration](./README.md#configuration)
-- **Doctor 自检**（31 项健康检查清单） → [README.md#doctor](./README.md#doctor)
+- **Doctor 自检**（33 项健康检查清单） → [README.md#doctor](./README.md#doctor)
 - **故障排查** → [README.md#troubleshooting](./README.md#troubleshooting)
 - **状态与限制** → [README.md#status-and-limitations](./README.md#status-and-limitations)
 - **兼容性**（Claude Code / Codex CLI / Gemini CLI / Cursor CLI / Claude Desktop） → [README.md#compatibility](./README.md#compatibility)

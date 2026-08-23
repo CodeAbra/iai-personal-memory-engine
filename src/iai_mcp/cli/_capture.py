@@ -1183,18 +1183,18 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
 
     desktop_cfg = _cli._claude_desktop_config_path()
     if desktop_cfg is None:
-        desktop_line = "Claude Desktop: not installed"
+        desktop_line = "Claude Desktop MCP tools: not installed"
         desktop_wired = False
     elif not desktop_cfg.exists():
-        desktop_line = f"Claude Desktop: {desktop_cfg} MISSING"
+        desktop_line = f"Claude Desktop MCP tools: {desktop_cfg} MISSING"
         desktop_wired = False
     else:
         try:
             d = _json.loads(desktop_cfg.read_text(encoding="utf-8"))
             desktop_wired = "iai-mcp" in d.get("mcpServers", {})
-            desktop_line = f"Claude Desktop: {desktop_cfg}  {'WIRED' if desktop_wired else 'NOT WIRED'}"
+            desktop_line = f"Claude Desktop MCP tools: {desktop_cfg}  {'WIRED' if desktop_wired else 'NOT WIRED'}"
         except (OSError, ValueError):
-            desktop_line = f"Claude Desktop: {desktop_cfg} (unreadable)"
+            desktop_line = f"Claude Desktop MCP tools: {desktop_cfg} (unreadable)"
             desktop_wired = False
     print(desktop_line)
 
@@ -1208,7 +1208,7 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
 
     if ok and not desktop_problem:
         print(f"\nstatus: ACTIVE — Stop + UserPromptSubmit + SessionStart + per-turn hooks wired "
-              f"(Claude Code{'; Desktop also wired' if desktop_wired else ''})")
+              f"(Claude Code{'; Desktop MCP tools also wired' if desktop_wired else ''})")
         return 0
     msg = []
     if not ok:
