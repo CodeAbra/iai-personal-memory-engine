@@ -103,6 +103,23 @@ def _cache_path(store: Any = None, session_id: str = "-") -> Path:
     return base / f".working-tier.{_sanitize_session_id(session_id)}.cached.md"
 
 
+def _model_label(record: Any) -> str:
+    try:
+        for entry in getattr(record, "provenance", None) or []:
+            value = entry.get("model") if isinstance(entry, dict) else None
+            if not isinstance(value, str):
+                continue
+            model = " ".join(value.split())
+            model = "".join(
+                char for char in model if char.isalnum() or char in " ._:/+-"
+            )[:64]
+            if model:
+                return f"[model:{model}] "
+    except Exception:  # noqa: BLE001 -- capture feed must remain fail-soft
+        pass
+    return ""
+
+
 def _render_snapshot(entry: WorkingSetEntry) -> str:
     lines = [
         "# Working tier — active task",
@@ -580,7 +597,7 @@ def update_from_record(record: Any, *, store: Any = None) -> None:
             text = _literal_surface_of(record)
             if text:
                 _bounded_append(
-                    entry.raw_sensory, text,
+                    entry.raw_sensory, f"{_model_label(record)}{text}",
                     max_slots=WORKING_TIER_MAX_SLOTS, allow_evict=True,
                 )
             # Advance the idle clock monotonically. The async write-queue flush

@@ -265,10 +265,28 @@ def _candidate_session_id(rec: object) -> str:
         return ""
 
 
+def _model_label(rec: object) -> str:
+    try:
+        for entry in getattr(rec, "provenance", None) or []:
+            value = entry.get("model") if isinstance(entry, dict) else None
+            if not isinstance(value, str):
+                continue
+            model = " ".join(value.split())
+            model = "".join(
+                char for char in model if char.isalnum() or char in " ._:/+-"
+            )[:64]
+            if model:
+                return f"[model:{model}] "
+    except Exception:  # noqa: BLE001 -- attribution must never break the payload
+        pass
+    return ""
+
+
 def _origin_label(rec: object) -> str:
     # Ambient feeds mix every session and project; an unlabeled line reads as
     # "my recent work" and a parallel session's thread gets adopted as this
     # one's. The label names the origin so the model can attribute, not guess.
+    model_label = _model_label(rec)
     try:
         prov = getattr(rec, "provenance", None) or []
         cwd = ""
@@ -279,7 +297,7 @@ def _origin_label(rec: object) -> str:
         if cwd:
             import os as _os
 
-            return f"[{_os.path.basename(cwd.rstrip('/')) or cwd}] "
+            return f"[{_os.path.basename(cwd.rstrip('/')) or cwd}] {model_label}"
         sid = ""
         for entry in prov:
             if isinstance(entry, dict) and entry.get("session_id"):
@@ -288,10 +306,10 @@ def _origin_label(rec: object) -> str:
         if not sid:
             sid = str(getattr(rec, "session_id", "") or "")
         if sid and sid != "-":
-            return f"[s:{sid[:6]}] "
+            return f"[s:{sid[:6]}] {model_label}"
     except Exception:  # noqa: BLE001 -- labels must never break the payload
         pass
-    return ""
+    return model_label
 
 
 def _recent_thread_segment(

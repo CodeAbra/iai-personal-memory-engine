@@ -406,6 +406,45 @@ def _is_episodic_conversational(tier: str, role: str) -> bool:
     return tier == "episodic" and role in {"user", "assistant"}
 
 
+def _normalize_model(model: object) -> str | None:
+    """Return a bounded printable model label, or ``None`` for unknown input."""
+    if not isinstance(model, str):
+        return None
+    normalized = "".join(
+        char for char in model if char.isalnum() or char in " ._:/+-"
+    )
+    normalized = " ".join(normalized.split())
+    if not normalized:
+        return None
+    return normalized[:80]
+
+
+class _TranscriptModelText(str):
+    """A text value that preserves explicit transcript metadata for old callers."""
+
+    def __new__(cls, value: str, model: object) -> "_TranscriptModelText":
+        instance = super().__new__(cls, value)
+        instance.model = model
+        return instance
+
+
+def _with_transcript_model(text: str, model: object) -> str:
+    if model is None:
+        return text
+    return _TranscriptModelText(text, model)
+
+
+def _transcript_model(text: object) -> object | None:
+    return getattr(text, "model", None)
+
+
+def _event_model(*containers: object) -> object | None:
+    for container in containers:
+        if isinstance(container, dict) and "model" in container:
+            return container["model"]
+    return None
+
+
 def capture_turn(
     store: MemoryStore,
     *,
@@ -416,6 +455,7 @@ def capture_turn(
     role: str = "user",
     ts: str | None = None,
     source_uuid: str | None = None,
+    model: str | None = None,
     provenance_extra: dict | None = None,
     extra_tags: "list[str] | None" = None,
     near_dup_gate: bool = False,
@@ -433,6 +473,8 @@ def capture_turn(
     # would otherwise insert near-duplicates at cos 0.95+.
     if tier not in TIER_ENUM:
         return {"status": "skipped", "record_id": None, "reason": f"invalid tier {tier!r}"}
+
+    model = _normalize_model(model)
 
     text = (text or "").strip()
     # A durable working-tier result is stored byte-identical even below the
@@ -594,10 +636,15 @@ def capture_turn(
             ts_iso = now.isoformat()
             tags.append(_idem_tag(session_id, role, ts_iso, text, source_uuid=source_uuid))
 
-        provenance_list: list[dict] = [
-            {"ts": now.isoformat(), "cue": cue or "(auto-capture)",
-             "session_id": session_id, "role": role}
-        ]
+        provenance = {
+            "ts": now.isoformat(),
+            "cue": cue or "(auto-capture)",
+            "session_id": session_id,
+            "role": role,
+        }
+        if model is not None:
+            provenance["model"] = model
+        provenance_list: list[dict] = [provenance]
         if provenance_extra:
             provenance_list.append(dict(provenance_extra))
 
@@ -690,6 +737,7 @@ def _drain_write_pending(
     role: str = "user",
     ts: str | None = None,
     source_uuid: str | None = None,
+    model: str | None = None,
     provenance_extra: dict | None = None,
 ) -> dict[str, Any]:
     """Write a captured turn as a pending (un-embedded) row.
@@ -712,6 +760,7 @@ def _drain_write_pending(
     if tier not in TIER_ENUM:
         return {"status": "skipped", "record_id": None, "reason": f"invalid tier {tier!r}"}
 
+    model = _normalize_model(model)
     text = (text or "").strip()
     if len(text) < MIN_CAPTURE_LEN:
         return {"status": "skipped", "record_id": None, "reason": "too short"}
@@ -758,10 +807,15 @@ def _drain_write_pending(
                 _idem_tag(session_id, role, ts_iso, text, source_uuid=source_uuid)
             )
 
-        provenance_list: list[dict] = [
-            {"ts": now.isoformat(), "cue": cue or "(auto-capture)",
-             "session_id": session_id, "role": role}
-        ]
+        provenance = {
+            "ts": now.isoformat(),
+            "cue": cue or "(auto-capture)",
+            "session_id": session_id,
+            "role": role,
+        }
+        if model is not None:
+            provenance["model"] = model
+        provenance_list: list[dict] = [provenance]
         if provenance_extra:
             provenance_list.append(dict(provenance_extra))
 
@@ -869,6 +923,7 @@ def capture_transcript(
                 role=role,
                 ts=ts,
                 source_uuid=src_uuid,
+                model=_transcript_model(text),
             )
             status = result.get("status", "skipped")
             if status in counts:
@@ -1036,11 +1091,14 @@ class _ToolTrailerState:
                 self._pending = []
             return None
         role, text, src_uuid, ts = parsed
+        model = _transcript_model(text)
         if role == "assistant":
             # Floor on the BARE text: the trailer must never turn an
             # otherwise-skipped stub into a record.
             if len(text.strip()) >= MIN_CAPTURE_LEN:
-                text = text + _tools_trailer(self._pending + tools)
+                text = _with_transcript_model(
+                    text + _tools_trailer(self._pending + tools), model
+                )
                 self._pending = []
             else:
                 self._pending.extend(tools)
@@ -1086,7 +1144,15 @@ def _parse_transcript_obj(
             return None
         if _is_noise(text):
             return None
-        return role, text, payload.get("id") or obj.get("uuid"), obj.get("timestamp")
+        return (
+            role,
+            _with_transcript_model(
+                text,
+                _event_model(payload, obj),
+            ),
+            payload.get("id") or obj.get("uuid"),
+            obj.get("timestamp"),
+        )
     if "step_index" in obj and "source" in obj:
         # Antigravity transcript_full lines: conversational turns only —
         # tool views, history replays, and system steps are not dialogue.
@@ -1100,7 +1166,12 @@ def _parse_transcript_obj(
         text = str(obj.get("content") or "").strip()
         if not text or _is_noise(text):
             return None
-        return role, text, None, obj.get("created_at")
+        return (
+            role,
+            _with_transcript_model(text, _event_model(obj)),
+            None,
+            obj.get("created_at"),
+        )
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
     # Claude puts the role in top-level "type", Cursor in top-level "role"
     # with the content nested under "message".
@@ -1128,7 +1199,12 @@ def _parse_transcript_obj(
     # per-line uuid — assistant lines of one prompt share promptId, so
     # keying them by it would collapse a whole response into one idem.
     src_uuid = (obj.get("promptId") if role == "user" else None) or obj.get("uuid")
-    return role, text, src_uuid, obj.get("timestamp")
+    return (
+        role,
+        _with_transcript_model(text, _event_model(msg, obj)),
+        src_uuid,
+        obj.get("timestamp"),
+    )
 
 
 # Spool lines are AES-GCM-encrypted with the store's key FILE only — never
@@ -1313,6 +1389,7 @@ def write_deferred_event(
     cwd: str | None = None,
     ts: str | None = None,
     source_uuid: str | None = None,
+    model: str | None = None,
 ) -> Path:
     deferred_dir = deferred_captures_dir()
     deferred_dir.mkdir(parents=True, exist_ok=True)
@@ -1354,6 +1431,11 @@ def write_deferred_event(
         }
         if source_uuid:
             event["source_uuid"] = source_uuid
+        normalized_model = _normalize_model(
+            model if model is not None else _transcript_model(text)
+        )
+        if normalized_model is not None:
+            event["model"] = normalized_model
         fh.write(_encode_spool_line(event) + "\n")
         fh.flush()
         try:
@@ -1651,6 +1733,9 @@ def write_deferred_captures(
                     }
                     if src_uuid:
                         event["source_uuid"] = src_uuid
+                    model = _normalize_model(_transcript_model(text))
+                    if model is not None:
+                        event["model"] = model
                     fh.write(_encode_spool_line(event) + "\n")
         fh.flush()
         try:
@@ -2110,6 +2195,7 @@ def _drain_deferred_captures_locked(
                         role=role,
                         ts=ev.get("ts"),
                         source_uuid=ev.get("source_uuid"),
+                        model=ev.get("model"),
                         provenance_extra=(
                             {"cwd": header_cwd} if header_cwd else None
                         ),
@@ -2403,6 +2489,7 @@ def drain_permanent_failed_files(
                         role=role,
                         ts=ev.get("ts"),
                         source_uuid=ev.get("source_uuid"),
+                        model=ev.get("model"),
                     )
                     if result.get("status") in ("inserted", "reinforced"):
                         file_inserted += 1
@@ -2442,6 +2529,7 @@ def drain_permanent_failed_files(
                         role=role,
                         ts=src_ts,
                         source_uuid=src_uuid,
+                        model=_transcript_model(text),
                     )
                     if result.get("status") in ("inserted", "reinforced"):
                         file_inserted += 1
@@ -2590,6 +2678,7 @@ def _drain_active_live_captures_locked(
                 role=ev.get("role", "user"),
                 ts=ev.get("ts"),
                 source_uuid=ev.get("source_uuid"),
+                model=ev.get("model"),
             )
             status = result.get("status", "skipped")
             reason = str(result.get("reason", ""))
