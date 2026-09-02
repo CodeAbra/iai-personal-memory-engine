@@ -77,6 +77,7 @@ class SocketServer:
         self.last_activity_ts: float = time.monotonic()
         self.active_connections: int = 0
         self.shutdown_event: asyncio.Event = asyncio.Event()
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
         self._state = state
 
     async def handle(
@@ -85,6 +86,9 @@ class SocketServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         self.active_connections += 1
+        handler_task = asyncio.current_task()
+        if handler_task is not None:
+            self._handler_tasks.add(handler_task)
         try:
             while not reader.at_eof():
                 line = await reader.readline()
@@ -255,12 +259,30 @@ class SocketServer:
             pass
         finally:
             self.active_connections -= 1
+            if handler_task is not None:
+                self._handler_tasks.discard(handler_task)
             try:
                 writer.close()
                 await writer.wait_closed()
             except (OSError, ConnectionError):  # noqa: BLE001 -- cleanup is best-effort
                 pass
 
+
+    async def _drain_handler_tasks(self) -> None:
+        """Cancel live connection handlers and wait for them to unwind.
+
+        ``Server.wait_closed()`` returns only once every active connection has
+        been dropped (CPython 3.12.1+; before that it returned immediately even
+        with connections open). A handler parked on ``reader.readline()`` for an
+        idle client never drops on its own, so without this the shutdown blocks
+        until the supervisor's stop timeout and the daemon dies by SIGKILL.
+        """
+        handlers = [t for t in self._handler_tasks if not t.done()]
+        if not handlers:
+            return
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
 
     async def serve(self, socket_path: Path | None = None) -> None:
         if socket_path is None:
@@ -279,9 +301,11 @@ class SocketServer:
                 self.handle, socket_path, limit=_line_limit,
             )
             try:
-                async with server:
+                try:
                     await self.shutdown_event.wait()
+                finally:
                     server.close()
+                    await self._drain_handler_tasks()
                     await server.wait_closed()
             finally:
                 shutdown_ipc()
@@ -311,9 +335,15 @@ class SocketServer:
                 pass
 
         try:
-            async with server:
+            try:
                 await self.shutdown_event.wait()
+            finally:
+                # Not `async with server:`. On cancellation the body is skipped
+                # and __aexit__ runs close()+wait_closed() with handlers still
+                # parked on readline(), which never returns. A finally runs the
+                # same teardown but drains the handlers first.
                 server.close()
+                await self._drain_handler_tasks()
                 await server.wait_closed()
         finally:
             if inherited is None and not supports_cleanup_socket:
