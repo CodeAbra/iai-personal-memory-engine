@@ -1,1 +1,0 @@
-{"adapter": "iai-mcp", "wake_depth": "minimal", "total_tokens": 1629, "per_turn": [204, 145, 176, 176, 156, 150, 142, 178, 151, 151], "mode": "tiktoken-cl100k-proxy", "refs": {}, "passed": true, "script_name": "D5-08-v1"}

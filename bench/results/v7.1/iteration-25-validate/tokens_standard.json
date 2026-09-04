@@ -1,1 +1,0 @@
-{"fresh": 2857, "warm": [2481, 2481, 2481], "steady_ok": true, "fresh_ok": true, "mode": "tiktoken-cl100k-proxy", "limits": {"steady": 3000, "fresh": 8000}, "payload_cached_tokens": 1675, "payload_dynamic_tokens": 1000}
