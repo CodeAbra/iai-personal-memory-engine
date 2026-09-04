@@ -17,6 +17,8 @@
 # current-turn cue takes priority over the lagged cache pack. Set to "0" to
 # opt back out; the cache path alone still honors the awake-memory invariant
 # when the accelerator is off or the daemon socket is absent.
+# IAI_MCP_RECALL_SOCKET_TIMEOUT overrides the 0.8s socket timeout (float
+# seconds); unset or unparseable falls back to 0.8.
 #
 # Always exits 0: context injection is best-effort, never a turn blocker.
 
@@ -242,7 +244,7 @@ emit_socket_recall() {
     HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
     _runner="python3"
     command -v timeout >/dev/null 2>&1 && _runner="timeout 1 python3"
-    SOCK="$sock" HOOK_STDIN="$STDIN_JSON" HOOK_DIR="$HOOK_DIR" $_runner - <<'PYEOF' 2>/dev/null || true
+    SOCK="$sock" HOOK_STDIN="$STDIN_JSON" HOOK_DIR="$HOOK_DIR" SOCK_TIMEOUT="${IAI_MCP_RECALL_SOCKET_TIMEOUT:-}" $_runner - <<'PYEOF' 2>/dev/null || true
 import json, os, socket, sys
 sock_path = os.environ["SOCK"]
 try:
@@ -253,8 +255,12 @@ try:
         cue = raw[:512].strip()
     if not cue:
         raise SystemExit(0)
+    try:
+        sock_timeout = float(os.environ.get("SOCK_TIMEOUT") or 0.8)
+    except (TypeError, ValueError):
+        sock_timeout = 0.8
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(0.8)
+    s.settimeout(sock_timeout)
     s.connect(sock_path)
     req = {"jsonrpc": "2.0", "id": 1, "method": "memory_recall",
            "params": {"cue": cue, "limit": 3}}

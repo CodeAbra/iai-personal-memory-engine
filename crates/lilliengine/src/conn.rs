@@ -2492,13 +2492,19 @@ fn ro_index_demand(
 
 fn record_ro_index_demand(path: &std::path::Path, table: &str) {
     if let Ok(mut guard) = ro_index_demand().lock() {
-        if guard.len() >= RO_INDEX_DEMAND_CAP {
-            guard.clear();
+        let key = (path.to_path_buf(), table.to_string());
+        // Bound the map by evicting exactly the single oldest entry (by its
+        // stored Instant), never a blanket clear -- a blanket clear can wipe
+        // a sibling key inserted earlier in the SAME sweep before the writer
+        // ever publishes for it (adopt_from_built_cache_or_demand registers
+        // every col-indexed table of one store back to back).
+        if !guard.contains_key(&key) && guard.len() >= RO_INDEX_DEMAND_CAP {
+            if let Some(oldest) = guard.iter().min_by_key(|(_, at)| **at).map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest);
+            }
         }
-        guard.insert(
-            (path.to_path_buf(), table.to_string()),
-            std::time::Instant::now(),
-        );
+        guard.insert(key, std::time::Instant::now());
     }
 }
 
@@ -2728,6 +2734,110 @@ mod publish_spacing_tests {
             Some(Duration::from_millis(1501)),
             interval
         ));
+    }
+}
+
+#[cfg(test)]
+mod ro_index_demand_cap_evict_tests {
+    use super::{
+        record_ro_index_demand, ro_index_demand, ro_index_demand_active, RO_INDEX_DEMAND_CAP,
+    };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    /// Restores the process-wide `RO_INDEX_DEMAND` map to its pre-test
+    /// snapshot on drop (including during a panicking unwind), so this test
+    /// can never leak state into any other test sharing this binary.
+    struct DemandMapRestore {
+        snapshot: HashMap<(PathBuf, String), Instant>,
+    }
+
+    impl Drop for DemandMapRestore {
+        fn drop(&mut self) {
+            if let Ok(mut guard) = ro_index_demand().lock() {
+                *guard = std::mem::take(&mut self.snapshot);
+            }
+        }
+    }
+
+    /// Snapshots the current map, then replaces its contents with exactly
+    /// `seed_len` synthetic filler entries under `filler_path` (never
+    /// colliding with the store path under test). Returns a guard that
+    /// restores the original snapshot on drop.
+    fn seed_to_len(seed_len: usize, filler_path: &std::path::Path) -> DemandMapRestore {
+        let snapshot = {
+            let guard = ro_index_demand().lock().unwrap();
+            guard.clone()
+        };
+        {
+            let mut guard = ro_index_demand().lock().unwrap();
+            guard.clear();
+            for i in 0..seed_len {
+                guard.insert(
+                    (filler_path.to_path_buf(), format!("__test_filler_{i}")),
+                    Instant::now(),
+                );
+            }
+        }
+        DemandMapRestore { snapshot }
+    }
+
+    /// Both col-indexed tables touched by ONE store's single
+    /// `adopt_from_built_cache_or_demand` sweep are expected to have active
+    /// demand immediately after the sweep, so the writer's next commit sees
+    /// every one of them in `publish_indexes_on_demand`'s `demanded` set.
+    /// `record_ro_index_demand`'s blanket-clear-on-cap eviction (not LRU)
+    /// combined with `ro_index_demand_active`'s fail-closed-on-missing-key
+    /// semantics can violate this invariant: when the registry sits at
+    /// exactly `CAP - 1` entries, the alphabetically-first "edges" call
+    /// crosses the cap (its insert lands on the boundary, no clear yet), and
+    /// the immediately-following "records" call sees a full map and
+    /// blanket-clears it BEFORE inserting its own key -- wiping "edges"
+    /// within the SAME sweep, before the writer's next commit ever gets a
+    /// chance to publish for it. There is no LRU and no pending/self-heal
+    /// fallback on this path (`publish_indexes_on_demand` simply excludes a
+    /// table absent from the registry from its `demanded` set for that
+    /// generation) -- a permanent miss for the generation, not a late one.
+    #[test]
+    fn cap_boundary_must_not_evict_same_sweep_demand() {
+        let filler_path =
+            PathBuf::from("/nonexistent/ro_index_demand_cap_evict_test/filler.lilli");
+        let store_path = PathBuf::from("/nonexistent/ro_index_demand_cap_evict_test/store.lilli");
+
+        // Drive the registry to exactly CAP-1 so the very next insert lands
+        // on the cap boundary.
+        let _restore = seed_to_len(RO_INDEX_DEMAND_CAP - 1, &filler_path);
+        {
+            let guard = ro_index_demand().lock().unwrap();
+            assert_eq!(
+                guard.len(),
+                RO_INDEX_DEMAND_CAP - 1,
+                "precondition: registry must sit at exactly CAP-1 before the \
+                 sweep, or the boundary this test drives is not the one under \
+                 test (another thread inserted into RO_INDEX_DEMAND concurrently)"
+            );
+        }
+
+        // The two calls `adopt_from_built_cache_or_demand` makes, back to
+        // back, for one store's two col-indexed tables in alphabetical order.
+        record_ro_index_demand(&store_path, "edges");
+        record_ro_index_demand(&store_path, "records");
+
+        let edges_active = ro_index_demand_active(&store_path, "edges");
+        let records_active = ro_index_demand_active(&store_path, "records");
+
+        assert!(
+            edges_active,
+            "RO_INDEX_DEMAND cap-eviction defect: the same sweep's earlier \
+             'edges' registration was wiped by the immediately-following \
+             'records' call's cap-triggered blanket clear before \
+             publish_indexes_on_demand could ever see it as demanded"
+        );
+        assert!(
+            records_active,
+            "'records' registers after the boundary and is expected to survive"
+        );
     }
 }
 

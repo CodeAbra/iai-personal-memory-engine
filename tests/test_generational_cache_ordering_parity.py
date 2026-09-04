@@ -51,12 +51,19 @@ def _unit_vec(seed: int) -> list[float]:
     return (v / np.linalg.norm(v)).tolist()
 
 
-def _populate(store: MemoryStore, n: int, seed: int) -> None:
+def _populate(
+    store: MemoryStore, n: int, seed: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Batch-flush: per-insert commit is O(rows) index churn, not needed until
+    # the corpus is queried. Opts out of conftest's autoflush-per-insert via
+    # its documented env switch, then does the one flush the query below needs.
+    monkeypatch.setenv("IAI_MCP_TEST_NO_AUTOFLUSH", "1")
     rng = np.random.default_rng(seed)
     for i in range(n):
         v = rng.standard_normal(EMBED_DIM).astype(np.float32)
         v /= np.linalg.norm(v)
         store.insert(_make(text=f"ordering parity fixture record {i}", vec=v.tolist()))
+    monkeypatch.delenv("IAI_MCP_TEST_NO_AUTOFLUSH", raising=False)
     try:
         flush_record_buffer(store)
         flush_edge_buffer(store)
@@ -92,7 +99,7 @@ def test_cache_on_off_hits_anti_hits_scores_byte_identical(
     monkeypatch.setattr(_pipeline_mod, "_age_penalty", lambda created_at: 0.0)
 
     store = MemoryStore(path=str(tmp_path / f"store-{driver}-{n}"))
-    _populate(store, n=n, seed=20260825)
+    _populate(store, n=n, seed=20260825, monkeypatch=monkeypatch)
     graph, assignment, rich_club = build_runtime_graph(store)
     cue_vec = _unit_vec(999)
 

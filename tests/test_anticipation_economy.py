@@ -15,7 +15,6 @@ import os
 import socket
 import subprocess
 import threading
-import time
 import urllib.request
 from pathlib import Path
 
@@ -172,11 +171,13 @@ def test_hook_appends_serve_ledger(tmp_path):
 def _serve_one_recall_reply(sock_path: str, reply_obj: dict):
     reply_frame = (json.dumps(reply_obj) + "\n").encode("utf-8")
     accept_done = threading.Event()
+    listening = threading.Event()
 
     def _listener():
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(sock_path)
         srv.listen(1)
+        listening.set()
         srv.settimeout(2.0)
         try:
             conn, _ = srv.accept()
@@ -198,7 +199,7 @@ def _serve_one_recall_reply(sock_path: str, reply_obj: dict):
             accept_done.set()
 
     threading.Thread(target=_listener, daemon=True).start()
-    time.sleep(0.05)
+    listening.wait(timeout=2.0)
     return accept_done
 
 
@@ -230,6 +231,9 @@ def test_socket_recall_fires_by_default_without_the_env_var():
         env["IAI_MCP_STORE"] = str(root)
         env.pop("IAI_MCP_ROOT", None)
         env.pop("IAI_MCP_PER_TURN_SOCKET_ACCEL", None)  # unset -> exercise the durable default
+        # Generous client-side socket budget so a contended CI host's listener
+        # scheduling latency can't race the hook's own timeout.
+        env["IAI_MCP_RECALL_SOCKET_TIMEOUT"] = "10"
         env["IAI_MCP_FORESIGHT_PACK"] = str(root / "absent-pack.md")
         env["IAI_MCP_WORKING_TIER_CACHE"] = str(root / "absent-wt.md")
 

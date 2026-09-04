@@ -531,11 +531,10 @@ impl Parser {
 
         // Plain column name.
         let name = self.expect_name()?;
-        // Dotted/qualified column (single-table, no JOIN, so the qualifier is
-        // unambiguous — mirrors parse_primary's dotted production). Un-aliased,
-        // it must synthesize a default output name (sqlite's default for
-        // `SELECT t.a` is the unqualified tail "a") so it does not hit the
-        // "requires an output name" reject below.
+        // Dotted `table.col` (single-table, no JOIN — qualifier is unambiguous).
+        // Un-aliased, it must synthesize a default output name (sqlite: the
+        // unqualified tail "a") or it hits the "requires an output name" reject
+        // below.
         if self.at_punct('.') {
             self.advance();
             let col = self.expect_name()?;

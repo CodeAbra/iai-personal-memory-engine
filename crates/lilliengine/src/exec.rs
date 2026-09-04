@@ -960,11 +960,9 @@ fn collect_expr_columns(expr: &Expr, out: &mut std::collections::HashSet<String>
     match expr {
         Expr::Column(c) | Expr::Excluded(c) => {
             out.insert(c.clone());
-            // A dotted `table.col` reference: also mark the unqualified tail, so
-            // mask_from_names (which tests against undotted catalog names) does
-            // not decode-skip the real column. Mirrors eval_expr's exact-first/
-            // tail-fallback resolution (eval.rs). Over-including an absent name
-            // is a no-op — mask_from_names is a membership OR.
+            // Also mark the unqualified tail of a dotted `table.col` (mirrors
+            // eval.rs) so mask_from_names does not decode-skip it.
+            // Over-including is a no-op — mask_from_names is a membership OR.
             if let Some((_, tail)) = c.rsplit_once('.') {
                 out.insert(tail.to_string());
             }
@@ -1370,11 +1368,9 @@ fn output_columns(columns: &[String], col_names: &[String]) -> Vec<String> {
     }
 }
 
-/// Resolve `rowid` for a row: the vec_label column value when `vec_label` is a
-/// genuine `INTEGER PRIMARY KEY` alias (sqlite's rowid-alias rule — the
-/// AUTOINCREMENT high-water mark), else the raw B-tree key (sqlite's implicit
-/// rowid). Gated on PK-alias-ness, never column presence — a plain non-PK
-/// `vec_label` column must not shadow the real rowid.
+/// Resolve `rowid`: the vec_label column value for a genuine `INTEGER PRIMARY
+/// KEY` alias, else the raw B-tree key. Gated on PK-alias-ness, never column
+/// presence — a plain non-PK `vec_label` column must not shadow the real rowid.
 fn resolve_rowid(row: &mut Row, vec_label_is_alias: bool) {
     let v = if vec_label_is_alias {
         row.get_or_null(ROWID_SOURCE)
