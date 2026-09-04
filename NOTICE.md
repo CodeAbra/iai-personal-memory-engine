@@ -8,7 +8,7 @@ every runtime dep is MIT, BSD, Apache-2.0, or PSF and therefore compatible.
 
 For Python deps, version-pin information lives in `pyproject.toml`; the
 versions listed below are the resolved versions observed at the time of the
-release-hardening pass. For npm deps, direct
+v7.1 release-hardening pass. For npm deps, direct
 declarations live in `mcp-wrapper/package.json` and resolved versions in
 `mcp-wrapper/package-lock.json`.
 
@@ -29,21 +29,11 @@ declarations live in `mcp-wrapper/package.json` and resolved versions in
 | pydantic              | 2.13.4           | MIT                 | Samuel Colvin et al.                         | https://github.com/pydantic/pydantic                      |
 | structlog             | 25.5.0           | MIT or Apache-2.0   | Hynek Schlawack                              | https://github.com/hynek/structlog                        |
 | tiktoken              | 0.13.0           | MIT                 | OpenAI (Shantanu Jain)                       | https://github.com/openai/tiktoken                        |
-| torch-hd              | 5.8.4            | MIT                 | Hyperdimensional Computing org               | https://github.com/hyperdimensional-computing/torchhd     |
 
 ## Python optional dependencies
 
-These are installable via `pip install -e .[compress]` or `pip install -e
-.[dev]` but are NOT pulled in by default. The `compress` extra is opt-in
-because the underlying model weights are large; the `dev` extra is for test
-runs only.
-
-### `compress` extra (opt-in)
-
-| Package    | Resolved version | License    | Upstream URL                                |
-| ---------- | ---------------- | ---------- | ------------------------------------------- |
-| llmlingua  | varies           | MIT        | https://github.com/microsoft/LLMLingua      |
-| accelerate | varies           | Apache-2.0 | https://github.com/huggingface/accelerate   |
+These are installable via `pip install -e .[dev]` but are NOT pulled in by
+default; the `dev` extra is for test runs only.
 
 ### `dev` extra (test-only, not shipped at runtime)
 
@@ -66,13 +56,13 @@ shipped) are:
 
 The wheel ships the wrapper as a single esbuild bundle
 (`iai_mcp/_wrapper/index.js`) with `@modelcontextprotocol/sdk` and `zod`
-inlined — that artifact REDISTRIBUTES both packages, and their MIT license
-texts travel with this NOTICE.
+inlined — that artifact REDISTRIBUTES both packages, and their MIT
+license texts travel with this NOTICE.
 
 The wrapper's `devDependencies` (`@types/node`, `typescript`, `tsx`,
-`esbuild`) are build-time only — they are not bundled into the shipped wrapper
-artifact and therefore do not require runtime attribution. They are nonetheless
-listed in `mcp-wrapper/package.json` for transparency.
+`esbuild`) are build-time only — they are not bundled into the shipped
+wrapper artifact and therefore do not require runtime attribution. They
+are nonetheless listed in `mcp-wrapper/package.json` for transparency.
 
 ## License compatibility summary
 
@@ -82,12 +72,16 @@ the above (e.g. `cryptography` is "Apache-2.0 OR BSD-3-Clause"; `structlog` is
 "MIT OR Apache-2.0").
 
 All of these are compatible with this project's MIT license declared in
-`LICENSE`.
+`LICENSE`. There are no copyleft (GPL / LGPL / AGPL) runtime dependencies in
+the shipped distribution.
 
-The MOSAIC community-detection backend (`src/iai_mcp/mosaic.py`) is original
-code under the project's MIT license, with the Numba JIT runtime (BSD-2-Clause)
-as its only Numba-specific dep. The repository is fully MIT-compatible for both
-static distribution and dynamic linking.
+The custom MIT-licensed Leiden implementation removed the
+project's previous dependence on `leidenalg` and `python-igraph`, both of
+which were copyleft-licensed. The replacement MOSAIC community-detection
+backend (`src/iai_mcp/mosaic.py`) is original code under the project's MIT
+license, with the Numba JIT runtime (BSD-2-Clause) as its only Numba-specific
+dep. Since that replacement the repository is fully MIT-compatible for both static
+distribution and dynamic linking.
 
 ## Updating this file
 
@@ -97,7 +91,7 @@ dependencies` changes, regenerate this file. The fastest path is:
 ```
 pip install pip-licenses
 pip-licenses --packages lancedb pyarrow numpy pydantic \
-  torch-hd structlog networkx numba anthropic tiktoken \
+  structlog networkx numba anthropic tiktoken \
   cryptography keyring cachetools psutil \
   --format=markdown --with-urls --with-authors
 ```
