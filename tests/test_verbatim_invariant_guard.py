@@ -10,8 +10,10 @@ from test_store import _make
 
 from iai_mcp.store import MemoryStore
 
+# non-English fixture data: multilingual behavior under test — keep
 TRICKY_STRINGS = [
     "simple ascii text",
+    # non-English fixture data: multilingual behavior under test — keep
     "unicode: привет мир 你好世界",
     'quotes: "double" and \'single\'',
     "newlines:\nline2\n\tindented",

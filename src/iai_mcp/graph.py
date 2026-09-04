@@ -41,16 +41,16 @@ class MemoryGraph:
         self._centrality_cache: dict[UUID, float] | None = None
         self._dirty_since_centrality: bool = True
         self._centrality_resolved: bool = False
-        self._normalized_pool: tuple[Any, np.ndarray] | None = None
-        # Raw collected pool (id sequence + embedding matrix) cached per content
-        # version; reused across recalls over the same build so the full node-set
-        # iteration + matrix construction runs once, not every recall.
-        self._collected_pool: tuple[int, list, np.ndarray] | None = None
-        # Monotonic counter bumped by every embedding-affecting mutator. Folded
-        # into the normalized-pool cache key so a content change with an
-        # unchanged id-sequence still invalidates the cache — making a stale
-        # cosine structurally impossible, not invariant-dependent.
+        # Monotonic counter bumped by every embedding-affecting mutator. Keys
+        # _records_view_cache below so a content change invalidates it even
+        # when the id-sequence is unchanged.
         self._pool_content_version: int = 0
+        # (version, records_cache) cached per content version. The dict
+        # stored here is the pristine base and is NEVER handed out directly
+        # or mutated -- every caller reads it via a copy-on-serve dict()
+        # copy, since a recall's confidence-escalation widen writes into its
+        # working dict in place.
+        self._records_view_cache: tuple[int, dict] | None = None
 
 
     def clear_and_rebuild(
@@ -73,7 +73,6 @@ class MemoryGraph:
         self._centrality_cache = None
         self._dirty_since_centrality = True
         self._centrality_resolved = False
-        self._normalized_pool = None
         self._pool_content_version += 1
         if hasattr(self, "_node_ids_csr_order"):
             del self._node_ids_csr_order
@@ -111,7 +110,6 @@ class MemoryGraph:
             "embedding": _compact_embedding(embedding),
         }
         self._dirty_since_centrality = True
-        self._normalized_pool = None
         self._pool_content_version += 1
 
     def set_node_payload(
@@ -125,9 +123,6 @@ class MemoryGraph:
             # boxed-list form through the payload door.
             merged[k] = _compact_embedding(v) if k == "embedding" else v
         self._node_payload[key] = merged
-        # The pool matrix is built from node embeddings; a payload change can
-        # alter an embedding, so the cached normalized pool must be dropped.
-        self._normalized_pool = None
         self._pool_content_version += 1
 
     def set_node_centrality(self, node_id: UUID | str, value: float) -> None:
@@ -150,7 +145,6 @@ class MemoryGraph:
                 pass
         self._node_payload.pop(label, None)
         self._dirty_since_centrality = True
-        self._normalized_pool = None
         self._pool_content_version += 1
 
     def add_edge(
@@ -168,7 +162,6 @@ class MemoryGraph:
         if u != v:
             self._adj[v][u] = attrs
         self._dirty_since_centrality = True
-        self._normalized_pool = None
         self._pool_content_version += 1
 
 
@@ -306,9 +299,14 @@ class MemoryGraph:
 
     # Edge types INFERRED at insert/consolidation rather than earned by
     # use: they widen spread reach but must not manufacture ranking hubs.
+    # `contradicts` is excluded for a distinct reason: a node whose only
+    # edge is a contradiction must not gain rank from it -- that would
+    # surface a contradicted record as a normal hit instead of routing it
+    # through the anti-hit channel, polluting recall and starving anti-hits.
     RANKING_DEGREE_EXCLUDED: "frozenset[str]" = frozenset({
         "pattern_separation_seed",
         "entity_shared",
+        "contradicts",
     })
 
     def iter_edges_with_weight(

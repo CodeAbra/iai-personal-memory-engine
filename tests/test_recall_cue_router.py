@@ -3,22 +3,32 @@ from __future__ import annotations
 import pytest
 
 def test_module_exposes_compiled_trigger_lists():
-    from iai_mcp.cue_router import EN_TRIGGERS
+    from iai_mcp.cue_router import EN_TRIGGERS, RU_TRIGGERS
 
     assert len(EN_TRIGGERS) == 4, f"EN_TRIGGERS must have 4 entries, got {len(EN_TRIGGERS)}"
+    assert len(RU_TRIGGERS) == 4, f"RU_TRIGGERS must have 4 entries, got {len(RU_TRIGGERS)}"
+
     for label, pat in EN_TRIGGERS:
         assert isinstance(label, str) and label, "EN trigger label must be non-empty str"
         assert hasattr(pat, "search"), f"EN trigger pattern for {label!r} must be compiled regex"
-
+    for label, pat in RU_TRIGGERS:
+        assert isinstance(label, str) and label, "RU trigger label must be non-empty str"
+        assert hasattr(pat, "search"), f"RU trigger pattern for {label!r} must be compiled regex"
 
 def test_module_exposes_historical_trigger_lists():
-    from iai_mcp.cue_router import EN_HISTORICAL_TRIGGERS
+    from iai_mcp.cue_router import EN_HISTORICAL_TRIGGERS, RU_HISTORICAL_TRIGGERS
 
     assert len(EN_HISTORICAL_TRIGGERS) == 5, (
         f"EN_HISTORICAL_TRIGGERS must have 5 entries, got {len(EN_HISTORICAL_TRIGGERS)}"
     )
+    assert len(RU_HISTORICAL_TRIGGERS) == 4, (
+        f"RU_HISTORICAL_TRIGGERS must have 4 entries, got {len(RU_HISTORICAL_TRIGGERS)}"
+    )
     for label, pat in EN_HISTORICAL_TRIGGERS:
         assert isinstance(label, str) and label.startswith("historical-en-")
+        assert hasattr(pat, "search")
+    for label, pat in RU_HISTORICAL_TRIGGERS:
+        assert isinstance(label, str) and label.startswith("historical-ru-")
         assert hasattr(pat, "search")
 
 @pytest.mark.parametrize(
@@ -45,7 +55,48 @@ def test_classify_cue_en_quoted_phrase():
         f"expected quoted-phrase or word-marker label, got {pattern!r}"
     )
 
+@pytest.mark.parametrize(
+    "cue",
+    [
+        "найди дословно сообщение о схема-чистке",
+        "точная цитата про deg_norm",
+        "что я сказал в прошлой сессии о dedup",
+    ],
+)
+def test_classify_cue_ru_verbatim_positives(cue):
+    from iai_mcp.cue_router import _classify_cue
 
+    mode, _intent, pattern = _classify_cue(cue)
+    assert mode == "verbatim", f"cue {cue!r} should classify as verbatim, got {mode!r}"
+    assert pattern is not None, f"cue {cue!r} should report a triggered_pattern label"
+    assert pattern.startswith("ru-start-"), (
+        f"expected ru-start-* label for cue {cue!r}, got {pattern!r}"
+    )
+
+def test_classify_cue_ru_european_quote_marker():
+    from iai_mcp.cue_router import _classify_cue
+
+    mode, _intent, pattern = _classify_cue('recall the «schema_reinforced event payload» definition')
+    assert mode == "verbatim"
+    assert pattern == "european-quote"
+
+@pytest.mark.parametrize(
+    "cue",
+    [
+        "tell me about schema dedup",
+        "how does the rank stage work",
+        "community structure of the live store",
+        "каков статус проекта",
+        "sleep daemon REM cycle behaviour",
+        "что нового в проекте",
+    ],
+)
+def test_classify_cue_concept_negatives(cue):
+    from iai_mcp.cue_router import _classify_cue
+
+    mode, _intent, pattern = _classify_cue(cue)
+    assert mode == "concept", f"cue {cue!r} should classify as concept, got {mode!r}"
+    assert pattern is None, f"cue {cue!r} should not have a triggered_pattern, got {pattern!r}"
 
 def test_classify_cue_triggered_pattern_label_non_none_for_verbatim():
     from iai_mcp.cue_router import _classify_cue
@@ -54,6 +105,7 @@ def test_classify_cue_triggered_pattern_label_non_none_for_verbatim():
         "verbatim quote please",
         "what I said on day 7",
         '"quoted text"',
+        "найди дословно вот это",
     ]
     for cue in verbatim_cues:
         mode, _intent, pattern = _classify_cue(cue)
@@ -63,6 +115,7 @@ def test_classify_cue_triggered_pattern_label_non_none_for_verbatim():
     concept_cues = [
         "what is the architecture",
         "general project status",
+        "опиши структуру проекта",
     ]
     for cue in concept_cues:
         mode, _intent, pattern = _classify_cue(cue)
@@ -76,6 +129,17 @@ def test_classify_cue_case_insensitive_en():
         mode, _intent, _pat = _classify_cue(cue)
         assert mode == "verbatim", f"case-insensitive match failed for {cue!r}"
 
+def test_classify_cue_ru_patterns_anchored_at_start():
+    from iai_mcp.cue_router import _classify_cue
+
+    mode_mid, _intent_mid, pattern_mid = _classify_cue("remind me, найди дословно not in middle")
+    assert mode_mid == "concept", (
+        f"RU trigger should NOT match mid-string, got mode={mode_mid!r} pattern={pattern_mid!r}"
+    )
+
+    mode_start, _intent_start, pattern_start = _classify_cue("найди дословно вот эту фразу")
+    assert mode_start == "verbatim"
+    assert pattern_start == "ru-start-найди-дословно"
 
 def test_classify_cue_empty_string_returns_concept():
     from iai_mcp.cue_router import _classify_cue
@@ -115,7 +179,42 @@ def test_classify_cue_en_historical_markers(cue):
         f"cue {cue!r} should have intent=historical_verbatim, got {intent!r}"
     )
 
+@pytest.mark.parametrize(
+    "cue",
+    [
+        "приведи оригинальную формулировку",
+        "что было сначала?",
+        "изначальный план",
+        "изначально мы говорили",
+        "ранее упомянутое",
+        "оригинальный текст про auth",
+    ],
+)
+def test_classify_cue_ru_historical_markers(cue):
+    from iai_mcp.cue_router import _classify_cue
 
+    _mode, intent, _label = _classify_cue(cue)
+    assert intent == "historical_verbatim", (
+        f"cue {cue!r} should have intent=historical_verbatim, got {intent!r}"
+    )
+
+@pytest.mark.parametrize(
+    "cue",
+    [
+        "what about auth",
+        "Quote the auth tokens.",
+        "tell me about schema dedup",
+        "каков статус системы",
+        '"exact phrase about db migration"',
+    ],
+)
+def test_classify_cue_neutral_no_historical_intent(cue):
+    from iai_mcp.cue_router import _classify_cue
+
+    _mode, intent, _label = _classify_cue(cue)
+    assert intent is None, (
+        f"cue {cue!r} should NOT have historical_verbatim intent, got {intent!r}"
+    )
 
 def test_classify_cue_historical_intent_orthogonal_to_mode():
     from iai_mcp.cue_router import _classify_cue
@@ -125,12 +224,93 @@ def test_classify_cue_historical_intent_orthogonal_to_mode():
         f"historical intent should be orthogonal to mode; got mode={mode!r} intent={intent!r}"
     )
 
+def test_classify_cue_ru_historical_uses_word_boundary_not_anchor():
+    from iai_mcp.cue_router import _classify_cue
+
+    _mode, intent, _label = _classify_cue("напомни мне, что было изначально в плане")
+    assert intent == "historical_verbatim", (
+        f"mid-cue RU historical marker should fire intent; got {intent!r}"
+    )
+
+def test_module_exposes_correction_trigger_lists():
+    from iai_mcp.cue_router import EN_CORRECTION_TRIGGERS, RU_CORRECTION_TRIGGERS
+
+    assert len(RU_CORRECTION_TRIGGERS) >= 1
+    assert len(EN_CORRECTION_TRIGGERS) >= 1
+    for label, pat in RU_CORRECTION_TRIGGERS:
+        assert isinstance(label, str) and label.startswith("ru-correction-")
+        assert hasattr(pat, "search")
+    for label, pat in EN_CORRECTION_TRIGGERS:
+        assert isinstance(label, str) and label.startswith("en-correction-")
+        assert hasattr(pat, "search")
+
+def test_strip_correction_trigger_vspomni_pravilny():
+    from iai_mcp.cue_router import strip_correction_trigger
+
+    stripped = strip_correction_trigger("вспомни правильный роутинг моделей по гсд")
+    assert stripped == "роутинг моделей по гсд", stripped
+
+def test_strip_correction_trigger_napomni_kak_my():
+    from iai_mcp.cue_router import strip_correction_trigger
+
+    stripped = strip_correction_trigger("напомни как мы пушим")
+    assert stripped in ("пушим", "как мы пушим"), stripped
+
+def test_classify_cue_correction_trigger_yields_intent_none():
+    from iai_mcp.cue_router import _classify_cue
+
+    for cue in (
+        "вспомни правильный роутинг моделей по гсд",
+        "напомни как мы пушим",
+    ):
+        _mode, intent, _label = _classify_cue(cue)
+        assert intent is None, f"{cue!r} should classify intent=None, got {intent!r}"
+
+def test_classify_cue_correction_trigger_beats_historical_ranee():
+    from iai_mcp.cue_router import _classify_cue
+
+    _mode, intent, _label = _classify_cue("вспомни как мы ранее пушили")
+    assert intent is None, (
+        f"correction-seeking trigger must win over the historical trigger 'ранее', got {intent!r}"
+    )
+
+def test_classify_cue_pure_historical_no_correction_trigger_still_historical():
+    from iai_mcp.cue_router import _classify_cue
+
+    _mode, intent, _label = _classify_cue("что было изначально")
+    assert intent == "historical_verbatim", (
+        f"a cue with no correction trigger must still classify historical_verbatim, got {intent!r}"
+    )
+
+def test_strip_correction_trigger_empty_string_unchanged():
+    from iai_mcp.cue_router import strip_correction_trigger
+
+    assert strip_correction_trigger("") == ""
+
+def test_strip_correction_trigger_non_matching_cue_unchanged():
+    from iai_mcp.cue_router import strip_correction_trigger
+
+    cue = "tell me about schema dedup"
+    assert strip_correction_trigger(cue) == cue
+
+def test_strip_correction_trigger_is_host_agnostic_pure_function():
+    from iai_mcp.cue_router import _classify_cue, strip_correction_trigger
+
+    raw_cue = "вспомни правильный роутинг моделей по гсд"
+    caller_a = strip_correction_trigger(raw_cue)
+    caller_b = strip_correction_trigger(raw_cue)
+    assert caller_a == caller_b == "роутинг моделей по гсд"
+
+    _mode_a, intent_a, _label_a = _classify_cue(raw_cue)
+    _mode_b, intent_b, _label_b = _classify_cue(raw_cue)
+    assert intent_a == intent_b is None
 
 from datetime import datetime, timezone  # noqa: E402  -- co-located fixtures
 from uuid import uuid4  # noqa: E402
 
 
 from iai_mcp.types import EMBED_DIM, MemoryRecord  # noqa: E402
+from tests._helpers import stub_embedder_for_store  # noqa: E402
 
 class _DispatchEmbedder:
 
@@ -208,10 +388,9 @@ def _seed_populated_store(tmp_path):
 
 def test_dispatch_routes_verbatim_cue_to_verbatim_mode(tmp_path, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
 
     store, embedder, cue, rec = _seed_populated_store(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store, **_kw: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     response = core.dispatch(
         store, "memory_recall",
@@ -225,10 +404,9 @@ def test_dispatch_routes_verbatim_cue_to_verbatim_mode(tmp_path, monkeypatch):
 
 def test_dispatch_routes_concept_cue_to_concept_mode(tmp_path, monkeypatch):
     from iai_mcp import core
-    from iai_mcp import embed as _embed_mod
 
     store, embedder, _cue, _rec = _seed_populated_store(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store, **_kw: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     concept_cue = "tell me about cleanup"
     embedder.set_fixed(concept_cue, embedder.embed(concept_cue))
@@ -260,11 +438,10 @@ def test_dispatch_empty_store_fallback_honours_classified_mode(tmp_path):
 def test_dispatch_passes_mode_kwarg_to_recall_for_response(tmp_path, monkeypatch):
     from iai_mcp import core
     from iai_mcp import pipeline as _pipeline_mod
-    from iai_mcp import embed as _embed_mod
     from iai_mcp.types import RecallResponse
 
     store, embedder, _cue, _rec = _seed_populated_store(tmp_path)
-    monkeypatch.setattr(_embed_mod, "embedder_for_store", lambda _store, **_kw: embedder)
+    stub_embedder_for_store(monkeypatch, embedder)
 
     captured: dict = {}
 

@@ -1,0 +1,10 @@
+[LME] Plan 05-11 blind run starting split=S limit=None out=bench/lme500/output/lme500-v1.json
+[LongMemEval] resolving split=S revision=2ec2a557f339b6c0369619b1ed5793734cc87533 filename=longmemeval_s
+[LME] per-row stores rooted at /var/folders/bc/qvvhxccn5ddchnqdrs8rt2k00000gn/T/lme_blind_ri2p_vbb
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 15941.53it/s]
+[LME] row 1/500 qid=e47becba qtype=single-session-user R@5_x=1 R@5_y=1 R@10_x=1 R@10_y=1 t_row=52.2s t_total=52.2s
+[LME] row 2/500 qid=118b2229 qtype=single-session-user R@5_x=1 R@5_y=1 R@10_x=1 R@10_y=1 t_row=42.2s t_total=94.5s
+[LME] row 3/500 qid=51a45a95 qtype=single-session-user R@5_x=1 R@5_y=1 R@10_x=1 R@10_y=1 t_row=45.0s t_total=139.6s
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

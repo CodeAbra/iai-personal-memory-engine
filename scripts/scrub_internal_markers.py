@@ -1,21 +1,28 @@
-"""Lint: a tracking marker must not carry prose.
+"""Lint: enforce CONVENTIONS.md `# @internal` marker rule.
 
-A `# @internal` comment tags a line for tooling. The tag stays alone on its
-comment line and any explanation goes on the next line, so the tag can be
-stripped without losing the explanation.
+Rule (from `CLAUDE.md` and `.planning/codebase/CONVENTIONS.md` lines 158-167):
+    `# @internal Phase X / D-Y` lives on its own comment line; the technical
+    sentence goes on the next comment line so the public-repo scrub can drop
+    the tag line without losing the rationale.
 
-A tagged line is rejected when text follows the marker on the same line:
-    1. Strip leading whitespace and the `# @internal` prefix.
-    2. Nothing left -> OK.
-    3. An em-dash in the tail -> violation.
-    4. Any whitespace-separated token starting with a lowercase ASCII
-       letter -> violation (prose past the marker).
-    5. Otherwise -> OK.
+Discrimination contract (token-based, verified against the 8-line fixture set
+in `20-02-PLAN.md <interfaces>`):
+    1. Strip the optional leading whitespace and `# @internal` prefix.
+    2. If nothing remains -> OK (bare marker).
+    3. If the tail contains an em-dash `—` -> VIOLATION.
+    4. Split the tail by whitespace; if ANY token starts with a lowercase
+       ASCII letter -> VIOLATION (English prose past the marker).
+    5. Otherwise -> OK (capitalized Phase/Plan/Decision IDs are accepted).
 
 Modes:
     default       Walk `src/iai_mcp/` and `mcp-wrapper/src/`; report all hits.
+                  Used for manual audit. NOT used by the pre-commit hook
+                  because CONVENTIONS.md mandates "no mass rewrite" of
+                  pre-existing historical lines.
     --check-staged
-                  Walk only the staged files under those two roots.
+                  Walk only files in `git diff --cached --name-only` that
+                  fall under the same two roots. This is the forward-promise
+                  mode used by `.git/hooks/pre-commit`.
 
 Output: each violation prints `path:line: <reason>` to stderr.
 Exit: 0 on clean, 1 on any violation.
@@ -122,7 +129,7 @@ def _iter_staged_files(repo_root: Path) -> list[Path]:
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns 0 on clean, 1 on any violation."""
     parser = argparse.ArgumentParser(
-        description="Lint `# @internal` markers: the tag carries no prose."
+        description="Lint `# @internal` markers per CONVENTIONS.md."
     )
     parser.add_argument(
         "--check-staged",

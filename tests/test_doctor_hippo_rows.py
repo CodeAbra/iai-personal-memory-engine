@@ -6,14 +6,13 @@ from pathlib import Path
 
 import pytest
 
-_skip_on_lilli = pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-    reason=(
-        "seeds a fresh SQLite file then calls the production doctor SQLite check; "
-        "the lilli equivalent degrades to WARN and is covered separately"
-    ),
-)
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 
+# The tests below seed a fresh SQLite file directly (not through HippoDB),
+# so the on-disk header is always genuine SQLite regardless of the ambient
+# driver value; the production doctor checks they call resolve their
+# connection from that header (open_store_conn -> _resolve_effective_driver),
+# so these tests need no driver override of their own.
 
 
 def test_row_f_hippo_readable_clean_store(tmp_path, monkeypatch):
@@ -202,7 +201,6 @@ def test_row_r_hnsw_corrupted_fail(tmp_path, monkeypatch):
     assert "rebuild" in result.detail
 
 
-@_skip_on_lilli
 def test_row_s_schema_version_match(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     hippo = tmp_path / "hippo"
@@ -223,7 +221,6 @@ def test_row_s_schema_version_match(tmp_path, monkeypatch):
     assert "schema_version=1" in result.detail
 
 
-@_skip_on_lilli
 def test_row_s_schema_drift_warn(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     hippo = tmp_path / "hippo"
@@ -320,7 +317,6 @@ def test_row_t_hippo_compaction_stale_warn(tmp_path, monkeypatch):
     assert "compact-hippo" in result.detail
 
 
-@_skip_on_lilli
 def test_doctor_total_row_count(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
     from iai_mcp.doctor import run_diagnosis
@@ -342,7 +338,6 @@ def _build_records_table(db_path: Path) -> None:
     conn.close()
 
 
-@_skip_on_lilli
 def test_check_x_collapsed_timestamps_warns(tmp_path, monkeypatch):
     """A store with >=5 episodic records sharing one created_at yields WARN."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
@@ -370,7 +365,6 @@ def test_check_x_collapsed_timestamps_warns(tmp_path, monkeypatch):
     assert "iai-mcp migrate --rederive-timestamps" in result.detail
 
 
-@_skip_on_lilli
 def test_check_x_collapsed_timestamps_ignores_tombstoned(tmp_path, monkeypatch):
     """Tombstoned duplicates must not count toward the >=5 collapsed-group threshold."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
@@ -397,7 +391,6 @@ def test_check_x_collapsed_timestamps_ignores_tombstoned(tmp_path, monkeypatch):
     assert result.status != "WARN"
 
 
-@_skip_on_lilli
 def test_check_x_collapsed_timestamps_pass(tmp_path, monkeypatch):
     """A store with episodic records each having a distinct created_at yields PASS."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
@@ -437,7 +430,7 @@ def test_no_lance_storage_optimized_in_identity_audit():
     )
 
 
-_lilli_driver = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli"
+_lilli_driver = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 
 @pytest.mark.skipif(

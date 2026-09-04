@@ -1,5 +1,5 @@
-//! iai_mcp_native — single-cdylib wheel exposing five Python sub-modules
-//! (`embed` + `graph` + `hd` + `store` + `engine`).
+//! iai_mcp_native — single-cdylib wheel exposing seven Python sub-modules
+//! (`embed` + `graph` + `vec` + `hd` + `store` + `engine` + `rank`).
 //!
 //! The core crates (`iai_mcp_embed_core`, `iai_mcp_graph_core`, `lilli-hd`,
 //! `lillibrain`, and `lilliengine`) are plain `rlib`s with no `#[pymodule]`
@@ -68,6 +68,13 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     lilliengine::register(py, &engine)?;
     m.add("engine", &engine)?;
 
+    // Rank sub-module — the resident rank-feature index (vectors, graph
+    // adjacency, lexical postings, resident text, scalar rank fields)
+    // behind a generation-tagged double-buffer. No scoring lives here.
+    let rank = PyModule::new(py, "iai_mcp_native.rank")?;
+    iai_mcp_rank_core::register(py, &rank)?;
+    m.add("rank", &rank)?;
+
     // Register the dotted sub-module names in `sys.modules` so a separate
     // `import iai_mcp_native.embed` statement also resolves. Without this
     // step, only `from iai_mcp_native import embed` works.
@@ -78,6 +85,7 @@ fn iai_mcp_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("iai_mcp_native.hd", &hd)?;
     sys_modules.set_item("iai_mcp_native.store", &store)?;
     sys_modules.set_item("iai_mcp_native.engine", &engine)?;
+    sys_modules.set_item("iai_mcp_native.rank", &rank)?;
 
     Ok(())
 }

@@ -5,12 +5,18 @@
 # (the working-tier snapshot). No socket round-trip, no python interpreter,
 # no iai_mcp import — an absent or sleeping daemon costs nothing and blocks
 # nothing. A stale snapshot (older than the freshness window) is ignored so
-# a dead daemon can never inject yesterday's task as the active one.
+# a dead daemon can never inject yesterday's task as the active one — with
+# one exception: the live-state emitter (goal/next-action only) ignores
+# this freshness window by design, so session continuity survives a
+# daemon restart even when the snapshot is stale.
 #
-# Optional accelerator: IAI_MCP_PER_TURN_SOCKET_ACCEL=1 additionally attempts
-# a live memory_recall over the daemon socket with a hard sub-second timeout,
-# via python3 stdlib only (still no iai_mcp import). Default OFF — the cache
-# path alone honors the awake-memory invariant.
+# Live accelerator: IAI_MCP_PER_TURN_SOCKET_ACCEL additionally attempts a
+# live memory_recall over the daemon socket with a hard sub-second timeout,
+# via python3 stdlib only (still no iai_mcp import). Default ON — measured
+# warm round-trip overhead sits well under the 0.8s socket timeout, so the
+# current-turn cue takes priority over the lagged cache pack. Set to "0" to
+# opt back out; the cache path alone still honors the awake-memory invariant
+# when the accelerator is off or the daemon socket is absent.
 #
 # Always exits 0: context injection is best-effort, never a turn blocker.
 
@@ -19,10 +25,20 @@ set -u
 # IAI_MCP_STORE is the canonical store-root variable; IAI_MCP_ROOT is kept
 # as a legacy fallback for environments installed before the rename.
 IAI_ROOT="${IAI_MCP_STORE:-${IAI_MCP_ROOT:-$HOME/.iai-mcp}}"
+CHANNEL="settings"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && CHANNEL="plugin"
 FRESH_SEC="${IAI_MCP_WORKING_TIER_FRESH_SEC:-7200}"
 PACK="${IAI_MCP_FORESIGHT_PACK:-$IAI_ROOT/.next-turn-pack.cached.md}"
 PACK_STATE="${PACK%.cached.md}.state.json"
 PACK_FRESH_SEC="${IAI_MCP_FORESIGHT_FRESH_SEC:-2700}"
+# Mirrors daemon_state.RUNNING_AGENT_TTL_HOURS (6h = 21600s); hardcoded,
+# never shelled out to python -- keep this value in sync by hand.
+RUNNING_AGENT_TTL_SEC="${IAI_MCP_RUNNING_AGENT_TTL_SEC:-21600}"
+CONTINUITY_CACHE="$IAI_ROOT/.session-continuity.cached.md"
+# Same-shell gate: set by emit_working_tier only on the path where it
+# actually emits a block, read by emit_live_state to suppress a duplicate.
+# Explicit local init (never an inherited/exported value) under set -u.
+_WORKING_TIER_EMITTED=""
 
 # stdin is read once; downstream consumers get it from the variable.
 STDIN_JSON=$(head -c 65536)
@@ -85,8 +101,8 @@ emit_foresight() {
     {
         mkdir -p "$IAI_ROOT/logs" 2>/dev/null
         LEDGER="$IAI_ROOT/logs/foresight-served.jsonl"
-        printf '{"ts":"%s","bytes":%s}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(wc -c < "$PACK" | tr -d ' ')" \
+        printf '{"ts":"%s","bytes":%s,"channel":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(wc -c < "$PACK" | tr -d ' ')" "$CHANNEL" \
             >> "$LEDGER"
         if [ "$(wc -l < "$LEDGER" | tr -d ' ')" -gt 4000 ]; then
             tail -n 2000 "$LEDGER" > "$LEDGER.rot.$$" 2>/dev/null \
@@ -114,19 +130,119 @@ emit_working_tier() {
     echo "<iai-mcp-working-tier>"
     head -c 4096 "$cache"
     echo "</iai-mcp-working-tier>"
+    _WORKING_TIER_EMITTED=1
+}
+
+emit_live_state() {
+    # Suppressed once emit_working_tier already carried the same goal/
+    # next-action lines verbatim in this same turn's output.
+    [ -z "$_WORKING_TIER_EMITTED" ] || return 0
+    # Same per-session cache emit_working_tier reads, but temporal — no
+    # freshness/mtime gate, so this reflects the last-known live state
+    # regardless of cache age WHENEVER a real next_action has been folded.
+    # Silent when next_action is still the "(none)" placeholder — avoids a
+    # zero-information block on every turn nothing has been folded yet.
+    # Extraction is by line PREFIX (goal: / next action:), never fixed
+    # position, so an added snapshot section can never silently break it.
+    if [ -n "${IAI_MCP_WORKING_TIER_CACHE:-}" ]; then
+        cache="$IAI_MCP_WORKING_TIER_CACHE"
+    else
+        sess_in="$SESS_IN"
+        [ -n "$sess_in" ] || return 0
+        sid=$(printf '%s' "$sess_in" | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
+        [ -n "$sid" ] || return 0
+        cache="$IAI_ROOT/.working-tier.$sid.cached.md"
+    fi
+    [ -f "$cache" ] || return 0
+    next_val=$(sed -n 's/^next action:[[:space:]]*//p' "$cache" | head -1)
+    [ -n "$next_val" ] || return 0
+    [ "$next_val" != "(none)" ] || return 0
+    block=$(sed -n -e '/^goal:/p' -e '/^next action:/p' "$cache")
+    [ -n "$block" ] || return 0
+    echo "<iai-mcp-live-state>"
+    printf '%s\n' "$block" | head -c 4096
+    echo "</iai-mcp-live-state>"
+}
+
+emit_agent_registry() {
+    # Session-agnostic: the eager continuity file carries the pending
+    # running-agent registry under a fixed name, no session id in the path,
+    # so a /clear that mints a new session id still reconstructs the
+    # pending agent on the very next turn. Whole-file mtime bound: older
+    # than RUNNING_AGENT_TTL_SEC emits nothing (an abandoned agent with no
+    # subsequent write must not surface forever).
+    [ -f "$CONTINUITY_CACHE" ] || return 0
+    [ "$(file_age "$CONTINUITY_CACHE")" -le "$RUNNING_AGENT_TTL_SEC" ] || return 0
+    block=$(sed -n '/<iai-mcp-agent-registry>/,/<\/iai-mcp-agent-registry>/p' "$CONTINUITY_CACHE" | sed '1d;$d')
+    [ -n "$block" ] || return 0
+    echo "<iai-mcp-agent-registry>"
+    printf '%s\n' "$block" | head -c 4096
+    echo "</iai-mcp-agent-registry>"
+}
+
+emit_live_state_fallback() {
+    # Fires whenever the session-scoped working-tier snapshot for this
+    # session id has NO real next_action yet -- not merely when the file is
+    # absent. A /clear's first captured turn opens a thin fresh entry (its
+    # own scoped file exists but next_action is still the "(none)"
+    # placeholder), so a presence-only guard would go silent on turn 2
+    # without the new session ever having acquired its own state. Mirrors
+    # emit_live_state's own "(none)" check, so this fires only when the
+    # scoped snapshot has no real next_action yet. At most one
+    # <iai-mcp-live-state> block fires across emit_live_state and this
+    # fallback, and the count may be zero by design once emit_working_tier
+    # already carried the same content. Same path resolution as
+    # emit_working_tier/emit_live_state, session-agnostic eager source,
+    # whole-file mtime bound (mirrors emit_agent_registry).
+    if [ -n "${IAI_MCP_WORKING_TIER_CACHE:-}" ]; then
+        scoped="$IAI_MCP_WORKING_TIER_CACHE"
+    else
+        sess_in="$SESS_IN"
+        [ -n "$sess_in" ] || return 0
+        sid=$(printf '%s' "$sess_in" | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
+        [ -n "$sid" ] || return 0
+        scoped="$IAI_ROOT/.working-tier.$sid.cached.md"
+    fi
+    if [ -f "$scoped" ]; then
+        scoped_next=$(sed -n 's/^next action:[[:space:]]*//p' "$scoped" | head -1)
+        [ -n "$scoped_next" ] && [ "$scoped_next" != "(none)" ] && return 0
+    fi
+
+    [ -f "$CONTINUITY_CACHE" ] || return 0
+    [ "$(file_age "$CONTINUITY_CACHE")" -le "$RUNNING_AGENT_TTL_SEC" ] || return 0
+    block=$(sed -n '/<iai-mcp-live-state>/,/<\/iai-mcp-live-state>/p' "$CONTINUITY_CACHE" | sed '1d;$d')
+    [ -n "$block" ] || return 0
+    echo "<iai-mcp-live-state>"
+    printf '%s\n' "$block" | head -c 4096
+    echo "</iai-mcp-live-state>"
+}
+
+emit_directives() {
+    # Global, no session gate, no freshness gate: unlike the emitters above,
+    # this must inject regardless of session id or cache age.
+    [ "${IAI_MCP_DIRECTIVES_OFF:-}" != "1" ] || return 0
+    cache="$IAI_ROOT/.directives.cached.md"
+    [ -f "$cache" ] || return 0
+    echo "<iai-mcp-directives>"
+    head -c 4096 "$cache"
+    echo "</iai-mcp-directives>"
 }
 
 emit_socket_recall() {
-    [ "${IAI_MCP_PER_TURN_SOCKET_ACCEL:-0}" = "1" ] || return 0
+    [ "${IAI_MCP_PER_TURN_SOCKET_ACCEL:-1}" = "1" ] || return 0
     sock="$IAI_ROOT/.daemon.sock"
     [ -S "$sock" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
     # The hook receives {"prompt": ...} JSON on stdin; the cue is extracted in
     # python (stdlib only). `timeout` is optional on macOS — the socket's own
-    # sub-second timeouts bound the call either way.
+    # sub-second timeouts bound the call either way. HOOK_DIR points the
+    # child at _recall_render.py, deployed next to this script in lockstep
+    # by the capture-hooks installer (still no iai_mcp import — the render
+    # helper is stdlib-only too).
+    HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
     _runner="python3"
     command -v timeout >/dev/null 2>&1 && _runner="timeout 1 python3"
-    SOCK="$sock" HOOK_STDIN="$STDIN_JSON" $_runner - <<'PYEOF' 2>/dev/null || true
+    SOCK="$sock" HOOK_STDIN="$STDIN_JSON" HOOK_DIR="$HOOK_DIR" $_runner - <<'PYEOF' 2>/dev/null || true
 import json, os, socket, sys
 sock_path = os.environ["SOCK"]
 try:
@@ -149,14 +265,14 @@ try:
         if not chunk:
             break
         buf += chunk
-    hits = (json.loads(buf).get("result") or {}).get("hits") or []
-    if hits:
-        print("<iai-mcp-recall>")
-        for h in hits[:3]:
-            text = (h.get("literal_surface") or h.get("text") or "")[:400]
-            if text:
-                print(f"- {text}")
-        print("</iai-mcp-recall>")
+    result = json.loads(buf).get("result") or {}
+    hook_dir = os.environ.get("HOOK_DIR", "")
+    if hook_dir and hook_dir not in sys.path:
+        sys.path.insert(0, hook_dir)
+    from _recall_render import render_recall_block
+    block = render_recall_block(result)
+    if block:
+        print(block)
 except Exception:
     pass
 PYEOF
@@ -164,5 +280,9 @@ PYEOF
 
 emit_foresight
 emit_working_tier
+emit_live_state
+emit_live_state_fallback
+emit_agent_registry
+emit_directives
 emit_socket_recall
 exit 0

@@ -10,10 +10,6 @@ from pathlib import Path
 import pytest
 
 
-_LILLI_DRIVER = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli"
-
-
-
 _WRITER_SCRIPT = textwrap.dedent("""\
     import os, sys
     from pathlib import Path
@@ -229,23 +225,21 @@ def test_multiprocess_serial_write_then_read_no_corruption(
         store.close()
 
 
-@pytest.mark.skipif(
-    _LILLI_DRIVER,
-    reason=(
-        "asserts a second process opens the store concurrently while a writer "
-        "holds it — stdlib sqlite3 WAL admits concurrent readers alongside one "
-        "writer. The lilli engine enforces a single-writer exclusive advisory "
-        "file lock (the single-writer durability invariant): a concurrent "
-        "second open across processes correctly fails with 'store is locked'. "
-        "That is expected-correct engine behavior, not a defect. Cross-process "
-        "serial open and same-process multi-open are covered by "
-        "test_multiprocess_serial_write_then_read_no_corruption and the "
-        "registry-reuse path."
-    ),
-)
 def test_multiprocess_concurrent_write_read_wal_safe(
-    hermetic_store: Path, tmp_path: Path
+    hermetic_store: Path, tmp_path: Path, monkeypatch
 ) -> None:
+    # Asserts a second process opens the store concurrently while a writer
+    # holds it -- stdlib sqlite3 WAL admits concurrent readers alongside one
+    # writer. The native engine enforces a single-writer exclusive advisory
+    # file lock (the single-writer durability invariant): a concurrent second
+    # open across processes correctly fails with 'store is locked'. That is
+    # expected-correct engine behavior, not a defect, so this test runs
+    # against the legacy driver explicitly. Cross-process serial open and
+    # same-process multi-open are covered by
+    # test_multiprocess_serial_write_then_read_no_corruption and the
+    # registry-reuse path.
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
     # Restores concurrent-overlap WAL coverage: writer and reader run genuinely
     # overlapping in separate processes. Asserts only the weaker invariants
     # (no crash, no integrity error, no corruption) — NOT a fixed final record

@@ -31,9 +31,10 @@ from typing import Generator
 import numpy as np
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.migrate import MigrateReport, migrate_sqlite_to_lilli
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _lilli_only = pytest.mark.skipif(
     not _LILLI,
@@ -87,7 +88,7 @@ def _build_source_store(
     ``migrate_role_column``'s bulk UPDATE during the migrator's own prewarm --
     the exact ordering-bug repro condition.
     """
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_STORE", str(root))
 
     from iai_mcp.store import MemoryStore, flush_record_buffer
@@ -343,7 +344,7 @@ def test_stdlib_driver_no_persist_no_error(
     ``persist_col_indexes`` attribute), no sidecar is written, and the report
     fields stay at their False/empty defaults.
     """
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     dst_root = tmp_path / "dst_stdlib"
     dst_root.mkdir()
 

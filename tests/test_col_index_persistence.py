@@ -26,10 +26,11 @@ import numpy as np
 import pytest
 
 from iai_mcp.hippo import _txn
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
 from iai_mcp.store import MemoryStore
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _EMBED_DIM = 384
 
@@ -338,7 +339,7 @@ def test_persist_failure_never_fails_the_step(tmp_path: Path, monkeypatch: pytes
 # ---------------------------------------------------------------------------
 
 def test_stdlib_driver_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     store = MemoryStore(path=tmp_path)
     assert getattr(store.db, "_storage_driver", "stdlib") == "stdlib"
 

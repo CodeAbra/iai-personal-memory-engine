@@ -17,6 +17,18 @@ from iai_mcp.crypto import (
     is_encrypted,
 )
 from iai_mcp.store import EVENTS_TABLE, MemoryStore
+from iai_mcp.store._purge_registry import register_store_purge
+
+# Several literals mean "the caller supplied no session id"; a cross-kind join
+# must reject every member of UNATTRIBUTED_SESSION_IDS, since one shared literal
+# cannot distinguish two unrelated callers. Producers keep their own literal --
+# bench/proc_corpus_census.py partitions on "-" specifically.
+UNATTRIBUTED_SESSION_IDS: frozenset[str] = frozenset({"-", "unknown"})
+
+
+def is_attributed_session(session_id: Any) -> bool:
+    return bool(session_id) and session_id not in UNATTRIBUTED_SESSION_IDS
+
 
 TELEMETRY_RANK_DEFICIENCY: str = "rank_deficiency_warning"
 TELEMETRY_ROLE_SATURATION: str = "role_saturation_warning"
@@ -44,6 +56,18 @@ TELEMETRY_RGC_WORKER_CRASH: str = "rgc_worker_crash"
 TELEMETRY_RGC_SNAPSHOT_NEAR_LIMIT: str = "rgc_snapshot_near_limit"
 TELEMETRY_EMBED_NONFINITE: str = "embed_nonfinite_rejected"
 
+# Emit-then-raise on a genuine fault: rank/role/codec-marker fail-loud
+# signals plus two pipeline fault kinds. A suppressed recursive probe
+# (claim_check) must still surface these -- they never fire on a happy
+# read-only path.
+_FAIL_LOUD_KINDS: frozenset[str] = frozenset({
+    TELEMETRY_RANK_DEFICIENCY,
+    TELEMETRY_ROLE_SATURATION,
+    TELEMETRY_CODEC_MARKER_MISSING,
+    TELEMETRY_EMBED_NATIVE_FAILURE,
+    "recall_centrality_failed",
+})
+
 _event_buffer: dict[int, list[dict]] = {}
 
 _last_flush_at: dict[int, datetime] = {}
@@ -63,6 +87,15 @@ def flush_event_buffer(store: MemoryStore) -> int:
         except (OSError, RuntimeError, ValueError) as exc:
             logging.getLogger(__name__).warning("flush_event_buffer_failed", extra={"n": len(pending), "err": str(exc)[:120]})
         return len(pending)
+
+
+def reset_event_buffers(store_id: int) -> None:
+    with _BUFFER_LOCK:
+        _event_buffer.pop(store_id, None)
+        _last_flush_at.pop(store_id, None)
+
+
+register_store_purge(reset_event_buffers)
 
 
 def should_flush(store_id: int, max_size: int | None = None) -> bool:
@@ -97,6 +130,11 @@ def write_event(
     source_ids: list[UUID] | None = None,
     buffered: bool = False,
 ) -> UUID:
+    from iai_mcp.recall_suppression import recall_suppressed
+
+    if recall_suppressed.get() and kind not in _FAIL_LOUD_KINDS:
+        return uuid4()
+
     event_id = uuid4()
     data_plain = json.dumps(data)
     ad = str(event_id).encode("ascii")

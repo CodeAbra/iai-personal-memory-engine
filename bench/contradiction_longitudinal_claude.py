@@ -892,9 +892,9 @@ def write_outputs(
         "",
         "## Notes on metric design",
         "",
-        "- **Metric A (verbatim preserved)** tests the promise that contradiction = reconsolidation, never overwrite. Pipeline beating cosine here = real architectural advantage.",
+        "- **Metric A (verbatim preserved)** tests REQUIREMENTS.md MEM-05 — the system's promise that contradiction = reconsolidation, never overwrite. Pipeline beating cosine here = real architectural advantage.",
         "- **Metric B-classical (rank current above cosine)** tests an expectation the system does not promise: it uses dual-route + inhibitory edges + hints, not rerank. Expect ΔMRR ≈ 0; this is a feature, not a bug.",
-        "- **Metric B-contract (s4_contradiction hint OR anti_hits ≥80%)** tests what the system actually promises (dual-route recall). Cosine cannot do either; pipeline either signals contradictions or it doesn't.",
+        "- **Metric B-contract (s4_contradiction hint OR anti_hits ≥80%)** tests what the system actually promises (REQUIREMENTS.md MEM-08, MCP-01 dual-route). Cosine cannot do either; pipeline either signals contradictions or it doesn't.",
         "",
     ]
     md_path.write_text("\n".join(lines))

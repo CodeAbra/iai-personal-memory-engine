@@ -1,13 +1,12 @@
 """Driver-aware raw open and test-only helpers for at-rest assertions.
 
-Returns a stdlib sqlite3 connection on the default driver, or the engine's
-crypto-blind raw DB-API connection when LILLI_STORAGE_DRIVER=lilli. The engine
-stores ciphertext BLOBs, so SELECT on encrypted columns returns the same wire
-prefix the harnesses assert today.
+Returns a stdlib sqlite3 connection for a legacy-format backing file, or the
+engine's crypto-blind raw DB-API connection for a native-format one. The
+engine stores ciphertext BLOBs, so SELECT on encrypted columns returns the
+same wire prefix the harnesses assert today.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 import struct
 from pathlib import Path
@@ -16,16 +15,23 @@ from pathlib import Path
 def open_store_raw(path: str | Path):
     """Open the backing store file for raw at-rest reads/writes.
 
-    On the stdlib driver, returns sqlite3.connect(path). On the lilli driver,
-    returns the engine raw connection for the file (the live registered
-    connection when HippoDB is open, else a temporary reopen). The returned
-    object supports execute()/commit()/close() and assignment of row_factory.
+    The backend is chosen from the on-disk header of ``path`` itself (mirroring
+    production's ``_resolve_effective_driver``) rather than from the ambient
+    environment, because this helper is always handed a concrete path to a file
+    that already exists. On a legacy header, returns sqlite3.connect(path). On
+    a native header, returns the engine raw connection for the file (the live
+    registered connection when HippoDB is open, else a temporary reopen). The
+    returned object supports execute()/commit()/close() and assignment of
+    row_factory.
 
-    Raises RuntimeError if the lilli driver is active but no engine connection
-    can be obtained for the path (file absent or genuine sqlite file) — fail
-    loud rather than silently fall through to a broken sqlite3.connect.
+    Raises RuntimeError if the resolved driver is the native engine but no
+    engine connection can be obtained for the path (file absent or genuine
+    sqlite file) — fail loud rather than silently fall through to a broken
+    sqlite3.connect.
     """
-    driver = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower()
+    from iai_mcp.hippo._db import _resolve_effective_driver  # noqa: PLC0415
+
+    driver = _resolve_effective_driver(str(path))
     if driver != "lilli":
         return sqlite3.connect(str(path))
 

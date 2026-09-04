@@ -49,10 +49,44 @@ session_id=$(extract "session_id")
 transcript_path=$(extract "transcript_path")
 cwd=$(extract "cwd")
 
+mkdir -p "$HOME/.iai-mcp/logs" 2>/dev/null || true
+log="$HOME/.iai-mcp/logs/capture-$(date -u +%Y-%m-%d).log"
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+channel="settings"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && channel="plugin"
+
+# The Claude-side scan root defaults to the shared home; CLAUDE_CONFIG_DIR
+# (host-supplied, untrusted) overrides it only when it names a different,
+# safe, existing directory -- absolute, no parent-directory traversal
+# segment, restricted to letters/digits/space/"._/-" (space allowed: real
+# install paths carry one; the traversal check above covers the actual
+# attack surface). A rejected value falls back to the shared home and logs
+# the refusal; it never changes an iai-side path.
+claude_root="$HOME/.claude"
+claude_config_dir="${CLAUDE_CONFIG_DIR:-}"
+if [ -n "$claude_config_dir" ] && [ "$claude_config_dir" != "$claude_root" ]; then
+  config_dir_ok=1
+  case "$claude_config_dir" in
+    /*) : ;;
+    *) config_dir_ok=0 ;;
+  esac
+  case "$claude_config_dir" in
+    *[!A-Za-z0-9._/\ -]*) config_dir_ok=0 ;;
+  esac
+  case "/$claude_config_dir/" in
+    */../*) config_dir_ok=0 ;;
+  esac
+  if [ "$config_dir_ok" -eq 1 ] && [ -d "$claude_config_dir" ]; then
+    claude_root="$claude_config_dir"
+  else
+    echo "$ts config-dir-refused channel=$channel" >> "$log" 2>/dev/null
+  fi
+fi
+
 # Fallback: locate transcript if the hook payload didn't include its path.
-# Claude Code stores transcripts under ~/.claude/projects/{cwd-hash}/{uuid}.jsonl
+# Claude Code stores transcripts under {claude_root}/projects/{cwd-hash}/{uuid}.jsonl
 if [ -z "$transcript_path" ] && [ -n "$session_id" ]; then
-  projects_dir="$HOME/.claude/projects"
+  projects_dir="$claude_root/projects"
   if [ -d "$projects_dir" ]; then
     # Look for the most recent file whose basename starts with session_id.
     # ls -t (mtime newest first). Avoid `find` per the project's no-grep hook.
@@ -66,18 +100,14 @@ if [ -z "$transcript_path" ] && [ -n "$session_id" ]; then
   fi
 fi
 
-mkdir -p "$HOME/.iai-mcp/logs" 2>/dev/null || true
-log="$HOME/.iai-mcp/logs/capture-$(date -u +%Y-%m-%d).log"
-ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
 {
   echo "---"
-  echo "$ts session=$session_id cwd=$cwd transcript=$transcript_path"
+  echo "$ts session=$session_id cwd=$cwd transcript=$transcript_path channel=$channel"
 } >> "$log" 2>/dev/null
 
 # Skip if we couldn't find anything to capture.
 if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
-  echo "$ts skipped: no transcript found" >> "$log" 2>/dev/null
+  echo "$ts skipped: no transcript found channel=$channel" >> "$log" 2>/dev/null
   exit 0
 fi
 
@@ -127,7 +157,7 @@ if [ -z "$iai_cli" ]; then
 fi
 
 if [ -z "$iai_cli" ]; then
-  echo "$ts skipped: iai-mcp CLI not found" >> "$log" 2>/dev/null
+  echo "$ts skipped: iai-mcp CLI not found channel=$channel" >> "$log" 2>/dev/null
   exit 0
 fi
 
@@ -168,7 +198,7 @@ if [ -n "$session_id" ]; then
 fi
 
 {
-  echo "$ts rc=$rc result=$result"
+  echo "$ts rc=$rc channel=$channel result=$result"
 } >> "$log" 2>/dev/null
 
 exit 0

@@ -45,6 +45,87 @@ def test_close_purges_all_six_buffer_dicts(tmp_path):
         s.close()
 
 
+def test_reset_purges_events_across_abandoned_id_reuse(tmp_path):
+    """Simulates a store abandoned WITHOUT close() (only close() purges the
+    events buffer today), then a later store deterministically reusing its
+    freed id() via the exact call MemoryStore.__init__ makes at construction.
+    """
+    from iai_mcp import events
+    from iai_mcp.events import flush_event_buffer, write_event
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.store._buffers import reset_store_buffers
+
+    store_a = MemoryStore(path=tmp_path)
+    write_event(store_a, kind="ghost_evt", data={"author": "store_a"}, buffered=True)
+
+    gid = id(store_a)
+    assert gid in events._event_buffer
+
+    # Populate _last_flush_at via the real flush path (only flush_event_buffer
+    # sets it) so the post-purge assert on it is load-bearing, not vacuous.
+    flush_event_buffer(store_a)
+    assert gid in events._last_flush_at
+
+    write_event(store_a, kind="ghost_evt_2", data={"author": "store_a"}, buffered=True)
+    assert gid in events._event_buffer
+
+    del store_a
+
+    reset_store_buffers(gid)
+
+    assert gid not in events._event_buffer
+    assert gid not in events._last_flush_at
+
+
+def test_reset_purges_curiosity_cache_across_abandoned_id_reuse(tmp_path):
+    """Same abandoned-without-close id()-reuse path as
+    test_reset_purges_events_across_abandoned_id_reuse, for curiosity's
+    read-through cache: reset_store_buffers(gid) must also drop
+    curiosity._caches[gid] so a reused id() cannot be served a dead store's
+    stale cached answer.
+    """
+    from iai_mcp import curiosity
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.store._buffers import reset_store_buffers
+
+    store_a = MemoryStore(path=tmp_path)
+    gid = id(store_a)
+    # Seed via the real population path (mirrors the liveness-guard test
+    # below) rather than hand-building a dict entry, so a future change to
+    # _cache_for's keying is caught here too.
+    curiosity._cache_for(store_a)
+    assert gid in curiosity._caches
+
+    del store_a
+
+    reset_store_buffers(gid)
+
+    assert gid not in curiosity._caches
+
+
+def test_curiosity_cache_stable_identity_across_live_store_calls(tmp_path):
+    """A live store's warm curiosity cache is never regressed: repeated
+    lookups for the SAME live store return the SAME cache object, and its
+    entry stays present in curiosity._caches for the store's whole life.
+    """
+    from iai_mcp import curiosity
+    from iai_mcp.curiosity import get_pending_questions_cached
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path)
+    try:
+        get_pending_questions_cached(store, limit=2)
+        first_cache = curiosity._cache_for(store)
+
+        get_pending_questions_cached(store, limit=2)
+        second_cache = curiosity._cache_for(store)
+
+        assert first_cache is second_cache
+        assert id(store) in curiosity._caches
+    finally:
+        store.close()
+
+
 def test_no_ghost_ciphertext_across_id_reuse(tmp_path, tmp_path_factory):
     from iai_mcp import events, store as store_mod
     from iai_mcp.events import write_event
@@ -87,3 +168,33 @@ def test_no_ghost_ciphertext_across_id_reuse(tmp_path, tmp_path_factory):
         )
     finally:
         store_b.close()
+
+
+def test_purge_callback_failure_is_telemetered():
+    """A raising purge callback must not be silent: purge_store logs it AND
+    bumps a countable failure counter, so a persistently-poisoned family is
+    observable without a store.
+    """
+    from iai_mcp.store._purge_registry import (
+        _PURGE_CALLBACKS,
+        _REGISTRY_LOCK,
+        purge_failure_counts,
+        purge_store,
+        register_store_purge,
+    )
+
+    def _boom(store_id: int) -> None:
+        raise RuntimeError("test_purge_callback_failure_is_telemetered")
+
+    register_store_purge(_boom)
+    try:
+        before = purge_failure_counts().get("_boom", 0)
+        purge_store(id(object()))
+        after = purge_failure_counts().get("_boom", 0)
+        assert after == before + 1
+    finally:
+        with _REGISTRY_LOCK:
+            try:
+                _PURGE_CALLBACKS.remove(_boom)
+            except ValueError:
+                pass

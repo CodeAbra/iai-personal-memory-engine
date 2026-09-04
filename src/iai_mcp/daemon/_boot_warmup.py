@@ -133,7 +133,7 @@ def warm_dispatch_surface(store: Any) -> dict:
     """
     _t0 = time.perf_counter()
     try:
-        from iai_mcp import runtime_graph_cache  # noqa: F401
+        from iai_mcp import prime_cache, runtime_graph_cache  # noqa: F401
         from iai_mcp.core import _serializers  # noqa: F401
         from iai_mcp.cue_router import _classify_cue  # noqa: F401
         from iai_mcp.embed import embed_query, embedder_for_store
@@ -142,6 +142,7 @@ def warm_dispatch_surface(store: Any) -> dict:
         embedder = embedder_for_store(store)
         embed_query(embedder, "boot warm-up probe cue")
         runtime_graph_cache.load_recall_structural(store)
+        prime_cache.load(store)
         return {"elapsed_ms": (time.perf_counter() - _t0) * 1000.0}
     except Exception as exc:  # noqa: BLE001 -- warm-up must never break boot
         return {

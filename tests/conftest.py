@@ -4,6 +4,7 @@ import gc
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -51,21 +52,21 @@ _TEST_PASSPHRASE = "iai-mcp-test-passphrase"
 @pytest.fixture(scope="session", autouse=True)
 def _lilli_fast_fsync():
     """Set LILLI_FSYNC_MODE=fast for the duration of the test session when the
-    lilli storage driver is active and the caller has not already chosen a mode.
+    resolved storage driver is the native engine and the caller has not
+    already chosen a mode.
 
-    The lilli engine defaults to F_FULLFSYNC on macOS, which flushes the drive
-    controller's DRAM cache to NAND on every commit.  At n=1000 commits per
-    property-test run that adds minutes of latency and trips the pytest-timeout
-    wall.  Test runs verify logical correctness, not power-loss durability, so
-    plain os.fsync is correct here.  Production keeps the F_FULLFSYNC default
-    because this fixture never runs outside pytest.
+    Test runs verify logical correctness, not power-loss durability, so plain
+    os.fsync is correct here; production keeps the safe fsync default because
+    this fixture never runs outside pytest.
 
     The prior value is saved and restored around the yield so in-process tools
     that inspect LILLI_FSYNC_MODE after the session do not see the test value.
     """
+    from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
+
     prior = os.environ.get("LILLI_FSYNC_MODE")
     if (
-        os.environ.get("LILLI_STORAGE_DRIVER") == "lilli"
+        os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
         and prior is None
     ):
         os.environ["LILLI_FSYNC_MODE"] = "fast"
@@ -116,6 +117,7 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     import iai_mcp.daemon as _daemon
     import iai_mcp.crypto as _crypto
     import iai_mcp.backup as _backup
+    import iai_mcp.directive_cache as _directive_cache
     monkeypatch.setattr(_hippo, "_DEFAULT_IAI_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_store, "DEFAULT_STORAGE_PATH", fake_root, raising=False)
     monkeypatch.setattr(_conc, "SOCKET_PATH", fake_root / ".daemon.sock", raising=False)
@@ -139,6 +141,10 @@ def _hermetic_default_paths(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(_crypto, "_DEFAULT_STORE_ROOT", fake_root, raising=False)
     monkeypatch.setattr(_backup, "DEFAULT_STORE_PATH", str(fake_root), raising=False)
+    monkeypatch.setattr(
+        _directive_cache, "DIRECTIVES_CACHE_PATH",
+        fake_root / ".directives.cached.md", raising=False,
+    )
     yield fake_root
 
 
@@ -151,6 +157,50 @@ def _clear_autoflush_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
 def _crypto_passphrase_env(monkeypatch: pytest.MonkeyPatch) -> None:
     if "IAI_MCP_CRYPTO_PASSPHRASE" not in os.environ:
         monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", _TEST_PASSPHRASE)
+
+
+_BLOCKED_SCHEDULER_BINARIES = ("launchctl", "systemctl", "schtasks", "loginctl")
+
+
+@pytest.fixture(autouse=True)
+def _block_real_scheduler_registration(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hard rail: no test may register or unregister a REAL OS scheduler job
+    (launchd, systemd, Windows Task Scheduler) on the development host.
+
+    A test exercising install/uninstall code must monkeypatch the specific
+    indirection that would call out to the scheduler; this fixture turns a
+    missed mock into a loud, immediate failure instead of a real
+    `launchctl`/`systemctl`/`schtasks`/`loginctl` invocation against the
+    developer's own session.
+
+    `@pytest.mark.live` tests are the sanctioned real-scheduler lane (opt-in
+    via --live, out of the default correctness gate) -- this guard exists to
+    catch an ACCIDENTAL real call from an otherwise-mocked default-gate test,
+    not to block the one lane that legitimately proves real scheduler
+    behavior. The exemption is scoped to the `live` marker only; every other
+    test still goes through the guard unchanged.
+    """
+    if request.node.get_closest_marker("live") is not None:
+        return
+    real_run = subprocess.run
+
+    def _guarded_run(cmd, *args, **kwargs):
+        prog = None
+        if isinstance(cmd, (list, tuple)) and cmd:
+            prog = str(cmd[0])
+        elif isinstance(cmd, str) and cmd.split():
+            prog = cmd.split()[0]
+        if prog and Path(prog).name in _BLOCKED_SCHEDULER_BINARIES:
+            raise RuntimeError(
+                f"test attempted a REAL scheduler call: {cmd!r} -- mock the "
+                "calling indirection instead of touching launchctl/systemctl/"
+                "schtasks/loginctl on the development host"
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _guarded_run)
 
 
 _GUARDED_ENV = (
@@ -473,6 +523,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run @pytest.mark.bench harness smokes (need local HF caches and bench artifacts; out of the default correctness gate)",
     )
+    parser.addoption(
+        "--runrealstore",
+        action="store_true",
+        default=False,
+        help="run @pytest.mark.realstore tests (open a copy of the operator's real store; non-hermetic and slow, out of the default correctness gate)",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -498,6 +554,11 @@ def pytest_collection_modifyitems(
         for item in items:
             if "live" in item.keywords:
                 item.add_marker(skip_live)
+    if not config.getoption("--runrealstore"):
+        skip_realstore = pytest.mark.skip(reason="need --runrealstore to run")
+        for item in items:
+            if "realstore" in item.keywords:
+                item.add_marker(skip_realstore)
 
 
 @pytest.fixture()

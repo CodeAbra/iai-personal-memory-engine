@@ -404,6 +404,7 @@ def test_save_writes_ciphertext_no_plaintext_surface(store):
 
 def test_save_then_try_load_preserves_surface_byte_for_byte(store):
     rid = uuid4()
+    # non-English fixture data: multilingual behavior under test — keep
     surface = "user сказал важное — please remember this 重要"
     node_payload = {
         str(rid): {

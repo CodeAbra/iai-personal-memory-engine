@@ -1,0 +1,25 @@
+probe_id,seed,n_slice,condition,topic,pipeline_rank,cosine_rank,pipeline_hit_at_k,cosine_hit_at_k,s4_contradiction_emitted,anti_hits_count,hint_kinds,pipeline_top1_text,route,cue_hash
+post-0000-13,13,0,post_flip,supplier_name,1,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_shadow,304e2924
+post-0001-13,13,0,post_flip,supplier_name,1,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_shadow,304e2924
+hist-0000-13,13,0,historical_verbatim,supplier_name,2,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_real,3baae30c
+hist-0001-13,13,0,historical_verbatim,supplier_name,2,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_real,3baae30c
+post-0000-13,13,1,post_flip,supplier_name,1,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_shadow,304e2924
+post-0001-13,13,1,post_flip,supplier_name,1,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_shadow,304e2924
+hist-0000-13,13,1,historical_verbatim,supplier_name,2,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_real,3baae30c
+hist-0001-13,13,1,historical_verbatim,supplier_name,2,2,1,1,1,0,s4_contradiction,Switched supplier: components now from Northwind Manufacturing.,efe_real,3baae30c
+post-0000-42,42,0,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+post-0001-42,42,0,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+hist-0000-42,42,0,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+hist-0001-42,42,0,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+post-0000-42,42,1,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+post-0001-42,42,1,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+hist-0000-42,42,1,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+hist-0001-42,42,1,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+post-0000-137,137,0,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+post-0001-137,137,0,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+hist-0000-137,137,0,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+hist-0001-137,137,0,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+post-0000-137,137,1,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+post-0001-137,137,1,post_flip,ceo_name,1,1,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_real,75575679
+hist-0000-137,137,1,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5
+hist-0001-137,137,1,historical_verbatim,ceo_name,2,2,1,1,1,0,s4_contradiction,Update: the actual CEO is Marcus Chen.,efe_shadow,ea618ef5

@@ -1,0 +1,120 @@
+
+===== FULL RECALL PATH — sort by CUMULATIVE time (top 50) =====
+         40132671 function calls (40127856 primitive calls) in 21.521 seconds
+
+   Ordered by: cumulative time
+   List reduced from 2660 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.017    0.017   21.682   21.682 profile_escalation_decode.py:345(_body)
+       40    0.257    0.006   21.665    0.542 pipeline.py:2364(recall_for_response)
+       40    1.328    0.033   20.164    0.504 pipeline.py:1095(_recall_core)
+       40    0.400    0.010   13.556    0.339 pipeline.py:1004(escalate_recall_candidates)
+       40    0.254    0.006   13.146    0.329 _store.py:2537(query_similar)
+       40    0.797    0.020    8.660    0.217 _table.py:1225(to_row_dicts)
+       40    0.105    0.003    6.981    0.175 _table.py:1022(_ann_knn_fetch_core)
+      643    0.000    0.000    6.900    0.011 connection.py:1535(execute)
+      643    6.900    0.011    6.900    0.011 {method 'execute' of 'iai_mcp_native.engine.RawConn' objects}
+      481    0.001    0.000    6.892    0.014 _ro_pool.py:236(execute)
+   144000    0.734    0.000    4.201    0.000 _store.py:4109(_from_row_rank_view)
+   578125    1.271    0.000    1.594    0.000 uuid.py:139(__init__)
+   150000    0.122    0.000    1.588    0.000 _store.py:693(_decrypt_for_record)
+  4719198    0.724    0.000    1.008    0.000 {method 'get' of 'dict' objects}
+  2300744    0.971    0.000    0.971    0.000 uuid.py:280(__str__)
+   420042    0.098    0.000    0.935    0.000 graph.py:310(iter_nodes)
+   150000    0.398    0.000    0.824    0.000 crypto.py:76(decrypt_field)
+    99938    0.033    0.000    0.751    0.000 graph.py:225(two_hop_neighborhood)
+    99978    0.367    0.000    0.704    0.000 graph.py:232(two_hop_neighborhood_with_provenance)
+   144000    0.074    0.000    0.683    0.000 _table.py:432(_decode_raw_row_embedding)
+   144000    0.047    0.000    0.590    0.000 _table.py:334(_decode_embedding)
+  3957828    0.351    0.000    0.584    0.000 uuid.py:268(__hash__)
+   150000    0.044    0.000    0.571    0.000 _store.py:685(_ad)
+       40    0.002    0.000    0.561    0.014 pipeline.py:429(_community_gate_scored)
+       40    0.139    0.003    0.557    0.014 pipeline.py:476(_community_gate_max_node_scored)
+   150000    0.072    0.000    0.510    0.000 _store.py:109(_uuid_literal)
+   146120    0.500    0.000    0.500    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+       40    0.003    0.000    0.499    0.012 pipeline.py:2149(_apply_post_rank_pipeline)
+    99938    0.436    0.000    0.469    0.000 pipeline.py:316(_trigram_jaccard)
+   150000    0.313    0.000    0.434    0.000 _store.py:166(_parse_ts_field)
+   400000    0.166    0.000    0.416    0.000 graph.py:430(get_centrality)
+   100219    0.078    0.000    0.372    0.000 {method 'sort' of 'list' objects}
+       40    0.038    0.001    0.368    0.009 s4.py:134(on_read_check_batch)
+   150001    0.062    0.000    0.328    0.000 __init__.py:299(loads)
+       39    0.000    0.000    0.320    0.008 __init__.py:1(<module>)
+   150000    0.155    0.000    0.308    0.000 __init__.py:93(_uuid_literal)
+152686/152385    0.108    0.000    0.306    0.000 <frozen importlib._bootstrap>:1390(_handle_fromlist)
+    49000    0.079    0.000    0.278    0.000 s4.py:22(_cosine)
+       40    0.002    0.000    0.269    0.007 pipeline.py:839(_backfill_hit_metadata)
+       40    0.037    0.001    0.268    0.007 pipeline.py:647(_normalize_pool_cached)
+       40    0.001    0.000    0.265    0.007 _store.py:3220(get_batch)
+       40    0.020    0.001    0.260    0.006 _store.py:3250(_run_chunks)
+      120    0.040    0.000    0.251    0.002 retrieve.py:515(derive_temporal_validity)
+   150001    0.117    0.000    0.238    0.000 decoder.py:333(decode)
+3979289/3979267    0.234    0.000    0.234    0.000 {built-in method builtins.hash}
+   400040    0.065    0.000    0.229    0.000 pipeline.py:664(<genexpr>)
+  1882034    0.209    0.000    0.209    0.000 {method 'replace' of 'str' objects}
+  3663441    0.206    0.000    0.206    0.000 {built-in method builtins.isinstance}
+   308/12    0.001    0.000    0.202    0.017 <frozen importlib._bootstrap>:1349(_find_and_load)
+   307/12    0.001    0.000    0.202    0.017 <frozen importlib._bootstrap>:1304(_find_and_load_unlocked)
+
+
+
+===== FULL RECALL PATH — sort by TOTAL (self) time (top 50) =====
+         40132671 function calls (40127856 primitive calls) in 21.521 seconds
+
+   Ordered by: internal time
+   List reduced from 2660 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      643    6.900    0.011    6.900    0.011 {method 'execute' of 'iai_mcp_native.engine.RawConn' objects}
+       40    1.328    0.033   20.164    0.504 pipeline.py:1095(_recall_core)
+   578125    1.271    0.000    1.594    0.000 uuid.py:139(__init__)
+  2300744    0.971    0.000    0.971    0.000 uuid.py:280(__str__)
+       40    0.797    0.020    8.660    0.217 _table.py:1225(to_row_dicts)
+   144000    0.734    0.000    4.201    0.000 _store.py:4109(_from_row_rank_view)
+  4719198    0.724    0.000    1.008    0.000 {method 'get' of 'dict' objects}
+   146120    0.500    0.000    0.500    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+    99938    0.436    0.000    0.469    0.000 pipeline.py:316(_trigram_jaccard)
+       40    0.400    0.010   13.556    0.339 pipeline.py:1004(escalate_recall_candidates)
+   150000    0.398    0.000    0.824    0.000 crypto.py:76(decrypt_field)
+    99978    0.367    0.000    0.704    0.000 graph.py:232(two_hop_neighborhood_with_provenance)
+  3957828    0.351    0.000    0.584    0.000 uuid.py:268(__hash__)
+   150000    0.313    0.000    0.434    0.000 _store.py:166(_parse_ts_field)
+       40    0.257    0.006   21.665    0.542 pipeline.py:2364(recall_for_response)
+       40    0.254    0.006   13.146    0.329 _store.py:2537(query_similar)
+3979289/3979267    0.234    0.000    0.234    0.000 {built-in method builtins.hash}
+  1882034    0.209    0.000    0.209    0.000 {method 'replace' of 'str' objects}
+  3663441    0.206    0.000    0.206    0.000 {built-in method builtins.isinstance}
+   400000    0.166    0.000    0.416    0.000 graph.py:430(get_centrality)
+   150000    0.155    0.000    0.308    0.000 __init__.py:93(_uuid_literal)
+   150000    0.140    0.000    0.140    0.000 {method 'decrypt' of 'cryptography.hazmat.bindings._rust.openssl.aead.AESGCM' objects}
+       40    0.139    0.003    0.557    0.014 pipeline.py:476(_community_gate_max_node_scored)
+        1    0.135    0.135    0.135    0.135 {method 'execute' of 'iai_mcp_native.engine.Connection' objects}
+  1089814    0.134    0.000    0.186    0.000 uuid.py:240(__eq__)
+       40    0.126    0.003    0.141    0.004 shape_base.py:380(stack)
+   144000    0.123    0.000    0.123    0.000 _table.py:1275(<lambda>)
+   150000    0.122    0.000    1.588    0.000 _store.py:693(_decrypt_for_record)
+   150001    0.117    0.000    0.238    0.000 decoder.py:333(decode)
+1931838/1931354    0.116    0.000    0.116    0.000 {built-in method builtins.len}
+   450191    0.114    0.000    0.114    0.000 {method 'match' of 're.Pattern' objects}
+152686/152385    0.108    0.000    0.306    0.000 <frozen importlib._bootstrap>:1390(_handle_fromlist)
+       40    0.105    0.003    6.981    0.175 _table.py:1022(_ann_knn_fetch_core)
+    98121    0.105    0.000    0.185    0.000 _linalg.py:2575(norm)
+   450000    0.103    0.000    0.181    0.000 crypto.py:50(is_encrypted)
+   420042    0.098    0.000    0.935    0.000 graph.py:310(iter_nodes)
+       40    0.092    0.002    0.092    0.002 {method 'knn_query' of 'builtins.ExactIndex' objects}
+   702198    0.088    0.000    0.088    0.000 {method 'startswith' of 'str' objects}
+   927784    0.080    0.000    0.080    0.000 {method 'append' of 'list' objects}
+    49000    0.079    0.000    0.278    0.000 s4.py:22(_cosine)
+   100219    0.078    0.000    0.372    0.000 {method 'sort' of 'list' objects}
+   100018    0.077    0.000    0.077    0.000 {method 'isoformat' of 'datetime.datetime' objects}
+   144000    0.074    0.000    0.683    0.000 _table.py:432(_decode_raw_row_embedding)
+      442    0.073    0.000    0.073    0.000 {method 'fetchall' of 'iai_mcp_native.engine.Cursor' objects}
+   150000    0.072    0.000    0.510    0.000 _store.py:109(_uuid_literal)
+   750743    0.065    0.000    0.065    0.000 {method 'lower' of 'str' objects}
+   400040    0.065    0.000    0.229    0.000 pipeline.py:664(<genexpr>)
+   199876    0.064    0.000    0.082    0.000 pipeline.py:392(<genexpr>)
+   150001    0.062    0.000    0.328    0.000 __init__.py:299(loads)
+    99938    0.060    0.000    0.101    0.000 pipeline.py:2002(<lambda>)
+
+

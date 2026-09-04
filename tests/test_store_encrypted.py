@@ -54,7 +54,7 @@ def _make(text: str = "hello", language: str = "en", detail: int = 2):
 def test_insert_writes_encrypted_literal_surface_on_disk(tmp_path):
     from iai_mcp.store import MemoryStore, RECORDS_TABLE
     store = MemoryStore(path=tmp_path)
-    rec = _make(text="top-secret Russian phrase: Привет")
+    rec = _make(text="top-secret encrypted phrase: hello")
     store.insert(rec)
 
     tbl = store.db.open_table(RECORDS_TABLE)
@@ -100,7 +100,7 @@ def test_embedding_remains_plaintext_on_disk(tmp_path):
 def test_language_remains_plaintext_on_disk(tmp_path):
     from iai_mcp.store import MemoryStore, RECORDS_TABLE
     store = MemoryStore(path=tmp_path)
-    rec = _make(language="ru", text="Привет")
+    rec = _make(language="ru", text="Привет")  # non-English fixture data: ru round-trip under test
     store.insert(rec)
 
     tbl = store.db.open_table(RECORDS_TABLE)
@@ -122,7 +122,7 @@ def test_tags_remain_plaintext_on_disk(tmp_path):
 def test_get_decrypts_literal_surface(tmp_path):
     from iai_mcp.store import MemoryStore
     store = MemoryStore(path=tmp_path)
-    text = "Alice said: пусть каждое слово сохранится точно"
+    text = "alice said: let every word be preserved exactly"
     rec = _make(text=text)
     store.insert(rec)
 
@@ -154,14 +154,14 @@ def test_all_records_decrypts_all_rows(tmp_path):
     from iai_mcp.store import MemoryStore
     store = MemoryStore(path=tmp_path)
     r1 = _make(text="first")
-    r2 = _make(text="второй")
+    r2 = _make(text="second")
     store.insert(r1)
     store.insert(r2)
 
     all_r = store.all_records()
     texts = {r.literal_surface for r in all_r}
     assert "first" in texts
-    assert "второй" in texts
+    assert "second" in texts
 
 def test_query_similar_still_works_after_encryption(tmp_path):
     from iai_mcp.store import MemoryStore

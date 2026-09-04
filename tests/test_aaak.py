@@ -56,7 +56,7 @@ def test_aaak_index_starts_with_wing_marker():
 
 
 def test_aaak_index_has_four_key_value_segments():
-    r = _make(tier="episodic", tags=["entity:Alice", "project", "raw:en"])
+    r = _make(tier="episodic", tags=["entity:alice", "project", "raw:en"])
     idx = generate_aaak_index(r)
     parts = idx.split("/")
     assert len(parts) == 4
@@ -67,9 +67,9 @@ def test_aaak_index_has_four_key_value_segments():
 
 
 def test_aaak_index_includes_entity_tag_stripped():
-    r = _make(tags=["entity:Alice", "entity:IAI-MCP", "project"])
+    r = _make(tags=["entity:alice", "entity:IAI-MCP", "project"])
     idx = generate_aaak_index(r)
-    assert "Alice" in idx.split("/E:")[1]
+    assert "alice" in idx.split("/E:")[1]
     assert "IAI-MCP" in idx.split("/E:")[1]
 
 
@@ -79,8 +79,8 @@ def test_aaak_index_deterministic():
 
 
 def test_aaak_index_does_not_contain_literal_surface():
-    verbatim = "Alice mentioned the SECRET_PASSWORD_ABC_XYZ on day 3"
-    r = _make(text=verbatim, tags=["entity:Alice", "project"])
+    verbatim = "alice mentioned the SECRET_PASSWORD_ABC_XYZ on day 3"
+    r = _make(text=verbatim, tags=["entity:alice", "project"])
     idx = generate_aaak_index(r)
     assert verbatim not in idx
     assert "SECRET_PASSWORD_ABC_XYZ" not in idx
@@ -99,11 +99,11 @@ def test_aaak_index_dash_when_no_entities():
 
 
 def test_parse_aaak_index_round_trips_entities_and_tags():
-    r = _make(tier="semantic", tags=["entity:Alice", "entity:IAI", "project", "urgent"])
+    r = _make(tier="semantic", tags=["entity:alice", "entity:IAI", "project", "urgent"])
     idx = generate_aaak_index(r)
     parsed = parse_aaak_index(idx)
     assert parsed["wing"] == ["S"]
-    assert parsed["entities"] == ["Alice", "IAI"]
+    assert parsed["entities"] == ["alice", "IAI"]
     assert set(parsed["tags"]) == {"project", "urgent"}
 
 
@@ -116,12 +116,12 @@ def test_parse_aaak_dash_segments_become_empty_lists():
 
 
 def test_enforce_english_raw_accepts_pure_english():
-    r = _make(text="Alice said the IAI-MCP project is go")
+    r = _make(text="alice said the IAI-MCP project is go")
     enforce_english_raw(r)
 
 
 def test_enforce_english_raw_rejects_cyrillic_without_tag():
-    r = _make(text="Alice сказал: пусть сохранится точно", tags=["project"])
+    r = _make(text="alice сказал: пусть сохранится точно", tags=["project"])  # non-English fixture data: ru round-trip under test
     with pytest.raises(ValueError) as exc:
         enforce_english_raw(r)
     assert "English raw verbatim" in str(exc.value)
@@ -129,7 +129,7 @@ def test_enforce_english_raw_rejects_cyrillic_without_tag():
 
 def test_enforce_english_raw_accepts_cyrillic_with_raw_tag():
     r = _make(
-        text="Alice сказал: пусть сохранится точно",
+        text="alice сказал: пусть сохранится точно",  # non-English fixture data: ru round-trip under test
         tags=["raw:ru", "project"],
     )
     enforce_english_raw(r)

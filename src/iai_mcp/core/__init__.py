@@ -38,8 +38,11 @@ def _passes_mode_filter(record: MemoryRecord, cue_mode: str) -> bool:
     Any tier that guarantees a record's presence (e.g. the exact-similarity
     authority) must still respect this exclusion: presence of a real memory is
     never license to resurrect a record class the active mode deliberately
-    filters out. Concept mode applies no tier filter.
+    filters out. Procedural records are excluded unconditionally, regardless
+    of cue_mode.
     """
+    if record.tier == "procedural":
+        return False
     if cue_mode != "verbatim":
         return True
     return record.tier == "episodic" and not any(
@@ -69,6 +72,13 @@ _posterior_state: dict[str, Any] = {}
 _task_support_probe_active_until: "datetime | None" = None
 
 _arousal_state: object | None = None
+
+# Suppresses the recall_dispatched telemetry event and the arousal update
+# for the memory_recall call a claim_check dispatch makes internally --
+# scoped to this call only via a contextvar (never a params key, which the
+# schema-parity extractor would force advertising). Defined in a leaf
+# module so pipeline/retrieve/events can gate on it without importing core.
+from iai_mcp.recall_suppression import recall_suppressed as _claim_check_active
 
 #: Bounds how long a later recall WAITS to share an in-flight embedder
 #: build -- not the build itself. A recall that wins a free lock becomes
@@ -374,6 +384,8 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
                     adjacent_suggestions=[],
                     session_id=_session_id,
                     captured_at=_captured_at,
+                    epistemic_status=_rec.epistemic_status,
+                    salience_level=_rec.salience_level,
                 )
                 _hits_json.append(_hit_to_json(_hit))
             except Exception as _hit_exc:  # noqa: BLE001 -- skip the bad hit,
@@ -412,6 +424,8 @@ def _incident_edges_warm(
     store when no warm bundle exists (cold boot, tests without a build).
     Ordering and shape mirror store.incident_edges exactly.
     """
+    from iai_mcp.store._store import _is_canonical_uuid_str
+
     memo = getattr(store, "_warm_graph_bundle", None)
     graph = memo[0][0] if memo is not None else None
     adj = getattr(graph, "_adj", None) if graph is not None else None
@@ -427,20 +441,133 @@ def _incident_edges_warm(
             items = list(nbrs.items())
         except RuntimeError:  # concurrent sync-hook mutation — one re-snapshot
             items = list(nbrs.items())
-        rows = []
-        for nbr_label, attrs in items:
-            try:
-                nbr = UUID(nbr_label)
-            except (ValueError, AttributeError):
-                continue
-            rows.append((
-                nbr,
-                str(attrs.get("edge_type", "hebbian")),
-                float(attrs.get("weight", 1.0)),
-            ))
-        rows.sort(key=lambda t: (-t[2], str(t[0]), t[1]))
-        result[rid] = rows[:top_k] if top_k is not None else rows
+        # str-keyed rows first (skip a UUID() construction per neighbor);
+        # canonical labels sort identically raw vs str(UUID(label)) — every
+        # _adj key is str(UUID_obj) by construction, so the raw-label sort
+        # matches the canonicalized sort exactly for every reachable key.
+        str_rows = [
+            (nbr_label, str(attrs.get("edge_type", "hebbian")), float(attrs.get("weight", 1.0)))
+            for nbr_label, attrs in items
+            if _is_canonical_uuid_str(nbr_label)
+        ]
+        str_rows.sort(key=lambda t: (-t[2], t[0], t[1]))
+        survivors = str_rows[:top_k] if top_k is not None else str_rows
+        result[rid] = [(UUID(label), et, wt) for (label, et, wt) in survivors]
     return result
+
+
+_RANK_BUILDER_ATTR = "_rank_builder_graph"
+
+
+def _rank_builder_graph_for(store: "MemoryStore"):
+    """The store-resident graph the live recall path feeds and reads the
+    Rust rank index against -- one persistent instance per store, never a
+    fresh object per call. Distinct from `retrieve.build_runtime_graph`'s
+    corpus-wide graph: this one accumulates only what live recall has
+    actually hydrated, and never registers a `graph_sync_hook` (that slot
+    already belongs to the warm-bundle graph)."""
+    graph = getattr(store, _RANK_BUILDER_ATTR, None)
+    if graph is None:
+        from iai_mcp.graph import MemoryGraph
+        graph = MemoryGraph()
+        setattr(store, _RANK_BUILDER_ATTR, graph)
+    return graph
+
+
+def _rank_builder_split(builder_graph, ids: list) -> "tuple[list, list]":
+    """Bulk membership split against the resident builder graph: ids
+    already hydrated by a prior call skip a fresh decrypt; ids never seen
+    still fetch through store.get_batch exactly as before."""
+    resident: list = []
+    miss: list = []
+    for _rid in ids:
+        if builder_graph.has_node(_rid):
+            resident.append(_rid)
+        else:
+            miss.append(_rid)
+    return resident, miss
+
+
+class _ResidentCandidateView:
+    """Reconstructs the shape the hydrate block expects from a fresh
+    store.get_batch(decode="rank") row, sourced from the builder graph's
+    already-decrypted payload instead -- used ONLY for ids the residency
+    split above already proved were hydrated by a prior call, so
+    literal_surface is never decrypted a second time for the same id."""
+
+    __slots__ = (
+        "id", "embedding", "literal_surface", "aaak_index", "created_at",
+        "stability", "tier", "tags", "language", "community_id", "centrality",
+    )
+
+    def __init__(self, node_id: UUID, payload: dict, community_id) -> None:
+        self.id = node_id
+        # Always a plain list, never the graph payload's numpy array: this
+        # object stands in for a RankCandidateView, whose own `.embedding`
+        # is a list -- callers throughout the hydrate block use the
+        # `_rec.embedding or []` idiom, which raises on array truthiness.
+        _raw_embedding = payload.get("embedding")
+        self.embedding = (
+            list(_raw_embedding) if _raw_embedding is not None else []
+        )
+        self.literal_surface = payload.get("surface", "") or ""
+        self.aaak_index = payload.get("aaak_index", "") or ""
+        _created_raw = payload.get("created_at") or ""
+        try:
+            self.created_at = (
+                datetime.fromisoformat(_created_raw) if _created_raw
+                else datetime.now(timezone.utc)
+            )
+        except (TypeError, ValueError):
+            self.created_at = datetime.now(timezone.utc)
+        self.stability = float(payload.get("stability", 0.5) or 0.5)
+        self.tier = payload.get("tier") or "episodic"
+        self.tags = list(payload.get("tags") or [])
+        self.language = payload.get("language") or "en"
+        self.community_id = community_id
+        self.centrality = float(payload.get("centrality", 0.0) or 0.0)
+
+
+def _rank_builder_resident_view(builder_graph, node_id: UUID) -> "_ResidentCandidateView | None":
+    payload = builder_graph.get_payload(node_id)
+    if not payload:
+        return None
+    community_id = builder_graph._attrs.get(node_id, {}).get("community_id")
+    return _ResidentCandidateView(node_id, payload, community_id)
+
+
+def _rank_builder_feed(builder_graph, handle, fetched: dict) -> None:
+    """Populate the resident builder graph from freshly hydrated rank-view
+    records and forward the same records to the Rust index's pending
+    queue -- the only place new content enters either structure, so a
+    later residency check never sees an id the index handle was not also
+    fed."""
+    for _rid, _rec in fetched.items():
+        if not builder_graph.has_node(_rid):
+            builder_graph.add_node(
+                _rid,
+                community_id=getattr(_rec, "community_id", None),
+                embedding=list(_rec.embedding or []),
+            )
+        builder_graph.set_node_payload(_rid, {
+            "embedding": list(_rec.embedding or []),
+            "surface": _rec.literal_surface or "",
+            "centrality": float(getattr(_rec, "centrality", 0.0) or 0.0),
+            "tier": _rec.tier or "episodic",
+            "tags": list(_rec.tags or []),
+            "language": _rec.language or "en",
+            "aaak_index": str(getattr(_rec, "aaak_index", "") or ""),
+            "created_at": (
+                _rec.created_at.isoformat()
+                if getattr(_rec, "created_at", None) else ""
+            ),
+            "stability": float(getattr(_rec, "stability", 0.5) or 0.5),
+            "valence": float(getattr(_rec, "valence", 0.0) or 0.0),
+        })
+        try:
+            handle.feed("upsert", _rec)
+        except Exception as exc:  # noqa: BLE001 -- index feed isolation, never break recall
+            logger.debug("rank_builder_feed_failed id=%s: %s", _rid, exc)
 
 
 def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
@@ -545,6 +672,17 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         # _auth_hits, throw, or never run at all on the cortex-fallback
         # path).
         _exact_authority_used = False
+        # Reused by the pask_teachback membership guard and the trajectory-
+        # coupling embedding reuse below -- pre-declared here (not just
+        # inside the recall try block) because both run unconditionally,
+        # including on the records_count==0 path, the cortex-fallback path,
+        # and any exception before the recall try block reaches its own
+        # assignment. None on every one of those paths means "no candidate-
+        # set data available", which correctly forces each site's own-query/
+        # get_batch fallback.
+        _all_cand_ids: "list | None" = None
+        _candidate_recs: "dict | None" = None
+        _contr_edges: "dict | None" = None
         # Emptiness gate via the corpus-count cache (O(1) warm): a raw
         # count_rows on the lilli engine re-scans every leaf page, and this
         # gate sits on a per-call read path.
@@ -567,7 +705,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 embed_query,
                 try_embedder_for_store,
             )
-            from iai_mcp.pipeline import recall_for_response
+            from iai_mcp.pipeline import _crossing_consolidation_off, recall_for_response
             # State detection and the recall dispatch keep separate guards:
             # folding the dispatch into the detection except would swallow
             # the tier's fail-loud refusals (the crisis guard had the same
@@ -614,7 +752,16 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         # through try_embedder_for_store above, unswallowed.
                         raise _EmbedderBuildNotReadyDegrade()
 
+                    # Stage profile flag read here (rather than at its
+                    # original hydrate-block site below) so the structural
+                    # load immediately below can be timed too.
+                    _stage_profile_on = os.environ.get("IAI_MCP_STAGE_PROFILE") == "1"
+                    _structural_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     assignment, rc, _cached_max_degree, _structural_source, _cached_node_degrees = _rgc.load_recall_structural(store)
+                    _structural_ms = (
+                        (_time.perf_counter() - _structural_t0) * 1000.0
+                        if _stage_profile_on else 0.0
+                    )
                     _trace_mark("structural")
 
                     _encode_ms: "float | None" = None
@@ -651,9 +798,52 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                 pass
                             raise NativeError(f"recall cue encode failed: {_emb_exc}") from _emb_exc
 
-                    _ann_pairs = store.query_similar(_cue_vec, k=K_CANDIDATES)
+                    # hydrate/fetch stage bucket (IAI_MCP_STAGE_PROFILE=1):
+                    # splits the ANN-seed decode from the get_batch decodes
+                    # below so the owner can see which fetch dominates.
+                    # (_stage_profile_on read earlier, at the structural-load
+                    # site, so that stage can be timed too.)
+                    _hydrate_ann_ms = 0.0
+                    _hydrate_getbatch_ms = 0.0
+
+                    _hydrate_ann_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                    _ann_substage_timings: "dict | None" = {} if _stage_profile_on else None
+                    _ann_pairs = store.query_similar(
+                        _cue_vec, k=K_CANDIDATES, decode="rank",
+                        substage_timings=_ann_substage_timings,
+                    )
+                    if _stage_profile_on:
+                        _hydrate_ann_ms += (_time.perf_counter() - _hydrate_ann_t0) * 1000.0
                     _candidate_recs: dict = {_r.id: _r for _r, _s in _ann_pairs}
                     _trace_mark("ann")
+
+                    # ann substage split (IAI_MCP_STAGE_PROFILE=1 only): the
+                    # native scan, the chunked SQL vec_label resolution and
+                    # the per-row rank-view decode, plus rows fetched vs
+                    # served -- the over-decode ratio (query_similar
+                    # over-fetches by over_fetch_factor then trims to k).
+                    if _ann_substage_timings:
+                        _ann_scan_ms = float(_ann_substage_timings.get("escalation_knn_query_ms", 0.0) or 0.0)
+                        _ann_inlist_ms = float(_ann_substage_timings.get("escalation_inlist_fetch_ms", 0.0) or 0.0)
+                        _ann_decode_ms = float(_ann_substage_timings.get("escalation_decode_ms", 0.0) or 0.0)
+                        _ann_rows_fetched = float(_ann_substage_timings.get("rows_fetched", 0.0) or 0.0)
+                        _ann_rows_served = float(_ann_substage_timings.get("rows_served", 0.0) or 0.0)
+                    else:
+                        _ann_scan_ms = _ann_inlist_ms = _ann_decode_ms = 0.0
+                        _ann_rows_fetched = _ann_rows_served = 0.0
+
+                    # Persistent, store-resident rank index handle: the SAME
+                    # graph object is reused across every recall for this
+                    # store (never a fresh MemoryGraph() per call), so the
+                    # handle's staleness check stops forcing a full rebuild
+                    # every call. Fed here from the ANN hydrate; the hop/
+                    # rich-club stages below both feed it further and read
+                    # its resident id set to skip a redundant decrypt for an
+                    # id a prior call already hydrated.
+                    from iai_mcp.store._rank_index import rank_index_for
+                    _rank_builder_graph = _rank_builder_graph_for(store)
+                    _rank_handle = rank_index_for(store, _rank_builder_graph)
+                    _rank_builder_feed(_rank_builder_graph, _rank_handle, _candidate_recs)
 
                     # Exact-similarity authority: a bounded exact-cosine scan
                     # that backstops the fast (approximate) index above. The
@@ -665,6 +855,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     # graph pipeline returns.
                     _authority_pairs: list = []
                     _live_auth_ids: set = set()
+                    _authority_block_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                    _hgb_before_authority = _hydrate_getbatch_ms
                     if os.environ.get("IAI_MCP_EXACT_AUTHORITY_OFF") != "1":
                         try:
                             # build_if_cold=False: a cold matrix kicks a
@@ -687,35 +879,87 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                 # ever-missed invalidate seam) can never
                                 # surface an erased record here.
                                 _auth_id_strs = [str(_rid) for _rid, _s in _authority_pairs]
-                                with store.db.ro_conn() as _conn:
-                                    _live_rows = _conn.execute(
-                                        "SELECT id FROM records WHERE id IN (%s)"
-                                        " AND tombstoned_at IS NULL"
-                                        % ",".join("?" * len(_auth_id_strs)),
-                                        _auth_id_strs,
-                                    ).fetchall()
-                                _live_auth_ids = {str(_row[0]) for _row in _live_rows}
-                                _authority_pairs = [
-                                    (_rid, _s)
-                                    for _rid, _s in _authority_pairs
-                                    if str(_rid) in _live_auth_ids
-                                ]
-                            _trace_mark("auth_liveness")
-                            _auth_new = [
-                                _rid for _rid, _s in _authority_pairs
-                                if _rid not in _candidate_recs
-                            ]
-                            if _auth_new:
-                                for _arid, _arec in store.get_batch(_auth_new).items():
-                                    _candidate_recs[_arid] = _arec
+                                if _crossing_consolidation_off():
+                                    with store.db.ro_conn() as _conn:
+                                        _live_rows = _conn.execute(
+                                            "SELECT id FROM records WHERE id IN (%s)"
+                                            " AND tombstoned_at IS NULL"
+                                            % ",".join("?" * len(_auth_id_strs)),
+                                            _auth_id_strs,
+                                        ).fetchall()
+                                    _live_auth_ids = {str(_row[0]) for _row in _live_rows}
+                                    _authority_pairs = [
+                                        (_rid, _s)
+                                        for _rid, _s in _authority_pairs
+                                        if str(_rid) in _live_auth_ids
+                                    ]
+                                    _trace_mark("auth_liveness")
+                                    _auth_new = [
+                                        _rid for _rid, _s in _authority_pairs
+                                        if _rid not in _candidate_recs
+                                    ]
+                                    if _auth_new:
+                                        _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                                        for _arid, _arec in store.get_batch(_auth_new, decode="rank").items():
+                                            _candidate_recs[_arid] = _arec
+                                        if _stage_profile_on:
+                                            _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
+                                else:
+                                    # Liveness SELECT and get_batch share ONE
+                                    # ro_conn() scope; conn=_conn below must
+                                    # reference this same open connection.
+                                    with store.db.ro_conn() as _conn:
+                                        _live_rows = _conn.execute(
+                                            "SELECT id FROM records WHERE id IN (%s)"
+                                            " AND tombstoned_at IS NULL"
+                                            % ",".join("?" * len(_auth_id_strs)),
+                                            _auth_id_strs,
+                                        ).fetchall()
+                                        _live_auth_ids = {str(_row[0]) for _row in _live_rows}
+                                        _authority_pairs = [
+                                            (_rid, _s)
+                                            for _rid, _s in _authority_pairs
+                                            if str(_rid) in _live_auth_ids
+                                        ]
+                                        _trace_mark("auth_liveness")
+                                        _auth_new = [
+                                            _rid for _rid, _s in _authority_pairs
+                                            if _rid not in _candidate_recs
+                                        ]
+                                        if _auth_new:
+                                            _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                                            for _arid, _arec in store.get_batch(
+                                                _auth_new, decode="rank", conn=_conn,
+                                            ).items():
+                                                _candidate_recs[_arid] = _arec
+                                            if _stage_profile_on:
+                                                _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
+                            else:
+                                _trace_mark("auth_liveness")
                         except Exception as _ea_exc:  # noqa: BLE001 -- a broken
                             # authority must never break recall.
                             logger.debug("exact_authority_seed_failed: %s", _ea_exc)
                             _authority_pairs = []
                             _live_auth_ids = set()
 
+                    if _stage_profile_on:
+                        # exact_top_k + the liveness SELECT + list
+                        # comprehensions only -- the nested get_batch calls
+                        # above already accrue into _hydrate_getbatch_ms via
+                        # their own _hgb_t0 timers, so that delta is
+                        # subtracted out here to avoid double-counting.
+                        _authority_scan_ms = (
+                            (_time.perf_counter() - _authority_block_t0) * 1000.0
+                            - (_hydrate_getbatch_ms - _hgb_before_authority)
+                        )
+                    else:
+                        _authority_scan_ms = 0.0
                     _trace_mark("authority")
+                    _hop1_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     _hop1_edges = _incident_edges_warm(store, list(_candidate_recs.keys()), top_k=5)
+                    _hop1_edges_ms = (
+                        (_time.perf_counter() - _hop1_t0) * 1000.0 if _stage_profile_on else 0.0
+                    )
                     _trace_mark("hop1_edges")
                     _hop1_new_ids = list({
                         _nbr
@@ -724,10 +968,25 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         if _nbr not in _candidate_recs
                     })
                     if _hop1_new_ids:
-                        _candidate_recs.update(store.get_batch(_hop1_new_ids))
+                        _hop1_resident, _hop1_miss = _rank_builder_split(_rank_builder_graph, _hop1_new_ids)
+                        for _hrid in _hop1_resident:
+                            _hview = _rank_builder_resident_view(_rank_builder_graph, _hrid)
+                            if _hview is not None:
+                                _candidate_recs[_hrid] = _hview
+                        if _hop1_miss:
+                            _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                            _hop1_fetched = store.get_batch(_hop1_miss, decode="rank")
+                            _candidate_recs.update(_hop1_fetched)
+                            _rank_builder_feed(_rank_builder_graph, _rank_handle, _hop1_fetched)
+                            if _stage_profile_on:
+                                _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
                     _trace_mark("hop1_fetch")
 
+                    _hop2_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     _hop2_edges = _incident_edges_warm(store, _hop1_new_ids, top_k=5) if _hop1_new_ids else {}
+                    _hop2_edges_ms = (
+                        (_time.perf_counter() - _hop2_t0) * 1000.0 if _stage_profile_on else 0.0
+                    )
                     _trace_mark("hop2_edges")
                     _hop2_new_ids = list({
                         _nbr
@@ -736,16 +995,80 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         if _nbr not in _candidate_recs
                     })
                     if _hop2_new_ids:
-                        _candidate_recs.update(store.get_batch(_hop2_new_ids))
+                        _hop2_resident, _hop2_miss = _rank_builder_split(_rank_builder_graph, _hop2_new_ids)
+                        for _hrid2 in _hop2_resident:
+                            _hview2 = _rank_builder_resident_view(_rank_builder_graph, _hrid2)
+                            if _hview2 is not None:
+                                _candidate_recs[_hrid2] = _hview2
+                        if _hop2_miss:
+                            _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                            _hop2_fetched = store.get_batch(_hop2_miss, decode="rank")
+                            _candidate_recs.update(_hop2_fetched)
+                            _rank_builder_feed(_rank_builder_graph, _rank_handle, _hop2_fetched)
+                            if _stage_profile_on:
+                                _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
                     _trace_mark("hop2_fetch")
 
                     _RC_CAP = 50
                     _rc_cap = (rc or [])[:_RC_CAP]
                     _rc_new_ids = [_rid for _rid in _rc_cap if _rid not in _candidate_recs]
                     if _rc_new_ids:
-                        _candidate_recs.update(store.get_batch(_rc_new_ids))
+                        _rc_resident, _rc_miss = _rank_builder_split(_rank_builder_graph, _rc_new_ids)
+                        for _rcrid in _rc_resident:
+                            _rcview = _rank_builder_resident_view(_rank_builder_graph, _rcrid)
+                            if _rcview is not None:
+                                _candidate_recs[_rcrid] = _rcview
+                        _rc_new_ids = _rc_miss
+                    if _rc_new_ids:
+                        _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                        _rc_fetched = store.get_batch(_rc_new_ids, decode="rank")
+                        _candidate_recs.update(_rc_fetched)
+                        _rank_builder_feed(_rank_builder_graph, _rank_handle, _rc_fetched)
+                        if _stage_profile_on:
+                            _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
+
+                    # Repeat-seen candidate-id overlap (IAI_MCP_STAGE_PROFILE=1
+                    # only): the fraction of this call's candidate ids already
+                    # resident from the store's prior call -- the exact
+                    # quantity fetch-avoidance would monetize. Read-only
+                    # against _candidate_recs; the prior-ids attribute is
+                    # REPLACED each call (bounded to one generation), never
+                    # accumulated.
+                    _candidate_overlap_fraction: "float | None" = None
+                    if _stage_profile_on:
+                        _prior_candidate_ids = getattr(store, "_layer1_prior_candidate_ids", None)
+                        _current_candidate_ids = set(_candidate_recs.keys())
+                        if _prior_candidate_ids:
+                            _candidate_overlap_fraction = (
+                                len(_current_candidate_ids & _prior_candidate_ids)
+                                / len(_current_candidate_ids)
+                                if _current_candidate_ids else 0.0
+                            )
+                        else:
+                            _candidate_overlap_fraction = 0.0
+                        try:
+                            store._layer1_prior_candidate_ids = _current_candidate_ids
+                        except AttributeError:
+                            pass
+
+                    # Persistent Rust index snapshot: the SAME builder graph
+                    # object is handed to the handle on every call, so a
+                    # second (and every later) recall never re-triggers the
+                    # full Python-side rebuild in _RankIndexHandle._build --
+                    # only the Rust engine's own generation-tagged drain of
+                    # whatever this call's _rank_builder_feed calls queued.
+                    _hops_snapshot_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                    try:
+                        _rank_handle.snapshot(_rank_builder_graph)
+                    except Exception as exc:  # noqa: BLE001 -- a broken index snapshot degrades to Python-only scoring, never breaks recall
+                        logger.debug("rank_index_snapshot_failed: %s", exc)
+                    _hops_snapshot_ms = (
+                        (_time.perf_counter() - _hops_snapshot_t0) * 1000.0
+                        if _stage_profile_on else 0.0
+                    )
 
                     _trace_mark("hops")
+                    _ge_populate_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     graph = MemoryGraph()
                     for _rec in _candidate_recs.values():
                         graph.add_node(
@@ -763,6 +1086,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                             "aaak_index": str(getattr(_rec, "aaak_index", "") or ""),
                             "created_at": str(getattr(_rec, "created_at", "") or ""),
                             "stability": float(getattr(_rec, "stability", 0.5) or 0.5),
+                            "valence": float(getattr(_rec, "valence", 0.0) or 0.0),
                         })
                     for _qid, _nbr_list in _hop1_edges.items():
                         for (_nbr, _et, _wt) in _nbr_list:
@@ -778,6 +1102,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                     graph.add_edge(_qid2, _nbr2, weight=_wt2, edge_type=_et2)
                                 except Exception:  # noqa: BLE001 — edge add fail-safe
                                     pass
+                    _ge_populate_ms = (
+                        (_time.perf_counter() - _ge_populate_t0) * 1000.0
+                        if _stage_profile_on else 0.0
+                    )
 
                     # The hebbian degree-map traversal and the contradicts
                     # traversal both run over the identical final candidate
@@ -789,6 +1117,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     _all_cand_ids = list(_candidate_recs.keys())
                     _paired_edges: "dict | None" = None
                     _paired_fetch_failed = False
+                    _ge_incident_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     try:
                         _paired_edges = store.incident_edges(
                             _all_cand_ids,
@@ -799,14 +1128,34 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     except Exception as _pf_exc:  # noqa: BLE001 — degrade gracefully
                         logger.debug("layer1_paired_edge_fetch_failed: %s", _pf_exc)
                         _paired_fetch_failed = True
+                    _ge_incident_ms = (
+                        (_time.perf_counter() - _ge_incident_t0) * 1000.0
+                        if _stage_profile_on else 0.0
+                    )
+                    _ge_split_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                    _ge_contr_fetch_ms = 0.0
+
+                    # Single inline bucketed pass over the fetched paired
+                    # edges — the hebbian and contradicts consumers below
+                    # each read their own pre-split dict instead of two
+                    # separate comprehensions re-scanning the same result.
+                    _hebb_split: dict = {}
+                    _contr_edges: dict = {}
+                    if not _paired_fetch_failed:
+                        for _q, _lst in _paired_edges.items():
+                            _h_bucket: list = []
+                            _c_bucket: list = []
+                            for _t in _lst:
+                                if _t[1] == "hebbian":
+                                    _h_bucket.append(_t)
+                                elif _t[1] == "contradicts":
+                                    _c_bucket.append(_t)
+                            _hebb_split[_q] = _h_bucket
+                            _contr_edges[_q] = _c_bucket
 
                     try:
                         if _paired_fetch_failed:
                             raise RuntimeError("paired edge fetch unavailable")
-                        _hebb_split = {
-                            _q: [_t for _t in _lst if _t[1] == "hebbian"]
-                            for _q, _lst in _paired_edges.items()
-                        }
                         # Per-node edge budget for the hebbian traversal — bounds
                         # the fan-out for latency without clamping the ranking degree.
                         # A hub with true degree > _HEBB_TRAVERSAL_CAP returns a
@@ -862,10 +1211,6 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     try:
                         if _paired_fetch_failed:
                             raise RuntimeError("paired edge fetch unavailable")
-                        _contr_edges = {
-                            _q: [_t for _t in _lst if _t[1] == "contradicts"]
-                            for _q, _lst in _paired_edges.items()
-                        }
                         for _rec in _candidate_recs.values():
                             _ca = getattr(_rec, "created_at", None)
                             if _ca is not None:
@@ -886,7 +1231,13 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                     except (ValueError, AttributeError):
                                         pass
                         if _contr_dst_ids:
-                            _contr_recs = store.get_batch(_contr_dst_ids)
+                            _ge_contr_fetch_t0 = _time.perf_counter() if _stage_profile_on else 0.0
+                            # rank decode: this fetch only ever reads .id and
+                            # .created_at below — two fewer AES fields decrypted
+                            # per record than the default full decode.
+                            _contr_recs = store.get_batch(_contr_dst_ids, decode="rank")
+                            if _stage_profile_on:
+                                _ge_contr_fetch_ms += (_time.perf_counter() - _ge_contr_fetch_t0) * 1000.0
                             for _cr in _contr_recs.values():
                                 _ca = getattr(_cr, "created_at", None)
                                 if _ca is not None:
@@ -894,8 +1245,14 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     except Exception as _tv_exc:  # noqa: BLE001 — degrade gracefully
                         logger.debug("layer1_tv_build_failed: %s", _tv_exc)
                         _tv_outgoing_l1, _tv_ts_l1 = {}, {}
+                    _ge_split_ms = (
+                        (_time.perf_counter() - _ge_split_t0) * 1000.0 - _ge_contr_fetch_ms
+                        if _stage_profile_on else 0.0
+                    )
 
                     _trace_mark("graph_edges")
+                    from iai_mcp import retrieval_weight_cache as _rwc
+                    _retrieval_weights = _rwc.load(store)
                     resp = recall_for_response(
                         store=store,
                         graph=graph,
@@ -912,9 +1269,72 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         tv_maps=(_tv_outgoing_l1, _tv_ts_l1) if _tv_ts_l1 else None,
                         trace_mark=_trace_mark,
                         cue_embedding=_cue_vec,
+                        hydrate_stage_timings=(
+                            {
+                                "hydrate_ann": _hydrate_ann_ms,
+                                "hydrate_getbatch": _hydrate_getbatch_ms,
+                                "candidate_overlap_fraction": _candidate_overlap_fraction,
+                                "structural": _structural_ms,
+                                "authority_scan": _authority_scan_ms,
+                                "hop1_edges": _hop1_edges_ms,
+                                "hop2_edges": _hop2_edges_ms,
+                                "ann_scan": _ann_scan_ms,
+                                "ann_inlist": _ann_inlist_ms,
+                                "ann_decode": _ann_decode_ms,
+                                "ann_rows_fetched": _ann_rows_fetched,
+                                "ann_rows_served": _ann_rows_served,
+                                "ge_populate": _ge_populate_ms,
+                                "ge_incident": _ge_incident_ms,
+                                "ge_split": _ge_split_ms,
+                                "ge_contr_fetch": _ge_contr_fetch_ms,
+                                "hops_snapshot": _hops_snapshot_ms,
+                            }
+                            if _stage_profile_on else None
+                        ),
+                        # Live recall dispatch requests the hybrid Rust
+                        # scorer; the pre-Rust Python reference stays the
+                        # function-level default for every other caller
+                        # (direct pipeline callers, tests, CLI/fallback
+                        # entry points) and for a structural_weight>0.0
+                        # override, so byte-for-byte behavior there is
+                        # untouched. IAI_MCP_RECALL_RUST_SCORER_OFF forces
+                        # the reference path even here.
+                        use_rust_scorer=True,
+                        retrieval_weights=_retrieval_weights,
                     )
                     resp.ann_path_used = True
                     _trace_mark("pipeline")
+
+                    # Winner-feature read off the resident Rust index: a
+                    # bulk cross-check that the salience-level rank the
+                    # scoring pass used for each served hit matches what
+                    # the resident index independently carries for that
+                    # id -- a real, runtime-observable read of the index
+                    # (not inferred from code shape), counted on the store
+                    # so a test can assert it actually ran. A mismatch is
+                    # logged, never fatal: this tracer proves reachability,
+                    # it does not yet make the index authoritative over the
+                    # scoring pass for this field.
+                    if resp.hits:
+                        try:
+                            from iai_mcp.types import SALIENCE_LEVEL_RANK as _SALIENCE_LEVEL_RANK
+                            _resident_salience = _rank_handle.salience_levels()
+                            store._rank_resident_feature_reads = (
+                                getattr(store, "_rank_resident_feature_reads", 0) + 1
+                            )
+                            for _hit in resp.hits:
+                                _resident_rank = _resident_salience.get(_hit.record_id.int)
+                                if _resident_rank is None:
+                                    continue
+                                _scored_rank = _SALIENCE_LEVEL_RANK.get(_hit.salience_level, 0)
+                                if _resident_rank != _scored_rank:
+                                    logger.debug(
+                                        "rank_index_winner_feature_mismatch id=%s "
+                                        "resident=%s scored=%s",
+                                        _hit.record_id, _resident_rank, _scored_rank,
+                                    )
+                        except Exception as exc:  # noqa: BLE001 -- a broken cross-check must never break recall
+                            logger.debug("rank_index_winner_feature_read_failed: %s", exc)
 
                     # Authority merge: union the exact-similarity hits found
                     # above (head, exact-cos order) with the graph pipeline's
@@ -964,6 +1384,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                         if _arec.created_at else None
                                     ),
                                     community_id=getattr(_arec, "community_id", None),
+                                    epistemic_status=_arec.epistemic_status,
+                                    salience_level=_arec.salience_level,
                                 ))
                             if _auth_hits:
                                 # This authority merge is unconditional by design: exact_top_k
@@ -1041,7 +1463,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _BOOT_WINDOW_EMBED_BUILD_TIMEOUT_SEC,
                     )
                     try:
-                        _update_arousal(_arousal_state, "error")
+                        if not _claim_check_active.get():
+                            _update_arousal(_arousal_state, "error")
                     except Exception:  # noqa: BLE001 -- arousal update fail-safe
                         pass
                     # The bounded acquire ABOVE (embed_acquire) already proved
@@ -1061,7 +1484,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 except Exception as exc:  # noqa: BLE001 -- soft availability fallback
                     logger.warning("recall_pipeline_fallback: %s", exc)
                     try:
-                        _update_arousal(_arousal_state, "error")
+                        if not _claim_check_active.get():
+                            _update_arousal(_arousal_state, "error")
                     except Exception:  # noqa: BLE001 -- arousal update fail-safe
                         pass
                     # Bounded acquire; an identity/config refusal from this
@@ -1073,8 +1497,9 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         budget_tokens=params.get("budget_tokens") or _arousal_budget_tokens,
                     )
         try:
-            _arousal_event = "recall_success" if resp.hits else "recall_failed"
-            _update_arousal(_arousal_state, _arousal_event)
+            if not _claim_check_active.get():
+                _arousal_event = "recall_success" if resp.hits else "recall_failed"
+                _update_arousal(_arousal_state, _arousal_event)
         except Exception:  # noqa: BLE001 -- arousal update fail-safe
             pass
 
@@ -1106,6 +1531,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         if _trace_spans is not None:
             _trace_mark("respond")
             response["_recall_trace_ms"] = list(_trace_spans)
+        if resp.stage_timings:
+            response["_stage_timings"] = dict(resp.stage_timings)
         try:
             _recall_ms = (_time.perf_counter() - _recall_t0) * 1000
             response["_recall_latency_ms"] = round(_recall_ms, 1)
@@ -1114,19 +1541,20 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         # Every agent-initiated search leaves a countable trace with its
         # payload weight — the denominator of the anticipation economy.
         try:
-            from iai_mcp.events import write_event as _we
-            _hits_list = response.get("hits") or []
-            _resp_chars = sum(
-                len(str(h.get("literal_surface") or "")) for h in _hits_list
-            ) + 200 * max(len(_hits_list), 1)
-            _we(
-                store,
-                "recall_dispatched",
-                {"hits": len(_hits_list), "resp_chars": int(_resp_chars)},
-                severity="info",
-                session_id=params.get("session_id", "-"),
-                buffered=True,
-            )
+            if not _claim_check_active.get():
+                from iai_mcp.events import write_event as _we
+                _hits_list = response.get("hits") or []
+                _resp_chars = sum(
+                    len(str(h.get("literal_surface") or "")) for h in _hits_list
+                ) + 200 * max(len(_hits_list), 1)
+                _we(
+                    store,
+                    "recall_dispatched",
+                    {"hits": len(_hits_list), "resp_chars": int(_resp_chars)},
+                    severity="info",
+                    session_id=params.get("session_id", "-"),
+                    buffered=True,
+                )
         except Exception as exc:  # noqa: BLE001 -- telemetry MUST NOT break recall
             logger.debug("recall_dispatched_emit_failed: %s", exc)
         try:
@@ -1137,22 +1565,24 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
             logger.debug("curiosity_signals_failed: %s", exc)
         try:
-            _reinforce_ids = [hit.record_id for hit in resp.hits]
-            store.queue_reinforce(_reinforce_ids)
+            if not _claim_check_active.get():
+                _reinforce_ids = [hit.record_id for hit in resp.hits]
+                store.queue_reinforce(_reinforce_ids)
         except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
             logger.debug("labile_write_failed: %s", exc)
         try:
-            from iai_mcp.retrieve import (
-                WAKE_COACTIVATION_MIN_SCORE,
-                potentiate_coactivation,
-            )
-            _wire_ids = [
-                hit.record_id
-                for hit in resp.hits
-                if float(getattr(hit, "score", 0.0) or 0.0)
-                >= WAKE_COACTIVATION_MIN_SCORE
-            ]
-            potentiate_coactivation(store, _wire_ids)
+            if not _claim_check_active.get():
+                from iai_mcp.retrieve import (
+                    WAKE_COACTIVATION_MIN_SCORE,
+                    potentiate_coactivation,
+                )
+                _wire_ids = [
+                    hit.record_id
+                    for hit in resp.hits
+                    if float(getattr(hit, "score", 0.0) or 0.0)
+                    >= WAKE_COACTIVATION_MIN_SCORE
+                ]
+                potentiate_coactivation(store, _wire_ids)
         except Exception as exc:  # noqa: BLE001 -- plasticity MUST NOT break recall
             logger.debug("coactivation_potentiate_failed: %s", exc)
         _inject_sleep_suggestion(
@@ -1160,8 +1590,10 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             cue=params.get("cue", ""),
             language=params.get("language", "en"),
         )
-        _inject_overnight_digest(response, store=store)
-        _first_turn_recall_hook(response, params=params, store=store)
+        if not _claim_check_active.get():
+            _inject_overnight_digest(response, store=store)
+        if not _claim_check_active.get():
+            _first_turn_recall_hook(response, params=params, store=store)
         try:
             from iai_mcp.response_decorator import apply_profile
             apply_profile(
@@ -1174,6 +1606,7 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             from iai_mcp.daemon_config import _load_pask_config
             from iai_mcp.events import write_event
             from iai_mcp.pask_teachback import verify_hit_set
+            from iai_mcp.pipeline import _crossing_consolidation_off
             pask_cfg = _load_pask_config()
             if pask_cfg.enabled:
                 hit_ids = [
@@ -1181,37 +1614,93 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     for h in resp.hits
                 ]
                 hit_ids = [h for h in hit_ids if h is not None]
-                teachback = verify_hit_set(store, hit_ids)
+                if _crossing_consolidation_off():
+                    teachback = verify_hit_set(store, hit_ids)
+                else:
+                    # Reuse _paired_edges' already-fetched contradicts subset
+                    # -- ONLY when every hit_id is a member of
+                    # _all_cand_ids, the frozen candidate set _paired_edges
+                    # was fetched against. pipeline.py builds its own
+                    # candidate pool independently of this dispatch-level
+                    # fetch (lex-fusion ids, multi-seed-widened ids) -- a
+                    # served hit can therefore be sourced outside
+                    # _all_cand_ids, in which case the guard falls back to
+                    # verify_hit_set's own exact query so no served-hit
+                    # contradiction is dropped.
+                    _contradicts_arg = None
+                    if (
+                        _all_cand_ids is not None
+                        and _contr_edges is not None
+                        and set(hit_ids) <= set(_all_cand_ids)
+                    ):
+                        _contradicts_arg = _contr_edges
+                    teachback = verify_hit_set(
+                        store, hit_ids, contradicts_edges=_contradicts_arg,
+                    )
                 response["pask_teachback"] = teachback
                 try:
-                    write_event(
-                        store,
-                        "pask_teachback_pass",
-                        {
-                            "hit_count": teachback["hit_count"],
-                            "has_contradictions": teachback["has_contradictions"],
-                            "contradiction_count": len(teachback["contradiction_pairs"]),
-                            "dry_run_mode": pask_cfg.dry_run,
-                        },
-                        severity="info",
-                    )
+                    if not _claim_check_active.get():
+                        write_event(
+                            store,
+                            "pask_teachback_pass",
+                            {
+                                "hit_count": teachback["hit_count"],
+                                "has_contradictions": teachback["has_contradictions"],
+                                "contradiction_count": len(teachback["contradiction_pairs"]),
+                                "dry_run_mode": pask_cfg.dry_run,
+                            },
+                            severity="info",
+                            buffered=True,
+                        )
                 except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
                     logger.debug("pask_teachback_event_failed: %s", exc)
         except Exception as exc:  # noqa: BLE001 -- MCP boundary fail-safe
             logger.debug("pask_teachback_failed: %s", exc)
         try:
-            if resp.hits:
+            if resp.hits and not _claim_check_active.get():
                 import numpy as _np
+                from iai_mcp.pipeline import _crossing_consolidation_off
                 embeddings = [h.embedding for h in resp.hits if hasattr(h, "embedding") and h.embedding]
                 if not embeddings:
-                    _emb_cache = {}
                     _top_hits = resp.hits[:5]
-                    _emb_batch = store.get_batch([h.record_id for h in _top_hits])
-                    for h in _top_hits:
-                        rec = _emb_batch.get(h.record_id)
-                        if rec and rec.embedding:
-                            _emb_cache[h.record_id] = rec.embedding
-                    embeddings = list(_emb_cache.values())
+                    if _crossing_consolidation_off():
+                        _emb_cache = {}
+                        _emb_batch = store.get_batch([h.record_id for h in _top_hits])
+                        for h in _top_hits:
+                            rec = _emb_batch.get(h.record_id)
+                            if rec and rec.embedding:
+                                _emb_cache[h.record_id] = rec.embedding
+                        embeddings = list(_emb_cache.values())
+                    else:
+                        # Each top-5 hit's embedding is already
+                        # resident (plaintext, pre-rank) in _candidate_recs
+                        # moments earlier in this same dispatch --
+                        # get_batch is called only for ids ABSENT from it
+                        # (escalation-sourced hits). Iterates in _top_hits
+                        # order (skipping misses) so np.mean below sees the
+                        # identical float32 summation order as the legacy
+                        # unconditional get_batch, not just the same set.
+                        _emb_cache = {}
+                        _miss_ids = []
+                        for h in _top_hits:
+                            _cand = (
+                                _candidate_recs.get(h.record_id)
+                                if _candidate_recs is not None else None
+                            )
+                            if _cand is not None and getattr(_cand, "embedding", None):
+                                _emb_cache[h.record_id] = _cand.embedding
+                            else:
+                                _miss_ids.append(h.record_id)
+                        if _miss_ids:
+                            _emb_batch = store.get_batch(_miss_ids)
+                            for _mid in _miss_ids:
+                                rec = _emb_batch.get(_mid)
+                                if rec and rec.embedding:
+                                    _emb_cache[_mid] = rec.embedding
+                        embeddings = [
+                            _emb_cache[h.record_id] for h in _top_hits
+                            if h.record_id in _emb_cache
+                        ]
                 if embeddings:
                     _last_injection_embedding = _np.mean(embeddings, axis=0).tolist()
                     _last_injection_ids = [str(h.record_id) for h in resp.hits[:5]]
@@ -1222,7 +1711,33 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             logger.debug("trajectory_coupling_store_failed: %s", exc)
             _last_injection_embedding = None
             _last_injection_ids = []
+        if _claim_check_active.get():
+            _last_injection_embedding = None
+            _last_injection_ids = []
         return response
+
+    if method == "claim_check":
+        from iai_mcp.claim_check import synthesize_verdict
+
+        claim = params.get("cue", "")
+        sub_params = {
+            "cue": claim,
+            "session_id": params.get("session_id", "-"),
+            "budget_tokens": params.get("budget_tokens"),
+        }
+        _guard_token = _claim_check_active.set(True)
+        try:
+            recall = dispatch(store, "memory_recall", sub_params)
+        finally:
+            _claim_check_active.reset(_guard_token)
+        verdict = synthesize_verdict(recall, now=datetime.now(timezone.utc))
+        return {
+            "hits": recall.get("hits", []),
+            "anti_hits": recall.get("anti_hits", []),
+            "verdict": verdict,
+            "verdict_reason": verdict.get("reason", ""),
+            "_source": "claim_check",
+        }
 
     if method == "brain_view":
         # Server side of the dashboard relay: while the daemon is alive it is
@@ -1374,7 +1889,12 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
 
     if method == "memory_reinforce":
         ids = [UUID(x) for x in params["ids"]]
+        session_id = params.get("session_id", "-")
         upd = retrieve.reinforce_edges(store, ids)
+        try:
+            retrieve.emit_retrieval_reinforced(store, session_id=session_id, ids=ids)
+        except Exception as exc:  # noqa: BLE001 -- reinforce must not fail on telemetry
+            logger.warning("retrieval_reinforced event write failed: %s", exc)
         return {
             "edges_boosted": upd.edges_boosted,
             "new_weights": upd.new_weights,
@@ -1383,7 +1903,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
     if method == "memory_contradict":
         cue_embedding = params.get("cue_embedding") or [0.0] * EMBED_DIM
         rec = retrieve.contradict(
-            store, UUID(params["id"]), params["new_fact"], cue_embedding
+            store, UUID(params["id"]), params["new_fact"], cue_embedding,
+            epistemic_status=params.get("epistemic_status", "unknown"),
         )
         return {
             "original_id": str(rec.original_id),
@@ -1421,6 +1942,12 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                 logger.debug("trajectory_coupling_measure_failed: %s", exc)
             _last_injection_embedding = None
             _last_injection_ids = []
+        # memory_capture is reachable by an unsupervised assistant call: this
+        # RPC path must never mint a directive, so no caller-supplied value
+        # (any params key) is ever forwarded to capture_turn's `directive`
+        # kwarg -- only the explicit `iai capture --directive` command
+        # (direct-store write) and the typed-marker human-transcript-drain
+        # path may set one.
         result = capture_turn(
             store,
             cue=params.get("cue", ""),
@@ -1429,7 +1956,49 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             session_id=params.get("session_id", "-"),
             role=params.get("role", "user"),
             live_turn=True,
+            epistemic_status=params.get("epistemic_status", "unknown"),
+            salience_level=params.get("salience_level", "unflagged"),
         )
+        _next_action_raw = params.get("next_action")
+        _focus_raw = params.get("focus")
+        _next_action_param = _next_action_raw if isinstance(_next_action_raw, str) else None
+        _focus_param = _focus_raw if isinstance(_focus_raw, str) else None
+        if _next_action_param is not None or _focus_param is not None:
+            from iai_mcp._continuity_update import continuity_update
+
+            continuity_update(
+                next_action=_next_action_param,
+                focus=_focus_param,
+                session_id=params.get("session_id"),
+                store=store,
+            )
+        _agent_id_raw = params.get("agent_id")
+        _agent_role_raw = params.get("agent_role")
+        _agent_artifact_raw = params.get("agent_expected_artifact")
+        _agent_complete_id_raw = params.get("agent_complete_id")
+        _agent_model_raw = params.get("agent_model")
+        _agent_id_param = _agent_id_raw if isinstance(_agent_id_raw, str) else None
+        _agent_role_param = _agent_role_raw if isinstance(_agent_role_raw, str) else None
+        _agent_artifact_param = _agent_artifact_raw if isinstance(_agent_artifact_raw, str) else None
+        _agent_complete_id_param = (
+            _agent_complete_id_raw if isinstance(_agent_complete_id_raw, str) else None
+        )
+        _agent_model_param = _agent_model_raw if isinstance(_agent_model_raw, str) else None
+        # Spawn requires all three fields together -- a partial set is a no-op, never a
+        # partial registry entry.
+        if _agent_id_param and _agent_role_param and _agent_artifact_param:
+            from iai_mcp import daemon_state, session
+            daemon_state.register_running_agent(
+                agent_id=_agent_id_param,
+                role=_agent_role_param,
+                expected_artifact=_agent_artifact_param,
+                agent_model=_agent_model_param,
+            )
+            session.write_continuity_cache(store)
+        if _agent_complete_id_param:
+            from iai_mcp import daemon_state, session
+            daemon_state.complete_running_agent(_agent_complete_id_param)
+            session.write_continuity_cache(store)
         try:
             from iai_mcp.store import flush_record_buffer
             flush_record_buffer(store)

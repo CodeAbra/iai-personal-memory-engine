@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import faulthandler
+import gc
 import json
 import logging
 import math
@@ -1190,7 +1191,17 @@ async def _maybe_run_rem(store, ds: dict) -> "dict | None":
     return result
 
 
-def _write_session_start_cache(store, *, cache_path: Path = SESSION_START_CACHE_PATH) -> None:
+def _write_session_start_cache(store, *, cache_path: Path | None = None) -> None:
+    # Resolved at call time -- see directive_cache.write_directives_cache for
+    # why a bound default would ignore a monkeypatched SESSION_START_CACHE_PATH.
+    if cache_path is None:
+        cache_path = SESSION_START_CACHE_PATH
+    try:
+        from iai_mcp.directive_cache import write_directives_cache
+        write_directives_cache(store)
+    except Exception:  # noqa: BLE001 -- directive cache write must never block the session cache
+        log.debug("directive cache precache write failed", exc_info=True)
+
     try:
         from iai_mcp import retrieve
         from iai_mcp.session import (
@@ -1749,11 +1760,52 @@ def _install_boot_signal_trace() -> None:
             pass
 
 
+def _resolve_gc_taming(env: dict) -> bool:
+    """Kill-switch polarity: taming is on by default; ``IAI_MCP_GC_TAMING_OFF=1``
+    reverts to unmanaged GC, matching the project's ``*_OFF`` convention."""
+    return env.get("IAI_MCP_GC_TAMING_OFF") != "1"
+
+
+def _apply_gc_taming(
+    tamed: bool,
+    *,
+    disable: Callable[[], None] = gc.disable,
+    freeze: Callable[[], None] = gc.freeze,
+) -> None:
+    """Disable automatic collection and freeze the current object set.
+
+    A no-op when ``tamed`` is false, so the OFF flag reverts byte-for-byte.
+    Both hooks fire together, exactly once, at the caller's chosen point."""
+    if not tamed:
+        return
+    disable()
+    freeze()
+
+
+def _log_store_format(store: object) -> None:
+    """Record the resolved store format and its root path once at boot.
+
+    A diagnostic, not a precondition: a store object missing the expected
+    attributes emits nothing rather than aborting boot.
+    """
+    try:
+        driver = store.db.storage_driver  # type: ignore[attr-defined]
+        root = store.root  # type: ignore[attr-defined]
+    except AttributeError:
+        return
+    try:
+        log.info("store format: %s path=%s", driver, root)
+    except OSError:
+        return
+
+
 async def main() -> int:
     _set_process_title()
     _rotate_launchd_stderr()
     _require_native()
     _raise_fd_limit()
+    # Resolved once, at boot -- GC state does not toggle per-call.
+    _gc_taming_tamed = _resolve_gc_taming(os.environ)
     # kill -USR2 <pid> dumps every thread's stack to stderr — the sanctioned
     # way to see where a live daemon is stuck without root or a debugger.
     try:
@@ -1770,12 +1822,37 @@ async def main() -> int:
     # unchanged; the graceful handlers replace it once they exist.
     _install_boot_signal_trace()
 
+    # Refuse to open a store root carrying an in-progress swap marker --
+    # this is the ONE point every start path converges on (supervisor
+    # KeepAlive, self-heal, wrapper wake), so it must sit BEFORE the store
+    # open, not after.
+    from iai_mcp.migrate import refuse_if_marker_present
+    from iai_mcp.tz import store_root as _resolve_boot_store_root
+
+    _swap_marker_reason = refuse_if_marker_present(_resolve_boot_store_root())
+    if _swap_marker_reason is not None:
+        try:
+            sys.stderr.write(
+                json.dumps({
+                    "event": "daemon_boot_blocked_swap_in_progress",
+                    "reason": _swap_marker_reason,
+                    "remediation": (
+                        "confirm the store is whole, then remove the "
+                        ".swap-in-progress marker file yourself"
+                    ),
+                }) + "\n"
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            log.debug("stderr write for swap_in_progress refusal failed: %s", exc)
+        raise SystemExit(2)
+
     store = await _open_exclusive_store_with_backoff(
         lambda: MemoryStore(
             read_consistency_interval=timedelta(seconds=0),
             access_mode=AccessMode.EXCLUSIVE,
         )
     )
+    _log_store_format(store)
 
     try:
         hippo_lock_path = store.root / "hippo" / ".lock"
@@ -2223,6 +2300,7 @@ async def main() -> int:
         mcp_socket_task = asyncio.create_task(mcp_socket.serve())
         await asyncio.sleep(0.05)
 
+        _boot_warmup_task_handle: "asyncio.Task | None" = None
         try:
             from iai_mcp.daemon._boot_warmup import run_boot_warmup
 
@@ -2232,10 +2310,11 @@ async def main() -> int:
                 except Exception as _exc:  # noqa: BLE001 -- warm-up must never crash the daemon
                     log.debug("boot_warmup failed: %s", _exc, exc_info=True)
 
-            asyncio.create_task(_boot_warmup_task())
+            _boot_warmup_task_handle = asyncio.create_task(_boot_warmup_task())
         except Exception:  # noqa: BLE001 -- scheduling failure must not block boot
             log.debug("boot_warmup scheduling failed", exc_info=True)
 
+        _boot_preload_task_handle: "asyncio.Task | None" = None
         try:
             from iai_mcp import runtime_graph_cache as _rgc_mod
 
@@ -2267,7 +2346,7 @@ async def main() -> int:
                 finally:
                     _rgc_mod.preload_ready.set()
 
-            asyncio.create_task(_boot_preload())
+            _boot_preload_task_handle = asyncio.create_task(_boot_preload())
         except Exception:  # noqa: BLE001 -- scheduling failure must not block boot
             log.debug("boot_preload scheduling failed", exc_info=True)
             try:
@@ -2275,6 +2354,22 @@ async def main() -> int:
                 _rgc_fallback.preload_ready.set()
             except Exception:  # noqa: BLE001
                 pass
+
+        if _gc_taming_tamed:
+            async def _gc_taming_after_boot_resident() -> None:
+                # Waits for both boot-resident builders (corpus warm-up +
+                # runtime graph) so freeze() moves them into the frozen
+                # generation instead of exempting them mid-build; a missing
+                # handle (scheduling failed above) is skipped, not awaited.
+                _pending = [
+                    _t for _t in (_boot_warmup_task_handle, _boot_preload_task_handle)
+                    if _t is not None
+                ]
+                if _pending:
+                    await asyncio.gather(*_pending, return_exceptions=True)
+                _apply_gc_taming(True)
+
+            asyncio.create_task(_gc_taming_after_boot_resident())
 
         try:
             from iai_mcp.capture import drain_capture_backlog as _drain
@@ -2336,6 +2431,21 @@ async def main() -> int:
             S2OscillationConflict,
         )
         from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline as _SleepPipeline
+
+        # Must stay adjacent to the import above: the stamp has to describe the
+        # bytes THIS process loaded, not bytes that landed later.
+        try:
+            from iai_mcp.code_stamp import compute_code_stamp as _compute_code_stamp
+
+            _code_stamp = _compute_code_stamp()
+            state["code_stamp"] = _code_stamp
+
+            def _persist_code_stamp(d: dict) -> None:
+                d["code_stamp"] = _code_stamp
+
+            await asyncio.to_thread(update_state, _persist_code_stamp)
+        except Exception:  # noqa: BLE001 -- boot MUST NOT fail on a health stamp
+            log.debug("code stamp failed", exc_info=True)
 
         from pathlib import Path as _PathHere
         _store_root = os.environ.get("IAI_MCP_STORE")

@@ -69,7 +69,7 @@ def _build_source_store(
     n_records: int,
 ) -> tuple[str, list[float]]:
     """Build a synthetic stdlib source store; return (brain.sqlite3 path, record-0 vec)."""
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_STORE", str(root))
 
     from iai_mcp.store import MemoryStore, flush_record_buffer
@@ -261,7 +261,7 @@ def test_matching_cache_untouched_when_prewarm_disabled(
     monkeypatch.setattr(
         to_lilli_mod,
         "_prewarm_graph_cache",
-        lambda dst_root, report, peak_rss: peak_rss,
+        lambda dst_root, report, peak_rss, *, src_root=None: peak_rss,
     )
 
     dst_root, _src_root, report, _first_vec = _migrate(

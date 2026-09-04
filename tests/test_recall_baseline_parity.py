@@ -55,6 +55,30 @@ def _make_schema(text: str, pattern: str) -> MemoryRecord:
         language="en",
     )
 
+def _make_proc_chunk(text: str) -> MemoryRecord:
+    now = datetime.now(timezone.utc)
+    return MemoryRecord(
+        id=uuid4(),
+        tier="procedural",
+        literal_surface=text,
+        aaak_index="",
+        embedding=[1.0] + [0.0] * (EMBED_DIM - 1),
+        community_id=None,
+        centrality=0.0,
+        detail_level=1,
+        pinned=False,
+        stability=0.0,
+        difficulty=0.0,
+        last_reviewed=None,
+        never_decay=False,
+        never_merge=False,
+        provenance=[],
+        created_at=now,
+        updated_at=now,
+        tags=["chunk", "source:cofire"],
+        language="en",
+    )
+
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -83,6 +107,12 @@ def _seed_mixed_tier_store(tmp_path):
     for r in schema_records:
         store.insert(r)
     return store, episodic_records, schema_records
+
+def _seed_mixed_tier_store_with_proc_chunk(tmp_path):
+    store, episodic_records, schema_records = _seed_mixed_tier_store(tmp_path)
+    proc_rec = _make_proc_chunk("procedural chunk content payload r7")
+    store.insert(proc_rec)
+    return store, episodic_records, schema_records, proc_rec
 
 def test_baseline_recall_default_mode_is_verbatim_per_d14():
     import inspect
@@ -119,6 +149,43 @@ def test_baseline_recall_verbatim_filters_to_episodic_only(tmp_path):
         assert rec.tier == "episodic", (
             f"verbatim mode hit {h.record_id} has tier {rec.tier!r}, expected 'episodic'"
         )
+
+def test_baseline_recall_verbatim_excludes_procedural_chunk(tmp_path):
+    """Pins retrieve.py's own tier=="episodic" filter applied to its raw
+    query_similar candidates under the default verbatim mode: a
+    tier="procedural" record is excluded even at cosine 1.0 to the cue.
+    The mutant that turns this RED: removing that tier filter from
+    retrieve.recall's verbatim branch.
+    """
+    from iai_mcp.retrieve import recall
+
+    store, episodic_records, schema_records, proc_rec = (
+        _seed_mixed_tier_store_with_proc_chunk(tmp_path)
+    )
+    cue = [1.0] + [0.0] * (EMBED_DIM - 1)
+
+    candidate_ids = {r.id for r, _ in store.query_similar(cue, k=10)}
+    assert proc_rec.id in candidate_ids, (
+        f"proc chunk {proc_rec.id} must be a real reachable candidate "
+        f"(non-vacuity check) before checking its absence from hits; "
+        f"candidates: {candidate_ids}"
+    )
+
+    # k_hits set to exceed the full 6-record pool (3 episodic + 2 schema +
+    # 1 proc, all tied at cosine 1.0) so the filter's exclusion is the ONLY
+    # thing keeping proc_rec out of hits -- a k_hits truncation coincidence
+    # cannot mask a disabled tier filter here.
+    resp = recall(
+        store=store, cue_embedding=cue, cue_text="probe",
+        session_id="r7_proc_exclude", k_hits=10, k_anti=2,
+    )
+    assert resp.cue_mode == "verbatim", (
+        f"baseline default mode must be 'verbatim', got {resp.cue_mode!r}"
+    )
+    hit_ids = {h.record_id for h in resp.hits}
+    assert proc_rec.id not in hit_ids, (
+        f"procedural chunk {proc_rec.id} leaked into verbatim baseline hits: {hit_ids}"
+    )
 
 def test_baseline_recall_concept_mode_returns_all_tiers(tmp_path):
     from iai_mcp.retrieve import recall

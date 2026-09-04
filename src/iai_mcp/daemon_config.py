@@ -673,6 +673,20 @@ def _load_reconsolidation_config() -> ReconsolidationConfig:
     )
 
 
+@dataclass(frozen=True)
+class ReconsolidationValenceConfig:
+
+    enabled: bool
+
+
+def _load_reconsolidation_valence_config() -> ReconsolidationValenceConfig:
+    # Same kill-switch store.raise_valence already honors -- one env var,
+    # one meaning, checked in both places.
+    return ReconsolidationValenceConfig(
+        enabled=os.environ.get("IAI_MCP_VALENCE_WRITE_OFF") != "1",
+    )
+
+
 _STC_DEFAULT_PERI_EVENT_BUFFER_SIZE: int = 20
 _STC_DEFAULT_PERI_EVENT_WINDOW_SEC: int = 1800
 _STC_DEFAULT_STRONG_EVENT_TYPES: str = "memory_capture,error_trace,user_correction"

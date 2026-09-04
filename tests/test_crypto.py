@@ -25,6 +25,7 @@ def test_crypto_roundtrip_basic() -> None:
 def test_crypto_roundtrip_cyrillic() -> None:
     from iai_mcp.crypto import encrypt_field, decrypt_field
     key = b"\x01" * 32
+    # non-English fixture data: multilingual behavior under test — keep
     plaintext = "Привет, мир! Это тест шифрования."
     ciphertext = encrypt_field(plaintext, key)
     recovered = decrypt_field(ciphertext, key)
@@ -285,10 +286,12 @@ def test_envelope_byte_identity_roundtrip() -> None:
     from iai_mcp.crypto import decrypt_field, encrypt_field
 
     key = b"\x14" * 32
+    # non-English fixture data: multilingual behavior under test — keep
     plaintexts = [
         "ok",
         "the quick brown fox jumps over the lazy dog " * 50,
         '[{"a":1,"b":2,"c":[1,2,3,4,5]}]',
+        # non-English fixture data: multilingual behavior under test — keep
         "Привет, мир! — Cyrillic mix",
         "",
         # Adversarial: new-write round-trip must survive leading control bytes

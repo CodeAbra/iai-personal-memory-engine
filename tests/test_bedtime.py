@@ -43,10 +43,15 @@ def test_english_phrase_matches_even_rhetorical() -> None:
 
 def test_russian_positive() -> None:
     for cue in [
+        # non-English fixture data: multilingual behavior under test — keep
         "пойду спать",
+        # non-English fixture data: multilingual behavior under test — keep
         "спокойной ночи",
+        # non-English fixture data: multilingual behavior under test — keep
         "устал, иду в постель",
+        # non-English fixture data: multilingual behavior under test — keep
         "до завтра",
+        # non-English fixture data: multilingual behavior under test — keep
         "пора ложиться",
     ]:
         matched, _ = detect_wind_down_phrase(cue, "ru")
@@ -92,6 +97,7 @@ def test_cross_lingual_en_is_fallback_but_ru_is_not() -> None:
     matched_en_under_ru, _ = detect_wind_down_phrase("good night", "ru")
     assert matched_en_under_ru, "EN fallback must trigger regardless of language"
 
+    # non-English fixture data: multilingual behavior under test — keep
     matched_ru_under_en, _ = detect_wind_down_phrase("я пойду спать", "en")
     assert not matched_ru_under_en, (
         "RU phrases must not fall back under language=en"

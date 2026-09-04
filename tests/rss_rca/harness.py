@@ -556,10 +556,28 @@ def run(
     seed: int = 42,
     deferred_events_per_cycle: int = 250,
     sleep_budget_sec: float | None = None,
+    gc_mode: str = "off",
 ) -> Path:
     """Drive ``cycles`` in-process WAKE→drain→SLEEP cycles against a tmp store.
 
     Returns the path to the rendered ``RCA-FINDINGS.md`` file under ``out``.
+
+    ``gc_mode`` applies the daemon's own boot-time GC-taming helper
+    (``iai_mcp.daemon._apply_gc_taming``) right after the corpus is built and
+    before the cycle loop starts -- the harness's own analogue of the
+    daemon's "boot-resident structures finished building" point. One of:
+
+    - ``"off"`` (default): neither hook fires, today's unmanaged GC.
+    - ``"disable"``: ``gc.disable()`` only (no freeze).
+    - ``"freeze"``: ``gc.freeze()`` only (auto-collection stays enabled).
+    - ``"both"``: the production kill-switch shape, both hooks together.
+
+    ``iai_mcp.daemon`` is imported unconditionally regardless of ``gc_mode``
+    so every mode pays the same module-import cost -- otherwise the RSS
+    comparison across modes would be confounded by import-graph size, not
+    just by which GC hooks fired. This lets the soak gate isolate which half
+    of the kill-switch (if either) is responsible for any observed per-cycle
+    RSS growth across repeated WAKE->drain->SLEEP cycles.
 
     ``sleep_budget_sec``, when set, bounds each cycle's sleep pass with
     ``pipeline.force_run(interrupt_check=...)`` instead of the bare
@@ -585,6 +603,10 @@ def run(
     """
     if n <= 0 or cycles <= 0:
         raise ValueError("--n and --cycles must be positive integers")
+    if gc_mode not in ("off", "disable", "freeze", "both"):
+        raise ValueError(
+            f"gc_mode must be one of off/disable/freeze/both, got {gc_mode!r}"
+        )
 
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -677,6 +699,35 @@ def run(
                 "duration_sec": round(corpus_duration, 3),
             }) + "\n")
             log_fh.flush()
+
+        # The harness's own analogue of the daemon's boot-resident freeze
+        # point: corpus (+ warm embedder) are the boot-resident set here.
+        # Imported unconditionally so every gc_mode pays the same
+        # module-import cost (see the gc_mode docstring above).
+        import gc as _gc_for_taming
+        from iai_mcp.daemon import _apply_gc_taming
+
+        def _no_gc_hook() -> None:
+            return None
+
+        if gc_mode != "off":
+            _apply_gc_taming(
+                True,
+                disable=(
+                    _gc_for_taming.disable
+                    if gc_mode in ("disable", "both") else _no_gc_hook
+                ),
+                freeze=(
+                    _gc_for_taming.freeze
+                    if gc_mode in ("freeze", "both") else _no_gc_hook
+                ),
+            )
+            with log_lock:
+                log_fh.write(
+                    json.dumps({"kind": "gc_taming_applied", "gc_mode": gc_mode})
+                    + "\n"
+                )
+                log_fh.flush()
 
         # Lifecycle event log — required by SleepPipeline constructor.
         sleep_log_dir = tmp_root / ".iai-mcp" / "logs"
@@ -1022,6 +1073,21 @@ def _main(argv: list[str] | None = None) -> int:
         "--deferred-events-per-cycle", type=int, default=250,
         help="number of deferred-capture events staged before each cycle",
     )
+    parser.add_argument(
+        "--gc-mode", choices=("off", "disable", "freeze", "both"), default="off",
+        help=(
+            "apply the daemon's boot-time GC-taming helper right after the "
+            "corpus is built, before the cycle loop: off (default), "
+            "disable-only, freeze-only, or both (the production shape)"
+        ),
+    )
+    parser.add_argument(
+        "--sleep-budget-sec", type=float, default=None,
+        help=(
+            "bound each cycle's sleep pass with a deadline instead of the "
+            "unbounded pipeline.run() (see run()'s own docstring)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.n <= 0 or args.cycles <= 0:
@@ -1050,6 +1116,8 @@ def _main(argv: list[str] | None = None) -> int:
         dim=args.dim,
         seed=args.seed,
         deferred_events_per_cycle=args.deferred_events_per_cycle,
+        sleep_budget_sec=args.sleep_budget_sec,
+        gc_mode=args.gc_mode,
     )
     print(f"RCA-FINDINGS.md written to {findings}")
     return 0

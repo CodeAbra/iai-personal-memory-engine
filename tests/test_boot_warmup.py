@@ -22,6 +22,8 @@ from uuid import uuid4
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
+
 _EMBED_DIM = 32
 
 
@@ -164,7 +166,7 @@ def test_warmup_is_write_free(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "").lower() != "lilli",
+    os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() != "lilli",
     reason="index-warming contract only observable via the lilli engine's full_scan_count",
 )
 def test_warmup_builds_engine_indexes(tmp_path) -> None:

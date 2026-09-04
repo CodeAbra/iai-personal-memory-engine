@@ -165,6 +165,7 @@ def test_wrapper_lists_all_tools(built_wrapper: Path, daemon_sock: Path) -> None
             "memory_capture",
             "episodes_recent",
             "memory_temporal_recall",
+            "claim_check",
         }
     finally:
         proc.terminate()

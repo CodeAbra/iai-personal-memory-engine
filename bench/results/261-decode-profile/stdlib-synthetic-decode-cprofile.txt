@@ -1,0 +1,90 @@
+
+===== sort by CUMULATIVE time (top 35) =====
+         2197562 function calls in 3.196 seconds
+
+   Ordered by: cumulative time
+   List reduced from 68 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.510    0.510    3.196    3.196 profile_escalation_decode.py:249(_body)
+       40    0.752    0.019    2.678    0.067 _table.py:1225(to_row_dicts)
+       40    0.074    0.002    0.998    0.025 _table.py:1022(_ann_knn_fetch_core)
+      720    0.064    0.000    0.766    0.001 _sqlite_stdlib.py:67(_call)
+      360    0.000    0.000    0.742    0.002 _sqlite_stdlib.py:97(fetchall)
+   144000    0.078    0.000    0.725    0.000 _table.py:432(_decode_raw_row_embedding)
+      360    0.678    0.002    0.678    0.002 {method 'fetchall' of 'sqlite3.Cursor' objects}
+   144000    0.050    0.000    0.626    0.000 _table.py:334(_decode_embedding)
+   144040    0.524    0.000    0.524    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+       40    0.031    0.001    0.150    0.004 {method 'sort' of 'list' objects}
+   144000    0.119    0.000    0.119    0.000 _table.py:1275(<lambda>)
+       40    0.000    0.000    0.100    0.002 _vecindex.py:76(knn_query)
+       40    0.100    0.002    0.100    0.002 {method 'knn_query' of 'builtins.ExactIndex' objects}
+   432040    0.052    0.000    0.052    0.000 {method 'get' of 'dict' objects}
+   144000    0.045    0.000    0.045    0.000 {built-in method numpy.frombuffer}
+      360    0.001    0.000    0.025    0.000 _sqlite_stdlib.py:123(execute)
+      360    0.024    0.000    0.024    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+   288280    0.019    0.000    0.019    0.000 {built-in method builtins.isinstance}
+   144040    0.015    0.000    0.015    0.000 {built-in method builtins.min}
+      400    0.009    0.000    0.015    0.000 {method 'join' of 'str' objects}
+   144000    0.015    0.000    0.015    0.000 {built-in method builtins.max}
+   144040    0.013    0.000    0.013    0.000 {method 'append' of 'list' objects}
+   144000    0.011    0.000    0.011    0.000 {method 'add' of 'set' objects}
+       40    0.000    0.000    0.007    0.000 profile_escalation_decode.py:81(_representative_vec)
+       40    0.003    0.000    0.007    0.000 neural_map.py:39(embed)
+   144360    0.006    0.000    0.006    0.000 _table.py:1174(<genexpr>)
+       40    0.001    0.000    0.001    0.000 {built-in method builtins.sum}
+    15360    0.001    0.000    0.001    0.000 {method 'random' of '_random.Random' objects}
+       40    0.000    0.000    0.001    0.000 _table.py:610(search)
+    15400    0.001    0.000    0.001    0.000 neural_map.py:46(<genexpr>)
+      360    0.001    0.000    0.001    0.000 {method 'extend' of 'list' objects}
+       40    0.000    0.000    0.001    0.000 random.py:126(__init__)
+       40    0.001    0.000    0.001    0.000 {built-in method numpy.array}
+       40    0.000    0.000    0.000    0.000 random.py:135(seed)
+       40    0.000    0.000    0.000    0.000 _db.py:2756(open_table)
+
+
+
+===== sort by TOTAL (self) time (top 35) =====
+         2197562 function calls in 3.196 seconds
+
+   Ordered by: internal time
+   List reduced from 68 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       40    0.752    0.019    2.678    0.067 _table.py:1225(to_row_dicts)
+      360    0.678    0.002    0.678    0.002 {method 'fetchall' of 'sqlite3.Cursor' objects}
+   144040    0.524    0.000    0.524    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+        1    0.510    0.510    3.196    3.196 profile_escalation_decode.py:249(_body)
+   144000    0.119    0.000    0.119    0.000 _table.py:1275(<lambda>)
+       40    0.100    0.002    0.100    0.002 {method 'knn_query' of 'builtins.ExactIndex' objects}
+   144000    0.078    0.000    0.725    0.000 _table.py:432(_decode_raw_row_embedding)
+       40    0.074    0.002    0.998    0.025 _table.py:1022(_ann_knn_fetch_core)
+      720    0.064    0.000    0.766    0.001 _sqlite_stdlib.py:67(_call)
+   432040    0.052    0.000    0.052    0.000 {method 'get' of 'dict' objects}
+   144000    0.050    0.000    0.626    0.000 _table.py:334(_decode_embedding)
+   144000    0.045    0.000    0.045    0.000 {built-in method numpy.frombuffer}
+       40    0.031    0.001    0.150    0.004 {method 'sort' of 'list' objects}
+      360    0.024    0.000    0.024    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+   288280    0.019    0.000    0.019    0.000 {built-in method builtins.isinstance}
+   144040    0.015    0.000    0.015    0.000 {built-in method builtins.min}
+   144000    0.015    0.000    0.015    0.000 {built-in method builtins.max}
+   144040    0.013    0.000    0.013    0.000 {method 'append' of 'list' objects}
+   144000    0.011    0.000    0.011    0.000 {method 'add' of 'set' objects}
+      400    0.009    0.000    0.015    0.000 {method 'join' of 'str' objects}
+   144360    0.006    0.000    0.006    0.000 _table.py:1174(<genexpr>)
+       40    0.003    0.000    0.007    0.000 neural_map.py:39(embed)
+    15360    0.001    0.000    0.001    0.000 {method 'random' of '_random.Random' objects}
+       40    0.001    0.000    0.001    0.000 {built-in method builtins.sum}
+    15400    0.001    0.000    0.001    0.000 neural_map.py:46(<genexpr>)
+      360    0.001    0.000    0.001    0.000 {method 'extend' of 'list' objects}
+       40    0.001    0.000    0.001    0.000 {built-in method numpy.array}
+      360    0.001    0.000    0.025    0.000 _sqlite_stdlib.py:123(execute)
+       40    0.000    0.000    0.000    0.000 {function Random.seed at 0x1059b4c20}
+      360    0.000    0.000    0.000    0.000 _sqlite_stdlib.py:80(__init__)
+      360    0.000    0.000    0.742    0.002 _sqlite_stdlib.py:97(fetchall)
+       40    0.000    0.000    0.000    0.000 {built-in method _hashlib.openssl_sha256}
+       40    0.000    0.000    0.000    0.000 random.py:135(seed)
+       40    0.000    0.000    0.000    0.000 _db.py:2756(open_table)
+       40    0.000    0.000    0.007    0.000 profile_escalation_decode.py:81(_representative_vec)
+
+

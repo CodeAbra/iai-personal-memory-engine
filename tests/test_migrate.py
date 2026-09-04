@@ -68,6 +68,7 @@ def test_migrate_v1_to_v2_defaults_language_to_en(tmp_path):
 
     store = MemoryStore(path=tmp_path)
     en = _v1_record("This is a reasonable English sentence with enough words.")
+    # non-English fixture data: multilingual behavior under test — keep
     ru = _v1_record("Это осмысленное предложение с достаточным количеством слов.")
     store.insert(en)
     store.insert(ru)

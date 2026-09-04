@@ -1,0 +1,25 @@
+{
+  "csv_path": "bench/results/v7.0/iteration-0/contradiction_longitudinal_20260518T030515Z-91463d2-seeds13-42-137-scale_honest.csv",
+  "n_rows": 3000,
+  "n_seeds": 3,
+  "per_seed": {
+    "13": {
+      "efe_real_rescue": 0.8852459016393442,
+      "efe_shadow_rescue": 0.8984375,
+      "delta": -0.013191598360655754
+    },
+    "42": {
+      "efe_real_rescue": 0.890295358649789,
+      "efe_shadow_rescue": 0.9011406844106464,
+      "delta": -0.010845325760857394
+    },
+    "137": {
+      "efe_real_rescue": 0.9173228346456693,
+      "efe_shadow_rescue": 0.9186991869918699,
+      "delta": -0.0013763523462005933
+    }
+  },
+  "cross_seed_mean_delta": -0.00847109215590458,
+  "ship_gate_hit": false,
+  "threshold": 0.1
+}

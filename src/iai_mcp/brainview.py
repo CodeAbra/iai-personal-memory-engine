@@ -782,6 +782,9 @@ class BrainView:
     def pin(self, record_id: str, on: bool = True) -> dict:
         return self._call("pin", {"record_id": record_id, "on": bool(on)})
 
+    def salience(self, record_id: str, level: str = "unflagged") -> dict:
+        return self._call("salience", {"record_id": record_id, "level": level})
+
     def capture(self, text: str) -> dict:
         return self._call("capture", {"text": text})
 
@@ -1494,6 +1497,42 @@ class BrainView:
                 logger.debug("pin provenance append failed: %s", exc)
         return {"status": "pinned" if on else "unpinned", "record_id": str(rid)}
 
+    def salience_direct(self, record_id: str, level: str = "unflagged") -> dict:
+        """Set or clear a record's salience_level. Writes exactly one column
+        -- never pinned or never_merge -- and is fully reversible per-call."""
+        from iai_mcp.store import flush_record_buffer
+        from iai_mcp.types import SALIENCE_LEVEL_ENUM
+
+        try:
+            rid = UUID(str(record_id))
+        except (TypeError, ValueError):
+            return {"status": "error", "reason": "invalid id"}
+        flush_record_buffer(self.store)
+        rec = self.store.get(rid)
+        if rec is None:
+            return {"status": "error", "reason": "unknown record"}
+        if level not in SALIENCE_LEVEL_ENUM:
+            level = "unflagged"
+        with self._lock:
+            from iai_mcp.store import RECORDS_TABLE
+
+            self.store.db.open_table(RECORDS_TABLE).update(
+                where=f"id = '{rid}'",
+                values={"salience_level": level},
+            )
+            try:
+                self.store.append_provenance(
+                    rid,
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "cue": f"operator-salience-{level}",
+                        "session_id": "brainview",
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 -- provenance is traceability
+                logger.debug("salience provenance append failed: %s", exc)
+        return {"status": "salience_set", "level": level, "record_id": str(rid)}
+
     def capture_direct(self, text: str) -> dict:
         import hashlib
 
@@ -1840,7 +1879,7 @@ _VIEWS: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
 
 BRAIN_VIEW_VERBS = frozenset({
     "overview", "graph", "search", "economy", "events", "browse", "surface",
-    "capture", "teach", "forget_hint", "rescue", "pin",
+    "capture", "teach", "forget_hint", "rescue", "pin", "salience",
 })
 
 

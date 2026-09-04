@@ -57,10 +57,9 @@ def _load_fixture() -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _clear_toggle_env(monkeypatch):
-    # None of the three membership-affecting toggles should leak between tests.
+    # None of the membership-affecting toggles should leak between tests.
     for var in (
         "IAI_MCP_EXACT_AUTHORITY_OFF",
-        "IAI_MCP_CONF_ESCALATE_OFF",
         "IAI_MCP_MULTI_SEED_OFF",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -132,9 +131,9 @@ def test_harness_uses_core_dispatch(driver):
 
 
 def test_trace_marks_fire_on_real_cue(driver):
-    """At least one real cue's traced dispatch must fire the soft_gate,
-    conf_escalate, and multi_seed marks; a cue flagged expects_structural
-    must additionally fire cleanup_attractor."""
+    """At least one real cue's traced dispatch must fire the soft_gate and
+    multi_seed marks; a cue flagged expects_structural must additionally
+    fire cleanup_attractor."""
     if not _fixture_path().exists():
         pytest.skip(_fixture_absent_reason())
     if not _HARNESS_PATH.exists():
@@ -149,8 +148,8 @@ def test_trace_marks_fire_on_real_cue(driver):
 
     _returned_ids, marks_set = dispatch_cue_traced(target_cue, driver=driver)
 
-    assert marks_set >= {"soft_gate", "conf_escalate", "multi_seed"}, (
-        f"expected soft_gate/conf_escalate/multi_seed to fire, got {sorted(marks_set)}"
+    assert marks_set >= {"soft_gate", "multi_seed"}, (
+        f"expected soft_gate/multi_seed to fire, got {sorted(marks_set)}"
     )
 
     if structural_cues:

@@ -10,21 +10,22 @@ them.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-    reason=(
-        "PRAGMA cache_size / cached_statements configures the SQLite page cache "
-        "and statement cache; the lilli engine has no page-cache analog and "
-        "accepts-and-ignores the PRAGMA. Lilli's at-rest footprint bound is proven "
-        "separately by the per-record size and float32-blob tests in "
-        "test_hippo_memory_footprint.py."
-    ),
-)
+# Every test in this module exercises PRAGMA cache_size / cached_statements,
+# which configures the SQLite page cache and statement cache; the native
+# engine has no page-cache analog and accepts-and-ignores the PRAGMA. Its
+# at-rest footprint bound is proven separately by the per-record size and
+# float32-blob tests in test_hippo_memory_footprint.py. Each test therefore
+# opens its store against the legacy driver explicitly rather than relying on
+# whatever the ambient default happens to be.
+
+
+@pytest.fixture(autouse=True)
+def _legacy_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
 
 
 def test_sqlite_cache_size_pragma_is_capped(tmp_path: Path, monkeypatch):

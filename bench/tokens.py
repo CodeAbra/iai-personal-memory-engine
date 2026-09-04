@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sys
@@ -111,7 +110,7 @@ def run_token_bench(
     if count_tokens_fn is not None:
         counter = count_tokens_fn
         mode = "injected"
-    elif os.environ.get("ANTHROPIC_API_KEY") and importlib.util.find_spec("anthropic"):
+    elif os.environ.get("ANTHROPIC_API_KEY"):
         counter = _anthropic_count_tokens
         mode = "anthropic-count-tokens"
     else:

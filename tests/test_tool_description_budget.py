@@ -48,8 +48,8 @@ def _extract_top_level_descriptions() -> list[tuple[str, str]]:
 
 def test_tool_count_pinned():
     descs = _extract_top_level_descriptions()
-    assert len(descs) == 14, (
-        f"expected 14 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
+    assert len(descs) == 15, (
+        f"expected 15 tool descriptions, found {len(descs)}: {[n for n, _ in descs]}"
     )
 
 def test_each_tool_description_le_30_tokens():
@@ -60,7 +60,7 @@ def test_each_tool_description_le_30_tokens():
         if n > 30:
             offenders.append((name, n, desc[:80]))
     assert not offenders, (
-        "TOK-15 violation: some descriptions exceed 30 tokens:\n"
+        "tool description exceeds the 30-token budget:\n"
         + "\n".join(f"  {n}: {t} tok -- {d!r}" for n, t, d in offenders)
     )
 

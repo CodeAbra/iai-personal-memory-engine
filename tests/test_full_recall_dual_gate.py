@@ -10,9 +10,9 @@ Latency direction — after a simulated high prior-recall latency, the live reca
   to gate spread).
 
 Accuracy direction — on a seeded small corpus with an edge-less-island target
-  and a beyond-first-pass target, the bounded escalation (adaptive depth) reaches
-  the island or the beyond-cutoff target while the escalation cap (ADAPTIVE_ESCALATION_CAP)
-  is never breached; the spread-disabled bucket stays at zero for the spread case.
+  and a beyond-first-pass target, spread reaches the island or the
+  beyond-cutoff target; the spread-disabled bucket stays at zero for the
+  spread case.
 
 Over-cap-hub rank-identity — a fixture hub whose TRUE hebbian degree exceeds the
   traversal cap (_HEBB_TRAVERSAL_CAP = 50) is built into a small corpus.  The
@@ -347,20 +347,19 @@ class TestSpreadSurvivesHighPriorLatency:
 
 
 # ---------------------------------------------------------------------------
-# Gate 2: Accuracy direction — bounded escalation
+# Gate 2: Accuracy direction — spread reach
 #
 # On a seeded corpus: an edge-less-island target (no Hebbian edges) and a
-# beyond-first-pass target.  The adaptive depth escalation reaches the island
-# when confidence is low, and the escalation is bounded (cap enforced).
-# The degrade bucket must remain at zero (spread_disabled never fires).
+# beyond-first-pass target.  Two-hop spread reaches the island.  The degrade
+# bucket must remain at zero (spread_disabled never fires).
 # ---------------------------------------------------------------------------
 
 
 class TestBoundedEscalationAccuracy:
-    """Accuracy gate: bounded escalation reaches islands; degrade bucket = zero."""
+    """Accuracy gate: spread reaches islands; degrade bucket = zero."""
 
     def test_degrade_bucket_is_zero_and_escalation_is_bounded(self, tmp_path):
-        """The spread-disabled miss bucket is zero; escalation stays bounded.
+        """The spread-disabled miss bucket is zero.
 
         Runs the bench.recall_accuracy.run_accuracy path on a crafted eval set
         (build_eval_set with a small filler count) and asserts:
@@ -406,27 +405,6 @@ class TestBoundedEscalationAccuracy:
         # with n_filler < K_CANDIDATES (the target lands inside the cosine frontier,
         # so it is neither island nor beyond-cutoff — structural by design with a
         # small corpus). The meaningful gate is degrade==0 above.
-
-    def test_escalation_cap_is_not_exceeded(self, tmp_path):
-        """ADAPTIVE_ESCALATION_CAP is never exceeded during a low-confidence escalation.
-
-        Patches the internal escalated-query path to record the widened k passed
-        to the ANN probe, then verifies the cap is honoured.
-        """
-        from iai_mcp.pipeline import ADAPTIVE_ESCALATION_CAP
-
-        # ADAPTIVE_ESCALATION_CAP must be a sane bounded value.
-        assert isinstance(ADAPTIVE_ESCALATION_CAP, int), (
-            "ADAPTIVE_ESCALATION_CAP must be an int"
-        )
-        assert ADAPTIVE_ESCALATION_CAP <= 2000, (
-            f"ADAPTIVE_ESCALATION_CAP must be <= 2000 (bounded escalation invariant); "
-            f"got {ADAPTIVE_ESCALATION_CAP}"
-        )
-        assert ADAPTIVE_ESCALATION_CAP > 0, (
-            "ADAPTIVE_ESCALATION_CAP must be positive"
-        )
-
 
 # ---------------------------------------------------------------------------
 # Gate 3: Over-cap-hub rank-identity assertion

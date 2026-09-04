@@ -29,11 +29,12 @@ from uuid import UUID, uuid4
 import numpy as np
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 from tests._helpers import stub_embedder_for_store
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _lilli_only = pytest.mark.skipif(
     not _LILLI,
@@ -211,7 +212,7 @@ def test_recall_reads_never_block_on_held_writer_lock(tmp_path: Path) -> None:
 def test_stdlib_reads_still_complete_after_lock_release(tmp_path: Path, monkeypatch) -> None:
     """On stdlib, ro_conn() is the writer path — document the no-op semantics
     (the read still completes correctly once the lock releases), not speed."""
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     store = _make_store(tmp_path)
     assert store.db._storage_driver == "stdlib"
     ids = _seed_records_and_edges(store, 5)

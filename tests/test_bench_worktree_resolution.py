@@ -34,9 +34,13 @@ BENCH_SCRIPTS_NEEDING_SHIM = [
     "trajectory.py",
     "recall_accuracy.py",
     "recall_accuracy_real.py",
+    "token_breakdown.py",
+    "token_recall_guard.py",
     "full_recall_latency_probe.py",
     "exact_authority_latency.py",
     "foresight_real_eval.py",
+    "foresight_multicue_eval.py",
+    "vspomni_fixture_eval.py",
     "longitudinal_export.py",
     "longitudinal_score.py",
     "boot_warmup_validation.py",
@@ -44,6 +48,14 @@ BENCH_SCRIPTS_NEEDING_SHIM = [
     "isolated_daemon_boot_proof.py",
     "verbatim.py",
     "zstd_ratio.py",
+    "crossing_count_probe.py",
+    "gc_live_probe.py",
+    "profile_escalation_decode.py",
+    "fhrr_multiplicity_calibration.py",
+    "fhrr_signal_discriminator.py",
+    "fhrr_verdict_membership.py",
+    "fhrr_verdict_recall_delta.py",
+    "proc_corpus_census.py",
 ]
 
 BENCH_SCRIPTS_NO_SHIM = [
@@ -55,6 +67,7 @@ BENCH_SCRIPTS_NO_SHIM = [
     "embed_warm_cost.py",
     "make_parity_summary.py",
     "memorygraph_adj_spike.py",
+    "cofire_shape_probe.py",
 ]
 
 

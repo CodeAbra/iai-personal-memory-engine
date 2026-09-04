@@ -10,12 +10,14 @@ import shutil
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from iai_mcp.exceptions import NativeError
+from iai_mcp.model_attribution import normalize_model
 
 MAX_DRAIN_EVENTS_PER_RUN = 5000
 
@@ -111,6 +113,8 @@ _LIVE_ACTIVE_RE = re.compile(r"\.live\.jsonl$")
 
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import (
+    EPISTEMIC_STATUS_ENUM,
+    SALIENCE_LEVEL_ENUM,
     SCHEMA_VERSION_CURRENT,
     TIER_ENUM,
     MemoryRecord,
@@ -406,6 +410,217 @@ def _is_episodic_conversational(tier: str, role: str) -> bool:
     return tier == "episodic" and role in {"user", "assistant"}
 
 
+# --- Correction-candidate detector ------------------------------------------
+#
+# This path must NEVER write a contradiction: no contradicts edge, no
+# valid_to close. Only an explicit human/model memory_contradict call --
+# entirely outside this module -- may do that. The fence is structural:
+# tests/test_correction_candidate_detector.py asserts this module imports
+# nothing named contradict/memory_contradict and never references the
+# add_contradicts_edge store method.
+
+CORRECTION_CANDIDATE_TEXT_SCAN_CAP = 2000
+
+# "Recently surfaced" is bounded to this window: foresight's served-state
+# dict accumulates for the whole session (its TTL only gates RE-serving,
+# never prunes the dict), so an unbounded read here would treat "served at
+# any point this session" as "just surfaced" -- degrading the false-positive
+# guard toward "did this session ever get a pack".
+CORRECTION_CANDIDATE_RECENCY_WINDOW_SEC = 600
+
+# Mirrors curiosity.MINE_MAX_PER_SESSION: caps queueing so a chatty
+# correction-shaped phrase cannot crowd out genuine curiosity questions on
+# the fixed-size curiosity_pending/get_pending_questions(limit=2) surface.
+CORRECTION_CANDIDATE_MAX_PENDING_PER_SESSION = 2
+
+# Same anchored, length-capped shape as cue_router.py's correction-trigger
+# tables (RU + EN); no nested quantifiers.
+_CORRECTION_PATTERNS: "list[tuple[str, re.Pattern]]" = [
+    ("ru-net-pravilno", re.compile(r"\bнет,\s*правильно\b", re.IGNORECASE)),
+    ("ru-vspomni-pravilnyi", re.compile(r"\bвспомни(?:ть)?\s+правильн\w*\b", re.IGNORECASE)),
+    ("ru-ne-tak-a-vot-tak", re.compile(r"\bне\s+так[,]?\s+а\s+вот\s+так\b", re.IGNORECASE)),
+    ("ru-na-samom-dele", re.compile(r"\bна\s+самом\s+деле\b", re.IGNORECASE)),
+    ("en-no-actually", re.compile(r"\bno,\s*actually\b", re.IGNORECASE)),
+    ("en-thats-wrong", re.compile(r"\bthat'?s\s+wrong\b", re.IGNORECASE)),
+]
+
+
+def _matched_correction_label(text: str) -> "str | None":
+    """The matched pattern's stable label, or None."""
+    scanned = (text or "")[:CORRECTION_CANDIDATE_TEXT_SCAN_CAP]
+    for label, pat in _CORRECTION_PATTERNS:
+        if pat.search(scanned):
+            return label
+    return None
+
+
+def _recently_surfaced_record_id(store: "MemoryStore", session_id: str) -> "str | None":
+    """Most recent record id THIS session's own next-turn pack has served
+    within CORRECTION_CANDIDATE_RECENCY_WINDOW_SEC.
+
+    Reads only this session's own served-state file (already sanitized and
+    session-scoped by foresight.pack_path/_load_state) -- never scans another
+    session's state. Returns None when nothing was served recently (the
+    false-positive guard: a pattern match with nothing to correct queues
+    nothing).
+    """
+    if not session_id or session_id == "-":
+        return None
+    try:
+        from iai_mcp.foresight import _load_state
+        served = _load_state(store, session_id).get("served") or {}
+    except Exception as exc:  # noqa: BLE001 -- detector is additive, never a dependency
+        log.debug("correction_candidate_served_state_read_failed: %s", exc)
+        return None
+    now_ts = time.time()
+    candidates = [
+        (rid, ts) for rid, ts in served.items()
+        if isinstance(rid, str) and not rid.startswith("q:")
+        and (now_ts - float(ts)) <= CORRECTION_CANDIDATE_RECENCY_WINDOW_SEC
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda kv: kv[1], reverse=True)
+    return candidates[0][0]
+
+
+def _queue_correction_candidate(
+    store: "MemoryStore", *, text: str, session_id: str,
+) -> None:
+    """QUEUE a confirmation candidate for a possible correction -- never
+    write a contradiction. Rides the existing curiosity_question event
+    shape so it surfaces via curiosity_pending / get_pending_questions with
+    no reader or MCP-tool change.
+    """
+    label = _matched_correction_label(text)
+    if label is None:
+        return
+    trigger_id = _recently_surfaced_record_id(store, session_id)
+    if trigger_id is None:
+        return
+    try:
+        from iai_mcp.curiosity import _last_curiosity_turn, pending_questions
+        if len(pending_questions(store, session_id=session_id)) >= (
+            CORRECTION_CANDIDATE_MAX_PENDING_PER_SESSION
+        ):
+            return
+        # Carry the SAME turn value _last_curiosity_turn(session_id) would
+        # already return (None included) -- this write must not shift what
+        # a later curiosity.fire_curiosity() cooldown check computes for
+        # this session. Writing a fabricated turn (e.g. 0) would make this
+        # event -- now the newest curiosity_question for the session --
+        # silently corrupt (turn - last) < COOLDOWN_TURNS for every
+        # subsequent real curiosity call in the session.
+        prior_turn = _last_curiosity_turn(store, session_id)
+    except Exception as exc:  # noqa: BLE001 -- detector is additive, never a dependency
+        log.debug("correction_candidate_precheck_failed: %s", exc)
+        return
+    try:
+        trigger_record = store.get(UUID(trigger_id))
+    except Exception as exc:  # noqa: BLE001 -- detector is additive, never a dependency
+        log.debug("correction_candidate_trigger_lookup_failed: %s", exc)
+        return
+    if trigger_record is None:
+        # The trigger vanished between the served-state read and now --
+        # nothing safe left to reference or to build a topical cue from.
+        return
+    # `cue` is the triggering record's own surface, stable PER RECORD (not
+    # per turn): foresight._tunnel_question_line embeds every pending
+    # question's `cue` and caches it by string. A synthetic label (e.g. the
+    # matched pattern's name) measured cos>=0.71 against unrelated turns --
+    # well past the 0.60 tunnel-injection floor -- which would inject this
+    # candidate into an unrelated session's next-turn pack. The record's own
+    # topical text keeps the tunnel gate meaningful.
+    cue = " ".join((trigger_record.literal_surface or "").split())[:80]
+    if not cue:
+        return
+    try:
+        from iai_mcp.events import write_event
+        q_id = uuid4()
+        write_event(
+            store,
+            kind="curiosity_question",
+            data={
+                "question_id": str(q_id),
+                "text": (
+                    "Possible correction of a recent memory -- confirm to "
+                    f"record it: {text[:200]!r}"
+                ),
+                "tier": "question",
+                "entropy": 1.0,
+                "turn": prior_turn,
+                "cue": cue,
+                "triggered_by": [trigger_id],
+                "candidate_kind": "correction_candidate",
+            },
+            severity="info",
+            session_id=session_id,
+            source_ids=[UUID(trigger_id)],
+        )
+    except Exception as exc:  # noqa: BLE001 -- detector is additive, never a dependency
+        log.debug("correction_candidate_queue_failed: %s", exc)
+
+
+def _directive_budget_reject_reason(store: MemoryStore, candidate_text: str) -> "str | None":
+    """None when a new directive fits the count-OR-token budget, else a
+    distinct reason string. Caller downgrades the flag to False on a
+    non-None return and still captures the text as ordinary memory --
+    reject-not-drop, mirroring working_tier._bounded_append(allow_evict=False).
+
+    Runs the read under a fresh buffer flush: capture_turn's own insert path
+    only buffers rows up to a size/time threshold before they land in SQL,
+    so an unflushed prior directive would otherwise be invisible to this
+    count/token read outside the test harness's per-insert autoflush.
+    """
+    from iai_mcp.directive_budget import (
+        DIRECTIVE_BUDGET_TOKENS,
+        DIRECTIVE_MAX_COUNT,
+        projected_directive_tokens,
+    )
+
+    try:
+        from iai_mcp.store import flush_record_buffer
+        flush_record_buffer(store)
+    except Exception as exc:  # noqa: BLE001 -- best-effort visibility flush
+        log.debug("directive_budget_flush_failed: %s", exc)
+
+    try:
+        live_texts = [
+            rec.literal_surface
+            for rec in store.iter_records(
+                where="directive = 1 AND tombstoned_at IS NULL"
+            )
+        ]
+    except Exception as exc:  # noqa: BLE001 -- fail closed on the DoS cap
+        log.warning("directive_budget_query_failed: %s", exc)
+        return "directive budget check failed, captured as ordinary memory"
+
+    if len(live_texts) + 1 > DIRECTIVE_MAX_COUNT:
+        return "directive budget full: count cap reached, retire one via contradict"
+    if projected_directive_tokens(live_texts + [candidate_text]) > DIRECTIVE_BUDGET_TOKENS:
+        return "directive budget full: token cap reached, retire one via contradict"
+
+
+@dataclass(frozen=True)
+class _TranscriptTurn:
+    """Immutable parsed transcript fields carried across transformations."""
+
+    role: str
+    text: str
+    source_uuid: str | None
+    timestamp: str | None
+    model: str | None
+
+
+def _event_model(*containers: object) -> object | None:
+    for container in containers:
+        if isinstance(container, dict):
+            value = container.get("model")
+            if value:
+                return value
+    return None
+
+
 def capture_turn(
     store: MemoryStore,
     *,
@@ -416,10 +631,15 @@ def capture_turn(
     role: str = "user",
     ts: str | None = None,
     source_uuid: str | None = None,
+    model: str | None = None,
     provenance_extra: dict | None = None,
     extra_tags: "list[str] | None" = None,
     near_dup_gate: bool = False,
     live_turn: bool = False,
+    epistemic_status: str = "unknown",
+    salience_level: str = "unflagged",
+    directive: bool | None = None,
+    directive_marker_allowed: bool = False,
 ) -> dict[str, Any]:
     # live_turn=True marks a genuinely-live conversational turn and is the
     # only thing that refreshes the next-turn foresight pack. Replay and
@@ -433,6 +653,15 @@ def capture_turn(
     # would otherwise insert near-duplicates at cos 0.95+.
     if tier not in TIER_ENUM:
         return {"status": "skipped", "record_id": None, "reason": f"invalid tier {tier!r}"}
+    # An out-of-enum caller value is coerced here, before MemoryRecord
+    # construction -- a batch capture must never abort a turn over a
+    # non-enum-enforcing host's bad status.
+    if epistemic_status not in EPISTEMIC_STATUS_ENUM:
+        epistemic_status = "unknown"
+    if salience_level not in SALIENCE_LEVEL_ENUM:
+        salience_level = "unflagged"
+
+    model = normalize_model(model)
 
     text = (text or "").strip()
     # A durable working-tier result is stored byte-identical even below the
@@ -508,6 +737,49 @@ def capture_turn(
         log.debug("entity_anchor_extraction_failed: %s", exc)
         _entity_tag_list = []
 
+    # Only overrides a still-"unknown" value -- an explicit caller-supplied
+    # status is never second-guessed.
+    if epistemic_status == "unknown" and _is_episodic_conversational(tier, role):
+        try:
+            from iai_mcp.epistemic_classify import classify_epistemic_status
+            epistemic_status = classify_epistemic_status(text)
+        except Exception as exc:  # noqa: BLE001 -- capture fail-safe
+            log.debug("epistemic_classify_failed: %s", exc)
+            epistemic_status = "unknown"
+
+    # Directive resolution is explicit-only: either the caller supplied a
+    # value, or a still-unset value is decided by the typed-marker
+    # recognizer -- and ONLY when the caller has opted in via
+    # directive_marker_allowed (fail-closed default False, so no unaudited
+    # call site can mint a directive) on a genuinely-live role=user
+    # conversational turn. A marker-eligible text that begins with a known
+    # injected-blob signature never satisfies the marker -- that family of
+    # content historically lands under a conversational role.
+    directive_source: str | None = None
+    if directive is None:
+        directive = False
+        if directive_marker_allowed and role == "user" and tier == "episodic":
+            try:
+                is_blob = False
+                try:
+                    from iai_mcp.migrate._blob_quarantine import _MARKER_GUARD_PREFIXES
+                    head = text.lstrip()
+                    is_blob = any(head.startswith(p) for p in _MARKER_GUARD_PREFIXES)
+                except Exception as exc:  # noqa: BLE001 -- fail-safe: fall back to the anchored check alone
+                    log.debug("directive_marker_blob_guard_import_failed: %s", exc)
+                if not is_blob:
+                    from iai_mcp.directive_marker import is_directive_marker
+                    if is_directive_marker(text):
+                        directive = True
+                        directive_source = "explicit-marker"
+            except Exception as exc:  # noqa: BLE001 -- capture fail-safe
+                log.debug("directive_marker_failed: %s", exc)
+                directive = False
+    elif directive:
+        directive_source = "explicit-command"
+
+    directive_reason: str | None = None
+
     with _CAPTURE_DEDUP_LOCK:
         conversational = _is_episodic_conversational(tier, role)
         if conversational:
@@ -520,6 +792,16 @@ def capture_turn(
                 except (ValueError, IOError) as exc:
                     log.warning(
                         "capture_dedup_reinforce_failed",
+                        extra={
+                            "err_type": type(exc).__name__,
+                            "record_id": str(existing_id),
+                        },
+                    )
+                try:
+                    store.raise_salience_level_if_higher(existing_id, salience_level)
+                except (ValueError, IOError) as exc:
+                    log.warning(
+                        "capture_dedup_salience_raise_failed",
                         extra={
                             "err_type": type(exc).__name__,
                             "record_id": str(existing_id),
@@ -538,6 +820,11 @@ def capture_turn(
                     "record_id": str(existing_id),
                     "reason": "exact-key re-drain",
                 }
+        if directive:
+            directive_reason = _directive_budget_reject_reason(store, text)
+            if directive_reason is not None:
+                directive = False
+                directive_source = None
         if not conversational or near_dup_gate:
             try:
                 neighbours = store.query_similar(embedding, k=3, tier=tier)
@@ -552,13 +839,26 @@ def capture_turn(
             for record, score in neighbours:
                 if score >= dedup_floor:
                     # A pinned neighbour is a hard lock; never reinforce it.
-                    if getattr(record, "never_merge", False):
+                    # A budget-accepted directive must land its own row --
+                    # folding it into an existing neighbour would silently
+                    # drop the standing-order intent.
+                    if getattr(record, "never_merge", False) or directive:
                         continue
                     try:
                         store.reinforce_record(record.id)
                     except (ValueError, IOError) as exc:
                         log.warning(
                             "capture_dedup_reinforce_failed",
+                            extra={
+                                "err_type": type(exc).__name__,
+                                "record_id": str(record.id),
+                            },
+                        )
+                    try:
+                        store.raise_salience_level_if_higher(record.id, salience_level)
+                    except (ValueError, IOError) as exc:
+                        log.warning(
+                            "capture_dedup_salience_raise_failed",
                             extra={
                                 "err_type": type(exc).__name__,
                                 "record_id": str(record.id),
@@ -594,10 +894,17 @@ def capture_turn(
             ts_iso = now.isoformat()
             tags.append(_idem_tag(session_id, role, ts_iso, text, source_uuid=source_uuid))
 
-        provenance_list: list[dict] = [
-            {"ts": now.isoformat(), "cue": cue or "(auto-capture)",
-             "session_id": session_id, "role": role}
-        ]
+        provenance = {
+            "ts": now.isoformat(),
+            "cue": cue or "(auto-capture)",
+            "session_id": session_id,
+            "role": role,
+        }
+        if model is not None:
+            provenance["model"] = model
+        if directive and directive_source is not None:
+            provenance["directive_source"] = directive_source
+        provenance_list: list[dict] = [provenance]
         if provenance_extra:
             provenance_list.append(dict(provenance_extra))
 
@@ -624,6 +931,9 @@ def capture_turn(
             s5_trust_score=0.5,
             profile_modulation_gain={},
             schema_version=SCHEMA_VERSION_CURRENT,
+            epistemic_status=epistemic_status,
+            salience_level=salience_level,
+            directive=directive,
         )
         try:
             from iai_mcp.aaak import generate_aaak_index
@@ -636,6 +946,16 @@ def capture_turn(
         except Exception as e:
             log.exception("capture_turn insert failed")
             return {"status": "skipped", "record_id": None, "reason": f"insert-failed: {type(e).__name__}"}
+
+    if directive:
+        # In-function so every caller -- RPC handlers, deferred_drain_worker,
+        # and any other capture_turn call site -- refreshes the cache by
+        # construction, decoupled from the precache throttle.
+        try:
+            from iai_mcp.directive_cache import write_directives_cache
+            write_directives_cache(store)
+        except Exception:  # noqa: BLE001 -- cache refresh must never break capture
+            log.debug("directive_cache_write_failed", exc_info=True)
 
     try:
         from iai_mcp.peri_event_buffer import get_buffer
@@ -666,6 +986,13 @@ def capture_turn(
     # only a genuinely-live conversational user turn refreshes the next-turn
     # memory pack. Failures never fail the capture.
     if live_turn and role == "user" and tier == "episodic":
+        # Read the pre-turn served state BEFORE refresh_pack below extends
+        # it -- the candidate must reference what was surfaced TO this turn,
+        # not what this turn's own refresh anticipates for the next one.
+        try:
+            _queue_correction_candidate(store, text=text, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 -- detector is additive, never a dependency
+            log.debug("correction_candidate_detector skipped: %s", exc)
         try:
             from iai_mcp.foresight import refresh_pack
             refresh_pack(
@@ -677,7 +1004,11 @@ def capture_turn(
         except Exception as exc:  # noqa: BLE001 -- anticipation is additive
             log.debug("foresight refresh skipped: %s", exc)
 
-    return {"status": "inserted", "record_id": str(rec.id), "reason": f"tier={tier}"}
+    return {
+        "status": "inserted",
+        "record_id": str(rec.id),
+        "reason": directive_reason or f"tier={tier}",
+    }
 
 
 def _drain_write_pending(
@@ -690,6 +1021,7 @@ def _drain_write_pending(
     role: str = "user",
     ts: str | None = None,
     source_uuid: str | None = None,
+    model: str | None = None,
     provenance_extra: dict | None = None,
 ) -> dict[str, Any]:
     """Write a captured turn as a pending (un-embedded) row.
@@ -712,6 +1044,7 @@ def _drain_write_pending(
     if tier not in TIER_ENUM:
         return {"status": "skipped", "record_id": None, "reason": f"invalid tier {tier!r}"}
 
+    model = normalize_model(model)
     text = (text or "").strip()
     if len(text) < MIN_CAPTURE_LEN:
         return {"status": "skipped", "record_id": None, "reason": "too short"}
@@ -758,10 +1091,15 @@ def _drain_write_pending(
                 _idem_tag(session_id, role, ts_iso, text, source_uuid=source_uuid)
             )
 
-        provenance_list: list[dict] = [
-            {"ts": now.isoformat(), "cue": cue or "(auto-capture)",
-             "session_id": session_id, "role": role}
-        ]
+        provenance = {
+            "ts": now.isoformat(),
+            "cue": cue or "(auto-capture)",
+            "session_id": session_id,
+            "role": role,
+        }
+        if model is not None:
+            provenance["model"] = model
+        provenance_list: list[dict] = [provenance]
         if provenance_extra:
             provenance_list.append(dict(provenance_extra))
 
@@ -859,16 +1197,16 @@ def capture_transcript(
             parsed = trailers.feed(obj, _parse_transcript_obj(obj))
             if parsed is None:
                 continue
-            role, text, src_uuid, ts = parsed
             result = capture_turn(
                 store,
                 cue=f"session {session_id} turn {seen}",
-                text=text,
+                text=parsed.text,
                 tier="episodic",
                 session_id=session_id,
-                role=role,
-                ts=ts,
-                source_uuid=src_uuid,
+                role=parsed.role,
+                ts=parsed.timestamp,
+                source_uuid=parsed.source_uuid,
+                model=parsed.model,
             )
             status = result.get("status", "skipped")
             if status in counts:
@@ -890,6 +1228,7 @@ _NOISE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("startswith", "<local-command-stderr>"),
     ("startswith", "Base directory for this skill:"),
     ("startswith", "<task-notification>"),
+    ("startswith", "<system-reminder>"),
     ("equals",     "[Request interrupted by user]"),
 )
 
@@ -1020,8 +1359,8 @@ class _ToolTrailerState:
     def feed(
         self,
         obj: dict,
-        parsed: "tuple[str, str, str | None, str | None] | None",
-    ) -> "tuple[str, str, str | None, str | None] | None":
+        parsed: _TranscriptTurn | None,
+    ) -> _TranscriptTurn | None:
         msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
         obj_role = obj.get("type") or msg.get("role") or obj.get("role", "")
         tools = _tool_names_for_obj(obj, msg, obj_role)
@@ -1035,18 +1374,20 @@ class _ToolTrailerState:
             elif _is_user_boundary(obj, msg, obj_role):
                 self._pending = []
             return None
-        role, text, src_uuid, ts = parsed
-        if role == "assistant":
+        if parsed.role == "assistant":
             # Floor on the BARE text: the trailer must never turn an
             # otherwise-skipped stub into a record.
-            if len(text.strip()) >= MIN_CAPTURE_LEN:
-                text = text + _tools_trailer(self._pending + tools)
+            if len(parsed.text.strip()) >= MIN_CAPTURE_LEN:
+                parsed = replace(
+                    parsed,
+                    text=parsed.text + _tools_trailer(self._pending + tools),
+                )
                 self._pending = []
             else:
                 self._pending.extend(tools)
         else:
             self._pending = []
-        return role, text, src_uuid, ts
+        return parsed
 
 
 def _parse_transcript_line(
@@ -1056,12 +1397,15 @@ def _parse_transcript_line(
         obj = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return None
-    return _parse_transcript_obj(obj)
+    parsed = _parse_transcript_obj(obj)
+    if parsed is None:
+        return None
+    return parsed.role, parsed.text, parsed.source_uuid, parsed.timestamp
 
 
 def _parse_transcript_obj(
     obj: dict,
-) -> tuple[str, str, str | None, str | None] | None:
+) -> _TranscriptTurn | None:
     if obj.get("type") == "response_item":
         # Codex rollout transcript: user messages also appear as event_msg
         # records, so ONLY response_item is consumed — anything else would
@@ -1086,7 +1430,13 @@ def _parse_transcript_obj(
             return None
         if _is_noise(text):
             return None
-        return role, text, payload.get("id") or obj.get("uuid"), obj.get("timestamp")
+        return _TranscriptTurn(
+            role=role,
+            text=text,
+            source_uuid=payload.get("id") or obj.get("uuid"),
+            timestamp=obj.get("timestamp"),
+            model=normalize_model(_event_model(payload, obj)),
+        )
     if "step_index" in obj and "source" in obj:
         # Antigravity transcript_full lines: conversational turns only —
         # tool views, history replays, and system steps are not dialogue.
@@ -1100,7 +1450,13 @@ def _parse_transcript_obj(
         text = str(obj.get("content") or "").strip()
         if not text or _is_noise(text):
             return None
-        return role, text, None, obj.get("created_at")
+        return _TranscriptTurn(
+            role=role,
+            text=text,
+            source_uuid=None,
+            timestamp=obj.get("created_at"),
+            model=normalize_model(_event_model(obj)),
+        )
     msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
     # Claude puts the role in top-level "type", Cursor in top-level "role"
     # with the content nested under "message".
@@ -1128,7 +1484,13 @@ def _parse_transcript_obj(
     # per-line uuid — assistant lines of one prompt share promptId, so
     # keying them by it would collapse a whole response into one idem.
     src_uuid = (obj.get("promptId") if role == "user" else None) or obj.get("uuid")
-    return role, text, src_uuid, obj.get("timestamp")
+    return _TranscriptTurn(
+        role=role,
+        text=text,
+        source_uuid=src_uuid,
+        timestamp=obj.get("timestamp"),
+        model=normalize_model(_event_model(msg, obj)),
+    )
 
 
 # Spool lines are AES-GCM-encrypted with the store's key FILE only — never
@@ -1177,6 +1539,11 @@ _CAPTURE_STATE_SUFFIXES = (
     ".pending-tools",
     ".drain-offset",
 )
+
+# The transcript-sweep per-file state suffix (".transcript-sweep") is
+# deliberately NOT a member of this tuple. It is a few dozen bytes; losing
+# it to this time-based GC would force a full re-read of a transcript that
+# may be huge. It is reclaimed only when its source transcript is gone.
 
 
 def sweep_capture_state(*, apply: bool, now: "float | None" = None) -> dict:
@@ -1313,6 +1680,7 @@ def write_deferred_event(
     cwd: str | None = None,
     ts: str | None = None,
     source_uuid: str | None = None,
+    model: str | None = None,
 ) -> Path:
     deferred_dir = deferred_captures_dir()
     deferred_dir.mkdir(parents=True, exist_ok=True)
@@ -1354,6 +1722,9 @@ def write_deferred_event(
         }
         if source_uuid:
             event["source_uuid"] = source_uuid
+        normalized_model = normalize_model(model)
+        if normalized_model is not None:
+            event["model"] = normalized_model
         fh.write(_encode_spool_line(event) + "\n")
         fh.flush()
         try:
@@ -1590,6 +1961,7 @@ def read_pending_live_events(session_id: str | None = None) -> list[dict]:
                         "ts": ts_dt,
                         "ts_iso": ts_iso,
                         "source_uuid": ev.get("source_uuid"),
+                        "model": normalize_model(ev.get("model")),
                     })
         except OSError:
             continue
@@ -1604,7 +1976,34 @@ def write_deferred_captures(
     *,
     cwd: str | None = None,
     max_turns: int = 100_000,
+    since_line: int = 0,
 ) -> Path:
+    out_path, _pending, _seen = _write_deferred_captures_impl(
+        session_id,
+        transcript_path,
+        cwd=cwd,
+        max_turns=max_turns,
+        since_line=since_line,
+    )
+    return out_path
+
+
+def _write_deferred_captures_impl(
+    session_id: str,
+    transcript_path: Path | str,
+    *,
+    cwd: str | None = None,
+    max_turns: int = 100_000,
+    since_line: int = 0,
+    pending_tools: "list[str] | None" = None,
+) -> "tuple[Path, list[str], int]":
+    """Shared body behind ``write_deferred_captures``. Returns the spool
+    path, the tool-trailer pending state as of the last line read, and the
+    count of transcript lines read -- the two extra values let an
+    incremental caller resume a later pass without re-feeding lines
+    already accounted for. ``write_deferred_captures`` itself only ever
+    returns the path, keeping every existing caller's contract unchanged.
+    """
     deferred_dir = deferred_captures_dir()
     deferred_dir.mkdir(parents=True, exist_ok=True)
     # Include pid for collision safety: two parallel bulk-import workers in
@@ -1615,6 +2014,8 @@ def write_deferred_captures(
     final_name = f"{session_id}-{int(time.time())}-{os.getpid()}.jsonl"
     out_path = deferred_dir / final_name
     tmp_path = deferred_dir / f"{final_name}.tmp"
+    seen = 0
+    trailers = _ToolTrailerState(pending=pending_tools)
     with tmp_path.open("w", encoding="utf-8") as fh:
         header = {
             "version": 1,
@@ -1625,32 +2026,49 @@ def write_deferred_captures(
         fh.write(_encode_spool_line(header) + "\n")
         path = Path(transcript_path).expanduser()
         if path.exists():
-            seen = 0
-            trailers = _ToolTrailerState()
             with path.open(encoding="utf-8") as src:
                 for line in src:
                     if seen >= max_turns:
                         break
                     seen += 1
+                    if seen <= since_line:
+                        # Already staged in a prior pass. The trailer state
+                        # was seeded from that pass's end, so this line must
+                        # not be re-fed -- doing so would double-count its
+                        # tool names into the seeded pending list.
+                        continue
                     try:
                         obj = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
+                        if not line.endswith("\n"):
+                            # Torn tail: the writer has not finished this
+                            # line yet. Do not count it toward the resume
+                            # high-water mark -- retry it whole next pass.
+                            seen -= 1
+                            break
+                        log.warning(
+                            "write_deferred_captures: skipping malformed "
+                            "JSON at line %d of %s",
+                            seen, path,
+                        )
                         continue
                     if not isinstance(obj, dict):
                         continue
                     parsed = trailers.feed(obj, _parse_transcript_obj(obj))
                     if parsed is None:
                         continue
-                    role, text, src_uuid, ts = parsed
                     event = {
-                        "text": text,
+                        "text": parsed.text,
                         "cue": f"session {session_id} turn {seen}",
                         "tier": "episodic",
-                        "role": role,
-                        "ts": ts or datetime.now(timezone.utc).isoformat(),
+                        "role": parsed.role,
+                        "ts": parsed.timestamp or datetime.now(timezone.utc).isoformat(),
                     }
-                    if src_uuid:
-                        event["source_uuid"] = src_uuid
+                    if parsed.source_uuid:
+                        event["source_uuid"] = parsed.source_uuid
+                    model = parsed.model
+                    if model is not None:
+                        event["model"] = model
                     fh.write(_encode_spool_line(event) + "\n")
         fh.flush()
         try:
@@ -1658,7 +2076,7 @@ def write_deferred_captures(
         except OSError as exc:  # noqa: BLE001 -- fsync is best-effort
             log.debug("write_deferred_captures fsync failed: %s", exc)
     os.replace(tmp_path, out_path)
-    return out_path
+    return out_path, trailers.pending, seen
 
 
 def _reencrypt_one_spool_file(path: Path, key: bytes) -> int:
@@ -1760,6 +2178,14 @@ def drain_capture_backlog(store: MemoryStore) -> dict[str, int]:
             counts[f"live_{k}"] = v
     except Exception as exc:  # noqa: BLE001 -- live sweep must not sink the drain
         log.debug("live spool sweep failed: %s", exc)
+    try:
+        from iai_mcp.cofire import drain_cofire_spool
+
+        cofire_counts = drain_cofire_spool(store)
+        for k, v in cofire_counts.items():
+            counts[f"cofire_{k}"] = v
+    except Exception as exc:  # noqa: BLE001 -- co-fire drain must not sink the drain
+        log.debug("cofire spool drain failed: %s", exc)
     return counts
 
 
@@ -2110,6 +2536,7 @@ def _drain_deferred_captures_locked(
                         role=role,
                         ts=ev.get("ts"),
                         source_uuid=ev.get("source_uuid"),
+                        model=ev.get("model"),
                         provenance_extra=(
                             {"cwd": header_cwd} if header_cwd else None
                         ),
@@ -2403,6 +2830,7 @@ def drain_permanent_failed_files(
                         role=role,
                         ts=ev.get("ts"),
                         source_uuid=ev.get("source_uuid"),
+                        model=ev.get("model"),
                     )
                     if result.get("status") in ("inserted", "reinforced"):
                         file_inserted += 1
@@ -2432,16 +2860,16 @@ def drain_permanent_failed_files(
                     if parsed is None:
                         file_dropped += 1
                         continue
-                    role, text, src_uuid, src_ts = parsed
                     result = capture_turn(
                         store,
                         cue="recovered turn",
-                        text=text,
+                        text=parsed.text,
                         tier="episodic",
                         session_id=raw_session_id,
-                        role=role,
-                        ts=src_ts,
-                        source_uuid=src_uuid,
+                        role=parsed.role,
+                        ts=parsed.timestamp,
+                        source_uuid=parsed.source_uuid,
+                        model=parsed.model,
                     )
                     if result.get("status") in ("inserted", "reinforced"):
                         file_inserted += 1
@@ -2590,6 +3018,7 @@ def _drain_active_live_captures_locked(
                 role=ev.get("role", "user"),
                 ts=ev.get("ts"),
                 source_uuid=ev.get("source_uuid"),
+                model=ev.get("model"),
             )
             status = result.get("status", "skipped")
             reason = str(result.get("reason", ""))

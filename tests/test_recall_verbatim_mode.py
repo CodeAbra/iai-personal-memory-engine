@@ -80,6 +80,30 @@ def _make_episodic(vec: list[float], text: str) -> MemoryRecord:
         language="en",
     )
 
+def _make_proc_chunk(vec: list[float], text: str) -> MemoryRecord:
+    now = datetime.now(timezone.utc)
+    return MemoryRecord(
+        id=uuid4(),
+        tier="procedural",
+        literal_surface=text,
+        aaak_index="",
+        embedding=list(vec),
+        community_id=None,
+        centrality=0.0,
+        detail_level=1,
+        pinned=False,
+        stability=0.0,
+        difficulty=0.0,
+        last_reviewed=None,
+        never_decay=False,
+        never_merge=False,
+        provenance=[],
+        created_at=now,
+        updated_at=now,
+        tags=["chunk", "source:cofire"],
+        language="en",
+    )
+
 def _make_schema_hub(vec: list[float], text: str, pattern: str) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
@@ -350,6 +374,50 @@ def test_concept_mode_default_preserves_locked_baseline(tmp_path):
     assert resp_default.cue_mode == "concept", (
         "recall_for_response default mode must be 'concept'"
     )
+
+def test_verbatim_mode_excludes_procedural_chunk_from_hits(tmp_path):
+    """Pins pipeline.py's episodic_ids narrowing (built when mode=="verbatim",
+    applied to reachable_indices before ranking): a tier="procedural" chunk is
+    structurally excluded from verbatim hits regardless of tags or cosine.
+    The mutant that turns this RED: removing/disabling the episodic_ids
+    narrowing at pipeline.py's reachable_indices filter step.
+    """
+    from iai_mcp.pipeline import recall_for_response
+    from iai_mcp.retrieve import build_runtime_graph
+
+    (store, embedder, graph, assignment, rich_club,
+     verbatim_ids_per_cue, hub_ids, cues) = _seed_5_verbatim_plus_10_hubs(tmp_path)
+
+    cue = cues[0]
+    cue_vec = embedder.embed(cue)
+    proc_vec = _unit_vector_with_cosine(cue_vec, 0.85)
+    proc_rec = _make_proc_chunk(proc_vec, "procedural chunk content payload r5")
+    store.insert(proc_rec)
+
+    graph, assignment, rich_club = build_runtime_graph(store)
+
+    candidate_ids = {r.id for r, _ in store.query_similar(cue_vec, k=32)}
+    assert proc_rec.id in candidate_ids, (
+        f"proc chunk {proc_rec.id} must be a real reachable candidate "
+        f"(non-vacuity check) before checking its absence from hits; "
+        f"candidates: {candidate_ids}"
+    )
+
+    resp = recall_for_response(
+        store=store, graph=graph, assignment=assignment,
+        rich_club=rich_club, embedder=embedder, cue=cue,
+        session_id="r5_proc_exclude", mode="verbatim",
+    )
+    hit_ids = {h.record_id for h in resp.hits}
+    assert proc_rec.id not in hit_ids, (
+        f"procedural chunk {proc_rec.id} leaked into verbatim hits: {hit_ids}"
+    )
+    for h in resp.hits:
+        rec = store.get(h.record_id)
+        assert rec is not None, f"unknown record id {h.record_id} in hits"
+        assert rec.tier == "episodic", (
+            f"verbatim hit {h.record_id} has tier {rec.tier!r}, expected 'episodic'"
+        )
 
 def test_dispatch_verbatim_5_cue_variance_window(tmp_path, monkeypatch):
     from iai_mcp import core

@@ -13,9 +13,12 @@ from uuid import UUID, uuid4
 
 from iai_mcp.aaak import enforce_english_raw, generate_aaak_index
 from iai_mcp.events import query_events, write_event
-from iai_mcp.store import MemoryStore, flush_record_buffer
+from iai_mcp.recall_suppression import recall_suppressed
+from iai_mcp.store import MemoryStore, RECORDS_TABLE, _uuid_literal, flush_record_buffer
 from iai_mcp.types import (
     EMBED_DIM,
+    EPISTEMIC_STATUS_ENUM,
+    SALIENCE_LEVEL_RANK,
     EdgeUpdate,
     MemoryHit,
     MemoryRecord,
@@ -190,6 +193,10 @@ def recall(
 
     raw = store.query_similar(cue_embedding, k=k_hits + k_anti)
 
+    # Procedural tier is never served as visible text, in any mode --
+    # mirrors core._passes_mode_filter's unconditional exclusion.
+    raw = [(rec, score) for rec, score in raw if rec.tier != "procedural"]
+
     if mode == "verbatim":
         raw = [
             (rec, score) for rec, score in raw
@@ -212,6 +219,8 @@ def recall(
                 session_id=_prov.get("session_id"),
                 captured_at=record.created_at.isoformat() if record.created_at else None,
                 community_id=getattr(record, "community_id", None),
+                epistemic_status=record.epistemic_status,
+                salience_level=record.salience_level,
             )
         )
         provenance_pending.append((
@@ -223,7 +232,10 @@ def recall(
             },
         ))
 
-    if provenance_pending:
+    # provenance_pending is read-only input derived above (never fed back
+    # into hits/anti_hits), so suppressing this write changes zero bytes of
+    # the response.
+    if provenance_pending and not recall_suppressed.get():
         try:
             store.queue_provenance_batch(provenance_pending)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -247,6 +259,8 @@ def recall(
                 reason="low-similarity baseline anti-hit",
                 literal_surface=record.literal_surface,
                 adjacent_suggestions=[],
+                epistemic_status=record.epistemic_status,
+                salience_level=record.salience_level,
             )
         )
 
@@ -307,6 +321,26 @@ def reinforce_edges(
     )
 
 
+def emit_retrieval_reinforced(
+    store: MemoryStore, *, session_id: str, ids: list[UUID],
+) -> UUID:
+    """Feedback signal for the nightly tuner, joined against retrieval_used
+    by session_id. corrected/re_asked are derived at consume time, not here.
+    """
+    return write_event(
+        store,
+        kind="retrieval_reinforced",
+        data={
+            "session_id": session_id,
+            "reinforced_ids": [str(i) for i in ids],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        severity="info",
+        session_id=session_id,
+        buffered=True,
+    )
+
+
 WAKE_COACTIVATION_DELTA: float = 0.1
 WAKE_COACTIVATION_MAX_HITS: int = 5
 WAKE_COACTIVATION_MIN_SCORE: float = 0.5
@@ -348,8 +382,13 @@ def contradict(
     original_id: UUID,
     new_fact: str,
     new_embedding: list[float],
+    epistemic_status: str = "unknown",
 ) -> ReconsolidationReceipt:
     flush_record_buffer(store)
+    # An out-of-enum caller value is coerced here, before MemoryRecord
+    # construction -- symmetric with the read-path coercion in _from_row.
+    if epistemic_status not in EPISTEMIC_STATUS_ENUM:
+        epistemic_status = "unknown"
     original = store.get(original_id)
     if original is None:
         raise ValueError(f"unknown record {original_id}")
@@ -387,6 +426,7 @@ def contradict(
         updated_at=now,
         tags=["contradict"],
         language=getattr(original, "language", "en") or "en",
+        epistemic_status=epistemic_status,
     )
     enforce_english_raw(new_rec)
     new_rec.aaak_index = generate_aaak_index(new_rec)
@@ -401,6 +441,18 @@ def contradict(
             "rephrase the correction so it is distinguishable"
         )
     store.add_contradicts_edge(original_id, new_rec.id)
+    if original.directive:
+        store.db.open_table(RECORDS_TABLE).update(
+            where=f"id = '{_uuid_literal(original_id)}'",
+            values={"directive": False},
+        )
+        # In-function so every caller refreshes the cache by construction,
+        # decoupled from the precache throttle.
+        try:
+            from iai_mcp.directive_cache import write_directives_cache
+            write_directives_cache(store)
+        except Exception:  # noqa: BLE001 -- cache refresh must never break contradict
+            log.debug("directive_cache_write_failed", exc_info=True)
     invalidate_temporal_validity_cache(store)
 
     try:
@@ -664,7 +716,10 @@ def apply_supersede_cap(
     return hits
 
 
-def _make_graph_sync_hook(graph):
+def _make_graph_sync_hook(graph, store=None):
+    """`store` feeds the resident Rust rank index in step with the graph --
+    optional so a caller building a graph with no store handy (tests,
+    isolated graph construction) still gets the graph-sync behavior alone."""
     def _hook(op: str, record) -> None:
         nid = record.id
         nid_str = str(nid)
@@ -686,6 +741,10 @@ def _make_graph_sync_hook(graph):
                     if getattr(record, "created_at", None) else ""
                 ),
                 "stability": float(getattr(record, "stability", 0.5) or 0.5),
+                "salience_level": SALIENCE_LEVEL_RANK.get(
+                    getattr(record, "salience_level", "unflagged"), 0
+                ),
+                "valence": float(getattr(record, "valence", 0.0) or 0.0),
             }
             if nid_str not in graph._node_payload:
                 graph.add_node(
@@ -699,6 +758,16 @@ def _make_graph_sync_hook(graph):
                 _rgc.increment_dirty_counter()
             except Exception:  # noqa: BLE001 -- never break a record write
                 pass
+            if store is not None:
+                try:
+                    from iai_mcp.store._rank_index import rank_index_for
+                    _rank_handle = rank_index_for(store, graph)
+                    _rank_handle.feed(op, record)
+                    # Write-time-only: never call maybe_fold() from a recall
+                    # read path (see _RankIndexHandle.maybe_fold's docstring).
+                    _rank_handle.maybe_fold()
+                except Exception as exc:  # noqa: BLE001 -- rank-index feed isolation, never break a record write
+                    log.debug("rank_index_feed_failed op=%s: %s", op, exc)
         elif op == "delete":
             graph.remove_node(nid)
             try:
@@ -706,6 +775,14 @@ def _make_graph_sync_hook(graph):
                 _rgc.increment_dirty_counter()
             except Exception:  # noqa: BLE001 -- never break a record delete
                 pass
+            if store is not None:
+                try:
+                    from iai_mcp.store._rank_index import rank_index_for
+                    _rank_handle = rank_index_for(store, graph)
+                    _rank_handle.feed(op, record)
+                    _rank_handle.maybe_fold()
+                except Exception as exc:  # noqa: BLE001 -- rank-index feed isolation, never break a record delete
+                    log.debug("rank_index_feed_failed op=%s: %s", op, exc)
     return _hook
 
 
@@ -1184,6 +1261,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "aaak_index": str(payload.get("aaak_index", "") or ""),
                 "created_at": str(payload.get("created_at", "") or ""),
                 "stability": float(payload.get("stability", 0.5) or 0.5),
+                "valence": float(payload.get("valence") or 0.0),
             })
         node_payload_for_cache = cached_node_payload
     else:
@@ -1208,6 +1286,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
             "aaak_index",
             "created_at",
             "stability",
+            "valence",
         ]
         # Stream only ACTIVE records — tombstoned (deleted) records are not graph
         # nodes. This matches the active-records predicate used everywhere else
@@ -1280,6 +1359,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "aaak_index": str(row.get("aaak_index") or ""),
                 "created_at": str(row.get("created_at") or ""),
                 "stability": float(row.get("stability") or 0.5),
+                "valence": float(row.get("valence") or 0.0),
             }
             graph.set_node_payload(rid, {
                 "embedding": list(embedding),
@@ -1484,7 +1564,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
         )
 
     try:
-        store.register_graph_sync_hook(_make_graph_sync_hook(graph))
+        store.register_graph_sync_hook(_make_graph_sync_hook(graph, store))
     except (AttributeError, TypeError, RuntimeError) as exc:
         log.warning("graph_sync_hook registration failed: %s", exc)
 
@@ -1602,6 +1682,7 @@ def build_runtime_graph_incremental(store: MemoryStore):
                 "aaak_index": str(payload.get("aaak_index", "") or ""),
                 "created_at": str(payload.get("created_at", "") or ""),
                 "stability": float(payload.get("stability", 0.5) or 0.5),
+                "valence": float(payload.get("valence") or 0.0),
             })
         node_payload_for_cache = dict(cached_node_payload)
         cached_ids = set(node_payload_for_cache.keys())
@@ -1625,6 +1706,7 @@ def build_runtime_graph_incremental(store: MemoryStore):
             "aaak_index",
             "created_at",
             "stability",
+            "valence",
             "updated_at",
             "tombstoned_at",
         ]
@@ -1705,6 +1787,7 @@ def build_runtime_graph_incremental(store: MemoryStore):
                 "aaak_index": str(row.get("aaak_index") or ""),
                 "created_at": str(row.get("created_at") or ""),
                 "stability": float(row.get("stability") or 0.5),
+                "valence": float(row.get("valence") or 0.0),
             }
             graph.add_node(rid, community_id=community_id, embedding=embedding)
             graph.set_node_payload(rid, payload)
@@ -1781,7 +1864,7 @@ def build_runtime_graph_incremental(store: MemoryStore):
         )
 
         try:
-            store.register_graph_sync_hook(_make_graph_sync_hook(graph))
+            store.register_graph_sync_hook(_make_graph_sync_hook(graph, store))
         except (AttributeError, TypeError, RuntimeError) as exc:
             log.warning("graph_sync_hook registration failed: %s", exc)
 

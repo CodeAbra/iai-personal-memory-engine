@@ -1298,12 +1298,23 @@ version = "0.1.0"
 dependencies = [
  "iai_mcp_embed_core",
  "iai_mcp_graph_core",
+ "iai_mcp_rank_core",
  "iai_mcp_vec_core",
  "lilli-hd",
  "lillibrain",
  "lilliengine",
  "pyo3",
  "pyo3-stub-gen",
+]
+
+[[package]]
+name = "iai_mcp_rank_core"
+version = "0.1.0"
+dependencies = [
+ "numpy",
+ "parking_lot",
+ "pyo3",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

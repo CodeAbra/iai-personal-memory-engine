@@ -174,6 +174,52 @@ def test_never_merge_existing_record_bypasses_skip(
         f"got body={b_event_body}"
     )
 
+def test_directive_new_candidate_bypasses_skip(
+    fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directive-flagged candidate must never be folded into an existing
+    near-duplicate, same as a never_merge lock -- inserted directly via
+    store.insert() so this isolates the store-level gate from capture.py's
+    own dedup (a different call site entirely)."""
+    monkeypatch.setenv("IAI_MCP_PATSEP_DRY_RUN", "false")
+
+    rec_a = _make_record(embedding=REFERENCE_EMBEDDING, never_merge=False)
+    fresh_store.insert(rec_a)
+    a_id = rec_a.id
+
+    near_dup_embedding = _make_embedding_at_cosine(0.97)
+    rec_b = _make_record(
+        embedding=near_dup_embedding,
+        directive=True,
+        literal_surface="alice always wants terse commit messages",
+    )
+    b_id_before = rec_b.id
+    fresh_store.insert(rec_b)
+
+    assert rec_b.id == b_id_before, (
+        f"directive=True new candidate must keep its own id; "
+        f"got rec_b.id={rec_b.id}, expected {b_id_before}"
+    )
+    assert rec_b.id != a_id, (
+        "directive=True new candidate must not be collapsed into existing record"
+    )
+
+    tbl = fresh_store.db.open_table(RECORDS_TABLE)
+    assert tbl.count_rows() == 2, (
+        f"directive=True candidate must INSERT as its own row; "
+        f"records table has {tbl.count_rows()} rows (expected 2)"
+    )
+
+    events = _events_in_insert_order(fresh_store)
+    assert len(events) == 2, (
+        f"expected 2 pattern_separation_pass events; got {len(events)}"
+    )
+    b_event_body = events[1]["data"]
+    assert b_event_body["action"] == "insert", (
+        f"event for directive=True candidate must report action=insert; "
+        f"got body={b_event_body}"
+    )
+
 def test_neither_pinned_skip_merge_still_fires(
     fresh_store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

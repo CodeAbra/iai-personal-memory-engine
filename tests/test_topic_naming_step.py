@@ -472,7 +472,7 @@ def _noop_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return pipeline, calls, state_path
 
 
-def test_wal_recovery_from_curiosity_mine_runs_tail_two(
+def test_wal_recovery_from_curiosity_mine_runs_tail_three(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pipeline, calls, state_path = _noop_pipeline(tmp_path, monkeypatch)
@@ -489,12 +489,18 @@ def test_wal_recovery_from_curiosity_mine_runs_tail_two(
 
     pipeline.run()
 
-    assert calls == [SleepStep.EMBEDDING_INTEGRITY, SleepStep.COMMUNITY_NAMING]
+    assert calls == [
+        SleepStep.EMBEDDING_INTEGRITY,
+        SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+    ]
     after = load_state(state_path)
     assert after["sleep_cycle_progress"] is None
 
 
-def test_wal_recovery_from_embedding_integrity_runs_naming_once(
+def test_wal_recovery_from_embedding_integrity_runs_tail_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pipeline, calls, state_path = _noop_pipeline(tmp_path, monkeypatch)
@@ -511,7 +517,12 @@ def test_wal_recovery_from_embedding_integrity_runs_naming_once(
 
     pipeline.run()
 
-    assert calls == [SleepStep.COMMUNITY_NAMING]
+    assert calls == [
+        SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+    ]
     after = load_state(state_path)
     assert after["sleep_cycle_progress"] is None
 

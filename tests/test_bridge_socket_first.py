@@ -205,8 +205,8 @@ def test_start_throws_DaemonUnreachableError_when_socket_missing(
         assert "result" in list_resp, f"tools/list error: {list_resp}"
         tools = list_resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert len(names) == 14, (
-            f"tools/list returned {len(names)} tools, expected 14. "
+        assert len(names) == 15, (
+            f"tools/list returned {len(names)} tools, expected 15. "
             f"names={sorted(names)}"
         )
         meta = list_resp["result"].get("_meta") or {}

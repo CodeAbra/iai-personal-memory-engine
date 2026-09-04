@@ -342,6 +342,8 @@ def _prewarm_graph_cache(
     dst_root: str | Path,
     report: MigrateReport,
     current_peak_rss: float,
+    *,
+    src_root: str | Path | None = None,
 ) -> float:
     """Build and persist the runtime graph cache for the migrated store.
 
@@ -351,15 +353,34 @@ def _prewarm_graph_cache(
     record count exactly — the drift gate on first daemon boot is trivially
     satisfied and no cold rebuild fires.
 
+    When ``src_root`` is given, its key is planted at ``dst_root`` for the
+    duration of this call only.
+
     Best-effort: any failure is logged as a warning and the migrated data is left
-    intact.  The report's prewarm_done and prewarm_elapsed_sec fields are updated
-    in-place.  Returns the updated peak_rss (may have grown during the build).
+    intact. ``report.prewarm_done`` reflects whether the cache file actually
+    landed on disk, never just whether the build itself raised — an
+    encrypt-and-persist failure two layers down must not be reported as success.
+    Returns the updated peak_rss (may have grown during the build).
     """
     import time as _time
+
+    from iai_mcp.migrate._to_lilli_verify import _plant_keys_for_recall, _unplant_keys
+
+    dst_root = Path(dst_root)
+    planted: list[Path] = []
+    if src_root is not None:
+        try:
+            from iai_mcp.crypto import CryptoKey
+
+            source_key = CryptoKey(store_root=Path(src_root)).get_or_create()
+            planted = _plant_keys_for_recall(source_key, [dst_root])
+        except Exception:  # noqa: BLE001 -- planting is best-effort; the disk check below is the real signal
+            planted = []
 
     try:
         from iai_mcp.store import MemoryStore
         from iai_mcp.retrieve import build_runtime_graph
+        from iai_mcp import runtime_graph_cache
 
         # Skip the pre-warm on a degenerate corpus (nothing to build a graph for).
         # A store with zero active records produces an empty centrality map which
@@ -375,11 +396,19 @@ def _prewarm_graph_cache(
                 )
                 return current_peak_rss
             build_runtime_graph(store)
+            cache_persisted = runtime_graph_cache._cache_path(store).exists()
         finally:
             try:
                 store.db.close()
             except Exception:  # noqa: BLE001
                 pass
+
+        if not cache_persisted:
+            _log.warning(
+                "runtime graph cache pre-warm ran but did not persist a "
+                "cache file; first daemon boot will perform a cold rebuild"
+            )
+            return current_peak_rss
 
         elapsed = _time.monotonic() - t_pw0
         report.prewarm_done = True
@@ -394,6 +423,8 @@ def _prewarm_graph_cache(
             "perform a cold rebuild (migrated data is intact)",
             exc_info=True,
         )
+    finally:
+        _unplant_keys(planted)
 
     return current_peak_rss
 
@@ -584,7 +615,9 @@ def migrate_sqlite_to_lilli(
             # empty corpus, a worker crash, or a missing community library)
             # logs a warning and leaves the migrated DATA intact.  The boot
             # then pays a one-time cold rebuild — correct but slower.
-            peak_rss = _prewarm_graph_cache(dst_root, report, peak_rss)
+            peak_rss = _prewarm_graph_cache(
+                dst_root, report, peak_rss, src_root=src_db.parent.parent
+            )
 
             # Persist the recall-index sidecar LAST, after the pre-warm's
             # stamp-gated boot migrations have settled the engine's column

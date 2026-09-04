@@ -536,7 +536,7 @@ def test_to_row_dicts_nan_distance_sorts_last_and_stable(monkeypatch):
 
     monkeypatch_core = (_FakeCursor(), fetched, dist_map)
 
-    def _fake_core(self):
+    def _fake_core(self, substage_timings=None):
         return monkeypatch_core
 
     query._ann_vector = object()

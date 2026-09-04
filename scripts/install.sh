@@ -40,29 +40,11 @@ else
     # 1. venv
     # -----------------------------------------------------------------------
     step "python venv"
-    # The package supports 3.11 and 3.12 only. IAI_PYTHON overrides detection
-    # (bootstrap.sh sets it from its own preflight); otherwise probe the usual
-    # names rather than trusting whatever `python3` happens to resolve to.
-    version_ok() { "$1" -c 'import sys; sys.exit(0 if sys.version_info[:2] in ((3,11),(3,12)) else 1)' 2>/dev/null; }
-    PYTHON="${IAI_PYTHON:-}"
-    if [ -n "${PYTHON}" ]; then
-        version_ok "${PYTHON}" || die "IAI_PYTHON=${PYTHON} is $("${PYTHON}" --version 2>&1 || echo unusable); need Python 3.11 or 3.12"
-    else
-        for candidate in python3.12 python3.11 python3; do
-            if command -v "${candidate}" >/dev/null 2>&1 && version_ok "${candidate}"; then
-                PYTHON="$(command -v "${candidate}")"
-                break
-            fi
-        done
-        [ -n "${PYTHON}" ] || die "need Python 3.11 or 3.12 (default python3 is: $(python3 --version 2>&1 || echo none)). Install one, or point IAI_PYTHON at a suitable interpreter."
-    fi
     if [ ! -d .venv ]; then
-        "${PYTHON}" -m venv .venv
-        ok ".venv created with $("${PYTHON}" --version)"
-    elif ! version_ok .venv/bin/python; then
-        die "existing .venv uses $(.venv/bin/python --version 2>&1 || echo 'a broken interpreter'); need Python 3.11 or 3.12. Remove ${REPO_ROOT}/.venv and re-run."
+        python3 -m venv .venv
+        ok ".venv created"
     else
-        ok ".venv already exists ($(.venv/bin/python --version))"
+        ok ".venv already exists"
     fi
 
     # -----------------------------------------------------------------------

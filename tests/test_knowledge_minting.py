@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from iai_mcp.types import EMBED_DIM, MemoryRecord
+from iai_mcp.types import CLS_SUMMARY_PREFIX_MARKER, EMBED_DIM, MemoryRecord
 
 
 def _record(text: str, i: int) -> MemoryRecord:
@@ -102,7 +102,8 @@ def test_psep_only_graph_mints_summaries(tmp_path):
     assert len(summaries) == 3
     for s in summaries:
         assert s.never_decay is True
-        assert "Cluster summary (3 records" in s.literal_surface
+        assert s.literal_surface.startswith(CLS_SUMMARY_PREFIX_MARKER)
+        assert "knowledge minting fixture row" in s.literal_surface
 
 
 def test_community_id_stamped_on_members(tmp_path):

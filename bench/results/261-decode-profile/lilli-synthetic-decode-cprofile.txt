@@ -1,0 +1,90 @@
+
+===== sort by CUMULATIVE time (top 35) =====
+         2201602 function calls in 8.690 seconds
+
+   Ordered by: cumulative time
+   List reduced from 97 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.466    0.466    8.690    8.690 profile_escalation_decode.py:249(_body)
+       40    0.732    0.018    8.216    0.205 _table.py:1225(to_row_dicts)
+       40    0.105    0.003    6.566    0.164 _table.py:1022(_ann_knn_fetch_core)
+      400    0.000    0.000    6.246    0.016 connection.py:1535(execute)
+      400    6.246    0.016    6.246    0.016 {method 'execute' of 'iai_mcp_native.engine.RawConn' objects}
+      360    0.001    0.000    6.245    0.017 _ro_pool.py:236(execute)
+   144000    0.074    0.000    0.702    0.000 _table.py:432(_decode_raw_row_embedding)
+   144000    0.047    0.000    0.608    0.000 _table.py:334(_decode_embedding)
+   144040    0.510    0.000    0.510    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+       40    0.030    0.001    0.171    0.004 {method 'sort' of 'list' objects}
+   144000    0.141    0.000    0.141    0.000 _table.py:1275(<lambda>)
+       40    0.000    0.000    0.092    0.002 _vecindex.py:76(knn_query)
+       40    0.091    0.002    0.091    0.002 {method 'knn_query' of 'builtins.ExactIndex' objects}
+      360    0.066    0.000    0.066    0.000 {method 'fetchall' of 'iai_mcp_native.engine.Cursor' objects}
+   432040    0.045    0.000    0.045    0.000 {method 'get' of 'dict' objects}
+   144000    0.043    0.000    0.043    0.000 {built-in method numpy.frombuffer}
+   288680    0.018    0.000    0.018    0.000 {built-in method builtins.isinstance}
+      400    0.009    0.000    0.014    0.000 {method 'join' of 'str' objects}
+   144040    0.014    0.000    0.014    0.000 {built-in method builtins.min}
+   144000    0.013    0.000    0.013    0.000 {built-in method builtins.max}
+   144040    0.013    0.000    0.013    0.000 {method 'append' of 'list' objects}
+   144000    0.010    0.000    0.010    0.000 {method 'add' of 'set' objects}
+       40    0.000    0.000    0.007    0.000 profile_escalation_decode.py:81(_representative_vec)
+       40    0.003    0.000    0.006    0.000 neural_map.py:39(embed)
+       80    0.000    0.000    0.006    0.000 {built-in method builtins.next}
+       80    0.000    0.000    0.006    0.000 _db.py:1510(ro_conn)
+   144360    0.005    0.000    0.005    0.000 _table.py:1174(<genexpr>)
+       40    0.000    0.000    0.005    0.000 contextlib.py:132(__enter__)
+       40    0.000    0.000    0.005    0.000 _ro_pool.py:311(borrow)
+       40    0.000    0.000    0.004    0.000 _ro_pool.py:365(_borrow_prepared)
+      360    0.000    0.000    0.002    0.000 _ro_pool.py:34(_slow_ro_execute_log_ms)
+      400    0.000    0.000    0.002    0.000 <frozen _collections_abc>:804(get)
+       40    0.001    0.000    0.001    0.000 {built-in method builtins.sum}
+      400    0.001    0.000    0.001    0.000 <frozen os>:709(__getitem__)
+    15360    0.001    0.000    0.001    0.000 {method 'random' of '_random.Random' objects}
+
+
+
+===== sort by TOTAL (self) time (top 35) =====
+         2201602 function calls in 8.690 seconds
+
+   Ordered by: internal time
+   List reduced from 97 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      400    6.246    0.016    6.246    0.016 {method 'execute' of 'iai_mcp_native.engine.RawConn' objects}
+       40    0.732    0.018    8.216    0.205 _table.py:1225(to_row_dicts)
+   144040    0.510    0.000    0.510    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+        1    0.466    0.466    8.690    8.690 profile_escalation_decode.py:249(_body)
+   144000    0.141    0.000    0.141    0.000 _table.py:1275(<lambda>)
+       40    0.105    0.003    6.566    0.164 _table.py:1022(_ann_knn_fetch_core)
+       40    0.091    0.002    0.091    0.002 {method 'knn_query' of 'builtins.ExactIndex' objects}
+   144000    0.074    0.000    0.702    0.000 _table.py:432(_decode_raw_row_embedding)
+      360    0.066    0.000    0.066    0.000 {method 'fetchall' of 'iai_mcp_native.engine.Cursor' objects}
+   144000    0.047    0.000    0.608    0.000 _table.py:334(_decode_embedding)
+   432040    0.045    0.000    0.045    0.000 {method 'get' of 'dict' objects}
+   144000    0.043    0.000    0.043    0.000 {built-in method numpy.frombuffer}
+       40    0.030    0.001    0.171    0.004 {method 'sort' of 'list' objects}
+   288680    0.018    0.000    0.018    0.000 {built-in method builtins.isinstance}
+   144040    0.014    0.000    0.014    0.000 {built-in method builtins.min}
+   144000    0.013    0.000    0.013    0.000 {built-in method builtins.max}
+   144040    0.013    0.000    0.013    0.000 {method 'append' of 'list' objects}
+   144000    0.010    0.000    0.010    0.000 {method 'add' of 'set' objects}
+      400    0.009    0.000    0.014    0.000 {method 'join' of 'str' objects}
+   144360    0.005    0.000    0.005    0.000 _table.py:1174(<genexpr>)
+       40    0.003    0.000    0.006    0.000 neural_map.py:39(embed)
+    15360    0.001    0.000    0.001    0.000 {method 'random' of '_random.Random' objects}
+      360    0.001    0.000    6.245    0.017 _ro_pool.py:236(execute)
+       40    0.001    0.000    0.001    0.000 {built-in method builtins.sum}
+      400    0.001    0.000    0.001    0.000 <frozen os>:709(__getitem__)
+    15400    0.001    0.000    0.001    0.000 neural_map.py:46(<genexpr>)
+      360    0.000    0.000    0.000    0.000 {method 'extend' of 'list' objects}
+       40    0.000    0.000    0.000    0.000 {built-in method numpy.array}
+      360    0.000    0.000    0.002    0.000 _ro_pool.py:34(_slow_ro_execute_log_ms)
+      400    0.000    0.000    0.002    0.000 <frozen _collections_abc>:804(get)
+       40    0.000    0.000    0.000    0.000 {function Random.seed at 0x108020c20}
+      440    0.000    0.000    0.000    0.000 {method 'encode' of 'str' objects}
+      400    0.000    0.000    0.000    0.000 <frozen os>:791(encode)
+       40    0.000    0.000    0.000    0.000 {built-in method _hashlib.openssl_sha256}
+      400    0.000    0.000    6.246    0.016 connection.py:1535(execute)
+
+

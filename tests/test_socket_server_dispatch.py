@@ -59,9 +59,21 @@ def test_memory_recall_routed_over_socket(short_socket_paths):
 
 def test_session_start_payload_routed(short_socket_paths):
     _, sock_path, _ = short_socket_paths
+    from iai_mcp.capture import capture_turn
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore()
+    # Seed one active record so records_count > 0 and dispatch takes the
+    # real assemble_session_start -> _payload_to_json path instead of the
+    # empty-store early return; a directive record keeps this independent
+    # of the default wake_depth ("minimal"), since directives render at
+    # every wake_depth while recent_thread only renders above minimal.
+    seed_result = capture_turn(
+        store=store, cue="standing order marker",
+        text="STANDING_ORDER_MARKER: never drop this on the wire",
+        directive=True, session_id="s-dispatch-seed", role="user",
+    )
+    assert seed_result["status"] == "inserted", seed_result
 
     async def _runner(sock_path, store):
         return await _send_jsonrpc(
@@ -76,6 +88,22 @@ def test_session_start_payload_routed(short_socket_paths):
     result = resp["result"]
     assert "l0" in result and "l1" in result, result
     assert "wake_depth" in result, result
+    assert "recent_thread" in result, (
+        "a host reading the serialized brief loses ambient first-turn recall "
+        f"when this key is absent: {result}"
+    )
+    assert "directives" in result, (
+        f"a host reading the serialized brief loses standing orders when this key is absent: {result}"
+    )
+    assert "live_state" in result, (
+        "a host reading the serialized brief loses session-continuity state "
+        f"when this key is absent: {result}"
+    )
+    # The populated-store path must actually have run, not just the keys'
+    # presence: the seeded directive text must be traceable on the wire, so
+    # a future _payload_to_json that hardcodes "" instead of reading the
+    # dataclass field fails this test.
+    assert "STANDING_ORDER_MARKER" in result["directives"], result
 
 def test_profile_get_routed(short_socket_paths):
     _, sock_path, _ = short_socket_paths

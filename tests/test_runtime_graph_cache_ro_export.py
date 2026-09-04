@@ -8,7 +8,6 @@ layer (JOIN against the active-records predicate).
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 
 from iai_mcp import errors
@@ -24,20 +23,13 @@ from iai_mcp import runtime_graph_cache_ro_export as roexp
 from iai_mcp.community import detect_communities
 from iai_mcp.graph import MemoryGraph
 
-_driver = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower()
 
-# Tests in this file that exercise the sqlite-format on-disk layout and the
-# file-layer ?mode=ro URI form are skipped on the lilli driver — those
-# assertions have no meaningful lilli analog (the lilli driver has no
-# file-layer RO mode). They are per-function rather than file-level so that
-# the new lilli routing test below can run on the lilli driver.
-_skip_sqlite_format = pytest.mark.skipif(
-    _driver == "lilli",
-    reason=(
-        "exercises the SQLite-driver on-disk format and RO-WAL URI directly; "
-        "lilli routing is proven by the dedicated lilli export test in this file"
-    ),
-)
+def _native_available() -> bool:
+    try:
+        from iai_mcp_native import engine  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 _DIM = 384
@@ -99,7 +91,6 @@ def _insert_edge(
     )
 
 
-@_skip_sqlite_format
 def test_open_ro_connection_rejects_writes(tmp_path: Path):
     db_path = tmp_path / "brain.sqlite3"
     writer = _make_db(db_path)
@@ -117,7 +108,6 @@ def test_open_ro_connection_rejects_writes(tmp_path: Path):
         ro.close()
 
 
-@_skip_sqlite_format
 def test_iter_records_chunks_pagination_complete(tmp_path: Path):
     db_path = tmp_path / "brain.sqlite3"
     writer = _make_db(db_path)
@@ -147,7 +137,6 @@ def test_iter_records_chunks_pagination_complete(tmp_path: Path):
     assert page_sizes == [2000, 2000, 1000]
 
 
-@_skip_sqlite_format
 def test_iter_records_chunks_filters_tombstoned(tmp_path: Path):
     db_path = tmp_path / "brain.sqlite3"
     writer = _make_db(db_path)
@@ -177,7 +166,6 @@ def test_iter_records_chunks_filters_tombstoned(tmp_path: Path):
     assert not any(tid in seen for tid in tombstoned)
 
 
-@_skip_sqlite_format
 def test_iter_records_chunks_filters_embedding_pending(tmp_path: Path):
     db_path = tmp_path / "brain.sqlite3"
     writer = _make_db(db_path)
@@ -201,7 +189,6 @@ def test_iter_records_chunks_filters_embedding_pending(tmp_path: Path):
     assert seen == []
 
 
-@_skip_sqlite_format
 def test_iter_edges_chunks_compound_keyset(tmp_path: Path):
     db_path = tmp_path / "brain.sqlite3"
     writer = _make_db(db_path)
@@ -240,7 +227,6 @@ def test_iter_edges_chunks_compound_keyset(tmp_path: Path):
     assert page_sizes == [30, 30, 30, 10]
 
 
-@_skip_sqlite_format
 def test_read_transaction_and_edges_branch_on_connection_not_env_reverse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -285,7 +271,6 @@ def test_read_transaction_and_edges_branch_on_connection_not_env_reverse(
     assert seen == {(str(ids[0]), str(ids[1])), (str(ids[1]), str(ids[2]))}
 
 
-@_skip_sqlite_format
 def test_read_transaction_snapshot_isolation(tmp_path: Path):
     db_path = tmp_path / "brain.sqlite3"
     writer = _make_db(db_path)
@@ -341,7 +326,6 @@ def test_read_transaction_snapshot_isolation(tmp_path: Path):
     )
 
 
-@_skip_sqlite_format
 def test_dangling_endpoint_unchanged_partition(tmp_path: Path):
     """SQL-drop dangling endpoint: edge with a tombstoned-endpoint is filtered
     at the streaming layer; partition over the active subgraph is unchanged
@@ -433,7 +417,7 @@ def test_dangling_endpoint_unchanged_partition(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    _driver != "lilli",
+    not _native_available(),
     reason="proves iter_edges_chunks works on a lilli store and drops tombstoned-endpoint edges",
 )
 def test_lilli_iter_edges_drops_tombstoned_endpoint(tmp_path: Path):
@@ -498,7 +482,7 @@ def test_lilli_iter_edges_drops_tombstoned_endpoint(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    _driver != "lilli",
+    not _native_available(),
     reason=(
         "proves read_transaction/iter_edges_chunks branch on the concrete "
         "connection object, not the ambient env var, on a real lilli store"
@@ -580,7 +564,7 @@ def test_lilli_ro_export_branches_on_connection_with_env_unset(
 
 
 @pytest.mark.skipif(
-    _driver != "lilli",
+    not _native_available(),
     reason="proves the routed open_ro_connection + BEGIN-branched read_transaction on a real lilli store",
 )
 def test_lilli_ro_export_records_via_engine(tmp_path: Path):

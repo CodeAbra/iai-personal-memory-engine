@@ -33,6 +33,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from iai_mcp.model_attribution import normalize_model
+
 logger = logging.getLogger(__name__)
 
 WORKING_TIER_MAX_SLOTS: int = 5
@@ -70,6 +72,11 @@ class WorkingSetEntry:
     raw_sensory: list[str] = field(default_factory=list)
     session_id: str = "-"
     last_turn_ts: float = 0.0
+    next_action: str = ""
+    raw_sensory_models: list[str | None] = field(
+        default_factory=list,
+        kw_only=True,
+    )
 
 
 _lock = threading.Lock()
@@ -103,11 +110,68 @@ def _cache_path(store: Any = None, session_id: str = "-") -> Path:
     return base / f".working-tier.{_sanitize_session_id(session_id)}.cached.md"
 
 
+def _record_model(record: Any) -> str | None:
+    try:
+        for entry in getattr(record, "provenance", None) or []:
+            value = entry.get("model") if isinstance(entry, dict) else None
+            model = normalize_model(value)
+            if model:
+                return model
+    except Exception:  # noqa: BLE001 -- capture feed must remain fail-soft
+        pass
+    return None
+
+
+def _repair_raw_sensory_models(entry: WorkingSetEntry) -> list[str | None]:
+    """Bound and align the sidecar list to raw_sensory length before any duplicate check."""
+    models = getattr(entry, "raw_sensory_models", None)
+    if not isinstance(models, list):
+        models = []
+        entry.raw_sensory_models = models
+    while len(entry.raw_sensory) > WORKING_TIER_MAX_SLOTS:
+        del entry.raw_sensory[0]
+    while len(models) > len(entry.raw_sensory):
+        del models[0]
+    if len(models) < len(entry.raw_sensory):
+        models[:0] = [None] * (len(entry.raw_sensory) - len(models))
+    for index, model in enumerate(models):
+        models[index] = normalize_model(model)
+    return models
+
+
+def _append_raw_sensory(
+    entry: WorkingSetEntry,
+    text: str,
+    model: object = None,
+) -> None:
+    """Append literal sensory text and its bounded render-only sidecar."""
+    sidecar_was_malformed = not isinstance(
+        getattr(entry, "raw_sensory_models", None), list
+    )
+    models = _repair_raw_sensory_models(entry)
+    if text in entry.raw_sensory:
+        index = entry.raw_sensory.index(text)
+        normalized_model = normalize_model(model)
+        if (
+            not sidecar_was_malformed
+            and models[index] is None
+            and normalized_model is not None
+        ):
+            models[index] = normalized_model
+        return
+    entry.raw_sensory.append(text)
+    models.append(normalize_model(model))
+    while len(entry.raw_sensory) > WORKING_TIER_MAX_SLOTS:
+        del entry.raw_sensory[0]
+        del models[0]
+
+
 def _render_snapshot(entry: WorkingSetEntry) -> str:
     lines = [
         "# Working tier — active task",
         f"session: {entry.session_id}",
         f"goal: {entry.goal}",
+        f"next action: {entry.next_action or '(none)'}",
     ]
     if entry.open_subgoals:
         lines.append("open subgoals:")
@@ -122,7 +186,11 @@ def _render_snapshot(entry: WorkingSetEntry) -> str:
         lines.append(f"focus: {entry.focus}")
     if entry.raw_sensory:
         lines.append("recent turns:")
-        lines += [f"- {t}" for t in entry.raw_sensory]
+        models = _repair_raw_sensory_models(entry)
+        lines += [
+            f"- {'[model:' + model + '] ' if model else ''}{text}"
+            for text, model in zip(entry.raw_sensory, models)
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -137,8 +205,13 @@ def _sweep_legacy_snapshot(base: Path) -> None:
         logger.debug("working_tier legacy snapshot sweep failed: %s", exc)
 
 
-def _persist_entry(store: Any, entry: WorkingSetEntry) -> None:
-    """Fail-soft cache emission of one task's per-session snapshot."""
+def _persist_entry(store: Any, entry: WorkingSetEntry, *, allow_downgrade: bool = False) -> None:
+    """Fail-soft cache emission of one task's per-session snapshot, plus a
+    session-agnostic continuity-cache refresh reached by every focal
+    mutation (update_task AND update_from_record). allow_downgrade=True
+    authorizes an explicit caller-cleared focus/next_action to render thin
+    in the eager file instead of resurrecting the prior substantive block —
+    an incidental task-switch thin-park must never pass True here."""
     try:
         path = _cache_path(store, entry.session_id)
         with _lock:
@@ -152,6 +225,15 @@ def _persist_entry(store: Any, entry: WorkingSetEntry) -> None:
         os.replace(tmp, path)
     except Exception as exc:  # noqa: BLE001 -- cache emission must never fail a write
         logger.debug("working_tier snapshot persist failed: %s", exc)
+
+    # No _lock is held here. Lazy import: session.py imports working_tier at
+    # module scope, so a module-level reverse import would be circular.
+    try:
+        from iai_mcp import session
+
+        session.write_continuity_cache(store, allow_downgrade=allow_downgrade)
+    except Exception as exc:  # noqa: BLE001 -- continuity refresh must never fail a persist
+        logger.debug("working_tier continuity cache refresh failed: %s", exc)
 
 
 def _remove_snapshot(store: Any, session_id: str) -> None:
@@ -261,11 +343,22 @@ def update_task(
     result: str | None = None,
     focus: str | None = None,
     close_sub_goal: str | None = None,
+    next_action: str | None = None,
+    session_id: str | None = None,
+    store: Any = None,
+    explicit_clear: bool = False,
 ) -> WorkingSetEntry | None:
-    """Fold new structured state into the focal task. Text is stored
-    verbatim (strip only, never paraphrased)."""
+    """Fold new structured state into the target task. Text is stored
+    verbatim (strip and WORKING_TIER_MAX_GOAL_CHARS bound for focus/
+    next_action, never paraphrased). session_id routes the target entry
+    through _select_entry_locked (None == today's global focal task), so a
+    fold from one session can never land on another session's entry.
+    When store is given, the folded entry's snapshot is persisted in the
+    same call. explicit_clear signals a caller-initiated focus=""/
+    next_action="" (not an incidental task-switch thin-park) and is the
+    ONLY case that authorizes the eager continuity file's downgrade path."""
     with _lock:
-        entry = _FOCAL
+        entry = _select_entry_locked(session_id)
         if entry is None:
             return None
         if sub_goal is not None:
@@ -284,7 +377,9 @@ def update_task(
                 max_slots=WORKING_TIER_MAX_SLOTS, allow_evict=False,
             )
         if focus is not None:
-            entry.focus = focus.strip()
+            entry.focus = focus.strip()[:WORKING_TIER_MAX_GOAL_CHARS]
+        if next_action is not None:
+            entry.next_action = next_action.strip()[:WORKING_TIER_MAX_GOAL_CHARS]
         if close_sub_goal is not None:
             marker = close_sub_goal.strip()
             if marker in entry.open_subgoals:
@@ -296,7 +391,12 @@ def update_task(
                 entry.closed_subgoals, marker,
                 max_slots=WORKING_TIER_MAX_SLOTS, allow_evict=False,
             )
-        return entry
+
+    # _persist_entry acquires _lock itself -- must run after release above,
+    # never inside the with-block (the lock is not re-entrant).
+    if store is not None:
+        _persist_entry(store, entry, allow_downgrade=explicit_clear)
+    return entry
 
 
 def _select_entry_locked(session_id: str | None) -> WorkingSetEntry | None:
@@ -310,10 +410,16 @@ def _select_entry_locked(session_id: str | None) -> WorkingSetEntry | None:
     return _PARKED.get(session_id)
 
 
-def read_task(*, session_id: str | None = None) -> WorkingSetEntry | None:
+def read_task(
+    *, session_id: str | None = None, fold_sensory: bool = True,
+) -> WorkingSetEntry | None:
     """Return the live task for the given session (focal when None), or None.
     No store/db parameter — the awake-read contract. Folds a live sensory
-    tail so per-turn continuity does not lag the promotion cadence."""
+    tail so per-turn continuity does not lag the promotion cadence, unless
+    fold_sensory=False: then _lock is held ONLY for the select and the cheap
+    in-memory field read, never across the fold's disk-touching scan — for
+    a caller (e.g. the write-triggered continuity render) that never reads
+    raw_sensory and must not pay that cost on a high-frequency path."""
     # Fold under the lock, matching populate_from_sensory — the sensory fold
     # MUTATES entry.raw_sensory, so it must not race a concurrent
     # update_from_record folding the same list. _fold_sensory_tail never
@@ -323,6 +429,8 @@ def read_task(*, session_id: str | None = None) -> WorkingSetEntry | None:
         entry = _select_entry_locked(session_id)
         if entry is None:
             return None
+        if not fold_sensory:
+            return entry
         try:
             _fold_sensory_tail(entry, entry.session_id)
         except Exception as exc:  # noqa: BLE001 -- read must never crash on a sensory hiccup
@@ -336,15 +444,14 @@ def _fold_sensory_tail(entry: WorkingSetEntry, session_id: str) -> None:
     pending = sensory_pending(session_id=session_id)
     for item in pending:
         text = None
+        model = None
         if isinstance(item, dict):
             text = item.get("text") or item.get("literal_surface")
+            model = item.get("model")
         elif isinstance(item, str):
             text = item
-        if text and text not in entry.raw_sensory:
-            _bounded_append(
-                entry.raw_sensory, text,
-                max_slots=WORKING_TIER_MAX_SLOTS, allow_evict=True,
-            )
+        if text:
+            _append_raw_sensory(entry, text, model)
 
 
 def populate_from_sensory(session_id: str) -> WorkingSetEntry | None:
@@ -468,6 +575,23 @@ def _consolidate_detached(entry: WorkingSetEntry, *, store: Any) -> dict[str, An
     return {"status": "closed", "consolidated": consolidated}
 
 
+def _refresh_continuity_cache_on_close(store: Any) -> None:
+    """close_task empties the focal state entirely -- unlike an incidental
+    thin-park mid-session, this IS the new ground truth, so the eager file's
+    live-state block must clear even though write_continuity_cache normally
+    refuses to downgrade a substantive block. No resolvable store root means
+    nothing meaningful to refresh (and no root to scope the write under),
+    so this stays inert rather than touching the default-home fallback."""
+    if getattr(store, "root", None) is None:
+        return
+    try:
+        from iai_mcp import session
+
+        session.write_continuity_cache(store, allow_downgrade=True)
+    except Exception as exc:  # noqa: BLE001 -- continuity refresh must never fail a close
+        logger.debug("working_tier close_task continuity cache refresh failed: %s", exc)
+
+
 def close_task(store: Any = None) -> dict[str, Any]:
     """Consolidate durable results of the focal AND every parked task via
     ordinary awake store.insert() (through capture_turn), THEN clear the
@@ -484,6 +608,7 @@ def close_task(store: Any = None) -> dict[str, Any]:
 
     if not entries:
         _remove_snapshot(store, "-")
+        _refresh_continuity_cache_on_close(store)
         return {"status": "no_active_task", "consolidated": []}
 
     # Consolidation may re-enter store.insert() -> _feed_working ->
@@ -496,6 +621,8 @@ def close_task(store: Any = None) -> dict[str, Any]:
         consolidated.extend(outcome.get("consolidated") or [])
         undelivered.extend(outcome.get("undelivered") or [])
         _remove_snapshot(store, entry.session_id)
+
+    _refresh_continuity_cache_on_close(store)
 
     if store is None:
         result: dict[str, Any] = {
@@ -579,10 +706,7 @@ def update_from_record(record: Any, *, store: Any = None) -> None:
 
             text = _literal_surface_of(record)
             if text:
-                _bounded_append(
-                    entry.raw_sensory, text,
-                    max_slots=WORKING_TIER_MAX_SLOTS, allow_evict=True,
-                )
+                _append_raw_sensory(entry, text, _record_model(record))
             # Advance the idle clock monotonically. The async write-queue flush
             # can deliver records out of created_at order; a bare assignment
             # would rewind last_turn_ts on an older record and spuriously

@@ -1,0 +1,32 @@
+{
+  "bench": "longmemeval",
+  "track": "A+B",
+  "stack": "v8.0",
+  "commit": "92976a5",
+  "config_aligned_to_mempalace": {
+    "dataset": "longmemeval-S cleaned",
+    "n": 500,
+    "granularity": "session",
+    "metric": "recall_any@k (any gold session-id in top-k)",
+    "haystack": "full",
+    "rerank": "none (raw)"
+  },
+  "iai_mcp_measured_on_host": {
+    "R@5": 0.962,
+    "R@10": 0.978,
+    "hits": 481,
+    "misses": 19,
+    "errors": 0
+  },
+  "mempalace_published_config_matched": {
+    "R@5_raw": 0.966,
+    "R@5_hybrid_v4_tuned": 0.984,
+    "R@5_plus_llm_rerank": ">=0.99",
+    "note": "published numbers; NOT run on host per owner; same 500q cleaned, raw=no-rerank"
+  },
+  "verdict": "iai-mcp raw R@5 0.962 vs mempalace published raw 0.966 \u2014 0.4pp behind, apples-to-apples (same dataset/N/metric/haystack/rerank-state). R@10 0.978. Cleared prior 0.953 (which was a 341-row filtered subset).",
+  "raw_result": "bench/results/v8.3/longmemeval_cleaned_full.json",
+  "reproduce": "IAI_MCP_CRYPTO_PASSPHRASE=<x> .venv/bin/python bench/longmemeval_blind.py --split S --dataset cleaned --granularity session --out bench/results/v8.3/longmemeval_cleaned_full.json",
+  "improvement_todo": "Track A step3 (no tuning-on-test): hybrid dense+lexical / ranker tuning / optional rerank variant (report raw AND reranked separately) to close the 0.4pp raw gap.",
+  "measured_at": "2026-06-04"
+}

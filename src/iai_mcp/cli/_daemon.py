@@ -489,6 +489,14 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_daemon_start(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
+    from iai_mcp.migrate import refuse_if_marker_present
+    from iai_mcp.tz import store_root as _resolve_start_store_root
+
+    _swap_marker_reason = refuse_if_marker_present(_resolve_start_store_root())
+    if _swap_marker_reason is not None:
+        print(_swap_marker_reason, file=sys.stderr)
+        return 1
+
     if os.name == "nt":
         result = _cli.subprocess.run(
             ["schtasks", "/Run", "/TN", _cli.WINDOWS_TASK_NAME],
@@ -956,6 +964,19 @@ def cmd_daemon_status(args: argparse.Namespace) -> int:
             f"stop && iai-mcp daemon start to restart",
             file=sys.stderr,
         )
+
+    try:
+        from iai_mcp.code_stamp import stamp_divergence
+
+        if stamp_divergence(resp.get("code_stamp")) == "digest":
+            print(
+                "WARNING: daemon is running sleep-path code older than the "
+                "source on disk -- run iai-mcp daemon stop && iai-mcp daemon "
+                "start to load it",
+                file=sys.stderr,
+            )
+    except OSError as exc:
+        logger.debug("code stamp comparison failed: %s", exc)
 
     for k, v in resp.items():
         print(f"{k}: {v}")

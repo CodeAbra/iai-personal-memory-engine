@@ -23,6 +23,7 @@ export const TOOL_NAMES = [
   "topology",
   "episodes_recent",
   "memory_temporal_recall",
+  "claim_check",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -131,6 +132,12 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
             "Edges between every pair are incremented; identical pair sets " +
             "are idempotent within one session.",
         },
+        session_id: {
+          type: "string",
+          description:
+            "Session identifier for correlating this reinforcement with the " +
+            "session's retrieval history. Optional; omit for old clients.",
+        },
       },
       required: ["ids"],
     },
@@ -178,6 +185,15 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
             "fact (EMBED_DIM=384 floats; bge-small-en-v1.5). When omitted, " +
             "the daemon embeds new_fact server-side.",
         },
+        epistemic_status: {
+          type: "string",
+          enum: ["fact", "estimate", "hypothesis", "opinion", "unknown"],
+          default: "unknown",
+          description:
+            "Caller-declared epistemic status of the corrected fact. Omit " +
+            "for 'unknown' (default, no behavior change). A value outside " +
+            "the enum is coerced to 'unknown' server-side, never rejected.",
+        },
       },
       required: ["id", "new_fact"],
     },
@@ -200,8 +216,8 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
   memory_capture: {
     name: "memory_capture",
     description:
-      "Capture a verbatim turn. Auto-dedups at cos>=0.95 (reinforces). " +
-      "Use for corrections + load-bearing decisions.",
+      "Capture a verbatim turn (auto-dedups near-duplicates). " +
+      "Use for corrections, not for minting standing-order directives.",
     inputSchema: {
       type: "object",
       properties: {
@@ -234,6 +250,74 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
           enum: ["user", "assistant", "system"],
           default: "user",
           description: "Who produced this turn — tags the record for filtering.",
+        },
+        epistemic_status: {
+          type: "string",
+          enum: ["fact", "estimate", "hypothesis", "opinion", "unknown"],
+          default: "unknown",
+          description:
+            "Caller-declared epistemic status. Omit for 'unknown' (default, no behavior change). " +
+            "A value outside the enum is coerced to 'unknown' server-side, never rejected.",
+        },
+        salience_level: {
+          type: "string",
+          enum: ["unflagged", "notable", "critical"],
+          default: "unflagged",
+          description:
+            "Caller-declared salience level for a decision, correction, or load-bearing " +
+            "preference marked in-turn. Additive rank-fusion boost only -- never a merge/drop " +
+            "lock. Omit for 'unflagged' (default, no behavior change). A value outside the " +
+            "enum is coerced to 'unflagged' server-side, never rejected.",
+        },
+        next_action: {
+          type: "string",
+          description:
+            "Optional immediate next step for the current live session task. " +
+            "Folded verbatim onto this session's own working-tier entry after " +
+            "the capture completes; surfaces at the next session start and on " +
+            "every subsequent turn until updated again.",
+        },
+        focus: {
+          type: "string",
+          description:
+            "Optional current point of attention for the live session task. " +
+            "Folded verbatim onto this session's own working-tier entry after " +
+            "the capture completes, alongside next_action.",
+        },
+        agent_id: {
+          type: "string",
+          description:
+            "Optional id of a background agent this capture is spawning or " +
+            "completing. Combine with agent_role and agent_expected_artifact " +
+            "to register a pending agent; combine with agent_complete_id on a " +
+            "later call to mark it done.",
+        },
+        agent_role: {
+          type: "string",
+          description:
+            "Optional role of the spawned background agent (for example " +
+            "'research' or 'implement'). Required alongside agent_id and " +
+            "agent_expected_artifact to register a spawn; omitted otherwise.",
+        },
+        agent_expected_artifact: {
+          type: "string",
+          description:
+            "Optional artifact the spawned background agent is expected to " +
+            "produce. Required alongside agent_id and agent_role to register " +
+            "a spawn; omitted otherwise.",
+        },
+        agent_complete_id: {
+          type: "string",
+          description:
+            "Optional id of a previously spawned background agent to mark " +
+            "complete on this call.",
+        },
+        agent_model: {
+          type: "string",
+          description:
+            "Optional model label for the spawned background agent, recorded " +
+            "on the registry entry when agent_id/agent_role/" +
+            "agent_expected_artifact register a spawn.",
         },
       },
       required: ["text"],
@@ -624,6 +708,46 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
       openWorldHint: false,
     },
   },
+  claim_check: {
+    name: "claim_check",
+    description:
+      "Check a claim (e.g. 'X is not done') against memory. Returns " +
+      "hits + anti_hits + a freshness verdict in one call.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cue: {
+          type: "string",
+          description: "The claim to check, e.g. 'the dashboard is not built yet'.",
+        },
+        session_id: {
+          type: "string",
+          description: "Current session id; gets written into provenance. Omit to use '-'.",
+        },
+        budget_tokens: {
+          type: "integer",
+          description: "Soft token budget for the underlying recall (default 1500).",
+        },
+      },
+      required: ["cue"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        hits: { type: "array", items: { type: "object" } },
+        anti_hits: { type: "array", items: { type: "object" } },
+        verdict: { type: "object" },
+        verdict_reason: { type: "string" },
+        _source: { type: "string" },
+      },
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
 };
 
 function isDaemonDownError(err: unknown): boolean {
@@ -689,6 +813,8 @@ export async function runDirectRecency(
   });
 }
 
+// Forwards only literal/text + session_id; tier/role/epistemic_status/salience_level
+// land as server defaults on this degraded path. The record is still persisted.
 export async function runDirectWrite(
   args: Record<string, unknown>,
   spawnFn: typeof spawn = spawn,
@@ -1118,6 +1244,8 @@ export async function invokeTool(
         throw err;
       }
     }
+    case "claim_check":
+      return bridge.call("claim_check", args);
     default: {
       const _exhaustive: never = name;
       throw new Error(

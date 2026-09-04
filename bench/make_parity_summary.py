@@ -115,20 +115,20 @@ def build_markdown(
     summary: dict, csv_name: str, bench_duration_s: float | None = None,
 ) -> str:
     lines = [
-        "# Parity Summary: current custom_leiden vs baseline leidenalg",
+        "# Parity Summary: v7.1 custom_leiden vs v7.0 leidenalg",
         "",
         "**Phase:** 21 — Custom MIT-Licensed Leiden Implementation (M8)",
         "**Bench:** Contradiction-longitudinal Regime 2 "
         "(`bench/contradiction_longitudinal_claude.py`)",
         f"**CSV:** `{csv_name}`",
-        "**Gate:** Rescue@10 within ±0.02 of baseline baseline (1.000)",
+        "**Gate:** Rescue@10 within ±0.02 of v7.0 baseline (1.000)",
         f"**Backend measured:** `{summary['backend']}`",
         f"**Attributable recalls (n_recalls):** {summary['n_recalls']}",
         f"**Seeds:** {summary['seeds']}",
         "",
         "## Per-Seed Rescue@10",
         "",
-        "| Seed | baseline (leidenalg) | current (custom_leiden) | Δ | Within ±0.02? |",
+        "| Seed | v7.0 (leidenalg) | v7.1 (custom_leiden) | Δ | Within ±0.02? |",
         "|------|------------------|----------------------|---|---------------|",
     ]
     for seed_key in sorted(summary["per_seed"].keys()):
@@ -146,7 +146,7 @@ def build_markdown(
         "",
         "## Cross-Seed Mean",
         "",
-        "| | baseline | current | Δ |",
+        "| | v7.0 | v7.1 | Δ |",
         "|---|------|------|---|",
     ]
     baseline_mean = (
@@ -172,10 +172,10 @@ def build_markdown(
         lines += [
             "## Wall-Time",
             "",
-            "| | Seconds | Δ vs baseline |",
+            "| | Seconds | Δ vs v7.0 |",
             "|---|---------|-----------|",
-            f"| baseline (leidenalg, iteration-3) | {baseline_duration_s:.1f} | — |",
-            f"| current (custom_leiden, iteration-0) | {bench_duration_s:.1f} | "
+            f"| v7.0 (leidenalg, iteration-3) | {baseline_duration_s:.1f} | — |",
+            f"| v7.1 (custom_leiden, iteration-0) | {bench_duration_s:.1f} | "
             f"{delta_pct:+.1f}% |",
             "",
             "Wall-time is informational only. Final perf disposition for LEIDEN-09 "
@@ -188,7 +188,7 @@ def build_markdown(
     lines += [
         "## Notes",
         "",
-        "- baseline baseline source: `bench/results/baseline/iteration-3/EFE-AB-SUMMARY.json`",
+        "- v7.0 baseline source: `bench/results/v7.0/iteration-3/EFE-AB-SUMMARY.json`",
         "  (per-seed `efe_shadow_rescue`; cross-seed mean = 1.000).",
         "- Parity tolerance + Risk row "
         "'Retrieval Rescue@10 regression > 0.02'.",

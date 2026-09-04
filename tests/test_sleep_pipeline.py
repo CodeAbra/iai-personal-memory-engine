@@ -123,6 +123,18 @@ def _patch_steps_to_noop(
         pipeline, "_step_community_naming",
         _make_step(SleepStep.COMMUNITY_NAMING),
     )
+    monkeypatch.setattr(
+        pipeline, "_step_reconsolidation_valence",
+        _make_step(SleepStep.RECONSOLIDATION_VALENCE),
+    )
+    monkeypatch.setattr(
+        pipeline, "_step_proc_mine",
+        _make_step(SleepStep.PROC_MINE),
+    )
+    monkeypatch.setattr(
+        pipeline, "_step_transcript_sweep_backstop",
+        _make_step(SleepStep.TRANSCRIPT_SWEEP_BACKSTOP),
+    )
     return calls
 
 def test_pipeline_runs_9_steps_in_order(
@@ -150,6 +162,9 @@ def test_pipeline_runs_9_steps_in_order(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
     assert result["completed_steps"] == calls
     assert result["failed_step"] is None
@@ -177,8 +192,8 @@ def test_pipeline_emits_started_and_completed_events(
     events = event_log.read_all()
     started = [e for e in events if e["event"] == "sleep_step_started"]
     completed = [e for e in events if e["event"] == "sleep_step_completed"]
-    assert len(started) == 17
-    assert len(completed) == 17
+    assert len(started) == 20
+    assert len(completed) == 20
     assert [e["step"] for e in started] == [
         s.name for s in (
             SleepStep.SCHEMA_MINE, SleepStep.KNOB_TUNE,
@@ -195,6 +210,9 @@ def test_pipeline_emits_started_and_completed_events(
             SleepStep.CURIOSITY_MINE,
             SleepStep.EMBEDDING_INTEGRITY,
             SleepStep.COMMUNITY_NAMING,
+            SleepStep.RECONSOLIDATION_VALENCE,
+            SleepStep.PROC_MINE,
+            SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
         )
     ]
 
@@ -233,6 +251,9 @@ def test_pipeline_resume_from_step_N(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
 
 def test_pipeline_resume_after_cycle_complete_treated_as_fresh(
@@ -270,6 +291,9 @@ def test_pipeline_resume_after_cycle_complete_treated_as_fresh(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
 
 def _patch_step_to_raise(
@@ -292,6 +316,7 @@ def _patch_step_to_raise(
         SleepStep.USER_MODEL_UPDATE: "_step_user_model_update",
         SleepStep.DMN_REFLECTION: "_step_dmn_reflection",
         SleepStep.CRISIS_RECLUSTER: "_step_crisis_recluster",
+        SleepStep.PROC_MINE: "_step_proc_mine",
     }[failing_step]
 
     def _raiser(_interrupt_check):
@@ -427,6 +452,9 @@ def test_pipeline_quarantine_auto_recovery_after_ttl(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
     record_after = load_state(state_path)
     assert record_after["quarantine"] is None
@@ -487,7 +515,7 @@ def test_pipeline_force_run_ignores_quarantine(
     result = pipeline.force_run()
 
     assert result["quarantine_triggered"] is False
-    assert len(calls) == 17
+    assert len(calls) == 20
     record_after = load_state(state_path)
     assert record_after["quarantine"] is not None
 
@@ -608,6 +636,9 @@ def test_pipeline_resumes_after_deferral(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
 
 def test_pipeline_deferral_does_not_increment_attempt(
@@ -774,6 +805,9 @@ def test_pipeline_legacy_last_completed_step_field_migrated(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
 
     calls2: list[SleepStep] = []
@@ -797,6 +831,9 @@ def test_pipeline_legacy_last_completed_step_field_migrated(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
 
 def test_pipeline_legacy_last_completed_step_zero_starts_fresh(
@@ -834,4 +871,98 @@ def test_pipeline_legacy_last_completed_step_zero_starts_fresh(
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     ]
+
+
+def test_proc_mine_resume_from_failure(
+    pipeline: SleepPipeline,
+    monkeypatch: pytest.MonkeyPatch,
+    state_path: Path,
+):
+    _patch_step_to_raise(pipeline, monkeypatch, SleepStep.PROC_MINE)
+    pipeline.run()
+
+    record = load_state(state_path)
+    progress = record["sleep_cycle_progress"]
+    assert progress is not None
+    assert progress["last_completed_index"] == SleepPipeline._STEP_ORDER.index(
+        SleepStep.RECONSOLIDATION_VALENCE,
+    )
+    assert progress["attempt"] == 1
+
+    pipeline.run()
+    record_after = load_state(state_path)
+    progress_after = record_after["sleep_cycle_progress"]
+    assert progress_after is not None
+    assert progress_after["last_completed_index"] == SleepPipeline._STEP_ORDER.index(
+        SleepStep.RECONSOLIDATION_VALENCE,
+    )
+    assert progress_after["attempt"] == 2
+
+def test_proc_mine_legacy_int_value_resumes(
+    pipeline: SleepPipeline,
+    monkeypatch: pytest.MonkeyPatch,
+    state_path: Path,
+):
+    # The WAL resume shim keys on the persisted int VALUE, not the enum
+    # member name — a state minted by an older binary must still land on
+    # PROC_MINE and continue through every step appended after it.
+    record = default_state()
+    record["sleep_cycle_progress"] = {
+        "last_completed_step": SleepStep.RECONSOLIDATION_VALENCE.value,
+        "attempt": 0,
+        "last_error": None,
+        "started_at": "2026-05-02T00:00:00+00:00",
+    }
+    save_state(record, state_path)
+
+    calls = _patch_steps_to_noop(pipeline, monkeypatch)
+    pipeline.run()
+
+    assert calls == [SleepStep.PROC_MINE, SleepStep.TRANSCRIPT_SWEEP_BACKSTOP]
+
+def test_proc_mine_live_mint(tmp_path: Path) -> None:
+    from uuid import uuid4
+
+    from iai_mcp.lilli.cycle.proc_mine import (
+        MIN_DISTINCT_SESSIONS,
+        PAIR_COUNT_FLOOR,
+        load_cofired_events,
+    )
+    from iai_mcp.store import RECORDS_TABLE
+    from iai_mcp.store._store import flush_record_buffer
+    from tests.test_proc_mine import _emit_cofired, _fresh_store, _repeated_pair_ids
+
+    real_store, home = _fresh_store(tmp_path)
+    pipeline = SleepPipeline(
+        store=real_store,
+        lifecycle_state_path=home / "lifecycle_state.json",
+        event_log=LifecycleEventLog(log_dir=home / "logs"),
+        quarantine_ttl_hours=24.0,
+    )
+
+    a, b = str(uuid4()), str(uuid4())
+    for i in range(MIN_DISTINCT_SESSIONS):
+        ids = _repeated_pair_ids((a, b), PAIR_COUNT_FLOOR, f"f{i}")
+        _emit_cofired(real_store, f"sess-{i}", ids, ids)
+
+    assert len(load_cofired_events(real_store)) >= MIN_DISTINCT_SESSIONS
+
+    done, payload = pipeline._step_proc_mine(None)
+
+    assert done is True
+    assert payload["candidates_gated"] > 0
+    assert payload["chunks_persisted"] >= 1
+
+    flush_record_buffer(real_store)
+    tbl = real_store.db.open_table(RECORDS_TABLE)
+    live_proc = tbl.count_rows(
+        filter="tier = 'procedural' AND tombstoned_at IS NULL",
+    )
+    assert live_proc >= 1
+
+    transitions = real_store.db.open_table("proc_transitions")
+    assert transitions.count_rows() >= 1

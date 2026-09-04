@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
-from iai_mcp.aaak import generate_aaak_index
+from iai_mcp.aaak import _TIER_TO_WING, generate_aaak_index
 from iai_mcp.community import CommunityAssignment
+from iai_mcp.directive_budget import (
+    AGENT_REGISTRY_BUDGET_TOKENS,
+    AGENT_REGISTRY_LINE_CHAR_CAP,
+    AGENT_REGISTRY_MAX_RENDERED,
+    CONT_BUDGET_TOKENS,
+    DIRECTIVE_BUDGET_TOKENS,
+    DIRECTIVE_LINE_CHAR_CAP,
+)
 from iai_mcp.foresight import age_label
 from iai_mcp.handle import decode_compact_handle, encode_compact_handle
 from iai_mcp.store import MemoryStore
-from iai_mcp.types import MemoryRecord
+from iai_mcp.types import CLS_SUMMARY_PREFIX_RE, MemoryRecord
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +38,9 @@ _MARKER_NAMES = (
     "command-args",
     "task-notification",
     "task-id",
+    "iai-mcp-directives",
+    "iai-mcp-live-state",
+    "iai-mcp-agent-registry",
 )
 
 _MARKER_PATTERNS: list[tuple[re.Pattern, re.Pattern, re.Pattern]] = []
@@ -56,7 +70,13 @@ L0_BUDGET_TOKENS = 80
 L1_BUDGET_TOKENS = 200
 L2_PER_COMMUNITY_TOKENS = 50
 L2_COMMUNITY_CAP = 7
+# Selection is always keyed to the legacy (verbose) line cost, never to the
+# compact-label render cost -- raising this over-admits, lowering it drops
+# records. IAI_MCP_RICH_CLUB_COMPACT_LABEL only swaps which label gets
+# EMITTED for an already-selected record; it never changes the budget.
 RICH_CLUB_BUDGET_TOKENS = 1500
+RICH_CLUB_CLS_SUMMARY_CAP = 30
+_RICH_CLUB_DEEP_BUDGET_TOKENS = 2000
 TOTAL_CACHED_BUDGET = 2000
 DYNAMIC_TAIL_TOKENS = 1000
 
@@ -86,6 +106,8 @@ class SessionStartPayload:
     compact_handle: str = ""
     wake_depth: str = "minimal"
     recent_thread: str = ""
+    directives: str = ""
+    live_state: str = ""
 
 
 def _approx_tokens(text: str) -> int:
@@ -111,13 +133,49 @@ def _fetch_record(store: MemoryStore, uid: UUID) -> MemoryRecord | None:
         return None
 
 
+def _compact_label_enabled() -> bool:
+    return os.environ.get("IAI_MCP_RICH_CLUB_COMPACT_LABEL", "1") != "0"
+
+
+_COMPACT_LABEL_ENTITY_CAP = 4
+_COMPACT_LABEL_ENTITY_CHAR_CAP = 40
+
+
+def _compact_aaak_label(tier: str, tags: list[str]) -> str:
+    # Render-site transform built directly from record fields -- never from
+    # a generate-then-reparse round trip through generate_aaak_index, so a
+    # tag/entity value containing '/' can't mis-split into a spoofed field.
+    wing = _TIER_TO_WING.get(tier, "?")
+    # Capped by BOTH count and character length: a handful of long entity
+    # names can grow the joined string past the shared 88-char aaak
+    # truncation guard just as easily as too many short ones, at which
+    # point the compact form no longer saves anything over the legacy one.
+    all_entities = [t[len("entity:"):] for t in tags if t.startswith("entity:")]
+    entities = all_entities[:_COMPACT_LABEL_ENTITY_CAP]
+    if not entities:
+        return wing
+    joined = ",".join(entities)
+    count_truncated = len(all_entities) > _COMPACT_LABEL_ENTITY_CAP
+    char_truncated = len(joined) > _COMPACT_LABEL_ENTITY_CHAR_CAP
+    if char_truncated:
+        joined = joined[:_COMPACT_LABEL_ENTITY_CHAR_CAP]
+    marker = "…" if (count_truncated or char_truncated) else ""
+    return f"{wing} ·{joined}{marker}"
+
+
+def _display_aaak(rec: MemoryRecord) -> str:
+    if _compact_label_enabled():
+        return _compact_aaak_label(rec.tier, rec.tags)
+    return generate_aaak_index(rec)
+
+
 def _l0_segment(store: MemoryStore) -> str:
     rec = _fetch_record(store, L0_RECORD_UUID)
     if rec is None:
         return ""
     # Regenerate at display: the stored index freezes the room at mint
     # time, while community stamping may have landed since.
-    aaak = generate_aaak_index(rec)
+    aaak = _display_aaak(rec)
     cleaned = _clean_surface(rec.literal_surface)[:200]
     return f"{aaak}\n{cleaned}"
 
@@ -168,6 +226,267 @@ def _l1_segment(store: MemoryStore, max_records: int = 10) -> str:
     return "\n".join(lines)
 
 
+def _live_directive_ids(store: MemoryStore) -> "list[UUID]":
+    """Plain-column scan, no embedding/cue/rank/similarity gate -- directives
+    must survive every wake_depth including minimal."""
+    db = store.db
+    with db._conn_lock:
+        rows = db._conn.execute(
+            "SELECT id FROM records"
+            " WHERE tombstoned_at IS NULL"
+            " AND directive = 1 ORDER BY created_at"
+        ).fetchall()
+    out: list[UUID] = []
+    for row in rows:
+        try:
+            out.append(UUID(row["id"]))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def render_directive_segment(store: MemoryStore) -> str:
+    """Renders the full accepted set with no truncation -- the capture-time
+    budget gate already bounds it; a cut here would silently drop an order."""
+    if os.environ.get("IAI_MCP_DIRECTIVES_OFF") == "1":
+        return ""
+    try:
+        ids = _live_directive_ids(store)
+        records = list(store.get_batch(ids).values())
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    records.sort(key=lambda r: r.created_at)
+    lines: list[str] = []
+    for r in records:
+        cleaned = _clean_surface(r.literal_surface)
+        if not cleaned:
+            continue
+        lines.append(f"- {cleaned[:DIRECTIVE_LINE_CHAR_CAP]}")
+    rendered = "\n".join(lines)
+    if _approx_tokens(rendered) > DIRECTIVE_BUDGET_TOKENS:
+        logger.warning(
+            "directive_segment_over_budget",
+            extra={"tokens": _approx_tokens(rendered), "budget": DIRECTIVE_BUDGET_TOKENS},
+        )
+    return rendered
+
+
+def render_live_state_segment(*, fold_sensory: bool = True) -> str:
+    """Narrow session-continuity render from the process-global focal task:
+    goal + focus + next_action only, never subgoals/hypotheses/results/raw
+    sensory. Reads the GLOBAL focal task (no session_id) -- the composer's
+    session_id is a placeholder on the daemon's cached fast path and must
+    never scope this read. No store/embedding/cue/rank/similarity gate.
+
+    fold_sensory is threaded straight to working_tier.read_task -- this
+    render itself reads only goal/focus/next_action either way, so
+    fold_sensory=False changes no output, only whether the read holds
+    read_task's lock across the (unused here) sensory-tail disk fold.
+    """
+    from iai_mcp import working_tier
+
+    entry = working_tier.read_task(fold_sensory=fold_sensory)
+    if entry is None:
+        return ""
+    lines: list[str] = []
+    goal = _clean_surface(entry.goal)
+    if goal:
+        lines.append(f"goal: {goal}")
+    focus = _clean_surface(entry.focus)
+    if focus:
+        lines.append(f"focus: {focus}")
+    next_action = _clean_surface(entry.next_action)
+    if next_action:
+        lines.append(f"next action: {next_action}")
+    rendered = "\n".join(lines)
+    if _approx_tokens(rendered) > CONT_BUDGET_TOKENS:
+        logger.warning(
+            "live_state_segment_over_budget",
+            extra={"tokens": _approx_tokens(rendered), "budget": CONT_BUDGET_TOKENS},
+        )
+    return rendered
+
+
+def _agent_model_prefix(model: str | None) -> str:
+    return f"[model:{model}] " if model else ""
+
+
+def render_agent_registry_segment(now: datetime | None = None) -> str:
+    """Direct, lock-free, fail-soft read of the running-agent registry in
+    daemon_state.json -- no store, no embedding/cue/rank/similarity gate,
+    off the awake-recall critical path.
+
+    Filters to status=='pending' AND spawned_at within
+    RUNNING_AGENT_TTL_HOURS at READ TIME: a /clear scenario fires no
+    subsequent write to trigger prune_stale_agents, so an abandoned pending
+    agent must never render as active. A completed entry never renders.
+    """
+    from iai_mcp.daemon_state import RUNNING_AGENT_TTL_HOURS, load_state
+
+    try:
+        state = load_state()
+    except Exception:  # noqa: BLE001 -- registry render must never break the payload
+        return ""
+    agents = state.get("running_agents")
+    if not isinstance(agents, dict) or not agents:
+        return ""
+
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(hours=RUNNING_AGENT_TTL_HOURS)
+
+    live: list[tuple[str, dict, datetime]] = []
+    for agent_id, entry in agents.items():
+        if not isinstance(entry, dict) or entry.get("status") != "pending":
+            continue
+        spawned_at = entry.get("spawned_at")
+        try:
+            spawned_dt = datetime.fromisoformat(str(spawned_at))
+            if spawned_dt.tzinfo is None:
+                spawned_dt = spawned_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if spawned_dt < cutoff:
+            continue
+        live.append((str(agent_id), entry, spawned_dt))
+
+    live.sort(key=lambda item: item[2])
+    lines: list[str] = []
+    for agent_id, entry, spawned_dt in live[:AGENT_REGISTRY_MAX_RENDERED]:
+        model_prefix = _agent_model_prefix(entry.get("model"))
+        role = entry.get("role") or ""
+        artifact = entry.get("expected_artifact") or ""
+        line = (
+            f"- {model_prefix}agent {agent_id[:8]} ({role}): "
+            f"expecting {artifact} (spawned {spawned_dt.isoformat()})"
+        )
+        lines.append(line[:AGENT_REGISTRY_LINE_CHAR_CAP])
+
+    rendered = "\n".join(lines)
+    if _approx_tokens(rendered) > AGENT_REGISTRY_BUDGET_TOKENS:
+        logger.warning(
+            "agent_registry_segment_over_budget",
+            extra={"tokens": _approx_tokens(rendered), "budget": AGENT_REGISTRY_BUDGET_TOKENS},
+        )
+    return rendered
+
+
+_CONTINUITY_CACHE_NAME = ".session-continuity.cached.md"
+
+
+def _continuity_cache_path(store: Any) -> Path:
+    root = getattr(store, "root", None)
+    base = Path(root) if root is not None else Path.home() / ".iai-mcp"
+    return base / _CONTINUITY_CACHE_NAME
+
+
+def _live_state_block_is_substantive(block: str) -> bool:
+    return any(
+        line.startswith("focus: ") or line.startswith("next action: ")
+        for line in block.splitlines()
+    )
+
+
+def _extract_sentinel_block(text: str, name: str) -> str:
+    """Inner content between <name> and </name> (first well-formed pair),
+    or "" if the pair is absent/malformed."""
+    open_tag = f"<{name}>"
+    close_tag = f"</{name}>"
+    start = text.find(open_tag)
+    if start == -1:
+        return ""
+    start += len(open_tag)
+    end = text.find(close_tag, start)
+    if end == -1:
+        return ""
+    return text[start:end].strip("\n")
+
+
+def _resanitize_preserved_live_state(block: str) -> str:
+    """A block re-read from disk may predate a marker-stripping fix; only
+    re-use lines matching the exact fold-free shape this renderer emits,
+    and reject any surviving marker-tag punctuation -- never launder disk
+    content back into the file unexamined."""
+    lines: list[str] = []
+    for line in block.splitlines():
+        if not (
+            line.startswith("goal: ")
+            or line.startswith("focus: ")
+            or line.startswith("next action: ")
+        ):
+            continue
+        if "<" in line or ">" in line:
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def write_continuity_cache(store: Any, *, allow_downgrade: bool = False) -> None:
+    """Write the ONE session-agnostic eager continuity file: a live-state
+    block (phase/step, rendered fold-free) then an agent-registry block
+    (pending agents), each independently sentinel-delimited. Mirrors the
+    working-tier snapshot's atomic tmp+chmod(0600)+os.replace idiom, resolved
+    under the same store root. Nothing precedes the first open sentinel; an
+    empty segment writes its sentinel pair with no inner lines.
+
+    A thin park-then-reopen (a task switch that opens a fresh, still-empty
+    entry) must never clobber a substantive live-state block already on
+    disk -- the eager file is the sole reconstruction source across a
+    /clear, and the new session's own entry has no next_action yet.
+    allow_downgrade=True bypasses this guard for an explicit close or an
+    explicit caller-cleared focus/next_action, where an empty block IS the
+    new ground truth.
+    """
+    path = _continuity_cache_path(store)
+    live_state = render_live_state_segment(fold_sensory=False)
+    agent_registry = render_agent_registry_segment()
+
+    existing_text = ""
+    if path.exists():
+        try:
+            existing_text = path.read_text(encoding="utf-8")
+        except OSError:
+            existing_text = ""
+
+    if (
+        not allow_downgrade
+        and not _live_state_block_is_substantive(live_state)
+        and existing_text
+    ):
+        preserved = _resanitize_preserved_live_state(
+            _extract_sentinel_block(existing_text, "iai-mcp-live-state")
+        )
+        if _live_state_block_is_substantive(preserved):
+            live_state = preserved
+
+    lines = ["<iai-mcp-live-state>"]
+    if live_state:
+        lines.append(live_state)
+    lines.append("</iai-mcp-live-state>")
+    lines.append("<iai-mcp-agent-registry>")
+    if agent_registry:
+        lines.append(agent_registry)
+    lines.append("</iai-mcp-agent-registry>")
+    text = "\n".join(lines) + "\n"
+
+    if existing_text == text and path.exists():
+        # mtime means "last confirmed current," not "last content change" --
+        # a stable, unchanging monotropic session must not read as stale
+        # once RUNNING_AGENT_TTL_HOURS of identical content has elapsed.
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
 def _l2_segments(
     store: MemoryStore,
     assignment: CommunityAssignment,
@@ -214,22 +533,26 @@ def _rich_club_segment(store: MemoryStore, rich_club: list[UUID]) -> str:
     return _rich_club_segment_with_budget(store, rich_club, budget=RICH_CLUB_BUDGET_TOKENS)
 
 
-def _rich_club_segment_with_budget(
+def _rich_club_admission(
     store: MemoryStore,
     rich_club: list[UUID],
     *,
     budget: int,
-) -> str:
+    now: datetime | None = None,
+) -> list[tuple[UUID, MemoryRecord, str, str, str]]:
+    # `now` is injectable so a caller threading its own value observes the
+    # same age snapshot the render uses -- required for callers that must
+    # compare two passes without a clock-read race between them.
     if not rich_club:
-        return ""
+        return []
     try:
         by_uuid = store.get_batch(rich_club)
     except (OSError, RuntimeError, ValueError):
-        return ""
+        return []
 
-    lines: list[str] = []
+    now = now or datetime.now(timezone.utc)
+    admitted: list[tuple[UUID, MemoryRecord, str, str, str]] = []
     running = 0
-    now = datetime.now(timezone.utc)
     for uid in rich_club:
         rec = by_uuid.get(uid)
         if rec is None:
@@ -237,21 +560,52 @@ def _rich_club_segment_with_budget(
         cleaned = _clean_surface(rec.literal_surface)
         if not cleaned:
             continue
-        # Regenerate at display: the stored index freezes the room at mint
-        # time, while community stamping may have landed since.
-        aaak = generate_aaak_index(rec)
-        # Entity anchors can triple the index length; the session-start pack
-        # trades anchor completeness for record count.
-        if len(aaak) > 88:
-            aaak = aaak[:88] + "…"
         age = age_label(rec.created_at, now)
         age_part = f" ({age})" if age else ""
-        line = f"{aaak}{age_part}: {cleaned[:60]}"
-        cost = _approx_tokens(line)
+        # Selection is always keyed to the legacy (verbose) line cost, after
+        # the same 88-char truncation the render applies -- so the admitted
+        # set is identical to the pre-compaction render at any corpus size.
+        # The toggle only changes what gets EMITTED, never what gets picked.
+        legacy_aaak = generate_aaak_index(rec)
+        if len(legacy_aaak) > 88:
+            legacy_aaak = legacy_aaak[:88] + "…"
+        cost = _approx_tokens(f"{legacy_aaak}{age_part}: {cleaned[:60]}")
         if running + cost + 1 > budget:
             break
-        lines.append(line)
+        admitted.append((uid, rec, cleaned, age_part, legacy_aaak))
         running += cost + 1
+    return admitted
+
+
+def _rich_club_segment_with_budget(
+    store: MemoryStore,
+    rich_club: list[UUID],
+    *,
+    budget: int,
+    now: datetime | None = None,
+) -> str:
+    compact = _compact_label_enabled()
+    lines: list[str] = []
+    for uid, rec, cleaned, age_part, legacy_aaak in _rich_club_admission(
+        store, rich_club, budget=budget, now=now
+    ):
+        if compact:
+            aaak = _compact_aaak_label(rec.tier, rec.tags)
+            if len(aaak) > 88:
+                aaak = aaak[:88] + "…"
+        else:
+            aaak = legacy_aaak
+        if "cls_summary" in rec.tags:
+            prefix_match = CLS_SUMMARY_PREFIX_RE.match(rec.literal_surface)
+            content = (
+                _clean_surface(rec.literal_surface[prefix_match.end():])[:RICH_CLUB_CLS_SUMMARY_CAP]
+                if prefix_match
+                else cleaned[:60]
+            )
+        else:
+            content = cleaned[:60]
+        line = f"{aaak}{age_part}: {content}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -265,10 +619,25 @@ def _candidate_session_id(rec: object) -> str:
         return ""
 
 
+def _model_label(rec: object) -> str:
+    from iai_mcp.model_attribution import normalize_model
+
+    try:
+        for entry in getattr(rec, "provenance", None) or []:
+            value = entry.get("model") if isinstance(entry, dict) else None
+            model = normalize_model(value)
+            if model:
+                return f"[model:{model}] "
+    except Exception:  # noqa: BLE001 -- attribution must never break the payload
+        pass
+    return ""
+
+
 def _origin_label(rec: object) -> str:
     # Ambient feeds mix every session and project; an unlabeled line reads as
     # "my recent work" and a parallel session's thread gets adopted as this
     # one's. The label names the origin so the model can attribute, not guess.
+    model_label = _model_label(rec)
     try:
         prov = getattr(rec, "provenance", None) or []
         cwd = ""
@@ -279,7 +648,7 @@ def _origin_label(rec: object) -> str:
         if cwd:
             import os as _os
 
-            return f"[{_os.path.basename(cwd.rstrip('/')) or cwd}] "
+            return f"[{_os.path.basename(cwd.rstrip('/')) or cwd}] {model_label}"
         sid = ""
         for entry in prov:
             if isinstance(entry, dict) and entry.get("session_id"):
@@ -288,10 +657,10 @@ def _origin_label(rec: object) -> str:
         if not sid:
             sid = str(getattr(rec, "session_id", "") or "")
         if sid and sid != "-":
-            return f"[s:{sid[:6]}] "
+            return f"[s:{sid[:6]}] {model_label}"
     except Exception:  # noqa: BLE001 -- labels must never break the payload
         pass
-    return ""
+    return model_label
 
 
 def _recent_thread_segment(
@@ -340,6 +709,7 @@ def _recent_thread_segment(
                 idem_tag=idem,
                 source_uuid=src_uuid,
                 role=role,
+                model=ev.get("model"),
             ))
 
     candidates.sort(key=lambda r: r.created_at, reverse=True)
@@ -348,6 +718,10 @@ def _recent_thread_segment(
     for r in candidates:
         if len(lines) >= max_records:
             break
+        # Procedural chunks are indexed/reachable but never served as
+        # visible text -- mirrors core._passes_mode_filter.
+        if r.tier == "procedural":
+            continue
         cleaned = _clean_surface(r.literal_surface)
         if not cleaned:
             continue
@@ -434,6 +808,7 @@ def render_session_delta(
                 idem_tag=idem,
                 source_uuid=src_uuid,
                 role=role,
+                model=ev.get("model"),
             ))
 
     candidates.sort(key=lambda r: r.created_at, reverse=True)
@@ -447,6 +822,10 @@ def render_session_delta(
         # The delta is cross-session memory: the caller's own turns are
         # already in its context and would only echo back.
         if session_id != "-" and _candidate_session_id(r) == session_id:
+            continue
+        # Procedural chunks are indexed/reachable but never served as
+        # visible text -- mirrors core._passes_mode_filter.
+        if r.tier == "procedural":
             continue
         cleaned = _clean_surface(r.literal_surface)
         if not cleaned:
@@ -529,6 +908,9 @@ def _compose_session_start_payload(
     if wake_depth not in ("minimal", "standard", "deep"):
         wake_depth = "minimal"
 
+    directives_segment = render_directive_segment(store)
+    live_state_segment = render_live_state_segment()
+
     if wake_depth == "minimal":
         l0_rec = _fetch_record(store, L0_RECORD_UUID)
         identity_short = str(L0_RECORD_UUID)[:8] if l0_rec is not None else ""
@@ -554,13 +936,17 @@ def _compose_session_start_payload(
             topic_cluster_hint=topic_cluster_hint,
             compact_handle=compact_handle,
             wake_depth="minimal",
+            directives=directives_segment,
+            live_state=live_state_segment,
         )
     else:
         l0 = _l0_segment(store)
         l1 = _l1_segment(store)
         l2 = _l2_segments(store, assignment)
         if wake_depth == "deep":
-            rc = _rich_club_segment_with_budget(store, rich_club, budget=2000)
+            rc = _rich_club_segment_with_budget(
+                store, rich_club, budget=_RICH_CLUB_DEEP_BUDGET_TOKENS
+            )
         else:
             rc = _rich_club_segment(store, rich_club)
 
@@ -600,6 +986,8 @@ def _compose_session_start_payload(
             compact_handle=compact_handle,
             wake_depth=wake_depth,
             recent_thread=recent_thread,
+            directives=directives_segment,
+            live_state=live_state_segment,
         )
 
     return payload
@@ -650,13 +1038,21 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
         l2 = list(payload.get("l2") or [])
         rich_club = payload.get("rich_club") or ""
         recent_thread = payload.get("recent_thread") or ""
+        directives = payload.get("directives") or ""
+        live_state = payload.get("live_state") or ""
     else:
         l0 = payload.l0
         l1 = payload.l1
         l2 = list(payload.l2)
         rich_club = payload.rich_club
         recent_thread = payload.recent_thread
+        directives = payload.directives
+        live_state = payload.live_state
     blocks: list[str] = []
+    if directives:
+        blocks.append(f"## Standing orders (always active)\n{directives}")
+    if live_state:
+        blocks.append(f"## Session continuity (always active)\n{live_state}")
     if l0:
         blocks.append(f"## Identity\n{l0}")
     if recent_thread:

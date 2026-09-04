@@ -1,7 +1,7 @@
 """RACC-01 phase-gate: one command composing SC-1..SC-5 into runnable assertions.
 
 This file does not duplicate the per-plan test suites (tests/test_recall_accuracy_gate.py,
-tests/test_recall_trace_accuracy_marks.py, tests/test_confidence_escalation_gate.py,
+tests/test_recall_trace_accuracy_marks.py,
 tests/test_recall_literal_surface_byte_identity.py, tests/test_multi_seed_recall.py,
 tests/test_cleanup_attractor_recall.py, tests/test_working_tier.py). It composes one
 end-to-end low-confidence recall and a high-confidence control recall, then asserts
@@ -14,12 +14,11 @@ numbers are recorded verbatim below. A real-session labelled eval is a queued
 follow-up, NOT introduced here.
 
 Honest finding: the strict-improvement bar is NOT reached on this crafted eval
-set by the four shipped mechanisms + associative fallback alone — the
-harness's own dense-filler construction keeps the aggregate confidence signal
-permanently HIGH on all three cues, so conf_escalate/multi_seed never fire on
-it, and the harness never exercises the fallback or sets structural_weight>0.
-The non-regression (<=) bound holds; the strict (<) bound is xfailed here,
-pointing at the real-thread labelled eval.
+set by the shipped mechanisms + associative fallback alone — the harness's own
+dense-filler construction keeps the aggregate confidence signal permanently
+HIGH on all three cues, and the harness never exercises the fallback or sets
+structural_weight>0. The non-regression (<=) bound holds; the strict (<) bound
+is xfailed here, pointing at the real-thread labelled eval.
 
 No src/ edits. No working_tier import or consult anywhere in this file.
 """
@@ -27,17 +26,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
 
 from bench.recall_accuracy import Archetype, build_eval_set, run_accuracy
-from iai_mcp.pipeline import (
-    ADAPTIVE_ESCALATION_CAP,
-    escalate_recall_candidates,
-)
+from iai_mcp.pipeline import K_CANDIDATES
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import MemoryRecord
 from tests._helpers import stub_embedder_for_store
@@ -182,10 +177,9 @@ def _make_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _seed_low_confidence_corpus(store: MemoryStore, cue_vec: list[float]) -> list[UUID]:
     """A small, low-confidence-inducing corpus, mirroring the shared
     fixture used by test_recall_trace_accuracy_marks.py: no near-duplicate
-    cluster, so top cosine stays below the high-confidence threshold and
-    hit-count-above-threshold stays low — the marks this test asserts on
-    (soft_gate, conf_escalate, multi_seed, cleanup_attractor) all become
-    reachable on this fixture."""
+    cluster, so top cosine stays below the high-confidence threshold — the
+    marks this test asserts on (soft_gate, multi_seed, cleanup_attractor)
+    all become reachable on this fixture."""
     record_ids: list[UUID] = []
     target_id = uuid4()
     target = _make_rec(target_id, "the associative target record", cue_vec)
@@ -197,20 +191,6 @@ def _seed_low_confidence_corpus(store: MemoryStore, cue_vec: list[float]) -> lis
         record_ids.append(rid)
     flush_record_buffer(store)
     return record_ids
-
-
-def _seed_high_confidence_corpus(store: MemoryStore, cue_vec: list[float]) -> None:
-    """A dense near-duplicate cluster around the cue — high confidence, used
-    as the SC-3 control case (escalation must NOT fire)."""
-    target_id = uuid4()
-    target = _make_rec(target_id, "the associative target record", cue_vec)
-    store.insert(target)
-    for i in range(5):
-        nudge = (np.array(cue_vec, dtype=np.float32) * 0.97
-                 + np.random.default_rng(500 + i).normal(0, 0.01, _DIM).astype(np.float32))
-        nudge = nudge / np.linalg.norm(nudge)
-        store.insert(_make_rec(uuid4(), f"near-duplicate {i}", nudge.tolist()))
-    flush_record_buffer(store)
 
 
 def _read_module_source(module_path: str) -> str:
@@ -259,17 +239,14 @@ def test_sc1_non_regression_holds_on_crafted_eval_set(tmp_path, monkeypatch, dri
 @pytest.mark.xfail(
     reason=(
         "[SC-1] strict-improvement bar NOT reached on the crafted archetype eval set "
-        "by the four shipped mechanisms (soft_gate/conf_escalate/multi_seed/cleanup_attractor) "
-        "+ D-A alone — root-caused in 184-04-SUMMARY.md: the harness's own dense-filler "
-        "construction (cosine 0.3-0.99 spread, required to push the target beyond "
-        "K_CANDIDATES=200) keeps the aggregate confidence signal (compute_spread_depth) "
-        "permanently HIGH on all three cues, so conf_escalate/multi_seed structurally never "
-        "fire on this harness; the harness also never routes through core.dispatch (D-A's "
-        "merge_authority_hits is never exercised) and never sets structural_weight>0 "
-        "(cleanup-attractor's snap is a no-op by design). Non-regression holds (see the "
-        "sibling test above); strict improvement is deferred to the owner-authorized "
-        "labelled real-thread eval routed through "
-        "core.dispatch that exercises all five mechanisms."
+        "by the shipped mechanisms (soft_gate/multi_seed/cleanup_attractor) + D-A alone "
+        "— the harness's own dense-filler construction (cosine 0.3-0.99 spread, required "
+        "to push the target beyond K_CANDIDATES=200) never routes through core.dispatch "
+        "(D-A's merge_authority_hits is never exercised) and never sets "
+        "structural_weight>0 (cleanup-attractor's snap is a no-op by design). "
+        "Non-regression holds (see the sibling test above); strict improvement is "
+        "deferred to the owner-authorized labelled real-thread eval routed through "
+        "core.dispatch that exercises all shipped mechanisms."
     ),
     strict=True,
 )
@@ -301,15 +278,15 @@ def test_strict_improvement_deferred_to_real_thread_eval(tmp_path, monkeypatch, 
 
 
 # ---------------------------------------------------------------------------
-# SC-2: all four new trace marks present on a low-confidence cue.
+# SC-2: shipped trace marks present on a low-confidence cue.
 # No working_tier_bias mark asserted anywhere (D-C).
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_sc2_all_four_trace_marks_present_on_low_confidence_cue(tmp_path, _make_store, monkeypatch, driver):
     """One low-confidence recall's trace MUST contain all of {soft_gate,
-    conf_escalate, multi_seed, cleanup_attractor}. No working_tier_bias mark
-    exists or is asserted (D-C)."""
+    multi_seed, cleanup_attractor}. No working_tier_bias mark exists or is
+    asserted (D-C)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _make_store(driver)
     cue_vec = _seeded_vec(2)
@@ -319,7 +296,7 @@ def test_sc2_all_four_trace_marks_present_on_low_confidence_cue(tmp_path, _make_
     resp = _dispatch_traced_recall(store, cue_vec, session_id=f"phase-gate-sc2-{driver}")
 
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
-    expected_marks = {"soft_gate", "conf_escalate", "multi_seed", "cleanup_attractor"}
+    expected_marks = {"soft_gate", "multi_seed", "cleanup_attractor"}
     missing = expected_marks - marks
     assert not missing, (
         f"[SC-2] missing trace marks {sorted(missing)}, got marks={sorted(marks)}"
@@ -328,60 +305,6 @@ def test_sc2_all_four_trace_marks_present_on_low_confidence_cue(tmp_path, _make_
         "[SC-2/D-C] a working_tier_bias mark was found in the trace — this mark must "
         "never exist (working-tier bias was intentionally dropped from the recall path)"
     )
-
-
-# ---------------------------------------------------------------------------
-# SC-3: escalate_recall_candidates fires once on low-confidence, never on
-# high-confidence.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
-def test_sc3_escalation_spy_fires_only_on_low_confidence_cue(tmp_path, _make_store, monkeypatch, driver):
-    """escalate_recall_candidates spy count == 1 on a low-confidence cue and
-    == 0 on a high-confidence cue (two separate stores, same test)."""
-    # --- low-confidence branch: must fire exactly once -----------------
-    low_store = _make_store(driver)
-    low_cue = _seeded_vec(11)
-    target_id = uuid4()
-    low_store.insert(_make_rec(target_id, "the associative target record", low_cue))
-    for i in range(2):
-        low_store.insert(_make_rec(uuid4(), f"unrelated filler {i}", _orthogonal_vec(11 + i)))
-    flush_record_buffer(low_store)
-    _stub_embedder_for_store(monkeypatch, low_cue)
-
-    low_spy = MagicMock(wraps=escalate_recall_candidates)
-    monkeypatch.setattr("iai_mcp.pipeline.escalate_recall_candidates", low_spy)
-
-    _dispatch_traced_recall(low_store, low_cue, session_id=f"phase-gate-sc3-low-{driver}")
-
-    assert low_spy.call_count == 1, (
-        f"[SC-3] expected escalate_recall_candidates to fire exactly once on a "
-        f"low-confidence cue, got call_count={low_spy.call_count}"
-    )
-    low_store.close()
-
-    # --- high-confidence branch: must never fire -----------------------
-    monkeypatch.undo()
-    monkeypatch.setenv("IAI_MCP_EMBED_DIM", str(_DIM))
-    monkeypatch.setenv("IAI_MCP_CRYPTO_PASSPHRASE", "test-passphrase-not-secret")
-    monkeypatch.delenv("IAI_MCP_EXACT_AUTHORITY_OFF", raising=False)
-    _select_driver(driver, monkeypatch)
-
-    high_store = MemoryStore(path=tmp_path / f"store-high-{driver}")
-    high_cue = _seeded_vec(21)
-    _seed_high_confidence_corpus(high_store, high_cue)
-    _stub_embedder_for_store(monkeypatch, high_cue)
-
-    high_spy = MagicMock(wraps=escalate_recall_candidates)
-    monkeypatch.setattr("iai_mcp.pipeline.escalate_recall_candidates", high_spy)
-
-    _dispatch_traced_recall(high_store, high_cue, session_id=f"phase-gate-sc3-high-{driver}")
-
-    assert high_spy.call_count == 0, (
-        f"[SC-3] expected escalate_recall_candidates to NEVER fire on a "
-        f"high-confidence cue, got call_count={high_spy.call_count}"
-    )
-    high_store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +322,7 @@ _VERBATIM_SURFACES: list[str] = [
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_sc4_literal_surface_byte_identity_after_plugin_recall(tmp_path, _make_store, monkeypatch, driver):
     """literal_surface bytes for every touched record are unchanged after a
-    recall that fires soft_gate/conf_escalate/multi_seed/cleanup_attractor and
+    recall that fires soft_gate/multi_seed/cleanup_attractor and
     reinforce_record(is_retrieval=True) (queue_reinforce)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _make_store(driver)
@@ -411,8 +334,8 @@ def test_sc4_literal_surface_byte_identity_after_plugin_recall(tmp_path, _make_s
         vec = cue_vec if i == 0 else _seeded_vec(31 + i)
         store.insert(_make_rec(rid, surface, vec))
         record_ids.append(rid)
-    # low-confidence filler so soft_gate/conf_escalate/multi_seed/cleanup_attractor
-    # all have a branch to fire on, same construction as the SC-2 fixture.
+    # low-confidence filler so soft_gate/multi_seed/cleanup_attractor all
+    # have a branch to fire on, same construction as the SC-2 fixture.
     for i in range(4):
         store.insert(_make_rec(uuid4(), f"unrelated filler {i}", _orthogonal_vec(131 + i)))
     flush_record_buffer(store)
@@ -426,8 +349,8 @@ def test_sc4_literal_surface_byte_identity_after_plugin_recall(tmp_path, _make_s
     assert resp.get("hits"), "[SC-4] recall returned no hits — cannot exercise the reinforce path"
 
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
-    assert {"soft_gate", "conf_escalate", "multi_seed", "cleanup_attractor"} <= marks, (
-        f"[SC-4] expected the four plug-ins to all fire on this fixture, got marks={sorted(marks)}"
+    assert {"soft_gate", "multi_seed", "cleanup_attractor"} <= marks, (
+        f"[SC-4] expected the shipped plug-ins to all fire on this fixture, got marks={sorted(marks)}"
     )
 
     after = {rid: store.get(rid).literal_surface for rid in record_ids}
@@ -474,7 +397,7 @@ def test_sc5_no_o_corpus_reads_on_recall_path(tmp_path, _make_store, monkeypatch
     _orig_query_similar = store.query_similar
 
     def _bounded_query_similar(vec, k=10, *args, **kwargs):
-        if k > ADAPTIVE_ESCALATION_CAP + 100:
+        if k > K_CANDIDATES + 100:
             raise AssertionError(f"[SC-5] query_similar called with unbounded k={k} on the recall path")
         return _orig_query_similar(vec, k, *args, **kwargs)
     monkeypatch.setattr(store, "query_similar", _bounded_query_similar)
