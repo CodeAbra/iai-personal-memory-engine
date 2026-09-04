@@ -84,6 +84,7 @@ iai_mcp = [
     "_deploy/windows/*.xml",
     "_deploy/hooks/*.sh",
     "_deploy/hooks/*.ps1",
+    "_deploy/hooks/*.py",
     "_deploy/brainview/*.html",
     "_wrapper/*.js",
 ]
@@ -101,4 +102,5 @@ markers = [
   "perf: opt-in via --perf (wall-clock latency benches, out of the default correctness gate)",
   "live: opt-in via --live (real daemon-subprocess E2E gate, out of the default correctness gate)",
   "bench: opt-in via --bench (bench-harness smoke against local HF caches and bench artifacts, out of the default correctness gate)",
+  "realstore: opt-in via --runrealstore (opens a copy of the operator's real store, non-hermetic and slow, out of the default correctness gate)",
 ]
