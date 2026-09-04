@@ -1753,7 +1753,14 @@ def _install_boot_signal_trace() -> None:
         except Exception:  # noqa: BLE001 -- re-raise is best-effort
             os._exit(128 + int(signum))
 
-    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    # SIGHUP resolved lazily: absent on Windows, where naming it in the
+    # tuple raises AttributeError before the per-signal guard below can
+    # catch it (the tuple is built before the loop body runs).
+    for _sig in (
+        _s
+        for _s in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None))
+        if _s is not None
+    ):
         try:
             signal.signal(_sig, _trace)
         except (AttributeError, ValueError, OSError):
