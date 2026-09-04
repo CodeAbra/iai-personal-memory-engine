@@ -237,8 +237,17 @@ def test_hook_silent_without_session_id(tmp_path):
 
 def test_hook_ignores_stale_per_session_snapshot(tmp_path):
     cache = tmp_path / ".working-tier.sess-old.cached.md"
-    cache.write_text("goal: yesterday's task\n", encoding="utf-8")
+    cache.write_text(
+        "goal: yesterday's task\nnext action: yesterday's next step\n",
+        encoding="utf-8",
+    )
     old = time.time() - 3 * 3600
     os.utime(cache, (old, old))
     out = _run_hook(tmp_path, '{"prompt": "hi", "session_id": "sess-old"}')
-    assert "yesterday" not in out
+    assert "<iai-mcp-working-tier>" not in out, (
+        "emit_working_tier's freshness gate must suppress a stale snapshot"
+    )
+    # The gate-free live-state emitter is deliberately unaffected by
+    # snapshot age -- it reads the same file with no freshness check.
+    assert "<iai-mcp-live-state>" in out
+    assert "yesterday's task" in out

@@ -64,7 +64,7 @@ _DIRECT_RECENCY_SQL = (
     " stability, difficulty, last_reviewed, never_decay, never_merge,"
     " provenance_json, created_at, updated_at, tags_json, language,"
     " s5_trust_score, profile_modulation_gain_json, schema_version,"
-    " hv_tier, structure_hv_payload,"
+    " hv_tier, structure_hv_payload, salience_level,"
     " COALESCE(embedding_pending, 0) AS embedding_pending"
     " FROM records WHERE live = 1 ORDER BY created_at DESC"
 )
@@ -76,7 +76,7 @@ _DIRECT_RECENCY_SQL_LIMITED = (
     " stability, difficulty, last_reviewed, never_decay, never_merge,"
     " provenance_json, created_at, updated_at, tags_json, language,"
     " s5_trust_score, profile_modulation_gain_json, schema_version,"
-    " hv_tier, structure_hv_payload,"
+    " hv_tier, structure_hv_payload, salience_level,"
     " COALESCE(embedding_pending, 0) AS embedding_pending"
     " FROM records WHERE live = 1 ORDER BY created_at DESC"
     " LIMIT ?"

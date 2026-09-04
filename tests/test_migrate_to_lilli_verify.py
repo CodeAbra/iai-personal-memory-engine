@@ -66,7 +66,7 @@ def _build_source_store(root: Path, n: int = 30) -> tuple[str, list[list[float]]
 
     Returns the source db path + the list of stored embedding vectors.
     """
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
     os.environ["IAI_MCP_STORE"] = str(root)
     from iai_mcp.store import MemoryStore, flush_record_buffer, flush_edge_buffer
     from iai_mcp.events import write_event, flush_event_buffer
@@ -160,7 +160,7 @@ def migrated_pair(tmp_path: Path):
     key = _crypto_key(src_root)
     # restore env so the verifier owns its own env juggling
     os.environ["IAI_MCP_STORE"] = str(src_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
     return src_db, src_root, dst_root, key
 
 
@@ -189,7 +189,7 @@ def test_counts_red_on_dropped_row(migrated_pair):
     finally:
         dst.close()
     os.environ["IAI_MCP_STORE"] = str(src_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
 
     report = verify_store_equality(src_db, dst_root, key, src_root=src_root)
     assert report.ok is False
@@ -220,7 +220,7 @@ def test_ciphertext_red_on_mutation(migrated_pair):
     finally:
         dst.close()
     os.environ["IAI_MCP_STORE"] = str(src_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
 
     report = verify_store_equality(src_db, dst_root, key, src_root=src_root)
     assert report.ok is False
@@ -269,7 +269,7 @@ def test_recall_recovers_from_empty_index(tmp_path: Path):
     assert planted_count == 0, "planted index must be empty for the recovery to be meaningful"
     key = _crypto_key(src_root)
     os.environ["IAI_MCP_STORE"] = str(src_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
 
     report = verify_store_equality(src_db, dst_root, key, src_root=src_root)
     # Counts/bytes match (the data is intact -- only the ANN file was stale).
@@ -347,7 +347,7 @@ def test_temporal_red_on_window_divergence(migrated_pair):
     finally:
         dst.close()
     os.environ["IAI_MCP_STORE"] = str(src_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
 
     report = verify_store_equality(src_db, dst_root, key, src_root=src_root)
     assert report.ok is False

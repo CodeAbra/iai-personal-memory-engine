@@ -23,6 +23,11 @@ ERR_PARSE_ERROR = -32700
 
 IDLE_SECS_DEFAULT = 1800
 
+# A worker thread already running inside asyncio.to_thread cannot be
+# cancelled -- this bound is what keeps it from overlapping the daemon's
+# own shutdown-flush work in the common case, not a hard kill guarantee.
+_DRAIN_BUSY_TIMEOUT_SEC = 5.0
+
 
 def _inherit_activated_socket() -> socket.socket | None:
     listen_fds = os.environ.get("LISTEN_FDS")
@@ -78,6 +83,8 @@ class SocketServer:
         self.active_connections: int = 0
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self._state = state
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
+        self._busy_handlers: set[asyncio.Task[Any]] = set()
 
     async def handle(
         self,
@@ -85,6 +92,9 @@ class SocketServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         self.active_connections += 1
+        _task = asyncio.current_task()
+        if _task is not None:
+            self._handler_tasks.add(_task)
         try:
             while not reader.at_eof():
                 line = await reader.readline()
@@ -167,6 +177,11 @@ class SocketServer:
                     continue
                 method = req["method"]
                 params = req.get("params") or {}
+                # Busy window covers dispatch through the response write, so
+                # the drain waits for the client to actually receive the
+                # answer, not just for asyncio.to_thread() to be awaited.
+                if _task is not None:
+                    self._busy_handlers.add(_task)
                 try:
                     from iai_mcp.core import dispatch
                     # Foreground-priority marker: while a live recall is in
@@ -239,6 +254,16 @@ class SocketServer:
                     }
                 writer.write((json.dumps(resp) + "\n").encode("utf-8"))
                 await writer.drain()
+                if _task is not None:
+                    self._busy_handlers.discard(_task)
+                if self.shutdown_event.is_set():
+                    # _drain_handler_tasks() snapshots idle/busy once and only
+                    # re-checks busy tasks via a bounded wait -- without this
+                    # break, a busy handler that finishes mid-shutdown stays
+                    # parked at readline() until the full
+                    # _DRAIN_BUSY_TIMEOUT_SEC elapses instead of being reaped
+                    # promptly.
+                    break
         except ValueError:
             # readline() raises when a single line exceeds the 64MB limit;
             # reply with a parse error instead of dropping the task uncaught.
@@ -255,12 +280,52 @@ class SocketServer:
             pass
         finally:
             self.active_connections -= 1
+            if _task is not None:
+                self._handler_tasks.discard(_task)
+                # Backstop for exit paths that skip the inline discard
+                # above (e.g. a cancellation delivered mid-dispatch).
+                self._busy_handlers.discard(_task)
             try:
                 writer.close()
                 await writer.wait_closed()
             except (OSError, ConnectionError):  # noqa: BLE001 -- cleanup is best-effort
                 pass
 
+    async def _drain_handler_tasks(self) -> None:
+        tasks = list(self._handler_tasks)
+        idle = [t for t in tasks if t not in self._busy_handlers and not t.done()]
+        busy = [t for t in tasks if t in self._busy_handlers and not t.done()]
+        for task in idle:
+            task.cancel()
+        if busy:
+            _done, pending = await asyncio.wait(
+                busy, timeout=_DRAIN_BUSY_TIMEOUT_SEC,
+            )
+            for task in pending:
+                task.cancel()
+        remaining = idle + busy
+        if remaining:
+            await asyncio.gather(*remaining, return_exceptions=True)
+
+    async def _finish_teardown(self, server: asyncio.Server) -> None:
+        await self._drain_handler_tasks()
+        await server.wait_closed()
+
+    async def _teardown_server(self, server: asyncio.Server) -> None:
+        # Must be a finally, not `async with`: cancellation skips the body
+        # and __aexit__ would wait_closed() with handlers still parked.
+        # The shield below only guards the awaits in THIS method against a
+        # second cancellation while they are running -- it does not touch
+        # how the caller's own cancellation reaches this finally block.
+        server.close()
+        task = asyncio.ensure_future(self._finish_teardown(server))
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                if task.done():
+                    raise
 
     async def serve(self, socket_path: Path | None = None) -> None:
         if socket_path is None:
@@ -279,10 +344,10 @@ class SocketServer:
                 self.handle, socket_path, limit=_line_limit,
             )
             try:
-                async with server:
+                try:
                     await self.shutdown_event.wait()
-                    server.close()
-                    await server.wait_closed()
+                finally:
+                    await self._teardown_server(server)
             finally:
                 shutdown_ipc()
             return
@@ -311,10 +376,10 @@ class SocketServer:
                 pass
 
         try:
-            async with server:
+            try:
                 await self.shutdown_event.wait()
-                server.close()
-                await server.wait_closed()
+            finally:
+                await self._teardown_server(server)
         finally:
             if inherited is None and not supports_cleanup_socket:
                 try:

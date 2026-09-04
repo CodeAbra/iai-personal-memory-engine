@@ -138,7 +138,7 @@ def test_migration_preserves_content_byte_for_byte(tmp_path):
     from iai_mcp.store import MemoryStore
 
     store = MemoryStore(path=tmp_path)
-    text = "verbatim content: Привет, мир"
+    text = "MEM-01 verbatim: Привет, мир"  # non-English fixture data: ru round-trip under test
     rec = _make(text=text, language="ru")
     _write_plaintext_row(store, rec)
 

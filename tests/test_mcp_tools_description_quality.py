@@ -113,8 +113,8 @@ def test_each_description_has_usage_or_behavior_marker() -> None:
 def test_every_tool_has_annotations_block() -> None:
     text = TOOLS_TS.read_text()
     blocks = _enumerate_tool_blocks()
-    assert len(blocks) == 14, (
-        f"expected 14 tool entries, found {len(blocks)}: {[b[0] for b in blocks]}"
+    assert len(blocks) == 15, (
+        f"expected 15 tool entries, found {len(blocks)}: {[b[0] for b in blocks]}"
     )
     annotations_re = re.compile(r"^    annotations:\s*\{", re.MULTILINE)
     total = len(annotations_re.findall(text))
@@ -123,9 +123,9 @@ def test_every_tool_has_annotations_block() -> None:
         span = text[open_idx:close_idx]
         if not annotations_re.search(span):
             missing.append(name)
-    assert not missing and total == 14, (
+    assert not missing and total == 15, (
         f"Quality-floor violation: tools missing `annotations: {{` block at "
-        f"column 4 (found {total}, expected 14); missing tools: "
+        f"column 4 (found {total}, expected 15); missing tools: "
         f"{sorted(missing)}"
     )
 
@@ -133,8 +133,8 @@ def test_every_tool_has_annotations_block() -> None:
 def test_every_tool_has_output_schema_block() -> None:
     text = TOOLS_TS.read_text()
     blocks = _enumerate_tool_blocks()
-    assert len(blocks) == 14, (
-        f"expected 14 tool entries, found {len(blocks)}: {[b[0] for b in blocks]}"
+    assert len(blocks) == 15, (
+        f"expected 15 tool entries, found {len(blocks)}: {[b[0] for b in blocks]}"
     )
     output_re = re.compile(r"^    outputSchema:\s*\{", re.MULTILINE)
     total = len(output_re.findall(text))
@@ -143,9 +143,9 @@ def test_every_tool_has_output_schema_block() -> None:
         span = text[open_idx:close_idx]
         if not output_re.search(span):
             missing.append(name)
-    assert not missing and total == 14, (
+    assert not missing and total == 15, (
         f"Quality-floor violation: tools missing `outputSchema: {{` block at "
-        f"column 4 (found {total}, expected 14); missing tools: "
+        f"column 4 (found {total}, expected 15); missing tools: "
         f"{sorted(missing)}"
     )
 

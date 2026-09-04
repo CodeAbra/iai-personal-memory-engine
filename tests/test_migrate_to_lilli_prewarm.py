@@ -64,7 +64,7 @@ def _build_source_store(
     n_records: int,
 ) -> str:
     """Build a synthetic stdlib source store with connected edges; return its db path."""
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_STORE", str(root))
 
     from iai_mcp.store import MemoryStore, flush_edge_buffer, flush_record_buffer

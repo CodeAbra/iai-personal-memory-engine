@@ -20,6 +20,10 @@ TOOL_NAMES: list[str] = [
     "schema_list",
     "events_query",
     "topology",
+    "memory_search",
+    "episodes_recent",
+    "memory_temporal_recall",
+    "claim_check",
 ]
 
 PROFILE_DISPATCH_BRANCHES: dict[str, list[str]] = {

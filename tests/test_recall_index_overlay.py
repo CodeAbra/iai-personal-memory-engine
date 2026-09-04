@@ -578,6 +578,23 @@ def test_recall_index_rebuild_step_position():
         SleepStep.CURIOSITY_MINE,
         SleepStep.EMBEDDING_INTEGRITY,
         SleepStep.COMMUNITY_NAMING,
+        # Tail-appended -- the WAL-recovery contract admits no earlier
+        # slot. A single-column write; the vector index never reads valence,
+        # and the write fires the graph-sync hook (live warm-bundle patch +
+        # dirty-counter bump), so it needs no rebuild to reach rank time.
+        SleepStep.RECONSOLIDATION_VALENCE,
+        # Tail-appended -- mints tier='procedural' records, but that tier is
+        # excluded unconditionally from recall serving in every mode
+        # (core._passes_mode_filter, retrieve.recall), so vector-index
+        # staleness for these rows never reaches rank time regardless of
+        # rebuild order.
+        SleepStep.PROC_MINE,
+        # Tail-appended -- the WAL-recovery contract admits no earlier slot.
+        # Drains ordinary episodic records through the same insert path
+        # every awake capture uses, which feeds the live ANN buffer
+        # incrementally per row (hippo._table add_items), so these rows
+        # reach rank time without waiting on the next full rebuild.
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     }
     trailing = set(step_order[idx_rebuild + 1:])
     assert trailing <= may_trail, (

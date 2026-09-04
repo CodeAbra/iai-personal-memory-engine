@@ -519,12 +519,12 @@ def test_cross_process_shared_coexists_exclusive_conflicts(tmp_path, monkeypatch
 
     monkeypatch.delenv("IAI_MCP_STORE", raising=False)
     # Exercises HippoDB's own flock (access_mode), which is driver-independent
-    # architecture — pinned to stdlib in BOTH processes regardless of the
-    # ambient env: the lilli engine holds its own single-process OS lock below
-    # this flock (no two processes can hold engine connections at once), so a
-    # lilli-driver run would fail at the engine layer before ever reaching the
-    # flock under test. Engine semantics are covered by test_hippo_multiprocess.
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    # architecture — pinned to stdlib in BOTH processes: the lilli engine holds
+    # its own single-process OS lock below this flock (no two processes can
+    # hold engine connections at once), so a lilli-driver run would fail at
+    # the engine layer before ever reaching the flock under test. Engine
+    # semantics are covered by test_hippo_multiprocess.
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     child_env = dict(_os.environ)
     child = subprocess.Popen(  # noqa: S603 -- argv list, no shell
         [_sys.executable, "-c", _CHILD_SHARED_HOLDER, str(tmp_path)],

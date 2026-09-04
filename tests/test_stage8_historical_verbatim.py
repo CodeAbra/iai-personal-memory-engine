@@ -231,37 +231,59 @@ def test_superseded_original_in_top10_below_corrector_buried_cosine(tmp_path):
         f"Hits: {[(str(h.record_id)[:8], h.literal_surface, round(h.score,3)) for h in resp.hits[:5]]}"
     )
 
-def test_neutral_cue_does_not_apply_downweight(tmp_path):
+def test_neutral_cue_does_not_apply_downweight(tmp_path, monkeypatch):
     from iai_mcp.pipeline import recall_for_benchmark
+    from iai_mcp.cue_router import _classify_cue
+    from iai_mcp import retrieve as retrieve_mod
 
     (store, embedder, graph, assignment, rich_club,
-     gold_id, wrong_id, _no_edge_id, _cue_vec) = _seed_bench_scenario(tmp_path)
+     gold_id, wrong_id, _no_edge_id, cue_vec) = _seed_bench_scenario(tmp_path)
 
-    resp = recall_for_benchmark(
+    neutral_cue = "What's the ETA?"
+    assert _classify_cue(neutral_cue)[1] != "historical_verbatim", (
+        "test fixture invariant: neutral cue must not classify as historical"
+    )
+    embedder.set_fixed(neutral_cue, cue_vec)
+
+    downweighted = recall_for_benchmark(
         store=store, graph=graph, assignment=assignment,
         rich_club=rich_club, embedder=embedder,
-        cue="What's the ETA?",
-        session_id="bench-probe",
-        k_hits=5, mode="concept",
+        cue=neutral_cue, session_id="bench-probe", k_hits=20, mode="concept",
+    )
+    real_factor = retrieve_mod.STALE_DOWNWEIGHT_FACTOR
+    monkeypatch.setattr(retrieve_mod, "STALE_DOWNWEIGHT_FACTOR", 1.0)
+    undownweighted = recall_for_benchmark(
+        store=store, graph=graph, assignment=assignment,
+        rich_club=rich_club, embedder=embedder,
+        cue=neutral_cue, session_id="bench-probe", k_hits=20, mode="concept",
     )
 
-    gold_hit = next((h for h in resp.hits if h.record_id == gold_id), None)
-    wrong_hit = next((h for h in resp.hits if h.record_id == wrong_id), None)
-    assert gold_hit is not None, "GOLD must appear in neutral cue results"
-    if wrong_hit is not None:
-        gap = abs(gold_hit.score - wrong_hit.score)
-        from iai_mcp.pipeline import HISTORICAL_VERBATIM_DOWNWEIGHT
-        assert gap < HISTORICAL_VERBATIM_DOWNWEIGHT - 0.02, (
-            f"On NEUTRAL cue the score gap should NOT reflect a "
-            f"~{HISTORICAL_VERBATIM_DOWNWEIGHT} downweight; got gap={gap:.4f}. "
-            f"GOLD={gold_hit.score:.4f} WRONG={wrong_hit.score:.4f}"
-        )
+    gold_dw = next((h for h in downweighted.hits if h.record_id == gold_id), None)
+    gold_undw = next((h for h in undownweighted.hits if h.record_id == gold_id), None)
+    wrong_dw = next((h for h in downweighted.hits if h.record_id == wrong_id), None)
+    assert gold_dw is not None, "GOLD must appear in neutral cue results"
+    assert gold_undw is not None, "GOLD must appear once the downweight is neutralized"
+    assert wrong_dw is not None, "corrector must also appear in neutral cue results"
+
+    # On a neutral (non-historical_verbatim) cue the superseded GOLD record
+    # is downweighted by exactly STALE_DOWNWEIGHT_FACTOR relative to its
+    # undownweighted score (current-fact primacy). The historical_verbatim
+    # exemption from this downweight is covered by the other tests in this
+    # file that use a historical cue.
+    assert abs(gold_dw.score - gold_undw.score * real_factor) < 1e-6, (
+        f"GOLD score on a neutral cue must equal its undownweighted score "
+        f"times STALE_DOWNWEIGHT_FACTOR={real_factor}; "
+        f"got downweighted={gold_dw.score:.6f} "
+        f"undownweighted={gold_undw.score:.6f} "
+        f"(ratio={gold_dw.score / gold_undw.score:.6f})"
+    )
 
 def test_russian_historical_cue_corrector_ranks_above_original(tmp_path):
     from iai_mcp.pipeline import recall_for_benchmark
 
     (store, embedder, graph, assignment, rich_club,
      gold_id, wrong_id, _no_edge_id, cue_vec) = _seed_bench_scenario(tmp_path)
+    # non-English fixture data: multilingual behavior under test — keep
     ru_cue = "приведи оригинальную формулировку"
     embedder.set_fixed(ru_cue, cue_vec)
 
@@ -328,18 +350,6 @@ def test_record_without_contradicts_edge_unaffected_by_downweight(tmp_path):
         f"(hist={no_edge_hist.score:.6f} neutral={no_edge_neutral.score:.6f}); "
         f"it has no contradicts edge so the superseded-original anchor "
         f"must not touch it."
-    )
-
-def test_historical_verbatim_downweight_constant_is_module_level(tmp_path):
-    from iai_mcp import pipeline as _pipeline_mod
-
-    assert hasattr(_pipeline_mod, "HISTORICAL_VERBATIM_DOWNWEIGHT"), (
-        "pipeline.py must export HISTORICAL_VERBATIM_DOWNWEIGHT module constant"
-    )
-    assert isinstance(_pipeline_mod.HISTORICAL_VERBATIM_DOWNWEIGHT, float)
-    assert 0.0 < _pipeline_mod.HISTORICAL_VERBATIM_DOWNWEIGHT < 1.0, (
-        f"HISTORICAL_VERBATIM_DOWNWEIGHT must be in (0, 1) for stability, "
-        f"got {_pipeline_mod.HISTORICAL_VERBATIM_DOWNWEIGHT}"
     )
 
 def test_bench_harness_calls_classify_cue_for_intent(tmp_path):

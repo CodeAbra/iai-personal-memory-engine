@@ -1,19 +1,15 @@
-"""Regression: the full-pool sanitize + L2 renorm must run once per build, and
-the once-resolved centrality must preserve seed ranking on an edge-dense corpus.
+"""Part A: the recall path sanitizes (nan_to_num) and L2-normalizes the whole
+N x D pool matrix fresh on every recall -- no cross-call memoization on the
+graph. This part spies ``np.linalg.norm`` and asserts the full-pool-sized
+pass fires once per recall, proving the matrix is never served from a stale
+cache.
 
-Part A (renorm-once): the recall path sanitizes (nan_to_num) and L2-normalizes the
-whole N x D pool matrix. On the per-recall-renorm path this full pass runs on every
-recall, an O(N*D) cost that dominates p95 at scale. The fix normalizes the pool
-once at assembly and caches it on the graph; the per-recall guard is only a cheap
-finite-check. This part spies ``np.linalg.norm`` and counts the full-pool-sized
-passes; RED when they fire M times, GREEN when reuse caps them at <= 1.
-
-Part B (quality trap guard): the perf fix must NOT silently drop the centrality
-ranking term. On an EDGE-DENSE corpus build-time betweenness is genuinely nonzero,
-and the seed order produced from the build-resolved centrality must match the order
-the per-recall recompute would produce. Identical order proves the recompute is pure
-waste on a static graph and the fix preserves ranking quality. These invariants are
-GREEN today and must stay GREEN after the fix lands.
+Part B (quality trap guard): centrality-driven seed ranking must not depend
+on whether the pool matrix was cached. On an EDGE-DENSE corpus build-time
+betweenness is genuinely nonzero, and the seed order produced from the
+build-resolved centrality must match the order a per-recall recompute would
+produce. Identical order proves the recompute is pure waste on a static
+graph.
 """
 from __future__ import annotations
 
@@ -24,7 +20,7 @@ import numpy as np
 import pytest
 
 from iai_mcp.graph import MemoryGraph
-from iai_mcp.pipeline import _normalize_pool_cached, _pick_seeds, recall_for_response
+from iai_mcp.pipeline import _normalize_pool, _pick_seeds, recall_for_response
 from iai_mcp.types import MemoryRecord
 
 
@@ -111,12 +107,11 @@ def _seed_store_connected(path, n: int, seed: int = 0):
     return store, embedder, graph, assignment, rich_club, ids
 
 
-def test_full_pool_renorm_not_repeated_per_recall(
+def test_full_pool_renorm_runs_every_recall(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Part A: the full-pool sanitize + L2 renorm must run at most once across M
-    recalls. RED when the per-recall renorm runs M times; GREEN once the
-    normalized pool is cached on the graph and reused."""
+    """Part A: the full-pool sanitize + L2 renorm runs on every recall -- no
+    graph-side memoization retains it across calls."""
     from tests.test_pipeline_perf import _seed_store
 
     store, embedder, graph, assignment, rich_club = _seed_store(
@@ -162,9 +157,9 @@ def test_full_pool_renorm_not_repeated_per_recall(
             budget_tokens=1500,
         )
 
-    assert full_pool_norm_calls["n"] <= 1, (
+    assert full_pool_norm_calls["n"] == m, (
         f"full-pool L2 renorm ran {full_pool_norm_calls['n']} times over {m} "
-        f"recalls; it must run at most once per build and be reused thereafter."
+        f"recalls; it must run fresh on every recall, never served from a cache."
     )
 
 
@@ -233,60 +228,28 @@ def test_edge_dense_centrality_nonzero_and_seed_parity(tmp_path):
     )
 
 
-def test_pool_cache_key_is_content_sensitive_not_id_only():
-    """WR-01 fence: the normalized-pool cache key must encode embedding CONTENT,
-    not just the id-sequence. A content change that leaves the id-sequence intact
-    must invalidate the cache so a stale normalized matrix (= silently wrong
-    cosine) can never be served.
-
-    This isolates the cache-KEY contract: a node embedding is mutated in place via
-    a graph mutator (same id-sequence), and the cached ``_normalized_pool`` entry
-    is re-warmed AFTER the mutation so the only thing standing between a warm hit
-    and a stale result is whether the KEY noticed the content change. Under
-    identity-only keying the re-warmed key matches and the stale V1 matrix is
-    served (RED). Under the content-version key the mutator bumped the version, so
-    the re-warmed key carries V2 and the V1 entry can never alias it (GREEN).
-    """
+def test_normalize_pool_reflects_in_place_embedding_change():
+    """`_normalize_pool` always recomputes from its `pool_embs`
+    argument -- an in-place embedding mutation is reflected on the very next
+    call, with no cache to go stale."""
     a, b = uuid4(), uuid4()
     graph = MemoryGraph()
-    # id-sequence is [a, b] and never changes across the whole test.
     graph.add_node(a, community_id=None, embedding=[1.0, 0.0])
     graph.add_node(b, community_id=None, embedding=[0.0, 1.0])
     pool_ids = [a, b]
     probe = np.array([1.0, 0.0], dtype=np.float32)
 
-    # --- V1: node `a` aligned with the probe (cosine 1.0). Warm the cache. ---
     pool_embs_v1 = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-    normalized_v1 = _normalize_pool_cached(graph, pool_ids, pool_embs_v1)
+    normalized_v1 = _normalize_pool(graph, pool_ids, pool_embs_v1)
     assert float(normalized_v1[0] @ probe) == pytest.approx(1.0)
-    # Capture the exact key the implementation stored for the warm V1 entry.
-    warm_key_v1, warm_mat_v1 = graph._normalized_pool
-    assert warm_mat_v1 is normalized_v1
 
-    # --- Mutate `a` in place THROUGH the mutator (same id-sequence). A correct
-    # implementation nulls _normalized_pool here; we re-pin the STALE V1 entry
-    # under its ORIGINAL key right after, modelling the WR-01 regression class —
-    # a content change reached the pool without the warm cache being dropped, so
-    # the KEY is the only thing that can reject the stale matrix. ---
     graph.set_node_payload(a, {"embedding": [0.0, 1.0]})
-    graph._normalized_pool = (warm_key_v1, normalized_v1)  # re-pin stale entry
-
     pool_embs_v2 = np.array(
         [graph.get_embedding(a), graph.get_embedding(b)], dtype=np.float32
     )
-    normalized_v2 = _normalize_pool_cached(graph, pool_ids, pool_embs_v2)
+    normalized_v2 = _normalize_pool(graph, pool_ids, pool_embs_v2)
 
     cos_v2 = float(normalized_v2[0] @ probe)
-    # Node `a` is now orthogonal to the probe → fresh cosine is ~0. A stale V1
-    # warm hit would return 1.0. Under an id-only key the re-pinned key still
-    # matches (RED). Under the content-version key the mutator advanced the
-    # version, so the re-pinned V1 key is stale and is rejected (GREEN).
     assert cos_v2 == pytest.approx(0.0, abs=1e-6), (
-        f"stale V1 normalized pool served (cosine {cos_v2}, expected ~0); the "
-        "cache key is content-blind — it matched the id-sequence alone and "
-        "ignored the in-place embedding change."
-    )
-    assert normalized_v2 is not normalized_v1, (
-        "the returned matrix is the cached V1 object; the content change with an "
-        "unchanged id-sequence did not invalidate the cache."
+        f"expected the fresh embedding change reflected (cosine ~0), got {cos_v2}"
     )

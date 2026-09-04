@@ -2,7 +2,7 @@
 
 > Local, MIT-licensed personal memory engine for MCP-compatible AI assistants. Captures every conversation turn verbatim (write-once), consolidates in the background, and injects a small relevant memory pack into the assistant at session start and per turn. No account, no API key, no telemetry.
 
-Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memory-engine. Current release: 3.0.7.
+Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memory-engine. Current release: 3.1.0.
 
 ## What it is
 

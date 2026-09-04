@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from uuid import uuid4
 
 
@@ -12,14 +11,12 @@ def test_constants_present():
         LEARN_RATE,
         MAX_WEIGHT,
         MIN_WEIGHT,
-        EPSILON_EXPLORE,
         TRUST_INCREMENT_PER_COMMIT,
         TRUST_DECREMENT_PER_REJECT,
     )
     assert LEARN_RATE == 0.05
     assert MAX_WEIGHT == 5.0
     assert MIN_WEIGHT == 0.0
-    assert 0.0 < EPSILON_EXPLORE < 1.0
     assert TRUST_INCREMENT_PER_COMMIT > 0
     assert TRUST_DECREMENT_PER_REJECT > 0
 
@@ -106,45 +103,6 @@ def test_does_not_mutate_input():
     fb = RetrievalFeedback("x", ids, ids, False, False)
     update_retrieval_weights(fb, before)
     assert before == before_copy
-
-def test_pick_retrieval_strategy_returns_string():
-    from iai_mcp.lilli.profile.tuner import pick_retrieval_strategy
-
-    random.seed(42)
-    s = pick_retrieval_strategy("fact_lookup", history={})
-    assert isinstance(s, str)
-
-def test_pick_retrieval_strategy_epsilon_greedy():
-    from iai_mcp.lilli.profile.tuner import pick_retrieval_strategy
-
-    random.seed(7)
-    history = {
-        "fact_lookup": {
-            "pipeline_default": {"mean": 0.9, "n": 10},
-            "greedy_2hop": {"mean": 0.1, "n": 10},
-            "rich_club_first": {"mean": 0.2, "n": 10},
-        }
-    }
-    picks = {"pipeline_default": 0, "greedy_2hop": 0, "rich_club_first": 0}
-    for _ in range(200):
-        s = pick_retrieval_strategy("fact_lookup", history)
-        picks[s] = picks.get(s, 0) + 1
-    assert picks["pipeline_default"] > 120
-
-def test_pick_retrieval_strategy_no_history():
-    from iai_mcp.lilli.profile.tuner import pick_retrieval_strategy
-
-    random.seed(42)
-    s = pick_retrieval_strategy("unseen", history={})
-    assert isinstance(s, str)
-    assert s in ("pipeline_default", "greedy_2hop", "rich_club_first")
-
-def test_pick_retrieval_strategy_custom_strategies():
-    from iai_mcp.lilli.profile.tuner import pick_retrieval_strategy
-
-    random.seed(1)
-    s = pick_retrieval_strategy("x", history={}, strategies=["a", "b", "c"])
-    assert s in ("a", "b", "c")
 
 def test_identity_refinement_increases_s5_trust(tmp_path):
     from iai_mcp.lilli.profile.tuner import refine_s5_trust_score

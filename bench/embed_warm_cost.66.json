@@ -1,7 +1,7 @@
 {
   "generated_at_utc": "2026-06-04T05:23:01.542453+00:00",
   "platform": "Darwin arm64",
-  "python": "/path/to/.venv/bin/python",
+  "python": "/Users/alice/Desktop/ASSET/IAI-MCP/.venv/bin/python",
   "n_warm": 5,
   "construction": {
     "samples": [

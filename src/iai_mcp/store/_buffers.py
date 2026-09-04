@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from iai_mcp.store import MemoryStore
 
 from iai_mcp.store import EDGES_TABLE, RECORDS_TABLE
+from iai_mcp.store._purge_registry import purge_store, register_store_purge
 
 logger = logging.getLogger(__name__)
 
@@ -349,11 +350,7 @@ _edge_buffer: dict[int, list[dict]] = {}
 _edge_last_flush_at: dict[int, datetime] = {}
 
 
-def reset_store_buffers(store_id: int) -> None:
-    """Purge every buffer entry keyed to store_id. Buffers key on id(store),
-    and CPython reuses freed addresses — a fresh store MUST start clean or
-    it inherits a dead store's unflushed rows, which poisons its own writes
-    and can land another store's content in its tables."""
+def _reset_record_edge_buffers(store_id: int) -> None:
     from iai_mcp.events import _BUFFER_LOCK
 
     with _BUFFER_LOCK:
@@ -361,6 +358,18 @@ def reset_store_buffers(store_id: int) -> None:
         _record_last_flush_at.pop(store_id, None)
         _edge_buffer.pop(store_id, None)
         _edge_last_flush_at.pop(store_id, None)
+
+
+register_store_purge(_reset_record_edge_buffers)
+
+
+def reset_store_buffers(store_id: int) -> None:
+    """Dispatches to every registered id(store)-keyed family (records, edges,
+    events, curiosity, ...). Buffers/caches key on id(store), and CPython
+    reuses freed addresses — a fresh store MUST start clean or it inherits a
+    dead store's unflushed rows/cached values, which poisons its own writes
+    and can land another store's content in its tables."""
+    purge_store(store_id)
 
 
 def flush_edge_buffer(store: "MemoryStore") -> int:

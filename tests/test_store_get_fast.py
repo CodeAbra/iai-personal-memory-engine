@@ -38,6 +38,7 @@ def test_get_unknown_id_returns_none(tmp_path):
 
 def test_get_known_id_roundtrip_with_decrypt(tmp_path):
     store = MemoryStore(path=tmp_path)
+    # non-English fixture data: multilingual behavior under test — keep
     verbatim = "пусть каждое слово сохранится точно — G2 fidelity"
     r = _make(text=verbatim)
     store.insert(r)

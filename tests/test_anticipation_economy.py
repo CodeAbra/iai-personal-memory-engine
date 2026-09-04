@@ -11,7 +11,11 @@ tokens as a conservative lower bound).
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -165,6 +169,122 @@ def test_hook_appends_serve_ledger(tmp_path):
     assert row["bytes"] > 0 and row["ts"]
 
 
+def _serve_one_recall_reply(sock_path: str, reply_obj: dict):
+    reply_frame = (json.dumps(reply_obj) + "\n").encode("utf-8")
+    accept_done = threading.Event()
+
+    def _listener():
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(1)
+        srv.settimeout(2.0)
+        try:
+            conn, _ = srv.accept()
+            try:
+                conn.settimeout(2.0)
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                conn.sendall(reply_frame)
+            finally:
+                conn.close()
+        except OSError:
+            pass
+        finally:
+            srv.close()
+            accept_done.set()
+
+    threading.Thread(target=_listener, daemon=True).start()
+    time.sleep(0.05)
+    return accept_done
+
+
+def test_socket_recall_fires_by_default_without_the_env_var():
+    """The durable template default is ON: an unset IAI_MCP_PER_TURN_SOCKET_ACCEL
+    must still fire the live socket recall when the daemon socket is present."""
+    import shutil
+    import tempfile
+
+    hook = (
+        Path(__file__).resolve().parents[1]
+        / "src/iai_mcp/_deploy/hooks/iai-mcp-per-turn-recall.sh"
+    )
+    # AF_UNIX sun_path is capped near 104 bytes; pytest's own tmp_path nests
+    # deep enough to overflow it, so use a short-lived /tmp dir instead.
+    root = Path(tempfile.mkdtemp(dir="/tmp", prefix="iai-recall-"))
+    try:
+        sock_path = str(root / ".daemon.sock")
+        reply = {
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"hits": [
+                {"record_id": "r1", "literal_surface": "alice prefers dark mode",
+                 "valid_to": None},
+            ]},
+        }
+        done = _serve_one_recall_reply(sock_path, reply)
+
+        env = dict(os.environ)
+        env["IAI_MCP_STORE"] = str(root)
+        env.pop("IAI_MCP_ROOT", None)
+        env.pop("IAI_MCP_PER_TURN_SOCKET_ACCEL", None)  # unset -> exercise the durable default
+        env["IAI_MCP_FORESIGHT_PACK"] = str(root / "absent-pack.md")
+        env["IAI_MCP_WORKING_TIER_CACHE"] = str(root / "absent-wt.md")
+
+        proc = subprocess.run(
+            [str(hook)], input='{"prompt":"remind me about alice"}',
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        done.wait(timeout=2)
+        assert proc.returncode == 0
+        assert "<iai-mcp-recall>" in proc.stdout
+        assert "alice prefers dark mode" in proc.stdout
+    finally:
+        shutil.rmtree(str(root), ignore_errors=True)
+
+
+def test_socket_recall_still_disableable_via_explicit_zero():
+    """Setting the env var to '0' still opts a caller out — the flip changes
+    the default, not the ability to turn the accelerator off."""
+    import shutil
+    import tempfile
+
+    hook = (
+        Path(__file__).resolve().parents[1]
+        / "src/iai_mcp/_deploy/hooks/iai-mcp-per-turn-recall.sh"
+    )
+    root = Path(tempfile.mkdtemp(dir="/tmp", prefix="iai-recall-"))
+    try:
+        sock_path = str(root / ".daemon.sock")
+        reply = {
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"hits": [
+                {"record_id": "r1", "literal_surface": "alice prefers dark mode",
+                 "valid_to": None},
+            ]},
+        }
+        done = _serve_one_recall_reply(sock_path, reply)
+
+        env = dict(os.environ)
+        env["IAI_MCP_STORE"] = str(root)
+        env.pop("IAI_MCP_ROOT", None)
+        env["IAI_MCP_PER_TURN_SOCKET_ACCEL"] = "0"
+        env["IAI_MCP_FORESIGHT_PACK"] = str(root / "absent-pack.md")
+        env["IAI_MCP_WORKING_TIER_CACHE"] = str(root / "absent-wt.md")
+
+        proc = subprocess.run(
+            [str(hook)], input='{"prompt":"remind me about alice"}',
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert proc.returncode == 0
+        assert "<iai-mcp-recall>" not in proc.stdout
+        done.set()
+    finally:
+        shutil.rmtree(str(root), ignore_errors=True)
+
+
 def test_savings_floor_without_observed_searches():
     """Foresight working perfectly means ZERO observed searches — the floor
     must still credit the avoided call overhead, not collapse to 0."""
@@ -174,3 +294,66 @@ def test_savings_floor_without_observed_searches():
     assert _savings_lower_est(0, 0, 0) == 0
     # observed premium adds on top of the overhead floor
     assert _savings_lower_est(2, 2000, 1000) == 2 * SEARCH_CALL_OVERHEAD_TOK + 2 * (1000 - 250)
+
+
+def test_deployed_per_turn_hook_and_render_helper_stay_byte_identical_to_template(
+    tmp_path, monkeypatch,
+):
+    """An old hook running next to a stale or missing render helper is a
+    live-failure class: the dated-staleness signal silently disappears.
+    Prove the installer keeps both files byte-identical to the tracked
+    template, using a throwaway HOME -- never ~/.claude."""
+    import argparse
+
+    repo_root = Path(__file__).resolve().parents[1]
+    hook_template = repo_root / "src/iai_mcp/_deploy/hooks/iai-mcp-per-turn-recall.sh"
+    render_template = repo_root / "src/iai_mcp/_deploy/hooks/_recall_render.py"
+
+    scratch_home = tmp_path / "scratch-home"
+    scratch_home.mkdir()
+    monkeypatch.setenv("HOME", str(scratch_home))
+
+    from iai_mcp.cli._capture import cmd_capture_hooks_install
+
+    rc = cmd_capture_hooks_install(argparse.Namespace(target="claude"))
+    assert rc == 0
+
+    deployed_hook = scratch_home / ".claude" / "hooks" / "iai-mcp-per-turn-recall.sh"
+    deployed_render = scratch_home / ".claude" / "hooks" / "_recall_render.py"
+    assert deployed_hook.read_bytes() == hook_template.read_bytes(), (
+        "deployed per-turn hook diverged from the tracked template"
+    )
+    assert deployed_render.read_bytes() == render_template.read_bytes(), (
+        "deployed render helper diverged from the tracked template"
+    )
+
+
+def test_per_turn_recall_block_stays_within_existing_budget():
+    """The dated-staleness render must not blow the pre-existing 3-hit /
+    [:400] per-turn injection budget. Invariant #3 bounds SessionStart;
+    per-turn injection has its own, smaller bound this guards so the
+    render change cannot grow it unbounded."""
+    import sys
+
+    hooks_dir = Path(__file__).resolve().parents[1] / "src/iai_mcp/_deploy/hooks"
+    if str(hooks_dir) not in sys.path:
+        sys.path.insert(0, str(hooks_dir))
+    from _recall_render import render_recall_block
+
+    hits = [
+        {"record_id": f"r{i}", "literal_surface": "x" * 500,
+         "valid_to": "2000-01-01T00:00:00+00:00"}
+        for i in range(5)
+    ]
+    result = {
+        "hits": hits,
+        "anti_hits": [
+            {"record_id": "a1", "literal_surface": "y" * 500,
+             "valid_to": "2000-01-01T00:00:00+00:00"},
+        ],
+    }
+    block = render_recall_block(result)
+    assert block.count("\n- ") <= 3, "must stay within the existing 3-hit budget"
+    assert len(block.encode("utf-8")) < 2048, (
+        f"per-turn recall block grew unbounded: {len(block)} bytes"
+    )

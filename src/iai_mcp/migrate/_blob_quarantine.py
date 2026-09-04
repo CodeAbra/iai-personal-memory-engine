@@ -16,8 +16,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
+from iai_mcp.capture import _NOISE_PATTERNS
+
 log = logging.getLogger(__name__)
 
+# Tombstone criteria for this (destructive, --apply mutates the store) sweep.
+# Deliberately narrower than the full noise filter and NOT auto-widened: a
+# false positive here silently destroys a record, so growing this set is a
+# deliberate, reviewed decision, never an automatic side effect of widening
+# the noise filter elsewhere.
 _BLOB_PREFIXES: tuple[str, ...] = (
     "<task-notification>",
     "[SYSTEM NOTIFICATION",
@@ -27,6 +34,19 @@ _BLOB_PREFIXES: tuple[str, ...] = (
     "<command-message>",
     "<system-reminder>",
 )
+
+# Guard-only superset: the directive-marker blob guard in capture.py must
+# never fire on any signature the noise filter (iai_mcp.capture._NOISE_PATTERNS)
+# recognizes -- refusing to mint a directive is safe/non-destructive, so this
+# set is deliberately widened to union in every noise-filter prefix (startswith
+# AND the one equals-type signature, folded in as a prefix -- startswith is a
+# strict superset of an equals check for a single literal here), sourced from
+# _NOISE_PATTERNS so it can never drift narrower than the filter it backstops.
+# NEVER use this tuple for the destructive tombstone sweep above.
+_MARKER_GUARD_PREFIXES: tuple[str, ...] = tuple(dict.fromkeys(
+    _BLOB_PREFIXES
+    + tuple(pattern for kind, pattern in _NOISE_PATTERNS if kind in ("startswith", "equals"))
+))
 
 
 def _is_notification_blob(text: str) -> bool:

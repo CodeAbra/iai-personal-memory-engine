@@ -124,7 +124,7 @@ def build_fixtures() -> dict[str, dict]:
     )
 
 
-    snapshot_path = "bench/snapshots/live_n2000.npz"
+    snapshot_path = ".planning/research/v8.0/phase50-mosaicsigma/snapshots/live_n2000.npz"
     if Path(snapshot_path).exists():
         fixtures["live_n2000"] = {
             "n": -1,

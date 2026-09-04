@@ -428,16 +428,24 @@ def bayesian_update(
     return new_value, p
 
 
+_COMMUNITY_ID_NOT_GIVEN = object()
+
+
 def profile_modulation_for_record(
     record,
     profile_state: dict,
     *,
     knobs_applied: dict | None = None,
+    community_id_override: "object" = _COMMUNITY_ID_NOT_GIVEN,
 ) -> dict[str, float]:
     gains: dict[str, float] = {}
 
     md = profile_state.get("monotropism_depth", {})
-    _record_community_id = getattr(record, "community_id", None)
+    _record_community_id = (
+        getattr(record, "community_id", None)
+        if community_id_override is _COMMUNITY_ID_NOT_GIVEN
+        else community_id_override
+    )
     if isinstance(md, dict) and md and _record_community_id is not None:
         from iai_mcp.core import get_community_names
         name = get_community_names().get(str(_record_community_id))

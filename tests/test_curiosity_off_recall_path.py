@@ -41,9 +41,10 @@ from iai_mcp.curiosity import (
     get_pending_questions_cached,
 )
 from iai_mcp.events import query_events, write_event
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.store import MemoryStore
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 
 @pytest.fixture

@@ -36,7 +36,7 @@ export IAI_MCP_PYTHON=/path/to/venv/bin/python
 | `SessionStart` | Assembles a small slice of relevant memory and injects it before your first prompt. |
 | `UserPromptSubmit` | Appends the turn to the session buffer (file IO only, ~5 ms), and serves the foresight pack — memories the engine expects the next turn to need, each marked with its age and how often it has been revised. |
 | `Stop` | Rolls the session buffer over for the engine to absorb while idle. |
-| MCP | Fifteen memory tools, including cue recall that returns contradictions alongside matches, time-anchored recall, and explicit capture. |
+| MCP | Fourteen memory tools, including cue recall that returns contradictions alongside matches, time-anchored recall, and explicit capture. |
 
 Every hook is fail-safe: an empty store, an absent engine or an unreachable
 daemon yields empty output, and the session starts normally.

@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from iai_mcp.hippo import HNSW_EF, HNSW_EF_CONSTRUCTION, HNSW_M, HippoDB
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.hnsw_rebuild_worker import _worker_entry
 from iai_mcp.types import EMBED_DIM
 
@@ -79,7 +80,7 @@ def _run_worker(db_path: str, tmp_dir: str) -> tuple[str, object]:
 
 
 @pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() != "lilli",
+    os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() != "lilli",
     reason="lilli-driver spawn child test — requires LILLI_STORAGE_DRIVER=lilli",
 )
 def test_hnsw_rebuild_worker_lilli_driver(tmp_path: pytest.TempPathFactory, monkeypatch):
@@ -105,7 +106,7 @@ def test_hnsw_rebuild_worker_lilli_driver(tmp_path: pytest.TempPathFactory, monk
 
 
 @pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() != "lilli",
+    os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() != "lilli",
     reason="proves the worker detects a lilli-format store from on-disk magic "
     "even when LILLI_STORAGE_DRIVER is unset in the worker's own env — the "
     "split-brain regression: a nightly rebuild spawned without the env "
@@ -147,13 +148,10 @@ def test_hnsw_rebuild_worker_lilli_store_with_env_unset(
     )
 
 
-@pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-    reason="stdlib regression guard — skip on lilli driver",
-)
 def test_hnsw_rebuild_worker_stdlib_driver(tmp_path: pytest.TempPathFactory, monkeypatch):
     """The spawn child rebuilds the HNSW index from a stdlib store (regression guard)."""
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
 
     db = HippoDB(tmp_path)
     n_seeded = _seed_records(db, 4)
@@ -170,10 +168,6 @@ def test_hnsw_rebuild_worker_stdlib_driver(tmp_path: pytest.TempPathFactory, mon
     )
 
 
-@pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-    reason="stdlib regression guard — skip on lilli driver",
-)
 def test_hnsw_rebuild_worker_stdlib_store_with_env_lilli(
     tmp_path: pytest.TempPathFactory, monkeypatch
 ):
@@ -184,6 +178,7 @@ def test_hnsw_rebuild_worker_stdlib_store_with_env_lilli(
     genuine sqlite3 file through the lilli engine because the env says so.
     """
     monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
 
     db = HippoDB(tmp_path)
     n_seeded = _seed_records(db, 4)

@@ -53,6 +53,40 @@ def test_recall_dispatch_modules_never_import_foresight():
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_cap_denylist_immutable_across_refresh_pack(driver, tmp_path, monkeypatch):
+    """The Cyrillic-fallback cue-derivation lane may only READ
+    entity_anchors._CAP_DENYLIST; mutating it would change what entity_tags()
+    writes to tags_json/aaak_index — a write-path violation."""
+    _select_driver(driver, monkeypatch)
+    from iai_mcp import entity_anchors, foresight
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.embed import embed_query, embedder_for_store
+    from iai_mcp.store import MemoryStore, flush_record_buffer
+
+    assert isinstance(entity_anchors._CAP_DENYLIST, frozenset)
+    snapshot = frozenset(entity_anchors._CAP_DENYLIST)
+
+    store = MemoryStore(path=tmp_path)
+    capture_turn(
+        store, cue="",
+        text="Explain carpathy and remember the humanizer skill for the telegram post.",
+        tier="episodic", session_id="purity-seed", role="user", live_turn=True,
+    )
+    flush_record_buffer(store)
+
+    cue_text = "carpathy humanizer skill telegram post"
+    vec = embed_query(embedder_for_store(store), cue_text)
+    foresight.refresh_pack(
+        store, cue_text=cue_text, cue_embedding=vec, session_id="purity-query",
+    )
+
+    assert isinstance(entity_anchors._CAP_DENYLIST, frozenset)
+    assert entity_anchors._CAP_DENYLIST == snapshot, (
+        "refresh_pack must never mutate the write-path denylist"
+    )
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_recall_path_no_foresight_calls(driver, tmp_path, monkeypatch):
     _select_driver(driver, monkeypatch)
     fake_home = tmp_path / "home"

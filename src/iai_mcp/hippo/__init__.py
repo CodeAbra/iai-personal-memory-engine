@@ -221,6 +221,8 @@ from iai_mcp.hippo._table import (
     _DDL_HIPPO_META,
     _DDL_RECORD_TAGS,
     _DDL_RECORD_TAGS_INDEXES,
+    _DDL_PROC_TRANSITIONS,
+    _DDL_PROC_TRANSITIONS_INDEXES,
     _TABLE_SQL,
 )
 

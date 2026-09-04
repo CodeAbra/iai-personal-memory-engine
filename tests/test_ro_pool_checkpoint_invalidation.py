@@ -37,10 +37,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.hippo._ro_pool import _RO_SNAPSHOT_FENCE_MARKER
 from iai_mcp.store import MemoryStore
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _EMBED_DIM = 384
 

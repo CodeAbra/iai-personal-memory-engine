@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import array
-import os
 import sqlite3
 import struct
 import time
@@ -13,10 +12,6 @@ import numpy as np
 import pytest
 
 from tests._store_raw import open_store_raw
-
-
-_LILLI_DRIVER = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli"
-
 
 
 def _make_episodic_record(text: str = "generic user turn"):
@@ -333,18 +328,17 @@ def test_boot_with_pending_row_no_crash_no_churn(hermetic_store: Path) -> None:
         hippo.close()
 
 
-@pytest.mark.skipif(
-    _LILLI_DRIVER,
-    reason=(
-        "fabricates a pre-migration store shape with CREATE TABLE ... AS SELECT "
-        "(clone-minus-column) + DROP TABLE + RENAME — a stdlib-sqlite migration "
-        "mechanism. CTAS is outside the lilli engine's supported grammar by "
-        "design; the production V4->V5 reconcile uses ALTER TABLE ADD COLUMN "
-        "(exercised driver-independently by test_boot_with_pending_row_no_crash_no_churn "
-        "and _reconcile_columns)."
-    ),
-)
-def test_pre_migration_store_opens_and_reconciles(hermetic_store: Path) -> None:
+def test_pre_migration_store_opens_and_reconciles(
+    hermetic_store: Path, monkeypatch
+) -> None:
+    """Fabricates a pre-migration store shape with CREATE TABLE ... AS SELECT
+    (clone-minus-column) + DROP TABLE + RENAME -- a stdlib-sqlite migration
+    mechanism. CTAS is outside the native engine's supported grammar by
+    design; the production V4->V5 reconcile uses ALTER TABLE ADD COLUMN
+    (exercised driver-independently by test_boot_with_pending_row_no_crash_no_churn
+    and _reconcile_columns). This test therefore sets the legacy driver itself
+    before the store is created."""
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
 
     from iai_mcp.store import MemoryStore, flush_record_buffer
 

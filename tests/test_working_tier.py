@@ -159,6 +159,36 @@ def test_populate_from_sensory_observable(tmp_path, monkeypatch):
     assert "recall surfaced a similar flaky test from last week" in joined_after
 
 
+def test_raw_sensory_model_sidecar_is_render_only_and_bounded():
+    from iai_mcp import working_tier as wt
+
+    entry = wt.WorkingSetEntry(
+        goal="preserve literal sensory text",
+        raw_sensory=["legacy earliest", "legacy latest"],
+        raw_sensory_models=["legacy-model"],
+    )
+
+    wt._append_raw_sensory(entry, "attributed literal", "  model\x00[label]  ")
+    assert entry.raw_sensory == [
+        "legacy earliest",
+        "legacy latest",
+        "attributed literal",
+    ]
+    assert entry.raw_sensory_models == [None, "legacy-model", "modellabel"]
+    assert "[model:modellabel] attributed literal" in wt._render_snapshot(entry)
+    assert entry.raw_sensory[-1] == "attributed literal"
+
+    wt._append_raw_sensory(entry, "attributed literal", "replacement-model")
+    assert entry.raw_sensory_models[-1] == "modellabel"
+
+    for index in range(5):
+        wt._append_raw_sensory(entry, f"literal {index}", f"model-{index}")
+    assert len(entry.raw_sensory) == wt.WORKING_TIER_MAX_SLOTS
+    assert len(entry.raw_sensory_models) == wt.WORKING_TIER_MAX_SLOTS
+    assert entry.raw_sensory[0] == "literal 0"
+    assert entry.raw_sensory_models[0] == "model-0"
+
+
 def test_read_task_reflects_sensory_tail_without_promotion():
     """read_task() reflects raw sensory turns via the live sensory_pending()
     tail fold, WITHOUT any store.insert / promotion ever firing.
@@ -405,7 +435,7 @@ def test_idle_gap_closes_and_reopens_task(driver, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# CR-01 regression: a short durable result is stored verbatim, no label leak
+# Regression guard: a short durable result is stored verbatim, no label leak
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
@@ -433,7 +463,7 @@ def test_short_durable_result_stored_byte_identical(driver, tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# WR-01 regression: an out-of-order (older) record does not rewind the clock
+# Regression guard: an out-of-order (older) record does not rewind the clock
 # ---------------------------------------------------------------------------
 
 def test_out_of_order_record_does_not_rewind_idle_clock():
@@ -463,7 +493,7 @@ def test_out_of_order_record_does_not_rewind_idle_clock():
 
 
 # ---------------------------------------------------------------------------
-# WR-02 regression: a mid-loop store error surfaces undelivered results
+# Regression guard: a mid-loop store error surfaces undelivered results
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
@@ -507,7 +537,7 @@ def test_partial_consolidation_failure_is_observable(driver, tmp_path, monkeypat
 
 
 # ---------------------------------------------------------------------------
-# WR-03 regression: the first folded turn seeds a verbatim goal
+# Regression guard: the first folded turn seeds a verbatim goal
 # ---------------------------------------------------------------------------
 
 def test_first_turn_seeds_verbatim_goal():
@@ -529,6 +559,121 @@ def test_first_turn_seeds_verbatim_goal():
 # ---------------------------------------------------------------------------
 # An immediate-capture record surfaces the same turn it lands
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# next_action field + session-scoped fold-and-persist seam
+# ---------------------------------------------------------------------------
+
+class _FakeStoreRoot:
+    def __init__(self, root: Path):
+        self.root = root
+
+
+def test_next_action_field_round_trips_and_defaults_empty():
+    from iai_mcp.working_tier import WorkingSetEntry
+
+    entry = WorkingSetEntry(goal="g")
+    assert entry.next_action == ""
+
+    entry2 = WorkingSetEntry(goal="g", next_action="ship the gate")
+    assert entry2.next_action == "ship the gate"
+
+
+def test_update_task_folds_next_action_onto_global_focal():
+    from iai_mcp import working_tier as wt
+
+    assert wt.update_task(next_action="X") is None, (
+        "no focal task: update_task must return None (unchanged contract)"
+    )
+
+    wt.open_task("global focal goal")
+    entry = wt.update_task(next_action="fix the token overflow first")
+    assert entry is not None
+    assert entry.next_action == "fix the token overflow first"
+    read_back = wt.read_task()
+    assert read_back is not None
+    assert read_back.next_action == "fix the token overflow first"
+
+
+def test_update_task_session_scoped_fold_lands_only_on_own_entry():
+    from iai_mcp import working_tier as wt
+
+    wt.open_task("session A goal", session_id="sess-a")
+    wt.open_task("session B goal", session_id="sess-b")  # parks A, focal is B
+
+    folded = wt.update_task(next_action="finish the A-only step", session_id="sess-a")
+    assert folded is not None
+    assert folded.session_id == "sess-a"
+    assert folded.next_action == "finish the A-only step"
+
+    entry_a = wt.read_task(session_id="sess-a")
+    assert entry_a is not None
+    assert entry_a.next_action == "finish the A-only step"
+
+    entry_b = wt.read_task(session_id="sess-b")
+    assert entry_b is not None
+    assert entry_b.next_action == "", (
+        "session A's fold must never leak onto session B's entry"
+    )
+
+    focal = wt.read_task()
+    assert focal is not None
+    assert focal.session_id == "sess-b"
+    assert focal.next_action == ""
+
+
+def test_update_task_with_store_persists_next_action_to_default_session_file(tmp_path, monkeypatch):
+    from iai_mcp import working_tier as wt
+
+    monkeypatch.delenv(wt.WORKING_TIER_CACHE_ENV, raising=False)
+    wt.open_task("session A goal", session_id="sess-a")
+
+    store = _FakeStoreRoot(tmp_path)
+    entry = wt.update_task(
+        next_action="check the persisted snapshot", session_id="sess-a", store=store,
+    )
+    assert entry is not None
+
+    snapshot_path = tmp_path / ".working-tier.sess-a.cached.md"
+    assert snapshot_path.is_file(), (
+        "update_task(store=...) must persist the per-session snapshot in the same call"
+    )
+    text = snapshot_path.read_text(encoding="utf-8")
+    assert "next action: check the persisted snapshot" in text
+
+
+def test_update_task_bounds_next_action_and_focus_to_the_goal_char_cap():
+    from iai_mcp import working_tier as wt
+
+    wt.open_task("global focal goal")
+    oversized = "x" * (wt.WORKING_TIER_MAX_GOAL_CHARS + 200)
+
+    entry = wt.update_task(next_action=oversized, focus=oversized)
+
+    assert entry is not None
+    assert len(entry.next_action) == wt.WORKING_TIER_MAX_GOAL_CHARS
+    assert len(entry.focus) == wt.WORKING_TIER_MAX_GOAL_CHARS
+    assert entry.next_action == oversized[: wt.WORKING_TIER_MAX_GOAL_CHARS]
+    assert entry.focus == oversized[: wt.WORKING_TIER_MAX_GOAL_CHARS]
+
+
+def test_render_snapshot_always_emits_prefixed_next_action_line():
+    from iai_mcp.working_tier import WorkingSetEntry, _render_snapshot
+
+    empty_entry = WorkingSetEntry(goal="g")
+    rendered_empty = _render_snapshot(empty_entry)
+    assert "next action: (none)" in rendered_empty
+
+    filled_entry = WorkingSetEntry(goal="g", next_action="ship the gate")
+    rendered_filled = _render_snapshot(filled_entry)
+    assert "next action: ship the gate" in rendered_filled
+
+
+def test_cont_budget_tokens_shared_leaf_constant():
+    from iai_mcp.directive_budget import CONT_BUDGET_TOKENS
+
+    assert CONT_BUDGET_TOKENS == 500
+
 
 def test_immediate_prompt_record_surfaces_in_working_tier_same_turn():
     """The record the immediate stdin capture produces (recent created_at,

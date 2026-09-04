@@ -95,6 +95,23 @@ def test_close_task_removes_snapshot(tmp_path, monkeypatch):
     assert not cache.exists(), "a closed task must not stay readable as active"
 
 
+def test_close_task_with_no_store_never_touches_continuity_cache(monkeypatch):
+    """close_task(store=None) has no resolvable store root -- the continuity
+    refresh must stay filesystem-inert rather than falling back to the real
+    ~/.iai-mcp default path."""
+    from iai_mcp import session as session_mod
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        session_mod, "write_continuity_cache", lambda *a, **k: calls.append(a)
+    )
+
+    working_tier.open_task("no-store close probe", session_id="s1")
+    working_tier.close_task(store=None)
+
+    assert calls == [], "close_task(store=None) must never call write_continuity_cache"
+
+
 def _run_hook(cache_path: Path, extra_env: dict | None = None) -> str:
     env = dict(os.environ)
     env["IAI_MCP_WORKING_TIER_CACHE"] = str(cache_path)

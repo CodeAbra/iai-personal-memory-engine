@@ -128,12 +128,12 @@ def test_large_cyrillic_file_newest_returned(tmp_path, monkeypatch):
         "version": 1, "deferred_at": _ts(), "session_id": session, "cwd": "/tmp"
     })
 
-    long_unicode = "UTF-8 テキストの大きなキャプチャファイル用テストデータ。 " * 30
+    long_cyrillic = "Русский текст для теста UTF-8 в больших файлах захвата памяти. " * 30  # non-English fixture data: ru round-trip under test
 
     lines = [header]
     for i in range(400):
         ev = {
-            "text": "最新エントリ" if i == 399 else f"行-{i} {long_unicode}",
+            "text": "САМОЕ НОВОЕ" if i == 399 else f"строка-{i} {long_cyrillic}",  # non-English fixture data: ru round-trip under test
             "role": "user",
             "tier": "episodic",
             "ts": _ts(i),
@@ -147,7 +147,7 @@ def test_large_cyrillic_file_newest_returned(tmp_path, monkeypatch):
 
     events = read_pending_live_events()
     texts = [e["text"] for e in events]
-    assert "最新エントリ" in texts, (
+    assert "САМОЕ НОВОЕ" in texts, (  # non-English fixture data: ru round-trip under test
         f"newest Cyrillic turn not returned; got {len(events)} events"
     )
 

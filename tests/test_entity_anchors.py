@@ -19,7 +19,9 @@ def _passphrase(monkeypatch: pytest.MonkeyPatch):
 
 def test_extractor_catches_the_incident_shapes() -> None:
     text = (
+        # non-English fixture data: multilingual behavior under test — keep
         "Работаем над Zephyrbot: правим `parse_kit` в render_skill.py, "
+        # non-English fixture data: multilingual behavior under test — keep
         "деплой через @shipbot, дальше SkyPilot и text_rewriter."
     )
     got = extract_entities(text)
@@ -62,10 +64,14 @@ def test_extractor_survives_pathological_input() -> None:
 
 def test_extractor_skips_sentence_starts_and_furniture() -> None:
     got = extract_entities(
+        # non-English fixture data: multilingual behavior under test — keep
         "Это просто предложение. Когда мы начали, The plan was ready. "
+        # non-English fixture data: multilingual behavior under test — keep
         "Внутри упоминается Лилли и проект Hippo."
     )
+    # non-English fixture data: multilingual behavior under test — keep
     assert "лилли" in got and "hippo" in got
+    # non-English fixture data: multilingual behavior under test — keep
     for absent in ("это", "когда", "the"):
         assert absent not in got
 
@@ -148,11 +154,13 @@ def test_backfill_anchors_old_records(tmp_path):
 
 def test_extractor_denies_stopwords_and_machine_tokens() -> None:
     got = extract_entities(
+        # non-English fixture data: multilingual behavior under test — keep
         "Знаешь Что? Из-за Чего-то сломалось, Пока непонятно. "
         "Quoted <task-notification> and tool-use-id tokens, path "
         "/Users/alice/Desktop stuff, Request from Thanks."
     )
     for junk in (
+        # non-English fixture data: multilingual behavior under test — keep
         "что", "из-за", "чего-то", "чего", "пока", "task-notification",
         "tool-use-id", "users", "desktop", "request", "thanks",
     ):
@@ -183,6 +191,7 @@ def test_refresh_removes_junk_anchors(tmp_path):
         tier="episodic", session_id="s-junk", role="user", live_turn=True,
     )["record_id"])
     # Simulate anchors written by the older, junk-happy extractor.
+    # non-English fixture data: multilingual behavior under test — keep
     store.add_tags(rid, ["entity:что", "entity:users"])
 
     dry = backfill_entity_anchors(
@@ -195,9 +204,11 @@ def test_refresh_removes_junk_anchors(tmp_path):
     )
     assert applied["records_written"] >= 1
     refreshed = store.get(rid)
+    # non-English fixture data: multilingual behavior under test — keep
     assert "entity:что" not in refreshed.tags
     assert "entity:users" not in refreshed.tags
     assert "entity:zephyrbot" in refreshed.tags
+    # non-English fixture data: multilingual behavior under test — keep
     assert "что" not in refreshed.aaak_index
     assert "zephyrbot" in refreshed.aaak_index
 
@@ -313,7 +324,7 @@ def test_community_stamp_refreshes_stored_aaak_index(tmp_path):
         assert "zephyrbot" in refreshed.aaak_index
 
 
-def test_session_display_regenerates_stale_room_and_truncates(tmp_path):
+def test_session_display_regenerates_stale_room_and_truncates(tmp_path, monkeypatch):
     from uuid import UUID
 
     from iai_mcp.capture import capture_turn
@@ -337,11 +348,25 @@ def test_session_display_regenerates_stale_room_and_truncates(tmp_path):
     # Freeze a stale mint-time index: the display must ignore it and show
     # the live room.
     store.set_aaak_index(rids[0], "W:E/R:unknown/E:-/T:capture")
-
-    segment = _rich_club_segment(store, rids)
     room = str(min(rids))[:8]
-    assert f"/R:{room}/" in segment
-    assert "/R:unknown/" not in segment
-    for line in segment.splitlines():
+
+    # Legacy verbose label (kill-switch OFF): room hash is directly
+    # observable, so the live-vs-stale regeneration is checked verbatim.
+    monkeypatch.setenv("IAI_MCP_RICH_CLUB_COMPACT_LABEL", "0")
+    legacy_segment = _rich_club_segment(store, rids)
+    assert f"/R:{room}/" in legacy_segment
+    assert "/R:unknown/" not in legacy_segment
+    for line in legacy_segment.splitlines():
+        head = line.split(": ", 1)[0]
+        assert len(head.split(" (")[0]) <= 89, line
+
+    # Compact label (default ON): the room hash is dropped from the display
+    # entirely -- assert it never leaks, and the frozen stale index string
+    # is never echoed verbatim (generation still regenerates fresh).
+    monkeypatch.delenv("IAI_MCP_RICH_CLUB_COMPACT_LABEL", raising=False)
+    compact_segment = _rich_club_segment(store, rids)
+    assert "R:" not in compact_segment
+    assert "W:E/R:unknown/E:-/T:capture" not in compact_segment
+    for line in compact_segment.splitlines():
         head = line.split(": ", 1)[0]
         assert len(head.split(" (")[0]) <= 89, line

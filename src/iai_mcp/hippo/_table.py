@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import time
+import types
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from typing import Any
@@ -151,7 +153,10 @@ CREATE TABLE IF NOT EXISTS records (
     structure_hv_payload BLOB NOT NULL DEFAULT x'',
     embedding_pending    INTEGER NOT NULL DEFAULT 0,
     role                 TEXT,
-    live                 INTEGER
+    epistemic_status     TEXT NOT NULL DEFAULT 'unknown',
+    salience_level       TEXT NOT NULL DEFAULT 'unflagged',
+    live                 INTEGER,
+    directive            INTEGER
 )"""
 
 _DDL_RECORDS_INDEXES = [
@@ -161,6 +166,7 @@ _DDL_RECORDS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_records_tomb      ON records(tombstoned_at) WHERE tombstoned_at IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_records_pending   ON records(embedding_pending) WHERE embedding_pending=1",
     "CREATE INDEX IF NOT EXISTS idx_records_live      ON records(live)",
+    "CREATE INDEX IF NOT EXISTS idx_records_directive ON records(directive)",
     "CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_records_role      ON records(role)",
     "CREATE INDEX IF NOT EXISTS idx_records_vec_label ON records(vec_label)",
@@ -243,6 +249,24 @@ _DDL_RECORD_TAGS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_record_tags_tag ON record_tags(tag)",
 ]
 
+_DDL_PROC_TRANSITIONS = """\
+CREATE TABLE IF NOT EXISTS proc_transitions (
+    src           TEXT NOT NULL,
+    dst           TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    count         INTEGER NOT NULL DEFAULT 0,
+    session_count INTEGER NOT NULL DEFAULT 0,
+    first_ts      TEXT,
+    last_ts       TEXT,
+    chunk_id      TEXT,
+    updated_at    TEXT,
+    PRIMARY KEY (src, dst, source)
+)"""
+
+_DDL_PROC_TRANSITIONS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_proc_transitions_chunk ON proc_transitions(chunk_id)",
+]
+
 
 _TABLE_SQL: dict[str, dict[str, str]] = {
     "records": {
@@ -307,6 +331,15 @@ _TABLE_SQL: dict[str, dict[str, str]] = {
         "update_prefix":  "UPDATE record_tags SET ",
         "insert_prefix":  "INSERT INTO record_tags ",
         "alter_prefix":   "ALTER TABLE record_tags ADD COLUMN ",
+    },
+    "proc_transitions": {
+        "count":          "SELECT COUNT(*) FROM proc_transitions",
+        "select_all":     "SELECT * FROM proc_transitions",
+        "delete_prefix":  "DELETE FROM proc_transitions WHERE ",
+        "pragma":         "PRAGMA table_info(proc_transitions)",
+        "update_prefix":  "UPDATE proc_transitions SET ",
+        "insert_prefix":  "INSERT INTO proc_transitions ",
+        "alter_prefix":   "ALTER TABLE proc_transitions ADD COLUMN ",
     },
 }
 
@@ -943,6 +976,45 @@ class HippoTable:
             existing.discard(col)
 
 
+#: Per-statement id ceiling for the chunked vec_label resolution below:
+#: bounds each IN (...) list under the lilli engine's MAX_IN_LIST_SIZE=1000
+#: parser cap. Defined locally — hippo is the lower layer, so this does not
+#: import store/_store.py's _GET_BATCH_CHUNK.
+_IN_LIST_CHUNK = 400
+
+#: Columns the rank-tier decode (_from_row_rank_view in store/_store.py)
+#: never reads. Dropping them from the rank-tier vec_label IN(...) fetch is a
+#: no-op on the decoded output; full-decode callers keep every column.
+_ANN_RANK_VIEW_EXCLUDED_COLUMNS = frozenset(
+    {"profile_modulation_gain_json", "provenance_json"}
+)
+
+
+def _resolve_rank_view_projection_sql(db: Any, conn: Any, table_name: str) -> str:
+    """Column list for the rank-tier vec_label IN(...) fetch.
+
+    Resolved from the live schema (PRAGMA table_info), never a hardcoded
+    column literal — a store that has not migrated onto a newer column is
+    never asked to SELECT one it does not have. Cached on *db* per table
+    name: one PRAGMA per HippoDB instance lifetime, not per fetch.
+    """
+    cache = getattr(db, "_ann_rank_view_projection_cache", None)
+    if cache is None:
+        cache = {}
+        db._ann_rank_view_projection_cache = cache
+    cached = cache.get(table_name)
+    if cached is not None:
+        return cached
+    pragma_rows = conn.execute("PRAGMA table_info(" + table_name + ")").fetchall()
+    live_columns = [row["name"] for row in pragma_rows]
+    projected = [
+        c for c in live_columns if c not in _ANN_RANK_VIEW_EXCLUDED_COLUMNS
+    ]
+    sql = ", ".join(projected)
+    cache[table_name] = sql
+    return sql
+
+
 class HippoQuery:
 
     def __init__(
@@ -965,9 +1037,17 @@ class HippoQuery:
         self._ann_vector: "np.ndarray | None" = ann_vector
         self._ann_db: "Any | None" = ann_db
         self._db: "Any | None" = db if db is not None else ann_db
+        self._rank_view_projection: bool = False
 
     def where(self, predicate: str) -> "HippoQuery":
         self._where_clauses.append(predicate)
+        return self
+
+    def select_rank_view(self) -> "HippoQuery":
+        """Narrow the ANN vec_label IN(...) fetch to the rank-tier column
+        set (see _ANN_RANK_VIEW_EXCLUDED_COLUMNS). Only _ann_knn_fetch_core
+        reads this flag; a no-op on any non-ANN query."""
+        self._rank_view_projection = True
         return self
 
     def select(self, columns: list[str]) -> "HippoQuery":
@@ -1010,12 +1090,20 @@ class HippoQuery:
 
     def _ann_knn_fetch_core(
         self,
+        substage_timings: "dict | None" = None,
     ) -> "tuple[Any, list, dict[int, float]] | None":
         """Run the knn_query + vec_label row fetch shared by every ANN output
         shape (DataFrame or row-dict). Returns ``None`` on every "no
         neighbours" outcome (empty index, RuntimeError, empty label result),
         matching ``_ann_to_pandas``'s empty-DataFrame returns exactly so both
         output shapes degrade identically.
+
+        *substage_timings*, when given, accumulates
+        ``escalation_knn_query_ms`` (the native vector-index scan) and
+        ``escalation_inlist_fetch_ms`` (the chunked SQL vec_label
+        resolution) as additive milliseconds. Opt-in caller-owned dict
+        (currently only the confidence-escalation widen supplies one);
+        zero overhead when None.
         """
         db = self._ann_db
         k = self._limit_val if self._limit_val is not None else 10
@@ -1059,6 +1147,7 @@ class HippoQuery:
                 # an empty return silently drops ANN from recall (both the
                 # ranking quality and the escalation paths) until the next
                 # full rebuild.
+                _knn_t0 = time.perf_counter() if substage_timings is not None else 0.0
                 while _k_try >= 1:
                     try:
                         labels, distances = db._hnsw.knn_query(
@@ -1068,6 +1157,11 @@ class HippoQuery:
                     except RuntimeError as exc:
                         _last_exc = exc
                         _k_try //= 2
+                if substage_timings is not None:
+                    substage_timings["escalation_knn_query_ms"] = (
+                        substage_timings.get("escalation_knn_query_ms", 0.0)
+                        + (time.perf_counter() - _knn_t0) * 1000.0
+                    )
                 if labels is None:
                     # Defensive: treat a query raise as "no neighbors found"
                     # so the insert path's pattern-separation gate can
@@ -1106,12 +1200,9 @@ class HippoQuery:
         if not flat_labels:
             return None
 
-        placeholders = ", ".join("?" for _ in flat_labels)
-        sql = (  # nosemgrep: sql-injection
-            f"SELECT * FROM {self._table_name} WHERE vec_label IN ({placeholders})"
-        )
+        where_suffix = ""
         if self._where_clauses:
-            sql += " AND " + " AND ".join(f"({c})" for c in self._where_clauses)
+            where_suffix = " AND " + " AND ".join(f"({c})" for c in self._where_clauses)
 
         # This vec_label IN lookup runs through db.ro_conn() — a pooled
         # lock-free reader on the lilli driver (never touches _conn_lock), or
@@ -1122,13 +1213,53 @@ class HippoQuery:
         # _ensure_tables (index present); when the store is opened read-only
         # (daemon down / reader process) self._conn is the read-only engine
         # connection that gets the index via meta.replay.
-        if db is not None:
-            with db.ro_conn() as conn:
-                cur = conn.execute(sql, flat_labels)
-                fetched = cur.fetchall()
-        else:
-            cur = self._conn.execute(sql, flat_labels)
-            fetched = cur.fetchall()
+        #
+        # Chunked at _IN_LIST_CHUNK, all chunks on ONE borrowed connection
+        # (mirrors get_batch's single-borrow / several-statements shape).
+        # Description is captured as VALUES via SimpleNamespace below, never
+        # a live chunked cursor — chunk cursors are not stable once a later
+        # statement executes on a shared lilli connection.
+        #
+        # Deduplicated before chunking: the pre-chunking single `IN (...)`
+        # query matched per-row, so a repeated label resolved once even if
+        # duplicated in the list. Independent per-chunk queries lose that —
+        # dedup restores it (mirrors get_batch's seen_ids/uniq pattern).
+        #
+        # `db` is guaranteed non-None here: this function already
+        # dereferences `db._hnsw_lock` unconditionally above, and `db` is
+        # only ever populated from a `self._db is not None` check in
+        # `search()` — so a single `db.ro_conn()` borrow is the only
+        # reachable path.
+        _seen_labels: set[int] = set()
+        dedup_labels = [
+            lbl for lbl in flat_labels if not (lbl in _seen_labels or _seen_labels.add(lbl))
+        ]
+        fetched: list = []
+        _first_description = None
+        _inlist_t0 = time.perf_counter() if substage_timings is not None else 0.0
+        with db.ro_conn() as conn:
+            _col_clause = (
+                _resolve_rank_view_projection_sql(db, conn, self._table_name)
+                if self._rank_view_projection
+                else "*"
+            )
+            for _start in range(0, len(dedup_labels), _IN_LIST_CHUNK):
+                _chunk = dedup_labels[_start : _start + _IN_LIST_CHUNK]
+                _placeholders = ", ".join("?" for _ in _chunk)
+                _sql = (  # nosemgrep: sql-injection
+                    f"SELECT {_col_clause} FROM {self._table_name} WHERE vec_label IN ({_placeholders})"
+                ) + where_suffix
+                _chunk_cur = conn.execute(_sql, _chunk)
+                _chunk_rows = _chunk_cur.fetchall()
+                if _first_description is None and _chunk_cur.description is not None:
+                    _first_description = _chunk_cur.description
+                fetched.extend(_chunk_rows)
+        if substage_timings is not None:
+            substage_timings["escalation_inlist_fetch_ms"] = (
+                substage_timings.get("escalation_inlist_fetch_ms", 0.0)
+                + (time.perf_counter() - _inlist_t0) * 1000.0
+            )
+        cur = types.SimpleNamespace(description=_first_description)
         # Best-effort operator signal: on a read-only open whose engine meta
         # lacks the vec_label index (un-upgraded store, no read-write boot yet),
         # this lookup full-scans — correct but slow. Log once, never disrupt.
@@ -1165,7 +1296,7 @@ class HippoQuery:
         df = df.sort_values("_distance", kind="stable").reset_index(drop=True)
         return df
 
-    def to_row_dicts(self) -> "list[dict]":
+    def to_row_dicts(self, substage_timings: "dict | None" = None) -> "list[dict]":
         """Row-dict twin of ``_ann_to_pandas`` — same knn_query + vec_label
         fetch + distance mapping + ascending-distance sort, without building a
         pandas DataFrame. Each dict carries the embedding BLOB already decoded
@@ -1175,19 +1306,28 @@ class HippoQuery:
 
         Only defined for the ANN branch (``self._ann_vector`` set) — the
         query_similar fast-decode caller is the sole consumer.
+
+        *substage_timings*, forwarded to ``_ann_knn_fetch_core`` and also
+        accumulating ``escalation_decode_ms`` (the row-dict build + sort
+        below) — see that method's docstring. Zero overhead when None.
         """
         if self._ann_vector is None or self._ann_db is None:
             # Mirrors ``to_pandas``'s ANN-branch guard: a non-ANN query has no
             # hnsw index to knn_query against. Degrade to an empty result
             # instead of an AttributeError on ``None._hnsw_lock``.
             return []
-        core = self._ann_knn_fetch_core()
+        core = (
+            self._ann_knn_fetch_core(substage_timings=substage_timings)
+            if substage_timings is not None
+            else self._ann_knn_fetch_core()
+        )
         if core is None:
             return []
         cur, fetched, dist_map = core
 
         if cur.description is None or not fetched:
             return []
+        _decode_t0 = time.perf_counter() if substage_timings is not None else 0.0
         columns = [d[0] for d in cur.description]
         rows: list[dict] = []
         for raw_row in fetched:
@@ -1207,6 +1347,11 @@ class HippoQuery:
         # row sorts by its true distance first, and all NaN rows land after
         # them, in their original relative (stable) order.
         rows.sort(key=lambda r: (r["_distance"] != r["_distance"], r["_distance"]))
+        if substage_timings is not None:
+            substage_timings["escalation_decode_ms"] = (
+                substage_timings.get("escalation_decode_ms", 0.0)
+                + (time.perf_counter() - _decode_t0) * 1000.0
+            )
         return rows
 
     def _decrypt_query_df(self, df: pd.DataFrame) -> pd.DataFrame:

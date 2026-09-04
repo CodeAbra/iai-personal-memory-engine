@@ -464,6 +464,7 @@ def cmd_lifecycle_status(args: argparse.Namespace) -> int:
 def cmd_maintenance_sleep_cycle(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
 
+    from iai_mcp.hippo import HippoLockHeldError
     from iai_mcp.lifecycle_event_log import LifecycleEventLog
     from iai_mcp.lifecycle_state import LIFECYCLE_STATE_PATH
     from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
@@ -476,6 +477,14 @@ def cmd_maintenance_sleep_cycle(args: argparse.Namespace) -> int:
 
     try:
         store = MemoryStore(path=store_path)
+    except HippoLockHeldError:
+        print(
+            "Daemon holds the store lock — is it running? Check "
+            "`iai-mcp daemon status`; stop the daemon or wait for its current "
+            "cycle to finish before running this command directly.",
+            file=_cli.sys.stderr,
+        )
+        return 1
     except Exception as exc:  # noqa: BLE001
         logger.error("sleep-cycle MemoryStore open failed: %s", exc)
         print(
@@ -762,6 +771,47 @@ def cmd_blob_quarantine(args: argparse.Namespace) -> int:
     if summary.get("journal"):
         print(f"  journal:              {summary['journal']}")
     if mode_str == "dry-run" and summary.get("blobs_found", 0) > 0:
+        print()
+        print("  Run with --apply to execute.")
+    errors = summary.get("errors") or []
+    if errors:
+        print(f"error: {len(errors)} record(s) failed:", file=_cli.sys.stderr)
+        for line in errors[:10]:
+            print(f"  {line}", file=_cli.sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_directive_sweep(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate import sweep_phantom_directives
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    store = MemoryStore(path=store_path)
+    summary = sweep_phantom_directives(store, apply=apply, store_path=store_path)
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp directive-sweep [{mode_str}]")
+    print(f"  live directives found:  {summary.get('directives_found', 0)}")
+    print(f"  unstamped (phantom):    {summary.get('unstamped', 0)}")
+    print(f"  retired:                {summary.get('retired', 0)}")
+    print(f"  failed (skipped):       {summary.get('failed', 0)}")
+    if summary.get("snapshot_dir"):
+        print(f"  snapshot directory:     {summary['snapshot_dir']}")
+    if mode_str == "dry-run" and summary.get("unstamped", 0) > 0:
         print()
         print("  Run with --apply to execute.")
     errors = summary.get("errors") or []

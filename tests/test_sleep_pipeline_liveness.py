@@ -143,6 +143,9 @@ _STEP_SOURCE_FILE: dict[SleepStep, str] = {
     SleepStep.CRISIS_RECLUSTER: "_crisis.py",
     SleepStep.RECONSOLIDATION: "_reconsolidation.py",
     SleepStep.COMMUNITY_NAMING: "_topic_naming.py",
+    SleepStep.RECONSOLIDATION_VALENCE: "_reconsolidation_valence.py",
+    SleepStep.PROC_MINE: "_proc_mine.py",
+    SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: "_transcript_sweep_backstop.py",
 }
 
 

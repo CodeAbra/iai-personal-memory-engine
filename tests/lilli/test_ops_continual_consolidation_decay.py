@@ -4,9 +4,7 @@ import pytest
 
 from iai_mcp.lilli.ops.continual import add_pair, empty_hv, update_role
 from iai_mcp.lilli.ops.consolidation import consolidate
-from iai_mcp.lilli.ops.decay import DECAY_GRACE_DAYS, decay_structure_edge, temporal_decay
 from iai_mcp.lilli.tiers import bsc, sparse_vsa
-from iai_mcp.lilli.core.similarity import hamming
 
 def test_continual_empty_hv_default_D():
     hv = empty_hv()
@@ -88,40 +86,3 @@ def test_consolidate_sparse_vsa_returns_list():
 def test_consolidate_unknown_tier_raises():
     with pytest.raises(ValueError, match="unknown tier"):
         consolidate([bytes(512)], "garbage")
-
-def test_decay_structure_edge_no_decay_in_grace():
-    assert decay_structure_edge(0, 0, 0) == 1.0
-    assert decay_structure_edge(0, 0, 50) == 1.0
-    assert decay_structure_edge(0, 0, 89) == 1.0
-    assert decay_structure_edge(0, 0, DECAY_GRACE_DAYS) == 1.0
-
-def test_decay_structure_edge_91_days():
-    result = decay_structure_edge(0, 0, 91)
-    assert result == pytest.approx(0.9)
-
-def test_temporal_decay_no_decay_in_grace_window():
-    hv = bsc.filler_hv("test-vector")
-    assert temporal_decay(hv, 0) == hv
-    assert temporal_decay(hv, 30) == hv
-    assert temporal_decay(hv, DECAY_GRACE_DAYS) == hv
-
-def test_temporal_decay_with_seed_deterministic():
-    hv = bytes([0xFF] * 512)
-    a = temporal_decay(hv, 365, seed=42)
-    b = temporal_decay(hv, 365, seed=42)
-    assert a == b
-    assert a != hv
-
-def test_temporal_decay_flips_more_at_higher_age():
-    hv = bytes([0xFF] * 512)
-    out_low = temporal_decay(hv, 91, seed=42)
-    out_high = temporal_decay(hv, 100, seed=42)
-
-    assert out_low != hv
-    assert out_high != hv
-
-    d_low = hamming(hv, out_low)
-    d_high = hamming(hv, out_high)
-    assert d_high > d_low, (
-        f"Expected more flips at dt=100 ({d_high:.4f}) than dt=91 ({d_low:.4f})"
-    )

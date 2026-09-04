@@ -1,7 +1,9 @@
 """Lilli/HD -- memory-architecture HDC library.
 
-Multi-tier (BSC episodic D=4096, FHRR semantic D=10000 uint8, Sparse VSA procedural D=2048).
-Pure numpy.
+Multi-tier (BSC episodic D=4096, FHRR semantic D=10000 uint8, Sparse VSA D=2048 --
+hypervector substrate dormant-by-design, no record assigned a sparse-VSA HV).
+Procedural tier has a sleep-time producer feeding the transition/chunk structure,
+not the sparse-VSA hypervector. Pure numpy.
 
 Public API:
     from iai_mcp.lilli import Brain, tier_info, from_embedding, to_embedding_neighbors

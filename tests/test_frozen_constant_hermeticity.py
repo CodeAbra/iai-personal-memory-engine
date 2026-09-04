@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import iai_mcp.concurrency
 import iai_mcp.crypto
 import iai_mcp.daemon
 import iai_mcp.daemon_state
+import iai_mcp.directive_cache
 import iai_mcp.hippo
 import iai_mcp.lifecycle
 import iai_mcp.lifecycle_event_log
@@ -58,7 +60,57 @@ def _redirected_constants() -> dict[str, object]:
         "daemon.SESSION_START_CACHE_PATH": iai_mcp.daemon.SESSION_START_CACHE_PATH,
         "crypto._DEFAULT_STORE_ROOT": iai_mcp.crypto._DEFAULT_STORE_ROOT,
         "backup.DEFAULT_STORE_PATH": iai_mcp.backup.DEFAULT_STORE_PATH,
+        "directive_cache.DIRECTIVES_CACHE_PATH": iai_mcp.directive_cache.DIRECTIVES_CACHE_PATH,
     }
+
+
+def _home_derived_defaults() -> list[tuple[str, object]]:
+    """Function default-argument VALUES, not module constants.
+
+    A default like ``def f(path: Path = SOME_HOME_CONSTANT)`` is bound once,
+    at function-definition time (import time) -- before any fixture runs.
+    ``monkeypatch.setattr(module, "SOME_HOME_CONSTANT", tmp)`` rebinds the
+    module global but never touches the already-captured default, so a call
+    site that omits the argument silently keeps writing to the operator's
+    real home. ``_redirected_constants`` above is structurally blind to this:
+    it only ever reads the module attribute, which the fixture patches
+    successfully -- the leak is in the function's ``__defaults__``.
+    """
+    modules = (
+        iai_mcp.backup, iai_mcp.capture_queue, iai_mcp.cli, iai_mcp.concurrency,
+        iai_mcp.crypto, iai_mcp.daemon, iai_mcp.daemon_state, iai_mcp.directive_cache,
+        iai_mcp.hippo, iai_mcp.lifecycle, iai_mcp.lifecycle_event_log,
+        iai_mcp.lifecycle_state, iai_mcp.store,
+    )
+    out: list[tuple[str, object]] = []
+    for mod in modules:
+        for fname, fn in vars(mod).items():
+            if not inspect.isroutine(fn):
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (ValueError, TypeError):
+                continue
+            for pname, p in params.items():
+                if p.default is inspect.Parameter.empty:
+                    continue
+                if isinstance(p.default, (str, Path)):
+                    out.append((f"{mod.__name__}.{fname}({pname}=)", p.default))
+    return out
+
+
+def test_no_function_default_argument_freezes_a_real_home_path() -> None:
+    real = _real_root()
+    offenders = [
+        f"{name}={value!r}"
+        for name, value in _home_derived_defaults()
+        if _resolves_under_real(value)
+    ]
+    assert not offenders, (
+        "function default argument(s) bound at import time to the operator's "
+        f"real store {real} -- a caller that omits the argument writes there "
+        f"even though the module-level constant is patched: {offenders}"
+    )
 
 
 def test_redirected_constants_resolve_under_tmp_not_real() -> None:

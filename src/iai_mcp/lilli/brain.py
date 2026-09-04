@@ -9,7 +9,6 @@ from iai_mcp.lilli.ops import (
     cleanup,
     consolidation,
     continual,
-    decay,
     delta,
     orthogonalize,
     replay,
@@ -32,7 +31,6 @@ class Brain:
         self.ops = SimpleNamespace(
             continual=continual,
             consolidation=consolidation,
-            decay=decay,
             replay=replay,
             orthogonalize=orthogonalize,
             cleanup=cleanup,

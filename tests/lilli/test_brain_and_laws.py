@@ -27,13 +27,12 @@ def test_brain_has_three_tier_backends():
     assert b.fhrr is fhrr
     assert b.sparse_vsa is sparse_vsa
 
-def test_brain_ops_bundle_has_eight_modules():
+def test_brain_ops_bundle_has_seven_modules():
     from iai_mcp.lilli.brain import Brain
     from iai_mcp.lilli.ops import (
         cleanup,
         consolidation,
         continual,
-        decay,
         delta,
         orthogonalize,
         replay,
@@ -43,7 +42,6 @@ def test_brain_ops_bundle_has_eight_modules():
     b = Brain()
     assert b.ops.continual is continual
     assert b.ops.consolidation is consolidation
-    assert b.ops.decay is decay
     assert b.ops.replay is replay
     assert b.ops.orthogonalize is orthogonalize
     assert b.ops.cleanup is cleanup

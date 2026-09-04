@@ -421,7 +421,7 @@ def test_fresh_migrate_lands_live_column_populated_before_first_recall(
     dst_root = tmp_path / "dst"
     src_root.mkdir()
 
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
     from iai_mcp.store import MemoryStore, flush_record_buffer
     from iai_mcp.types import MemoryRecord

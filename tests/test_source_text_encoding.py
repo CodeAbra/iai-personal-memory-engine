@@ -16,6 +16,7 @@ TEXT_SUFFIXES = {".py", ".md", ".toml", ".json", ".sh", ".ts", ".yml", ".yaml", 
 
 # A UTF-8 file decoded as cp1251 and re-encoded turns every dash and curly
 # quote into one of these. They are never legitimate in our sources.
+# non-English fixture data: multilingual behavior under test — keep
 MOJIBAKE = ("вЂ", "Ð²Ð", "â€", "Ã¢â‚¬")
 
 # PowerShell 5.1 needs the marker to read a script as UTF-8; nothing else does.

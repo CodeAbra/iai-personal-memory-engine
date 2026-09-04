@@ -220,7 +220,7 @@ def test_overflow_prune_oldest(tmp_path):
 
 def test_verbatim_round_trip_unicode(tmp_path):
     q = CaptureQueue(queue_dir=tmp_path)
-    payload = "こんにちは, world! 🧠 Δ ∑ — combining é vs é"
+    payload = "Привет, world! 🧠 Δ ∑ — combining é vs é"  # non-English fixture data: ru round-trip under test
 
     q.append(_sample_record(0, surface=payload))
     seen: list[str] = []

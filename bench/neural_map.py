@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import tempfile
@@ -17,6 +18,7 @@ if _SRC_PATH not in sys.path:
 if _ROOT_PATH not in sys.path:
     sys.path.insert(0, _ROOT_PATH)
 
+import iai_mcp.pipeline as _pipeline_mod
 from iai_mcp.pipeline import recall_for_response
 from iai_mcp.retrieve import build_runtime_graph
 from iai_mcp.store import MemoryStore, flush_edge_buffer, flush_record_buffer
@@ -97,21 +99,26 @@ def run_neural_map_bench(
         store = MemoryStore(path=path)
         embedder = _BenchEmbedder(base_seed=seed, dim=store.embed_dim)
 
-        tag_pool = [
-            ["topic:auth"], ["topic:db"], ["topic:web"],
-            ["topic:net"], ["topic:cli"],
-        ]
-        for i in range(n):
-            vec = embedder.embed(f"seed-{i}")
-            tags = list(tag_pool[i % len(tag_pool)])
-            rec = _make_record(vec, text=f"synthetic fact {i}", tags=tags)
-            store.insert(rec)
+        # A store already holding >= n live records was built by a prior run
+        # at this --store-path (same seed): reuse it instead of re-paying the
+        # per-record insert cost, so N=50k/100k stores build once and every
+        # later bench run against the same path measures recall only.
+        if store.active_records_count() < n:
+            tag_pool = [
+                ["topic:auth"], ["topic:db"], ["topic:web"],
+                ["topic:net"], ["topic:cli"],
+            ]
+            for i in range(n):
+                vec = embedder.embed(f"seed-{i}")
+                tags = list(tag_pool[i % len(tag_pool)])
+                rec = _make_record(vec, text=f"synthetic fact {i}", tags=tags)
+                store.insert(rec)
 
-        try:
-            flush_record_buffer(store)
-            flush_edge_buffer(store)
-        except Exception:
-            pass
+            try:
+                flush_record_buffer(store)
+                flush_edge_buffer(store)
+            except Exception:
+                pass
 
         t_build = time.perf_counter()
         graph, assignment, rich_club = build_runtime_graph(store)
@@ -146,19 +153,12 @@ def run_neural_map_bench(
 
         latencies: list[float] = []
         stage_totals: dict[str, list[float]] = {
-            "embed": [], "gate": [], "seeds": [], "spread": [], "rank": [],
+            "embed": [], "pool": [], "pool_collection": [], "degree": [], "gate": [],
+            "seeds": [], "spread": [], "rank": [],
         }
+        os.environ["IAI_MCP_STAGE_PROFILE"] = "1"
         for i in range(iterations):
             cue = cues[rng.randrange(len(cues))]
-            t_stage = time.perf_counter()
-            cue_emb = embedder.embed(cue)
-            stage_totals["embed"].append(
-                (time.perf_counter() - t_stage) * 1000.0
-            )
-            t_stage = time.perf_counter()
-            stage_totals["gate"].append(
-                (time.perf_counter() - t_stage) * 1000.0
-            )
 
             t0 = time.perf_counter()
             recall_for_response(
@@ -174,12 +174,10 @@ def run_neural_map_bench(
             call_ms = (time.perf_counter() - t0) * 1000.0
             latencies.append(call_ms)
 
-            remaining = max(0.0, call_ms - sum(
-                stage_totals[k][-1] for k in ("embed", "gate")
-            ))
-            stage_totals["seeds"].append(remaining * 0.2)
-            stage_totals["spread"].append(remaining * 0.3)
-            stage_totals["rank"].append(remaining * 0.5)
+            for stage_name in stage_totals:
+                stage_totals[stage_name].append(
+                    _pipeline_mod._last_stage_timings_ms.get(stage_name, 0.0)
+                )
 
         p50 = _percentile(latencies, 0.50)
         p95 = _percentile(latencies, 0.95)
@@ -212,6 +210,7 @@ def main(
     ns: list[int] | None = None,
     iterations: int = 10,
     store_path: Path | str | None = None,
+    seed: int = 0,
     *,
     refs_p95_ms: "dict[str, float] | None" = None,
     with_cascade: bool = False,
@@ -224,6 +223,7 @@ def main(
             n=n,
             iterations=iterations,
             store_path=store_path,
+            seed=seed,
             warm_cascade=with_cascade,
         )
 
@@ -282,6 +282,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="store sizes to bench; repeat for multiple N",
     )
     parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument(
+        "--store-path",
+        dest="store_path",
+        type=str,
+        default=None,
+        help=(
+            "reuse a store at this path across runs (skips the insert loop "
+            "when it already holds >= --n live records) instead of a fresh "
+            "temp store per invocation"
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="RNG seed for the synthetic corpus and cue selection",
+    )
     parser.add_argument(
         "--ref-p95-ms",
         dest="refs_p95_ms",
@@ -348,6 +365,8 @@ if __name__ == "__main__":
     sys.exit(main(
         ns=args.n,
         iterations=args.iterations,
+        store_path=args.store_path,
+        seed=args.seed,
         refs_p95_ms=_parsed_refs,
         with_cascade=args.with_cascade,
     ))

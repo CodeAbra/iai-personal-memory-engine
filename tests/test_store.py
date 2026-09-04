@@ -41,7 +41,7 @@ def _make(
 
 def test_insert_and_get_preserves_verbatim(tmp_path):
     store = MemoryStore(path=tmp_path)
-    verbatim = "Alice said: пусть каждое слово сохранится точно"
+    verbatim = "alice said: let every word be preserved exactly"
     r = _make(text=verbatim)
     store.insert(r)
     got = store.get(r.id)

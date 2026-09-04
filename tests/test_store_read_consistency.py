@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-_skip_on_lilli = pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-    reason=(
-        "Asserts SQLite WAL cross-visibility between two concurrently-open "
-        "connections; lilli uses independent pagers per open store and has no "
-        "multi-connection snapshot analog (and read_consistency_interval has no "
-        "production consumer). Lilli's durable at-rest persistence across reopen is "
-        "proven by test_store_raw.py::test_open_store_raw_lilli_returns_engine_conn."
-    ),
-)
+# The two WAL-cross-visibility tests below assert SQLite WAL cross-visibility
+# between two concurrently-open connections; the native engine uses
+# independent pagers per open store and has no multi-connection snapshot
+# analog (and read_consistency_interval has no production consumer there).
+# The native engine's durable at-rest persistence across reopen is proven by
+# test_store_raw.py::test_open_store_raw_lilli_returns_engine_conn. Each such
+# test therefore sets the legacy driver itself before opening any store.
 
 def _make_record(store):
     from iai_mcp.types import MemoryRecord
@@ -48,8 +44,8 @@ def tmp_store_env(tmp_path, monkeypatch):
     monkeypatch.setenv("IAI_MCP_EMBED_DIM", "384")
     return tmp_path
 
-@_skip_on_lilli
-def test_reader_with_strong_consistency_sees_writer_insert(tmp_store_env):
+def test_reader_with_strong_consistency_sees_writer_insert(tmp_store_env, monkeypatch):
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     from iai_mcp.daemon import _store_is_empty
     from iai_mcp.store import MemoryStore
 
@@ -61,8 +57,8 @@ def test_reader_with_strong_consistency_sees_writer_insert(tmp_store_env):
 
     assert _store_is_empty(reader) is False
 
-@_skip_on_lilli
-def test_default_connection_is_snapshot_pinned(tmp_store_env):
+def test_default_connection_is_snapshot_pinned(tmp_store_env, monkeypatch):
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     from iai_mcp.store import MemoryStore
 
     reader = MemoryStore()

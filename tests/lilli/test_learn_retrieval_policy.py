@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from uuid import uuid4
 
 
@@ -75,45 +74,6 @@ def test_retrieval_weights_bounded():
         weights = update_retrieval_weights(fb, weights)
     assert weights["W_COSINE"] <= MAX_WEIGHT
     assert weights["W_COSINE"] >= MIN_WEIGHT
-
-def test_pick_retrieval_strategy_returns_string():
-    from iai_mcp.learn import pick_retrieval_strategy
-
-    random.seed(42)
-    s = pick_retrieval_strategy("fact_lookup", history={})
-    assert isinstance(s, str)
-
-def test_pick_retrieval_strategy_epsilon_greedy():
-    from iai_mcp.learn import pick_retrieval_strategy
-
-    random.seed(7)
-    history = {
-        "fact_lookup": {
-            "pipeline_default": {"mean": 0.9, "n": 10},
-            "greedy_2hop": {"mean": 0.1, "n": 10},
-            "rich_club_first": {"mean": 0.2, "n": 10},
-        }
-    }
-    picks = {"pipeline_default": 0, "greedy_2hop": 0, "rich_club_first": 0}
-    for _ in range(200):
-        s = pick_retrieval_strategy("fact_lookup", history)
-        picks[s] = picks.get(s, 0) + 1
-    assert picks["pipeline_default"] > 120
-
-def test_pick_retrieval_strategy_no_history():
-    from iai_mcp.learn import pick_retrieval_strategy
-
-    random.seed(42)
-    s = pick_retrieval_strategy("unseen", history={})
-    assert isinstance(s, str)
-    assert s in ("pipeline_default", "greedy_2hop", "rich_club_first")
-
-def test_pick_retrieval_strategy_custom_strategies():
-    from iai_mcp.learn import pick_retrieval_strategy
-
-    random.seed(1)
-    s = pick_retrieval_strategy("x", history={}, strategies=["a", "b", "c"])
-    assert s in ("a", "b", "c")
 
 def test_retrieval_policy_per_query_type():
     from iai_mcp.learn import RetrievalFeedback, update_retrieval_weights

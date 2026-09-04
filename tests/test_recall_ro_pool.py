@@ -26,10 +26,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.lilli.cycle.sleep_pipeline import SleepPipeline
 from iai_mcp.store import MemoryStore
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _EMBED_DIM = 384
 
@@ -104,7 +105,7 @@ def test_pool_construction_is_lazy_no_engine_open_at_init(tmp_path: Path) -> Non
 
 
 def test_stdlib_driver_ro_conn_is_shared_conn_under_lock(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     store = _make_store(tmp_path)
     assert store.db._storage_driver == "stdlib"
     assert store.db._ro_pool is None, "pool must never be constructed on the stdlib driver"
@@ -591,7 +592,7 @@ def test_sleep_step_recycle_failure_never_fails_step(tmp_path: Path, monkeypatch
 
 
 def test_sleep_step_stdlib_no_recycle_key(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     store = _make_store(tmp_path)
     assert store.db._storage_driver == "stdlib"
     _seed_records(store, 5)

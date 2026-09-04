@@ -28,7 +28,8 @@ _SRC_PATH = str(Path(__file__).resolve().parent.parent / "src")
 if _SRC_PATH not in sys.path:
     sys.path.insert(0, _SRC_PATH)
 
-from iai_mcp import core
+from iai_mcp import core, runtime_graph_cache
+from iai_mcp.crypto import is_encrypted
 from iai_mcp.hippo import AccessMode, _operator_home
 from iai_mcp.store import MemoryStore
 
@@ -47,6 +48,38 @@ def fixture_path() -> Path:
     if env_val:
         return Path(env_val).expanduser()
     return _DEFAULT_FIXTURE_PATH
+
+
+def _verify_graph_cache_copy(dest: Path) -> None:
+    """Fail loud when the copied graph-cache snapshot is torn or absent.
+
+    The live daemon rewrites ``runtime_graph_cache.json`` via an atomic
+    tmp+rename on its own rebuild cadence; a copy racing that rewrite can
+    observe a vanished or 0-byte file between the rename and the next
+    write. A structurally-cold eval copy produced by that race must raise
+    here rather than silently reach ``assert_graphcache_generation_parity``
+    already broken.
+    """
+    if not dest.exists():
+        raise RuntimeError(
+            f"graph-cache copy vanished after shutil.copy2: {dest} -- the "
+            "copy likely raced the live daemon's atomic snapshot rewrite"
+        )
+    size = dest.stat().st_size
+    if size == 0:
+        raise RuntimeError(
+            f"copied graph-cache is empty (0 bytes): {dest} -- the copy "
+            "likely raced the live daemon's atomic snapshot rewrite"
+        )
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"copied graph-cache is unreadable: {dest} ({exc})") from exc
+    if not is_encrypted(text):
+        raise RuntimeError(
+            f"copied graph-cache is not a recognizable encrypted snapshot: "
+            f"{dest} -- likely torn mid-write by a racing daemon rewrite"
+        )
 
 
 def _copy_real_store(dest: Path) -> Path:
@@ -85,6 +118,10 @@ def _copy_real_store(dest: Path) -> Path:
         src = real_root / aux
         if src.exists():
             shutil.copy2(src, dest / aux)
+
+    graph_cache_src = real_root / "runtime_graph_cache.json"
+    if graph_cache_src.exists():
+        _verify_graph_cache_copy(dest / "runtime_graph_cache.json")
 
     mtime_after = real_db.stat().st_mtime
     size_after = real_db.stat().st_size
@@ -126,6 +163,76 @@ def open_eval_copy_store(*, driver: str | None = None) -> Iterator[MemoryStore]:
             yield store
         finally:
             store.close()
+
+
+def warm_eval_copy_store(store: MemoryStore) -> None:
+    """Force both in-RAM recall indexes warm, matching how a long-lived
+    production store stays warm across a session.
+
+    A freshly-opened copy starts cold on both: the recall-path entry points
+    (``lexical_query_warm``, ``exact_top_k(build_if_cold=False)``) silently
+    degrade a cold index to an empty or race-dependent result instead of
+    ever rebuilding it, so an unwarmed copy manufactures misses production
+    never serves. ``lexical_search`` builds unconditionally on a generation
+    mismatch regardless of the query text, and ``exact_top_k(...,
+    build_if_cold=True)`` builds the exact-cosine matrix synchronously --
+    both entry points already exist for exactly this purpose (the scoped-
+    search surface and the interactive-labelling precedent respectively).
+    """
+    store.lexical_search("warm", k=1)
+    from iai_mcp.embed import embedder_for_store
+
+    embedder = embedder_for_store(store)
+    warm_vec = embedder.embed("warm")
+    store.exact_top_k(list(warm_vec), k=1, build_if_cold=True)
+
+
+def assert_graphcache_generation_parity(store: MemoryStore) -> None:
+    """Fail loud when the copied graph-cache snapshot cannot serve the
+    discovery-pool inputs (community assignment + rich-club) it was copied
+    with -- a generation mismatch changes candidate-pool MEMBERSHIP, not
+    merely a rank-fusion weight, so this must never degrade silently.
+
+    Reads via ``load_recall_structural`` FIRST: on a fresh process the
+    module-global generation counter starts at 0 and is bootstrapped from
+    the on-disk snapshot only inside that call, before it consults the
+    overlay internally. Calling ``consult_overlay`` standalone ahead of
+    this bootstrap compares the (still-zero) counter against the real
+    on-disk generation and raises on every single-store-per-process
+    invocation, independent of whether the copy is actually current.
+
+    An age/dirty-count freshness-fuse trip alone is not fatal here: the
+    fuse only bounds how long a snapshot may serve without a rebuild, and
+    the last-good/normal fallbacks it triggers still decode the SAME
+    copied file, so discovery-pool membership survives that bypass
+    reason. Every other bypass reason (epoch mismatch, parity mismatch,
+    absent snapshot, a failed invariant check) means the copy cannot
+    serve its own structural state and must raise -- including when the
+    fallback still resolves to the `normal`/`last_good` decode tiers
+    rather than the fully-warm overlay, since those tiers do not
+    guarantee the same generation the copy was taken at.
+    """
+    _assignment, _rich_club, _max_degree, structural_source, _node_degrees = (
+        runtime_graph_cache.load_recall_structural(store)
+    )
+    if structural_source == "cold_degrade":
+        raise RuntimeError(
+            "eval-copy graph-cache generation mismatch: structural "
+            "discovery degraded to an empty assignment; rich-club and "
+            "community candidate-pool inputs are unavailable for this copy"
+        )
+    if structural_source != "overlay":
+        overlay_result = runtime_graph_cache.consult_overlay(store)
+        if (
+            isinstance(overlay_result, runtime_graph_cache._OverlayBypass)
+            and overlay_result.reason != "fuse_tripped"
+        ):
+            raise RuntimeError(
+                "eval-copy graph-cache generation mismatch: overlay bypassed "
+                f"with reason={overlay_result.reason!r}; the copied "
+                "snapshot's community/rich-club discovery-pool inputs are "
+                "not being served from a matching generation"
+            )
 
 
 @contextmanager
@@ -293,6 +400,8 @@ def run_both_passes(fixture: "dict | Path | None" = None, *, driver: str | None 
     resolved_driver = driver if driver is not None else os.environ.get("LILLI_STORAGE_DRIVER", "stdlib")
 
     with open_eval_copy_store(driver=driver) as store:
+        warm_eval_copy_store(store)
+        assert_graphcache_generation_parity(store)
         with _toggles(
             IAI_MCP_EXACT_AUTHORITY_OFF="1",
             IAI_MCP_CONF_ESCALATE_OFF="true",

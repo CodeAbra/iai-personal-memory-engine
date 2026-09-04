@@ -78,7 +78,7 @@ export function buildServer(
   const server = new Server(
     {
       name: "iai-mcp",
-      version: "3.0.8",
+      version: "3.1.0",
     },
     {
       capabilities: { tools: {} },

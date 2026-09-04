@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -209,16 +208,24 @@ def test_recent_pending_markers_role_not_starved(store):
         f"{n+1} ambient writes (filter must be in SQL, not post-LIMIT Python)"
     )
 
-@pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli",
-    reason=(
-        "Asserts the SQLite query planner chose idx_records_pending via "
-        "EXPLAIN QUERY PLAN; the lilli engine has no cost-based planner or EXPLAIN "
-        "surface. The actual pending-marker query correctness is proven on both "
-        "drivers by the sibling tests in this file."
-    ),
-)
-def test_recent_pending_markers_explain_search_using_index(store):
+@pytest.fixture
+def legacy_store(tmp_path, monkeypatch):
+    """A store opened against the legacy driver explicitly, for the query-planner
+    assertion below (EXPLAIN QUERY PLAN has no native-engine analog)."""
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "daemon.sock"))
+    s = MemoryStore(str(tmp_path / "store"))
+    yield s
+
+def test_recent_pending_markers_explain_search_using_index(legacy_store):
+    """Asserts the SQLite query planner chose idx_records_pending via EXPLAIN
+    QUERY PLAN; the native engine has no cost-based planner or EXPLAIN
+    surface, so this test runs against the legacy driver explicitly. The
+    actual pending-marker query correctness is proven on both drivers by the
+    sibling tests in this file."""
+    store = legacy_store
     for i in range(5):
         store.insert(_make_rec(seed=800 + i))
     for i in range(3):

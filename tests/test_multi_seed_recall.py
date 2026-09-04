@@ -1,9 +1,9 @@
-"""SC-2 exercise for multi-seed widening (plan 04, Task 1).
+"""Exercise for multi-seed widening.
 
-``_pick_seeds`` stays a fixed cosine+centrality blend (n=3); this plan unions
-additional seed ids from ``fts_hits`` (an exact-substring match already
-computed for ranking) into the seed set, but ONLY when the confidence signal
-is low, and capped at ``MULTI_SEED_CAP``.
+``_pick_seeds`` stays a fixed cosine+centrality blend (n=3); the recall path
+unconditionally unions additional seed ids from ``fts_hits`` (an
+exact-substring match already computed for ranking) into the seed set,
+capped at ``MULTI_SEED_CAP``, unless ``IAI_MCP_MULTI_SEED_OFF=true``.
 
 Dual-driver: every test parametrizes ``LILLI_STORAGE_DRIVER`` since each
 dispatch exercises a real ``MemoryStore`` insert + recall round-trip.
@@ -140,8 +140,8 @@ _FTS_MARKER = "zzz-exact-substring-marker-zzz"
 
 
 def _mild_cosine_vec(cue_vec: list[float], seed: int, weight: float = 0.3) -> list[float]:
-    """A vector with SOME cosine similarity to cue_vec (dominates the
-    cosine+centrality seed blend) but not enough to raise confidence high."""
+    """A vector with SOME cosine similarity to cue_vec -- dominates the
+    cosine+centrality seed blend without being an exact match."""
     rng = np.random.default_rng(seed)
     noise = rng.random(_DIM).astype(np.float32) - 0.5
     v = np.array(cue_vec, dtype=np.float32) * weight + noise * (1.0 - weight)
@@ -149,11 +149,11 @@ def _mild_cosine_vec(cue_vec: list[float], seed: int, weight: float = 0.3) -> li
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
-def test_low_confidence_cue_promotes_fts_hit_to_seed(driver, _make_store, monkeypatch):
-    """On a low-confidence cue, an fts_hits id (exact substring match, near-
-    zero cosine to the cue, NOT among the base-3 cosine+centrality seeds)
-    MUST be promoted into the seed set — observable via activation_trace
-    (union of seed_ids and their 2-hop spread)."""
+def test_fts_hit_promoted_to_seed(driver, _make_store, monkeypatch):
+    """An fts_hits id (exact substring match, near-zero cosine to the cue,
+    NOT among the base-3 cosine+centrality seeds) MUST be promoted into the
+    seed set — observable via activation_trace (union of seed_ids and their
+    2-hop spread)."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _make_store(driver)
     cue_vec = _seeded_vec(41)
@@ -167,9 +167,6 @@ def test_low_confidence_cue_promotes_fts_hit_to_seed(driver, _make_store, monkey
     fts_id = uuid4()
     fts_rec = _make_rec(fts_id, f"contains {_FTS_MARKER} verbatim", _orthogonal_vec(41))
     store.insert(fts_rec)
-    # A larger filler pool with SOME cosine to the cue (dominates the base-3
-    # pick), but not enough to push confidence high (kept below
-    # _CONF_HIGH_COSINE_THRESHOLD=0.75 / hit-count-above-threshold=3).
     for i in range(8):
         store.insert(_make_rec(
             uuid4(), f"unrelated filler {i}", _mild_cosine_vec(cue_vec, 900 + i),
@@ -182,46 +179,46 @@ def test_low_confidence_cue_promotes_fts_hit_to_seed(driver, _make_store, monkey
 
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     assert "multi_seed" in marks, (
-        f"expected multi_seed trace mark on a low-confidence fts-hit cue, got {sorted(marks)}"
+        f"expected multi_seed trace mark, got {sorted(marks)}"
     )
     assert str(fts_id) in resp["activation_trace"], (
-        "fts_hits id was not promoted into the seed set (or its 2-hop spread) "
-        "on a low-confidence cue"
+        "fts_hits id was not promoted into the seed set (or its 2-hop spread)"
     )
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
-def test_high_confidence_cue_does_not_add_seeds_beyond_base(driver, _make_store, monkeypatch):
-    """On a high-confidence cue (dense near-duplicate cluster), no new seeds
-    beyond the base 3 are added — the multi_seed mark must not fire."""
+def test_multi_seed_off_toggle_disables_promotion(driver, _make_store, monkeypatch):
+    """IAI_MCP_MULTI_SEED_OFF=true disables the fts_hits promotion and its
+    trace mark, even on the same fixture that promotes by default."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
+    monkeypatch.setenv("IAI_MCP_MULTI_SEED_OFF", "true")
     store = _make_store(driver)
     cue_vec = _seeded_vec(51)
+    cue_text = _FTS_MARKER
 
-    target_id = uuid4()
-    store.insert(_make_rec(target_id, "the associative target record", cue_vec))
-    for i in range(5):
-        nudge = (np.array(cue_vec, dtype=np.float32) * 0.97
-                 + np.random.default_rng(600 + i).normal(0, 0.01, _DIM).astype(np.float32))
-        nudge = nudge / np.linalg.norm(nudge)
-        store.insert(_make_rec(uuid4(), f"near-duplicate {i}", nudge.tolist()))
+    fts_id = uuid4()
+    fts_rec = _make_rec(fts_id, f"contains {_FTS_MARKER} verbatim", _orthogonal_vec(51))
+    store.insert(fts_rec)
+    for i in range(8):
+        store.insert(_make_rec(
+            uuid4(), f"unrelated filler {i}", _mild_cosine_vec(cue_vec, 800 + i),
+        ))
     flush_record_buffer(store)
 
     _stub_embedder_for_store(monkeypatch, cue_vec)
 
-    resp = _dispatch_recall(store, cue_vec, "high confidence cue text")
+    resp = _dispatch_recall(store, cue_vec, cue_text)
 
     marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
     assert "multi_seed" not in marks, (
-        f"multi_seed mark fired on a high-confidence cue, got {sorted(marks)} — "
-        "the widening must stay confidence-gated"
+        f"multi_seed mark fired with the toggle set, got {sorted(marks)}"
     )
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_seed_count_never_exceeds_multi_seed_cap(driver, _make_store, monkeypatch):
-    """Even with many fts_hits candidates on a low-confidence cue, the total
-    seed count post-union must never exceed MULTI_SEED_CAP."""
+    """Even with many fts_hits candidates, the total seed count post-union
+    must never exceed MULTI_SEED_CAP."""
     monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
     store = _make_store(driver)
     cue_vec = _seeded_vec(61)
@@ -291,4 +288,7 @@ def test_no_new_store_calls_from_multi_seed_widen(driver, _make_store, monkeypat
     # get_batch may legitimately be called for anti-hits/pool fallback, but the
     # multi-seed union itself (a pure id_to_idx lookup) must not add an extra
     # per-seed store round trip. This is a smoke bound, not a strict zero.
-    assert calls["n"] <= 3
+    # One additional bounded call backfills session_id/captured_at on any
+    # graph/rank-view-sourced finalist (anti-hit or hit); it is O(finalists),
+    # never O(seeds) or O(candidate pool).
+    assert calls["n"] <= 4

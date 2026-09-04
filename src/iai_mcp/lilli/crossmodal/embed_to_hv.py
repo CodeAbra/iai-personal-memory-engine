@@ -21,6 +21,29 @@ _TELEMETRY_RANK_DEFICIENCY_KIND: str = "rank_deficiency_warning"
 
 _HV_BYTES: int = HV_DIM // 8
 
+_TWO_PI = 2.0 * np.pi
+
+
+def from_embedding_fhrr(emb: list[float]) -> bytes:
+    arr = np.asarray(emb, dtype=np.float32)
+    if arr.shape != (EMBED_DIM,):
+        raise ValueError(
+            f"from_embedding_fhrr expects a length-{EMBED_DIM} embedding, got shape {arr.shape}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("from_embedding_fhrr: embedding contains non-finite values")
+    norm = float(np.linalg.norm(arr))
+    if norm <= 0.0:
+        raise ValueError("from_embedding_fhrr: zero-norm embedding")
+    arr = arr / norm                       # unconditional L2 normalize — CONTRACT, not an
+                                           # optimization: the phase encoding's scale-free
+                                           # cosine relationship requires unit norm. Do NOT
+                                           # delete even if the embedder appears to normalize.
+    projected = arr @ P                    # raw radians — NEVER rescale (rescaling collapses
+                                           # real cosine sims into the FHRR noise floor)
+    phase = np.mod(np.round(projected / _TWO_PI * 256.0), 256).astype(np.uint8)
+    return phase.tobytes()                 # 10000 bytes, matches fhrr TIER_INFO bytes_per_hv
+
 
 def from_embedding(emb: list[float]) -> bytes:
     arr = np.asarray(emb, dtype=np.float32)

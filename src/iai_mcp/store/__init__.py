@@ -20,6 +20,7 @@ from uuid import UUID
 import logging
 
 from iai_mcp.hippo import _REAL_IAI_ROOT, AccessMode, HippoDB, HippoIntegrityError
+from iai_mcp.model_attribution import normalize_model
 
 CPU_HAS_AVX2: bool = True
 
@@ -109,7 +110,15 @@ def _resolve_embed_dim() -> int:
 
 class _PendingTurn:
 
-    __slots__ = ("_text", "_session_id", "_ts", "_idem_tag", "_source_uuid", "_role")
+    __slots__ = (
+        "_text",
+        "_session_id",
+        "_ts",
+        "_idem_tag",
+        "_source_uuid",
+        "_role",
+        "_model",
+    )
 
     def __init__(
         self,
@@ -120,6 +129,7 @@ class _PendingTurn:
         idem_tag: str,
         source_uuid: "str | None",
         role: str = "user",
+        model: object = None,
     ) -> None:
         self._text = text
         self._session_id = session_id
@@ -127,6 +137,7 @@ class _PendingTurn:
         self._idem_tag = idem_tag
         self._source_uuid = source_uuid
         self._role = role
+        self._model = normalize_model(model)
 
     @property
     def id(self):
@@ -149,6 +160,8 @@ class _PendingTurn:
         prov: dict = {"session_id": self._session_id, "role": self._role}
         if self._source_uuid is not None:
             prov["source_uuid"] = self._source_uuid
+        if self._model is not None:
+            prov["model"] = self._model
         return [prov]
 
     @property

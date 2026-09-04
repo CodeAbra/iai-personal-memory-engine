@@ -276,6 +276,15 @@ def cmd_migrate_to_lilli(args: argparse.Namespace) -> int:
     from iai_mcp.crypto import CryptoKey
     from iai_mcp.migrate import migrate_sqlite_to_lilli, verify_store_equality
 
+    if bool(getattr(args, "swap", False)):
+        return cmd_migrate_to_lilli_swap(args)
+    if getattr(args, "dst", None) is None:
+        print(
+            "error: --dst is required unless --swap is given",
+            file=_sys.stderr,
+        )
+        return 2
+
     src = str(getattr(args, "src"))
     dst = str(getattr(args, "dst"))
     batch = int(getattr(args, "batch", 500))
@@ -304,6 +313,108 @@ def cmd_migrate_to_lilli(args: argparse.Namespace) -> int:
         print("verify: GREEN -- all dimensions match")
         return 0
     print("verify: RED -- store equality NOT proven; do NOT cut over", file=_sys.stderr)
+    return 1
+
+
+def cmd_migrate_to_lilli_swap(args: argparse.Namespace) -> int:
+    """Preview or perform the in-place swap of a verified native copy into the
+    live store root.
+
+    Dry-run (the default) reports the detected format, the resolved store
+    root, the backup directory an apply would create, and any blockers --
+    without writing anything. Apply requires --yes in addition to --apply;
+    the source argument stays required, so no invocation defaults to the
+    live store by accident.
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    from iai_mcp.migrate import swap_migrated_store
+    from iai_mcp.migrate._to_lilli_swap import MARKER_FILE_NAME
+
+    src = str(getattr(args, "src"))
+    dst = getattr(args, "dst", None)
+    batch = int(getattr(args, "batch", 500))
+    apply_flag = bool(getattr(args, "apply", False))
+    confirm_flag = bool(getattr(args, "yes", False))
+
+    if apply_flag and not confirm_flag:
+        print(
+            "error: --apply requires --yes to confirm -- this replaces the "
+            "live store's hippo/ directory in place. Preview first with "
+            "--swap (no --apply), then re-run with --swap --apply --yes.",
+            file=_sys.stderr,
+        )
+        return 2
+
+    apply_mode = apply_flag and confirm_flag
+    try:
+        summary = swap_migrated_store(src, apply=apply_mode, dst_root=dst, batch=batch)
+    except OSError as exc:
+        # Reached only by a genuine mid-mutation failure (e.g. the second
+        # rename): lock-acquisition and post-success cleanup failures are
+        # both handled without raising. A raw traceback here would leave
+        # the operator with no pointer to the readable three-way state
+        # (backup + staging tree + marker) the swap's own crash safety
+        # left behind -- point at it explicitly instead.
+        live_root = _Path(src).resolve().parent.parent
+        print(
+            f"error: the swap failed mid-mutation ({exc}). The store at "
+            f"{live_root} may be in a three-way state -- check for a marker "
+            f"at {live_root / MARKER_FILE_NAME}, a dated hippo.sqlite-backup-* "
+            "directory, and a .migrate-staging-* directory there, then "
+            "recover manually before retrying.",
+            file=_sys.stderr,
+        )
+        return 1
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp migrate-to-lilli --swap [{mode_str}]")
+    print(f"  detected format:   {summary.get('source_format')}")
+    print(f"  live store root:   {summary.get('live_root')}")
+
+    if summary.get("source_format") == "lilli":
+        print("  already native -- nothing to swap")
+        return 0
+
+    print(f"  backup directory:  {summary.get('backup_dir')}")
+    if summary.get("staging_root"):
+        print(f"  staging root:      {summary.get('staging_root')}")
+
+    blockers = summary.get("blockers") or []
+    if blockers:
+        print(f"  blockers ({len(blockers)}):")
+        for blocker in blockers:
+            print(f"    - {blocker}")
+
+    if summary.get("verify_ok") is False:
+        print("  verify:            RED -- store equality NOT proven")
+    elif summary.get("verify_ok") is True:
+        print("  verify:            GREEN -- all dimensions match")
+
+    rows = summary.get("rows_copied")
+    if rows:
+        print(
+            f"  rows copied:       {sum(rows.values())} "
+            f"({', '.join(f'{t}={n}' for t, n in rows.items())})"
+        )
+
+    if summary.get("swapped"):
+        print(
+            "  swapped -- the live store now runs on the native engine; "
+            f"the previous store is kept at {summary.get('backup_dir')}"
+        )
+        return 0
+
+    if not apply_mode:
+        if blockers:
+            print()
+            print("  (preview only -- resolve the blockers above before applying)")
+        else:
+            print()
+            print("  Run with --apply --yes to execute.")
+        return 0
+
     return 1
 
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -105,7 +104,7 @@ def _select_counter(
 ) -> tuple[Callable[[str], int], str]:
     if count_tokens_fn is not None:
         return count_tokens_fn, "injected"
-    if os.environ.get("ANTHROPIC_API_KEY") and importlib.util.find_spec("anthropic"):
+    if os.environ.get("ANTHROPIC_API_KEY"):
         return _anthropic_count_tokens, "anthropic-count-tokens"
     try:
         import tiktoken  # noqa: F401

@@ -34,12 +34,35 @@ except Exception:
 session_id=$(extract "session_id")
 source_evt=$(extract "source")
 
+# Mirrors daemon_state.RUNNING_AGENT_TTL_HOURS (6h = 21600s); hardcoded,
+# never shelled out to python -- keep this value in sync by hand.
+RUNNING_AGENT_TTL_SEC="${IAI_MCP_RUNNING_AGENT_TTL_SEC:-21600}"
+
+emit_continuity_agent_block() {
+  # Eager, session-agnostic agent-registry append -- fixed-name file, no
+  # session id in the path, so a brand-new post-/clear session id still
+  # gets the pending-agent block. Inserted at BOTH successful exits of this
+  # script (cache-hit early exit and the CLI-compose fallback) so the agent
+  # block is never silently missing from either path.
+  cont_path="$HOME/.iai-mcp/.session-continuity.cached.md"
+  [ -f "$cont_path" ] || return 0
+  cont_mtime=$(stat -c %Y "$cont_path" 2>/dev/null || stat -f %m "$cont_path" 2>/dev/null || echo 0)
+  [ "$cont_mtime" -gt 0 ] || return 0
+  cont_age=$(( $(date +%s) - cont_mtime ))
+  [ "$cont_age" -le "$RUNNING_AGENT_TTL_SEC" ] || return 0
+  cont_block=$(sed -n '/<iai-mcp-agent-registry>/,/<\/iai-mcp-agent-registry>/p' "$cont_path" | sed '1d;$d')
+  [ -n "$cont_block" ] || return 0
+  printf '\n<iai-mcp-agent-registry>\n%s\n</iai-mcp-agent-registry>\n' "$cont_block"
+}
+
 mkdir -p "$HOME/.iai-mcp/logs" 2>/dev/null || true
 log="$HOME/.iai-mcp/logs/recall-$(date -u +%Y-%m-%d).log"
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+channel="settings"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && channel="plugin"
 {
   echo "---"
-  echo "$ts session=$session_id source=$source_evt"
+  echo "$ts session=$session_id source=$source_evt channel=$channel"
 } >> "$log" 2>/dev/null
 
 # Precache for the SessionStart hook:
@@ -51,22 +74,23 @@ if [ -s "$cache_path" ]; then
   # Cross-platform mtime: try GNU stat, then BSD stat.
   cache_mtime=$(stat -c %Y "$cache_path" 2>/dev/null || stat -f %m "$cache_path" 2>/dev/null || echo 0)
   if [ "$cache_mtime" -eq 0 ]; then
-    echo "$ts cache-error stat-failed" >> "$log" 2>/dev/null
+    echo "$ts cache-error stat-failed channel=$channel" >> "$log" 2>/dev/null
   else
     now_epoch=$(date +%s)
     age=$(( now_epoch - cache_mtime ))
     cache_out=$(head -c 10000 "$cache_path" 2>/dev/null || true)
     if [ -n "$cache_out" ]; then
       printf '%s' "$cache_out"
-      echo "$ts cache-hit age=${age}s bytes=${#cache_out}" >> "$log" 2>/dev/null
+      emit_continuity_agent_block
+      echo "$ts cache-hit age=${age}s bytes=${#cache_out} channel=$channel" >> "$log" 2>/dev/null
       exit 0
     fi
-    echo "$ts cache-miss empty (file existed but read returned 0 bytes)" >> "$log" 2>/dev/null
+    echo "$ts cache-miss empty (file existed but read returned 0 bytes) channel=$channel" >> "$log" 2>/dev/null
   fi
 elif [ -e "$cache_path" ]; then
-  echo "$ts cache-miss empty (zero-byte file)" >> "$log" 2>/dev/null
+  echo "$ts cache-miss empty (zero-byte file) channel=$channel" >> "$log" 2>/dev/null
 else
-  echo "$ts cache-miss absent" >> "$log" 2>/dev/null
+  echo "$ts cache-miss absent channel=$channel" >> "$log" 2>/dev/null
 fi
 
 # Locate the CLI. Same resolution order as the capture half of the hook
@@ -114,7 +138,7 @@ if [ -z "$iai_cli" ]; then
   done
 fi
 if [ -z "$iai_cli" ]; then
-  echo "$ts skipped: iai-mcp CLI not found" >> "$log" 2>/dev/null
+  echo "$ts skipped: iai-mcp CLI not found channel=$channel" >> "$log" 2>/dev/null
   exit 0
 fi
 
@@ -162,7 +186,8 @@ fi
 if [ "$rc" -eq 0 ]; then
   printf '%s' "$out"
 fi
+emit_continuity_agent_block
 {
-  echo "$ts rc=$rc bytes=${#out}"
+  echo "$ts rc=$rc bytes=${#out} channel=$channel"
 } >> "$log" 2>/dev/null
 exit 0

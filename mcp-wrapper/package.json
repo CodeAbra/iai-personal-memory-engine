@@ -1,6 +1,6 @@
 {
   "name": "iai-mcp-wrapper",
-  "version": "3.0.8",
+  "version": "3.1.0",
   "description": "TypeScript MCP wrapper for IAI-MCP Python core",
   "author": "Areg Noya",
   "type": "module",
@@ -27,9 +27,7 @@
     "typescript": "^5.4.0"
   },
   "overrides": {
-    "qs": "^6.15.2",
-    "body-parser": "^2.3.0",
-    "esbuild": "^0.28.1"
+    "fast-uri": "^3.1.7"
   },
   "engines": {
     "node": ">=18"

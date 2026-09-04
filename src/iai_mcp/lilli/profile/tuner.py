@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -11,7 +10,6 @@ from iai_mcp.store import MemoryStore
 LEARN_RATE: float = 0.05
 MAX_WEIGHT: float = 5.0
 MIN_WEIGHT: float = 0.0
-EPSILON_EXPLORE: float = 0.1
 
 
 @dataclass
@@ -47,23 +45,6 @@ def update_retrieval_weights(
         if k in w:
             w[k] = max(MIN_WEIGHT, min(MAX_WEIGHT, w[k]))
     return w
-
-
-def pick_retrieval_strategy(
-    query_type: str,
-    history: dict,
-    strategies: list[str] | None = None,
-) -> str:
-    strategies = strategies or ["pipeline_default", "greedy_2hop", "rich_club_first"]
-    if random.random() < EPSILON_EXPLORE:
-        return random.choice(strategies)
-    rewards = history.get(query_type, {})
-    if not rewards:
-        return strategies[0]
-    return max(
-        strategies,
-        key=lambda s: rewards.get(s, {}).get("mean", 0.0),
-    )
 
 
 TRUST_INCREMENT_PER_COMMIT: float = 0.02

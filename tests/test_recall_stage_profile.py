@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -12,11 +13,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_store import _make
+from _recall_helpers import diff_recall_quality_baseline_entry
 
 import iai_mcp.pipeline as _pipeline_mod
 from iai_mcp.embed import Embedder
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
+
+# Opt-in maintenance path: a normal run diffs fresh-vs-committed and fails
+# on regression instead of silently resetting the baseline.
+_UPDATE_BASELINE_ENV = "IAI_MCP_UPDATE_BASELINE"
 
 RNG_SEED = 20260601
 N_SMALL = 1_000
@@ -126,16 +132,16 @@ def _time_edges_topology_scan(store: MemoryStore) -> float:
 def _time_temporal_validity_dirty(store: MemoryStore, insert_rec: MemoryRecord) -> float:
     from iai_mcp.retrieve import build_temporal_validity_maps, _tv_cache_dirty
     store.insert(insert_rec)
-    _tv_cache_dirty[id(store)] = True
+    _tv_cache_dirty[store] = True
     t0 = time.perf_counter()
     build_temporal_validity_maps(store)
     return (time.perf_counter() - t0) * 1000.0
 
 def _time_temporal_validity_clean(store: MemoryStore) -> float:
     from iai_mcp.retrieve import build_temporal_validity_maps, _tv_cache_dirty
-    _tv_cache_dirty[id(store)] = True
+    _tv_cache_dirty[store] = True
     build_temporal_validity_maps(store)
-    _tv_cache_dirty[id(store)] = False
+    _tv_cache_dirty[store] = False
     t0 = time.perf_counter()
     build_temporal_validity_maps(store)
     return (time.perf_counter() - t0) * 1000.0
@@ -349,6 +355,105 @@ def _estimate_ann_top200_cosine_threshold(store: MemoryStore, cue_vec: list[floa
     sorted_cos = np.sort(cos)[::-1]
     return float(sorted_cos[min(199, len(sorted_cos) - 1)])
 
+def build_gate_b_reference_store(
+    store_root: Path,
+    n_records: int,
+    cue_vec_generic: list[float],
+    cue_vec_specific: list[float],
+) -> "tuple[MemoryStore, dict[str, UUID]]":
+    """Build the exact reference store this module's fixture-producing test
+    seeds, at the given record count. Any consumer of the committed
+    recall_quality_baseline.json fixture must build from THIS function --
+    a differently-shaped reference store (different gold-record graph
+    degree, different filler count) changes graph-based ranking and makes
+    a fresh-vs-committed diff compare two different systems, not the same
+    system at two points in time. Returns the store and the stable gold
+    UUIDs by role."""
+    store_root.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(str(store_root))
+
+    rng = np.random.default_rng(RNG_SEED)
+    for i in range(n_records):
+        v = rng.random(EMBED_DIM).astype(np.float32)
+        v = (v / np.linalg.norm(v)).tolist()
+        rec = _make(text=f"User record {i} filler content for gate-b baseline", vec=v)
+        store.insert(rec)
+
+    cue_spec_arr = np.asarray(cue_vec_specific, dtype=np.float32)
+    cue_spec_arr /= np.linalg.norm(cue_spec_arr)
+    cue_gen_arr = np.asarray(cue_vec_generic, dtype=np.float32)
+    cue_gen_arr /= np.linalg.norm(cue_gen_arr)
+
+    hub_gold_id = UUID(int=1)
+    store.insert(_make_gold_record(1, list(cue_gen_arr)))
+
+    hub_node_id = UUID(int=2)
+    rng4 = np.random.default_rng(44444)
+    hub_node_vec = rng4.random(EMBED_DIM).astype(np.float32)
+    hub_node_vec /= np.linalg.norm(hub_node_vec)
+    store.insert(_make_gold_record(2, hub_node_vec.tolist()))
+    store.boost_edges([(hub_node_id, hub_gold_id)], edge_type="hebbian", delta=[3.0])
+    for extra_i in range(12):
+        store.boost_edges([(hub_node_id, UUID(int=1000 + extra_i))], edge_type="hebbian", delta=[1.0])
+
+    seed_id = UUID(int=3)
+    store.insert(_make_gold_record(3, list(cue_spec_arr)))
+
+    intermediate_id = UUID(int=4)
+    inter_component = 0.4 * cue_spec_arr
+    rng5 = np.random.default_rng(55555)
+    inter_noise = rng5.random(EMBED_DIM).astype(np.float32)
+    inter_noise -= np.dot(inter_noise, cue_spec_arr) * cue_spec_arr
+    inter_noise /= np.linalg.norm(inter_noise)
+    inter_full = inter_component + 0.9165 * inter_noise
+    inter_full /= np.linalg.norm(inter_full)
+    store.insert(_make_gold_record(4, inter_full.tolist()))
+    for extra_j in range(10):
+        store.boost_edges([(intermediate_id, UUID(int=2000 + extra_j))], edge_type="hebbian", delta=[1.0])
+
+    two_hop_gold_id = UUID(int=5)
+    rng6 = np.random.default_rng(66666)
+    noise = rng6.random(EMBED_DIM).astype(np.float32)
+    noise -= np.dot(noise, cue_spec_arr) * cue_spec_arr
+    noise /= np.linalg.norm(noise)
+    target_cosine = 0.02
+    orth_magnitude = float(np.sqrt(max(0.0, 1.0 - target_cosine**2)))
+    two_hop_vec = target_cosine * cue_spec_arr + orth_magnitude * noise
+    two_hop_vec /= np.linalg.norm(two_hop_vec)
+    store.insert(_make_gold_record(5, two_hop_vec.tolist()))
+
+    store.boost_edges([(seed_id, intermediate_id)], edge_type="hebbian", delta=[5.0])
+    store.boost_edges([(intermediate_id, two_hop_gold_id)], edge_type="hebbian", delta=[5.0])
+    rng7 = np.random.default_rng(88888)
+    for extra_k in range(8):
+        target_id = UUID(int=3000 + extra_k)
+        target_vec = rng7.random(EMBED_DIM).astype(np.float32)
+        target_vec = (target_vec / np.linalg.norm(target_vec)).tolist()
+        store.insert(_make_gold_record(3000 + extra_k, target_vec))
+        store.boost_edges([(two_hop_gold_id, target_id)], edge_type="hebbian", delta=[2.0])
+
+    contradict_a_id = UUID(int=6)
+    contradict_b_id = UUID(int=7)
+    rng3 = np.random.default_rng(77777)
+    ca_vec = rng3.random(EMBED_DIM).astype(np.float32)
+    ca_vec = (ca_vec / np.linalg.norm(ca_vec)).tolist()
+    cb_vec = rng3.random(EMBED_DIM).astype(np.float32)
+    cb_vec = (cb_vec / np.linalg.norm(cb_vec)).tolist()
+    store.insert(_make_gold_record(6, ca_vec))
+    store.insert(_make_gold_record(7, cb_vec))
+    store.boost_edges([(contradict_a_id, contradict_b_id)], edge_type="contradicts", delta=[1.0])
+
+    gold_ids = {
+        "hub_gold": hub_gold_id,
+        "hub_node": hub_node_id,
+        "seed": seed_id,
+        "intermediate": intermediate_id,
+        "two_hop_gold": two_hop_gold_id,
+        "contradict_a": contradict_a_id,
+        "contradict_b": contradict_b_id,
+    }
+    return store, gold_ids
+
 @pytest.mark.slow
 def test_ef_k_linchpin_and_gate_b_fixture(tmp_path, monkeypatch):
     _monkeypatch_env(monkeypatch, tmp_path)
@@ -366,83 +471,19 @@ def test_ef_k_linchpin_and_gate_b_fixture(tmp_path, monkeypatch):
         print(f"{'='*60}")
 
         store_root = tmp_path / f"linchpin-{n_label}"
-        store_root.mkdir(parents=True, exist_ok=True)
-        store = MemoryStore(str(store_root))
-
-        rng = np.random.default_rng(RNG_SEED)
-        for i in range(n_records):
-            v = rng.random(EMBED_DIM).astype(np.float32)
-            v = (v / np.linalg.norm(v)).tolist()
-            rec = _make(text=f"User record {i} filler content for gate-b baseline", vec=v)
-            store.insert(rec)
+        store, gold_ids = build_gate_b_reference_store(
+            store_root, n_records, cue_vec_generic, cue_vec_specific,
+        )
+        hub_gold_id = gold_ids["hub_gold"]
+        hub_node_id = gold_ids["hub_node"]
+        seed_id = gold_ids["seed"]
+        intermediate_id = gold_ids["intermediate"]
+        two_hop_gold_id = gold_ids["two_hop_gold"]
+        contradict_a_id = gold_ids["contradict_a"]
+        contradict_b_id = gold_ids["contradict_b"]
 
         cue_spec_arr = np.asarray(cue_vec_specific, dtype=np.float32)
         cue_spec_arr /= np.linalg.norm(cue_spec_arr)
-        cue_gen_arr = np.asarray(cue_vec_generic, dtype=np.float32)
-        cue_gen_arr /= np.linalg.norm(cue_gen_arr)
-
-        hub_gold_id = UUID(int=1)
-        hub_gold_vec = list(cue_gen_arr)
-        hub_gold_rec = _make_gold_record(1, hub_gold_vec)
-        store.insert(hub_gold_rec)
-
-        hub_node_id = UUID(int=2)
-        rng4 = np.random.default_rng(44444)
-        hub_node_vec = rng4.random(EMBED_DIM).astype(np.float32)
-        hub_node_vec /= np.linalg.norm(hub_node_vec)
-        hub_node_rec = _make_gold_record(2, hub_node_vec.tolist())
-        store.insert(hub_node_rec)
-        store.boost_edges([(hub_node_id, hub_gold_id)], edge_type="hebbian", delta=[3.0])
-        for extra_i in range(12):
-            store.boost_edges([(hub_node_id, UUID(int=1000 + extra_i))], edge_type="hebbian", delta=[1.0])
-
-        seed_id = UUID(int=3)
-        seed_vec = list(cue_spec_arr)
-        seed_rec = _make_gold_record(3, seed_vec)
-        store.insert(seed_rec)
-
-        intermediate_id = UUID(int=4)
-        inter_component = 0.4 * cue_spec_arr
-        rng5 = np.random.default_rng(55555)
-        inter_noise = rng5.random(EMBED_DIM).astype(np.float32)
-        inter_noise -= np.dot(inter_noise, cue_spec_arr) * cue_spec_arr
-        inter_noise /= np.linalg.norm(inter_noise)
-        inter_full = inter_component + 0.9165 * inter_noise
-        inter_full /= np.linalg.norm(inter_full)
-        intermediate_rec = _make_gold_record(4, inter_full.tolist())
-        store.insert(intermediate_rec)
-        for extra_j in range(10):
-            store.boost_edges([(intermediate_id, UUID(int=2000 + extra_j))], edge_type="hebbian", delta=[1.0])
-
-        two_hop_gold_id = UUID(int=5)
-        rng6 = np.random.default_rng(66666)
-        noise = rng6.random(EMBED_DIM).astype(np.float32)
-        noise -= np.dot(noise, cue_spec_arr) * cue_spec_arr
-        noise /= np.linalg.norm(noise)
-        target_cosine = 0.02
-        orth_magnitude = float(np.sqrt(max(0.0, 1.0 - target_cosine**2)))
-        two_hop_vec = target_cosine * cue_spec_arr + orth_magnitude * noise
-        two_hop_vec /= np.linalg.norm(two_hop_vec)
-        two_hop_gold_rec = _make_gold_record(5, two_hop_vec.tolist())
-        store.insert(two_hop_gold_rec)
-
-        store.boost_edges([(seed_id, intermediate_id)], edge_type="hebbian", delta=[5.0])
-        store.boost_edges([(intermediate_id, two_hop_gold_id)], edge_type="hebbian", delta=[5.0])
-        for extra_k in range(8):
-            store.boost_edges([(two_hop_gold_id, UUID(int=3000 + extra_k))], edge_type="hebbian", delta=[2.0])
-
-        contradict_a_id = UUID(int=6)
-        contradict_b_id = UUID(int=7)
-        rng3 = np.random.default_rng(77777)
-        ca_vec = rng3.random(EMBED_DIM).astype(np.float32)
-        ca_vec = (ca_vec / np.linalg.norm(ca_vec)).tolist()
-        cb_vec = rng3.random(EMBED_DIM).astype(np.float32)
-        cb_vec = (cb_vec / np.linalg.norm(cb_vec)).tolist()
-        ca_rec = _make_gold_record(6, ca_vec)
-        cb_rec = _make_gold_record(7, cb_vec)
-        store.insert(ca_rec)
-        store.insert(cb_rec)
-        store.boost_edges([(contradict_a_id, contradict_b_id)], edge_type="contradicts", delta=[1.0])
 
         _reset_auto_depth()
         from iai_mcp.retrieve import build_runtime_graph
@@ -452,7 +493,9 @@ def test_ef_k_linchpin_and_gate_b_fixture(tmp_path, monkeypatch):
         print(f"  hub_in_rich_club: {hub_in_rich_club} (rich_club size={len(rich_club)})")
 
         ann_boundary = _estimate_ann_top200_cosine_threshold(store, cue_vec_specific)
-        gold_cosine_vs_cue = float(np.dot(two_hop_vec, cue_spec_arr))
+        two_hop_vec_arr = np.asarray(store.get(two_hop_gold_id).embedding, dtype=np.float32)
+        two_hop_vec_arr /= np.linalg.norm(two_hop_vec_arr)
+        gold_cosine_vs_cue = float(np.dot(two_hop_vec_arr, cue_spec_arr))
         two_hop_outside_ann_top200 = gold_cosine_vs_cue < ann_boundary
         print(f"  two-hop gold cosine vs specific cue: {gold_cosine_vs_cue:.4f}")
         print(f"  ANN top-200 boundary (specific cue): {ann_boundary:.4f}")
@@ -631,17 +674,8 @@ def test_ef_k_linchpin_and_gate_b_fixture(tmp_path, monkeypatch):
             },
         }
 
-    FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(FIXTURE_PATH, "w", encoding="utf-8") as f:
-        json.dump(fixture_data, f, indent=2)
-    print(f"\n  Gate-B fixture written: {FIXTURE_PATH}")
-
-    assert FIXTURE_PATH.exists(), "Gate-B fixture not written"
-    with open(FIXTURE_PATH) as f:
-        loaded = json.load(f)
     for n_label in ("n1k", "n10k"):
-        assert n_label in loaded, f"Missing {n_label} in fixture"
-        entry = loaded[n_label]
+        entry = fixture_data[n_label]
         assert "reference_cues" in entry, f"Missing reference_cues in {n_label}"
         assert "contradicts_pair_stable_keys" in entry
         assert "recall_at_200" in entry
@@ -657,6 +691,42 @@ def test_ef_k_linchpin_and_gate_b_fixture(tmp_path, monkeypatch):
             )
         assert entry["two_hop_gold_reachable_via_2hop"], (
             f"Two-hop gold not reachable via 2-hop at {n_label} -- seeding failed"
+        )
+
+    # Load the OLD on-disk fixture BEFORE any overwrite: a diff against
+    # freshly-written data would always compare fresh-vs-itself and could
+    # never fail on a real regression.
+    old_fixture: dict | None = None
+    if FIXTURE_PATH.exists():
+        with open(FIXTURE_PATH) as f:
+            old_fixture = json.load(f)
+
+    update_baseline = os.environ.get(_UPDATE_BASELINE_ENV) == "1"
+
+    if old_fixture is not None and not update_baseline:
+        regression_violations: list[str] = []
+        for n_label in ("n1k", "n10k"):
+            if n_label in old_fixture and n_label in fixture_data:
+                regression_violations.extend(
+                    diff_recall_quality_baseline_entry(
+                        fixture_data[n_label], old_fixture[n_label]
+                    )
+                )
+        assert not regression_violations, (
+            "recall-quality regression vs the committed baseline "
+            f"(set {_UPDATE_BASELINE_ENV}=1 to intentionally reset it):\n"
+            + "\n".join(regression_violations)
+        )
+
+    if update_baseline or old_fixture is None:
+        FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(FIXTURE_PATH, "w", encoding="utf-8") as f:
+            json.dump(fixture_data, f, indent=2)
+        print(f"\n  Gate-B fixture written: {FIXTURE_PATH}")
+    else:
+        print(
+            "\n  Gate-B fixture NOT overwritten (no regression, no update "
+            f"requested): {FIXTURE_PATH}"
         )
 
     print("\n  Gate-B fixture validation: PASSED")

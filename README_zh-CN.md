@@ -1,243 +1,263 @@
 [English](./README.md) | **中文**
 
-> 这是社区翻译，可能落后于英文版几个版本。最新内容请以 [English README](./README.md) 为准。欢迎提 PR 帮助保持同步。
->
-> Community-maintained translation, may lag the English version. See [English README](./README.md) for the latest. PRs welcome.
-
----
-
 <p align="center">
-  <img src="logo.png" alt="iai-pme" width="600">
+  <img src="docs/assets/iai-memory-banner.png" alt="iai-memory —— 为你的 AI 编程工作流打造的个人记忆引擎" width="100%">
 </p>
 
-<h3 align="center">为 AI 编程助手打造的最佳开源个人记忆引擎。</h3>
-<p align="center">每一项声明都附带可复现的基准测试脚本。你可以自己跑一遍验证。</p>
+<p align="center">
+  <b>逐字捕获对话，跨会话召回相关上下文，<br>
+  并在事实变化时同时保留新旧措辞、二者都可检索。</b>
+</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v3.0.8-1f6feb?style=flat-square" alt="Release v3.0.7">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/python-3.11%20|%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 | 3.12">
-  <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-555?style=flat-square" alt="Platform: macOS and Linux">
-  <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows: beta">
-  <img src="https://img.shields.io/badge/engine-Rust%20native-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust-native engine">
+  <img src="docs/assets/iai-brain-demo.gif" alt="iai-memory 搜索、召回、置顶、淡出、抢救记忆并学习文件" width="850">
 </p>
+
 <p align="center">
-  <img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962">
+  <a href="https://pypi.org/project/iai-pme/"><img src="https://img.shields.io/pypi/v/iai-pme?style=flat-square&color=1f6feb&label=pypi" alt="iai-memory 在 PyPI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square" alt="MIT 许可证"></a>
+  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 或 3.12">
+  <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-supported-555?style=flat-square" alt="支持 macOS 与 Linux">
+  <img src="https://img.shields.io/badge/Windows-beta-dbab09?style=flat-square&logo=windows&logoColor=white" alt="Windows 测试版">
+  <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="兼容 MCP">
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Rescue%4010-1.000-2ea043?style=flat-square" alt="Rescue@10 1.000">
-  <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/local--only-no%20telemetry-2ea043?style=flat-square" alt="Local only, no telemetry">
-  <img src="https://img.shields.io/badge/MCP-compatible-8957e5?style=flat-square" alt="MCP compatible">
-  <a href="https://glama.ai/mcp/servers/CodeAbra/iai-mcp"><img src="https://glama.ai/mcp/servers/CodeAbra/iai-mcp/badges/score.svg" alt="Glama MCP score"></a>
+  <img src="https://img.shields.io/badge/LongMemEval%20R%405-0.962-2ea043?style=flat-square" alt="LongMemEval R@5 0.962">
+  <img src="https://img.shields.io/badge/historical--verbatim-1.000-2ea043?style=flat-square" alt="历史逐字命中@10 1.000">
+  <img src="https://img.shields.io/badge/at%20rest-AES--256--GCM-2ea043?style=flat-square" alt="静态存储 AES-256-GCM">
+</p>
+
+<p align="center">
+  <a href="#快速开始"><b>快速开始</b></a> ·
+  <a href="#工作原理"><b>工作原理</b></a> ·
+  <a href="#基准测试"><b>基准测试</b></a> ·
+  <a href="#兼容性"><b>兼容性</b></a> ·
+  <a href="docs/REFERENCE.md"><b>技术参考</b></a>
 </p>
 
 ---
 
-# iai-pme
+## 这是什么
 
-**你的 AI 助手每次会话都会忘记你。iai-pme 给它一个不会忘的记忆。**
+iai-memory 为你已经在用的编程助手，在你自己的机器上提供持久记忆。启用环境挂钩（ambient hooks）后，它会记录对话的双方、保留捕获时的原始措辞，并在会话开始或推进时提供一小段有界的相关历史。你无需维护记忆文件，也无需反复说“记住这个”。
 
-*Independent Autistic Intelligence —— 个人记忆引擎。完全本地、环境无感、自动运行。兼容 Claude Code、Claude Desktop、Cursor、Codex CLI、Gemini CLI、Cline、Continue.dev、Zed、Cherry Studio、Goose、Aider、Hermes、OpenClaw、Le Chat、Kimi —— 任何支持 MCP-over-stdio 的客户端。*
+纠正不会改写历史。一条被更新的事实会成为一条新记录，并与被取代的旧记录相互链接，因此当前陈述和早先措辞都仍可检索。召回可以把相互矛盾或已被取代的记录与匹配结果并列返回，而不是让过时的事实冒充当前事实。
 
-## 目录
+这是**为你已经在用的助手打造的个人引擎**，而不是面向应用的多租户记忆 API。情景（episodic）捕获是一次写入、逐字保存的；存储、嵌入、检索、图操作和仪表盘全部在本地运行。无需任何外部向量数据库或图数据库。
 
-- [它是什么](#它是什么)
-- [快速开始](#快速开始)
-- [使用方式](#使用方式)
-- [工作原理](#工作原理)
-- [自研组件](#自研组件)
-- [完整文档（英文）](#完整文档英文)
-
----
-
-## 它是什么
-
-一个本地服务，使用 [MCP 协议](https://modelcontextprotocol.io) 为 Claude（以及其他兼容 MCP 的助手）提供长期记忆。它逐字记录每个会话的每一轮对话，随着时间组织成关于你的个人地图，并在每次新会话开始时回传一小段相关记忆。你不需要说 *"记住这个"* 或 *"我们上次说了什么?"*。
-
-我为自己做了这个工具。它有效。我已经每天用了好几个月，现在分享出来。基准测试主要是出于我自己的好奇心 —— 我想知道它是真的有效，还是只是我习惯了。
-
-底层不是对别人家向量库和图库的薄薄一层封装 —— 关键部分都是我自己写的代码：存储引擎、社区发现算法、超维记忆基底，以及让它快起来的原生引擎。详见 [自研组件](#自研组件)。
-
-不像云端记忆服务：没有 API key，没有账号，没有埋点。引擎、存储、嵌入全部本地运行。唯一离开你机器的数据，就是你的 CLI 客户端本来就会发出的那次模型调用。
+**其记忆风格是刻意“自闭式”的：** 逐字优先于转述、线索精确、专注持续、罕见事件被当作罕见来保留。[名称由来](#名称由来)。
 
 ---
 
 ## 快速开始
 
-### 前置条件
-
-- macOS（Apple Silicon）、Linux 或 Windows（beta）
-- Python 3.11 或 3.12
-- Node.js 18+
-- Rust 工具链 —— 原生引擎从源码构建
-- 支持 MCP 的 CLI 客户端 —— [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)、Codex CLI、Gemini CLI、Cursor CLI 等
-- 约 500 MB 可用磁盘空间
-
-macOS 和 Linux 已完整支持。**Windows 处于 beta** —— 运行时已移植并在 Windows 11 上验证，但测试套件仍在移植中，请视为实验性。欢迎贡献：遇到 Windows 问题请开 issue 或 PR。
-
-### 安装
+### Claude Code
 
 ```bash
-git clone https://github.com/CodeAbra/iai-personal-memory-engine.git
-cd iai-personal-memory-engine
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install .
+python3.12 -m pip install -U iai-pme
 ```
 
-`pip install` 会通过 `setuptools-rust` 自动构建原生 Rust 引擎（`iai_mcp_native` —— 嵌入器 + 图核），作为包构建的一部分。没有单独的构建脚本。如果以后修改 Rust 源码需要手动重建：
+然后在 Claude Code 中运行：
 
-```bash
-iai-mcp build-native        # 原地重建原生引擎
+```text
+/plugin marketplace add CodeAbra/iai-personal-memory-engine
+/plugin install iai-memory@iai-pme
 ```
 
-然后构建 MCP wrapper 并启动本地引擎（在后台运行）：
+重启会话，然后验证：
 
 ```bash
-cd mcp-wrapper && npm install && npm run build && cd ..
-iai-mcp daemon install      # macOS 用 launchd，Linux 用 systemd，Windows 用任务计划程序
 iai --version
+iai-mcp daemon status
+iai-mcp doctor
 ```
 
-### 安装捕获 + 召回钩子
+也支持 Python 3.11。
 
-这是让记忆变成"环境无感"的关键。没有这些钩子，iai-mcp 只能读取记忆，不会写入对话内容，也不会在会话开始时注入召回。一条命令搞定三个钩子：
+### macOS 或 Linux：一体化源码安装
 
 ```bash
-iai-mcp capture-hooks install       # 复制全部三个钩子 + 修补 ~/.claude/settings.json
-iai-mcp capture-hooks status        # 验证：应输出 "status: ACTIVE"
-iai-mcp capture-hooks uninstall     # 干净卸载
+curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine/main/scripts/bootstrap.sh | bash
 ```
 
-Codex 用户：
+它会构建 Rust 引擎和 TypeScript 包装器，安装后台服务与挂钩，注册 Claude Code，并运行健康检查。需要 Git、Python 3.11/3.12、Node.js 18+ 和 Rust。若想在不改动机器的情况下查看步骤：
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/CodeAbra/iai-personal-memory-engine/main/scripts/bootstrap.sh | bash -s -- --dry-run
+```
+
+### 其他宿主
+
+```bash
+python3.12 -m pip install -U iai-pme
+iai-mcp crypto init
+iai-mcp daemon install
 iai-mcp capture-hooks install --target codex
 ```
 
-两个都装：
+把 `codex` 换成 `cursor`、`antigravity`、`hermes`、`openclaw` 或 `all`。MCP 工具适用于任何支持 MCP-over-stdio 的客户端；自动捕获与上下文注入取决于宿主暴露的挂钩。详见[技术参考](docs/REFERENCE.md)。
 
-```bash
-iai-mcp capture-hooks install --target all
-```
-
-### 连接你的 MCP 客户端
-
-Claude Code：
-
-```bash
-claude mcp add iai-mcp -- node "$(pwd)/mcp-wrapper/dist/index.js"
-```
-
-或者直接编辑 `~/.claude.json`：
-
-```json
-{
-  "mcpServers": {
-    "iai-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/iai-mcp/mcp-wrapper/dist/index.js"]
-    }
-  }
-}
-```
-
-使用绝对路径。`~` 和 `$HOME` 在这里不会展开。
-
-Claude Desktop 用户编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`。
-
-### 验证
-
-```bash
-iai-mcp doctor
-iai-mcp daemon status
-```
-
-重启 Claude Code。开始一次会话、做点事、退出。然后：
-
-```bash
-tail ~/.iai-mcp/logs/capture-$(date -u +%Y-%m-%d).log
-```
-
-你应该能看到一行 `rc=0`。这就是你的第一段记忆。
+新建的存储默认使用原生引擎格式；升级时既有存储会保持其当前格式。要把既有的旧版 SQLite 存储迁移到原生引擎，运行 `iai-mcp migrate-to-lilli`——`iai-mcp doctor` 会打印确切命令，[技术参考](docs/REFERENCE.md)记录了完整流程。
 
 ---
 
-## 使用方式
+## 安装之后会发生什么
 
-会话过程中你不需要直接调用 `iai-mcp`。一旦连接好：
+| 事件 | 动作 |
+|---|---|
+| 提示提交 | 新的对话轮次以文件 IO 追加到会话缓冲区；捕获路径上无需嵌入或引擎 RPC |
+| 会话结束 | 剩余的转录内容被转存以待摄取；挂钩失败不会阻塞宿主 |
+| 会话开始 | 一段有界的记忆前缀作为宿主上下文暴露；空存储或引擎不可用时输出为空 |
+| 后续轮次 | 支持的宿主会收到一小份前瞻（foresight）或增量包，附带年龄与修订标记 |
+| 空闲时 | 捕获内容被嵌入、去重、加密、插入、聚类、巩固、强化并衰减 |
 
-**捕获是自动的。** 每一轮对话（你的和助手的）都会被逐字记录，带时间戳和会话元数据。你不需要说 *"记住这个"*。
-
-**召回是自动的。** 新会话开始时，本地引擎会组装一小段与当前相关的历史，注入到对话前缀里。你不需要问 *"我们上次说了什么"*。
-
-**整合在闲时运行。** 会话之间，本地引擎合并重复内容、强化常被检索的路径、修剪弱连接。系统会随着时间悄悄变得更懂你。
-
-几周日常使用之后差别会变得明显。助手不再问相同的定位问题，会引用你顺口提过的事，无需被告知就能适应你的风格。
-
-还有一个 CLI —— 日常使用不需要它，但当你想直接从终端查询或添加记忆时，`iai` 提供了：`recall`、`capture`、`ask`（基于你的记忆做 LLM 综合回答）、`status`、`last`。
+后台进程在 CLI 中称为 `daemon`。当它处于休眠或临时不可用时，MCP 包装器和 `iai` 仍能直接读取本地存储。
 
 ---
 
 ## 工作原理
 
-本地引擎是一个在后台运行的 Python 进程 —— 闲时休眠，需要时被唤醒，所以不会一直在用 CPU。你的 MCP 客户端通过 Unix socket 连接它。不暴露任何网络端口。
+### 记忆模型
 
-召回不依赖引擎是否唤醒。存储本身始终可用：当引擎休眠或未运行时，你的助手（和 `iai` CLI）会直接从本地存储读取记忆。引擎只负责快速的无 LLM 召回路径，加上夜间整合 —— 它从不充当你记忆的看门人。
-
-记忆分为三层：
-
-**情景记忆（Episodic）** —— 对话内容的逐字片段，带时间戳。一次写入，永不覆盖或重写。
-
-**语义记忆（Semantic）** —— 闲时整合期间，从相关情景的聚类中归纳出的摘要。
-
-**程序性记忆（Procedural）** —— 一小组关于你的稳定参数，随时间习得：偏好、风格线索、反复出现的模式。11 个根据"什么管用"自我调整的封印式旋钮。
-
-三层由一个超维记忆基底（hyperdimensional memory substrate）承载 —— 每种记忆有自己独立的表示，所以情景细节、语义要点、程序性模式不会被压成一个无差别的团块。
-
-后台周期性运行一次（睡眠周期）：用我自己写的社区发现算法对情景做聚类、构建语义摘要、衰减未被强化的旧连接、强化被频繁共同检索的路径。你没再回顾过的事情会自然褪色。每晚最多发起一次 LLM 调用，**通过你已有的 Claude 订阅**（`claude -p`） —— 不需要单独的 API key，限制在你日均额度的 ≤1%。（`iai-mcp doctor` 的 (p) 项验证整个安装中没有任何 API-key SDK 路径。）
-
-召回综合三种信号：语义相似度、图连接强度、时近性。三者一起排序。热路径完全本地运行，链路中没有 LLM。
-
-所有记录在静态时使用 AES-256-GCM 加密。密钥放在 `~/.iai-mcp/.crypto.key`（mode 0600）。请备份。**密钥丢失 = 记忆丢失。**
-
-一切都存放在 `~/.iai-mcp/`。嵌入在本地计算。唯一离开机器的数据，就是你的客户端本来就要调用的那次 LLM API 请求。
-
----
-
-## 自研组件
-
-大部分记忆类项目只是在现成的向量库和图库上面薄薄包一层。这个不是。承重的部分都是我自己写的代码，专门为这种工作负载设计 —— 一个小型记忆图，每晚变化，每次召回都会被查询：
-
-| 组件 | 功能 |
+| 层 | 内容 |
 |---|---|
-| **Hippo** | 存储引擎 —— 加密记录、向量索引、图，全部在一个本地存储里。 |
-| **MOSAIC** | 我的社区发现算法 —— Leiden 家族方法（CPM 目标函数），用纯 Python 从零编写。它对记忆图做聚类，让召回能扩散到正确的邻域，让睡眠能重放连贯的情景 —— 专为小型、异构权重、每个周期都在变化的图调优，社区身份在拆分和合并中保持稳定。 |
-| **Lilli HD** | 超维记忆基底 —— 情景 / 语义 / 程序性记忆各有独立表示，支持结构性召回（按记忆的*形状*召回，而不只是它的嵌入向量）。 |
-| **Native engine** | Rust 内核 —— 嵌入器和图核。延迟主要来自这里。 |
+| **情景（Episodic）** | 带时间戳、一次写入的“当时所说”的片段 |
+| **语义（Semantic）** | 空闲巩固期间由相关情景归纳出的摘要 |
+| **程序（Procedural）** | 随时间习得的十个有界行为参数 |
 
-这些组件构建在一层稳定的、宽松许可的基础库之上 —— SQLite、`candle` 张量库、NumPy、经过审计的 `cryptography` AES 实现。我自己写引擎和算法；我不重新发明数据库、张量内核 —— 也*故意*不重新发明加密原语。有趣的砖是我的，下面的地基是无聊、久经考验、宽松许可的。**全程 MIT。**
+不同的超维（hyperdimensional）表示让字面细节、语义结构和行为倾向不会坍缩到同一个向量面上。
 
-我写这些是因为现成的方案是为不同的问题设计的 —— 大型静态图、多租户云、要点式摘要 —— 它们对"一个人的记忆，在一台机器上，每晚重新组织"这个问题来说更慢、更不合适。我的版本在*这个形状*的问题上更快，而我只在乎这个形状。
+本地、无需大模型的召回路径结合了语义相似度、图证据、时近性、时间有效性和词法证据。`memory_recall` 同时返回 `hits` 和 `anti_hits`；`memory_contradict` 会关闭旧记录的有效区间、创建新记录并把二者链接起来。
 
----
+空闲时，引擎会把相关情景分组、归纳语义记忆、强化有用路径、衰减未复核的弱边。一个可选的 REM 步骤可能通过用户已有的 Claude 订阅调用一次 `claude -p`，上限不超过每日配额的 1%。无需 Anthropic API 密钥。
 
-## 完整文档（英文）
+### 自研核心组件
 
-更多内容请见英文版 README：
-
-- **基准测试细节**（LongMemEval-S 对比 mempalace、Rescue@10、漂移、整合、延迟、内存占用） → [README.md#benchmarks](./README.md#benchmarks)
-- **配置项**（环境变量、调优旋钮） → [README.md#configuration](./README.md#configuration)
-- **Doctor 自检**（33 项健康检查清单） → [README.md#doctor](./README.md#doctor)
-- **故障排查** → [README.md#troubleshooting](./README.md#troubleshooting)
-- **状态与限制** → [README.md#status-and-limitations](./README.md#status-and-limitations)
-- **兼容性**（Claude Code / Codex CLI / Gemini CLI / Cursor CLI / Claude Desktop） → [README.md#compatibility](./README.md#compatibility)
-- **关于命名**（Independent Autistic Intelligence 的含义） → [README.md#about-the-name](./README.md#about-the-name)
+| 组件 | 作用 |
+|---|---|
+| **Hippo** | 在一个本地存储中容纳加密记录、向量索引和图 |
+| **MOSAIC** | Leiden 家族的社区检测，具备稳定的社区身份 |
+| **Lilli HD** | 超维基底与结构化召回 |
+| **原生引擎** | Rust 嵌入器与图内核 |
 
 ---
 
-## License
+## 仪表盘与 CLI
+
+```bash
+iai brain
+```
+
+本地仪表盘可搜索存储、展示图邻域与矛盾、置顶或淡出记忆、摄取文件、控制后台引擎，并根据你自己的存储报告 token 用量估计。
+
+```text
+iai recall · temporal-recall · search · ask · capture · teach · upload
+iai watch · brain · status · last
+```
+
+`iai upload` 接受文档、Office 文件、电子书、源代码、配置文件和目录。完整格式与运维命令列在 [`docs/REFERENCE.md`](docs/REFERENCE.md)。
+
+---
+
+## 基准测试
+
+每个测试脚手架都随 `bench/` 一同发布；方法学与复现命令见 [`BENCHMARKS.md`](BENCHMARKS.md)。
+
+| 基准 | 结果 |
+|---|---:|
+| 矛盾后 Rescue@10 | **1.000** |
+| 历史逐字命中@10 | **1.000** |
+| LongMemEval-S R@5（产品嵌入器） | **0.962** |
+| LongMemEval-S R@10（产品嵌入器） | **0.978** |
+
+历史逐字检索的平面余弦（flat-cosine）基线约为 0.71。使用相同的 `all-MiniLM-L6-v2` 嵌入器时，iai-memory 与 mempalace v3.3.6 的 R@5 均为 `0.966`、R@10 均为 `0.978`；不宣称胜出。
+
+在作者自己的存储上，自动注入的一份记忆包平均约 350 tokens，而它所替代的一次智能体搜索往返约 2,850 tokens：在该实测负载上约便宜 88%。这不适用于显式的 `memory_recall`，后者的默认响应预算为 1,500 tokens。
+
+---
+
+## MCP 工具
+
+```text
+memory_recall              memory_temporal_recall
+memory_recall_structural   memory_search
+memory_capture             memory_contradict
+memory_reinforce           memory_consolidate
+profile_get_set            topology
+schema_list                events_query
+episodes_recent            curiosity_pending
+```
+
+共十四个工具，涵盖线索式、时间式、结构式和词法式召回；捕获与纠正；强化与巩固；行为画像控制；以及存储自省。
+
+---
+
+## 兼容性
+
+| 宿主 | 环境行为 |
+|---|---|
+| **Claude Code** | 会话开始召回、逐轮更新、逐轮捕获与会话捕获 |
+| **Codex CLI** | 通过 Codex 挂钩完整集成 |
+| **Cursor** | 会话开始召回与捕获；无逐轮文本注入 |
+| **Antigravity** | 每次调用召回，并从无损转录中捕获 |
+| **Hermes 0.5.0+** | 模型调用前召回，并从其消息存储中捕获 |
+| **OpenClaw** | 按需提供 MCP 工具；无环境 shell 挂钩 |
+| **Gemini CLI 及其他 MCP 宿主** | 提供 MCP 工具；除上表所列外不附带宿主专用挂钩 |
+| **Claude Desktop** | 提供 MCP 工具；纯 Chat 不暴露 Claude Code 式的环境挂钩 |
+
+---
+
+## 隐私与限制
+
+- 记录以 AES-256-GCM 静态加密。存储与密钥位于 `~/.iai-mcp/`；请一起备份。
+- macOS 与 Linux 使用 Unix 套接字。Windows 使用带每用户令牌的临时回环端口。
+- 没有 iai-memory 账号、遥测管线、托管仪表盘或跨机同步。
+- 可选的 iai-memory 网络活动仅有 REM 的 `claude -p` 步骤和每日一次 PyPI 版本检查。设置 `IAI_MCP_VERSION_CHECK=0` 可关闭该检查。
+- 存储拒绝混用不兼容的嵌入代（generation）；更换嵌入器需要一次显式迁移。
+- 在最初大约十个会话里召回通常一般，其质量与延迟取决于语料规模、语言、嵌入器与已存历史。
+- 默认存储以英语为先。原始的非英语记录需要显式的 `raw:<lang>` 标签以及一个多语言或自定义嵌入器。
+- Windows 为测试版。环境行为随宿主挂钩支持而不同。
+- 本项目由个人维护，无企业级 SLA。
+
+健康检查与更新：
+
+```bash
+iai-mcp doctor          # 36 项检查
+iai-mcp daemon status
+iai-mcp self-update
+```
+
+---
+
+## 名称由来
+
+**IAI —— Independent Autistic Intelligence（独立·自闭式·智能）** 描述的是这套记忆设计。
+
+- **Independent（独立）：** 引擎、存储、嵌入与仪表盘都在本地运行。
+- **Autistic（自闭式）：** 字面保存、线索精确、专注持续，把罕见事件当作罕见来保留，而不是抹平成一份普通摘要。这是对运行设计的描述，而非诊断或随意的比喻。
+- **Intelligence（智能）：** 取系统层面的含义——一个观察、适应、自我重组并长期保持可用的过程。
+
+“个人记忆引擎”界定了它的范围：一个人的记忆，在一台机器上，供其已经在用的助手使用。
+
+---
+
+## 文档
+
+- [`docs/REFERENCE.md`](docs/REFERENCE.md) —— 技术与运维参考
+- [`BENCHMARKS.md`](BENCHMARKS.md) —— 方法学与复现命令
+- [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md) —— 提供器、语言与迁移
+- [`CHANGELOG.md`](CHANGELOG.md) —— 发布历史
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) —— 开发与测试设置
+- [`SECURITY.md`](SECURITY.md) —— 私密漏洞上报
+
+欢迎提交 issue 与 pull request。对检索、捕获、矛盾处理或巩固的改动，应附带相关的基准重跑。
+
+## 作者
+
+由 Areg Aramovich Noya 与 Lilli Noya，与 [lcgc.dev](https://lcgc.dev) 团队合作打造。
+
+## 许可证
 
 [MIT](LICENSE)
-
-## Authors
-
-By Areg Aramovich Noya, in collaboration with the team at [lcgc.dev](https://lcgc.dev).

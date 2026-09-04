@@ -479,6 +479,144 @@ def test_socket_windowed_response_legitimately_empty_still_passes(
     assert result.passed is True
 
 
+# --- Sleep-step failure surfaced on WARN/FAIL only -----------------------
+
+
+def _write_lifecycle_state_with_failure(path, last_error: str | None) -> None:
+    from iai_mcp import lifecycle_state
+
+    record = lifecycle_state.default_state()
+    if last_error is not None:
+        record["sleep_cycle_progress"] = {
+            "last_completed_index": 4,
+            "attempt": 1,
+            "last_error": last_error,
+            "started_at": "2026-08-11T00:00:00+00:00",
+        }
+    lifecycle_state.save_state(record, path=path)
+
+
+_REALISTIC_FAILURE = (
+    "deferred:step=DREAM_DECAY:chunk_idx=7 "
+    "caused_by=RuntimeError: simulated failure"
+)
+
+
+def test_warn_detail_carries_recorded_sleep_step_failure(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "lifecycle_state.json"
+    _write_lifecycle_state_with_failure(state_path, _REALISTIC_FAILURE)
+    monkeypatch.setattr("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", state_path)
+
+    events = [
+        _ev(1, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+        _ev(2, {"claude_call_used": False, "timed_out": True}),
+    ]
+    _patch_events(monkeypatch, events)
+
+    result = check_bb_nightly_insight_mint(store=object(), now=_NOW)
+
+    assert result.status == "WARN"
+    assert "2 consecutive night(s)" in result.detail
+    assert "DREAM_DECAY" in result.detail
+
+
+def test_fail_detail_carries_recorded_sleep_step_failure(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "lifecycle_state.json"
+    _write_lifecycle_state_with_failure(state_path, _REALISTIC_FAILURE)
+    monkeypatch.setattr("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", state_path)
+
+    events = [
+        _ev(1, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+        _ev(2, {"claude_call_used": False, "timed_out": True}),
+        _ev(3, {"claude_call_used": False, "insight_skip_reason": "rate_limited"}),
+    ]
+    _patch_events(monkeypatch, events)
+
+    result = check_bb_nightly_insight_mint(store=object(), now=_NOW)
+
+    assert result.status == "FAIL"
+    assert "3 consecutive nights without a minted insight" in result.detail
+    assert "DREAM_DECAY" in result.detail
+
+
+def test_no_recorded_failure_detail_is_byte_identical_to_pre_change(
+    monkeypatch, tmp_path
+) -> None:
+    """No key, and no lifecycle-state file at all, produce the identical
+    detail string -- neither trailing separator nor empty clause."""
+    events = [
+        _ev(1, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+        _ev(2, {"claude_call_used": False, "timed_out": True}),
+    ]
+    _patch_events(monkeypatch, events)
+
+    baseline = check_bb_nightly_insight_mint(store=object(), now=_NOW)
+    assert baseline.detail == "2 consecutive night(s) without a minted insight"
+
+    state_path = tmp_path / "lifecycle_state.json"
+    _write_lifecycle_state_with_failure(state_path, None)
+    monkeypatch.setattr("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", state_path)
+
+    with_no_failure = check_bb_nightly_insight_mint(store=object(), now=_NOW)
+    assert with_no_failure.detail == baseline.detail
+
+
+def test_absent_lifecycle_state_file_degrades_silently(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "does-not-exist" / "lifecycle_state.json"
+    monkeypatch.setattr("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", state_path)
+
+    events = [
+        _ev(1, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+        _ev(2, {"claude_call_used": False, "timed_out": True}),
+        _ev(3, {"claude_call_used": False, "insight_skip_reason": "rate_limited"}),
+    ]
+    _patch_events(monkeypatch, events)
+
+    result = check_bb_nightly_insight_mint(store=object(), now=_NOW)  # must not raise
+
+    assert result.status == "FAIL"
+    assert result.detail == "3 consecutive nights without a minted insight"
+
+
+def test_malformed_lifecycle_state_file_degrades_silently(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "lifecycle_state.json"
+    state_path.write_text("not valid json{{{")
+    monkeypatch.setattr("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", state_path)
+
+    events = [
+        _ev(1, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+        _ev(2, {"claude_call_used": False, "timed_out": True}),
+        _ev(3, {"claude_call_used": False, "insight_skip_reason": "rate_limited"}),
+    ]
+    _patch_events(monkeypatch, events)
+
+    result = check_bb_nightly_insight_mint(store=object(), now=_NOW)  # must not raise
+
+    assert result.status == "FAIL"
+    assert result.detail == "3 consecutive nights without a minted insight"
+
+
+def test_pass_verdict_detail_unchanged_even_with_a_recorded_failure(
+    monkeypatch, tmp_path
+) -> None:
+    state_path = tmp_path / "lifecycle_state.json"
+    _write_lifecycle_state_with_failure(state_path, _REALISTIC_FAILURE)
+    monkeypatch.setattr("iai_mcp.lifecycle_state.LIFECYCLE_STATE_PATH", state_path)
+
+    events = [
+        _ev(1, {"claude_call_used": True}),
+        _ev(2, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+        _ev(3, {"claude_call_used": False, "insight_skip_reason": "auth_failed"}),
+    ]
+    _patch_events(monkeypatch, events)
+
+    result = check_bb_nightly_insight_mint(store=object(), now=_NOW)
+
+    assert result.status == "PASS"
+    assert "DREAM_DECAY" not in result.detail
+    assert result.detail == f"last minted insight {(_NOW.date() - timedelta(days=1)).isoformat()}"
+
+
 def test_events_query_socket_route_redacts_main_insight_text(
     tmp_path, monkeypatch
 ) -> None:

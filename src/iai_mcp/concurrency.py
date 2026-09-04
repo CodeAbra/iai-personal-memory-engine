@@ -90,7 +90,11 @@ def foreground_backoff(max_wait_s: float = 2.0, step_s: float = 0.05) -> None:
         waited += step_s
 
 
-def cleanup_stale_socket(path: Path = SOCKET_PATH) -> None:
+def cleanup_stale_socket(path: Path | None = None) -> None:
+    # Resolved at call time -- see directive_cache.write_directives_cache for
+    # why a bound default would ignore a monkeypatched SOCKET_PATH.
+    if path is None:
+        path = SOCKET_PATH
     try:
         path.unlink()
     except FileNotFoundError:
@@ -185,6 +189,13 @@ def _status_embed_identity(store: Any) -> "dict | None":
         return {"error": str(exc)[:160]}
 
 
+#: Per-process cache of cue embeddings on the recall path. A hit returns the
+#: exact vector a fresh embed produced (byte-identical); bounded and reset on
+#: process restart, never persisted.
+_CUE_EMBED_VEC_CAP: int = 256
+_cue_embed_vecs: "dict[str, list[float]]" = {}
+
+
 async def _dispatch_socket_request(
     req: dict,
     store: Any,
@@ -272,6 +283,11 @@ async def _dispatch_socket_request(
             "embed_identity": (
                 state.get("embed_identity")
                 if isinstance(state.get("embed_identity"), dict)
+                else None
+            ),
+            "code_stamp": (
+                state.get("code_stamp")
+                if isinstance(state.get("code_stamp"), dict)
                 else None
             ),
         }
@@ -363,9 +379,21 @@ async def _dispatch_socket_request(
 
     if req_type == "embed_cue":
         cue = str(req.get("cue", ""))
+        cache_on = os.environ.get("IAI_MCP_CUE_EMBED_CACHE", "1") != "0"
+        if not cache_on:
+            _cue_embed_vecs.clear()
         try:
             from iai_mcp.embed import embed_query as _embed_query, embedder_for_store
+            # embedder_for_store runs the store-embedder identity guard on
+            # every call, cache hit or miss — a cached vector must never
+            # bypass it.
             embedder = embedder_for_store(store)
+            if cache_on:
+                cached = _cue_embed_vecs.get(cue)
+                if cached is not None:
+                    if len(cached) == embedder.DIM:
+                        return {"ok": True, "embedding": list(cached)}
+                    del _cue_embed_vecs[cue]
             vec = await asyncio.to_thread(_embed_query, embedder, cue)
             if len(vec) != embedder.DIM:
                 return {
@@ -373,6 +401,10 @@ async def _dispatch_socket_request(
                     "reason": "embed_dim_mismatch",
                     "error": f"embedder returned {len(vec)} dims, expected {embedder.DIM}",
                 }
+            if cache_on:
+                if len(_cue_embed_vecs) >= _CUE_EMBED_VEC_CAP:
+                    _cue_embed_vecs.clear()
+                _cue_embed_vecs[cue] = list(vec)
             return {"ok": True, "embedding": list(vec)}
         except Exception as exc:  # noqa: BLE001 -- embedder not ready / cold
             return {"ok": False, "reason": "daemon_not_ready", "error": str(exc)[:200]}
@@ -390,8 +422,12 @@ async def serve_control_socket(
     shutdown: asyncio.Event,
     *,
     dispatcher: Callable[[dict], Awaitable[dict]] | None = None,
-    socket_path: Path = SOCKET_PATH,
+    socket_path: Path | None = None,
 ) -> None:
+    # Resolved at call time -- see directive_cache.write_directives_cache for
+    # why a bound default would ignore a monkeypatched SOCKET_PATH.
+    if socket_path is None:
+        socket_path = SOCKET_PATH
     cleanup_stale_socket(socket_path)
     socket_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -23,13 +23,14 @@ from uuid import UUID
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt",
     reason="POSIX paths; hermetic fixture uses HOME monkeypatching",
 )
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _EMBED_DIM = 384
 

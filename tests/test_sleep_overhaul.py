@@ -108,6 +108,7 @@ def test_r1_step_phase_mapping() -> None:
         SleepStep.OPTIMIZE_HIPPO,
         SleepStep.HIPPO_CLEANUP,
         SleepStep.EMBEDDING_INTEGRITY,
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     }
     assert rem_steps == {
         SleepStep.DREAM_DECAY,
@@ -122,15 +123,18 @@ def test_r1_step_phase_mapping() -> None:
         SleepStep.ENTITY_LINK,
         SleepStep.CURIOSITY_MINE,
         SleepStep.COMMUNITY_NAMING,
+        SleepStep.RECONSOLIDATION_VALENCE,
+        SleepStep.PROC_MINE,
     }
 
 def test_r2_step_order_nrem_before_rem() -> None:
     order = SleepPipeline._STEP_ORDER
-    assert len(order) == 17
-    assert order[-1] == SleepStep.COMMUNITY_NAMING
-    assert order[-2] == SleepStep.EMBEDDING_INTEGRITY
-    assert order[-3] == SleepStep.CURIOSITY_MINE
-    assert order[-4] == SleepStep.ENTITY_LINK
+    assert len(order) == 20
+    assert order[-1] == SleepStep.TRANSCRIPT_SWEEP_BACKSTOP
+    assert order[-2] == SleepStep.PROC_MINE
+    assert order[-3] == SleepStep.RECONSOLIDATION_VALENCE
+    assert order[-4] == SleepStep.COMMUNITY_NAMING
+    assert order[-5] == SleepStep.EMBEDDING_INTEGRITY
 
     nrem_positions = [
         order.index(s)
@@ -171,18 +175,21 @@ def test_r2_step_order_nrem_before_rem() -> None:
     assert order.index(SleepStep.DMN_REFLECTION) == (
         order.index(SleepStep.USER_MODEL_UPDATE) + 1
     )
-    assert order.index(SleepStep.CRISIS_RECLUSTER) == len(order) - 7
+    assert order.index(SleepStep.CRISIS_RECLUSTER) == len(order) - 10
     assert SleepStep.CLUSTER_SUMMARY.value == 12
     assert SleepStep.RECALL_INDEX_REBUILD.value == 13
     assert SleepStep.ENTITY_LINK.value == 14
     assert SleepStep.CURIOSITY_MINE.value == 15
     assert SleepStep.COMMUNITY_NAMING.value == 17
-    assert order[-6] == SleepStep.CLUSTER_SUMMARY
-    assert order[-5] == SleepStep.RECALL_INDEX_REBUILD
-    assert order[-4] == SleepStep.ENTITY_LINK
-    assert order[-3] == SleepStep.CURIOSITY_MINE
-    assert order[-2] == SleepStep.EMBEDDING_INTEGRITY
-    assert order[-1] == SleepStep.COMMUNITY_NAMING
+    assert order[-9] == SleepStep.CLUSTER_SUMMARY
+    assert order[-8] == SleepStep.RECALL_INDEX_REBUILD
+    assert order[-7] == SleepStep.ENTITY_LINK
+    assert order[-6] == SleepStep.CURIOSITY_MINE
+    assert order[-5] == SleepStep.EMBEDDING_INTEGRITY
+    assert order[-4] == SleepStep.COMMUNITY_NAMING
+    assert order[-3] == SleepStep.RECONSOLIDATION_VALENCE
+    assert order[-2] == SleepStep.PROC_MINE
+    assert order[-1] == SleepStep.TRANSCRIPT_SWEEP_BACKSTOP
 
 def test_r3_cluster_replay_batches_intra_cluster_edges(
     tmp_path: Path,

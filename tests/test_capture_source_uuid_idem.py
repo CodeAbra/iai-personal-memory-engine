@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(
 
 SESSION_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 TRANSCRIPT_TS = "2026-05-31T17:41:01.968Z"
-TURN_TEXT = "маркер один — unique marker for re-emission idem test"
+TURN_TEXT = "marker one — unique marker for re-emission idem test"
 
 
 @pytest.fixture
@@ -270,6 +270,76 @@ def test_drain_deferred_deduplicates_already_inserted_uuid(iai_home):
     assert len(matching) == 1, (
         f"Expected 1 row after cross-path drain; found {len(matching)}.  "
         f"A second row here is the cross-path duplicate bug."
+    )
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_immediate_and_walk_same_prompt_id_collapse_to_one_row(driver, iai_home, monkeypatch):
+    """The immediate stdin capture stamps source_uuid=prompt_id; the later
+    transcript walk of the SAME prompt re-keys role:user to promptId via
+    _parse_transcript_line. Both must collapse through find_record_by_tag —
+    a second stored row here is the double-capture regression this phase
+    exists to prevent."""
+    if driver == "lilli":
+        try:
+            import iai_mcp_native  # noqa: F401
+        except ImportError:
+            pytest.skip("iai_mcp_native not built — lilli driver unavailable in this env")
+        monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+
+    from iai_mcp.capture import _parse_transcript_line, capture_turn
+
+    store = _open_store()
+    PROMPT_ID = "f1e2d3c4-5566-7788-99aa-bbccddeeff00"
+    TEXT = "immediate-versus-walk join key collapse test for prompt id"
+
+    r1 = capture_turn(
+        store,
+        cue="immediate stdin capture",
+        text=TEXT,
+        tier="episodic",
+        session_id=SESSION_ID,
+        role="user",
+        ts="2026-08-18T09:00:00.000Z",
+        source_uuid=PROMPT_ID,
+    )
+    assert r1["status"] == "inserted", f"immediate capture must insert; got {r1}"
+
+    transcript_line = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": TEXT},
+        "uuid": "per-line-uuid-distinct-from-prompt-id",
+        "promptId": PROMPT_ID,
+        "timestamp": "2026-08-18T09:00:03.000Z",
+    })
+    parsed = _parse_transcript_line(transcript_line)
+    assert parsed is not None
+    role, text, src_uuid, ts = parsed
+    assert src_uuid == PROMPT_ID, (
+        f"the walk must key a role:user turn by promptId (fallback uuid); got {src_uuid!r}"
+    )
+
+    r2 = capture_turn(
+        store,
+        cue="transcript walk (reinforce)",
+        text=text,
+        tier="episodic",
+        session_id=SESSION_ID,
+        role=role,
+        ts=ts,
+        source_uuid=src_uuid,
+    )
+    assert r2["status"] == "reinforced", (
+        f"walk of the same prompt must reinforce the immediate row, not insert "
+        f"a second one; got {r2!r}"
+    )
+    assert r2["record_id"] == r1["record_id"]
+
+    turns = store.recent_user_turns(n=50, session_id=SESSION_ID)
+    matching = [t for t in turns if TEXT in (t.literal_surface or "")]
+    assert len(matching) == 1, (
+        f"[driver={driver}] expected exactly 1 row for the immediate+walk pair; "
+        f"found {len(matching)}"
     )
 
 
