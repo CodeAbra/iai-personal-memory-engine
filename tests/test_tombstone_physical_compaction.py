@@ -366,7 +366,7 @@ def test_migrate_finalize_imports_full_tombstone_bloat(
     no compaction step; the migrated destination's physical row count still
     equals the source's full row count (live + aged-tombstoned + grace).
     """
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_ERASURE_TOMBSTONE_TTL_SEC", "60")
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -500,7 +500,7 @@ def test_compaction_stdlib_noop_arm(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     """step_compact_hippo is driver-agnostic (HippoTable/MemoryStore only) --
     the same aged-drop correctness must hold on the stdlib sqlite3 driver.
     """
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_ERASURE_TOMBSTONE_TTL_SEC", "60")
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 

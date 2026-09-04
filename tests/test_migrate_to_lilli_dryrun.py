@@ -171,7 +171,7 @@ def _topup_store_to_min(root: Path, *, start_idx: int, target: int) -> int:
     synthetic) root -- NEVER the live store.
     """
     os.environ["IAI_MCP_STORE"] = str(root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
     from iai_mcp.store import MemoryStore, flush_record_buffer
 
     store = MemoryStore(root)
@@ -191,7 +191,7 @@ def _topup_store_to_min(root: Path, *, start_idx: int, target: int) -> int:
 def _build_synthetic_source(root: Path, *, n: int) -> str:
     """Build a fresh stdlib source store of ``n`` spread records + edges + events."""
     os.environ["IAI_MCP_STORE"] = str(root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
     from iai_mcp.store import MemoryStore, flush_record_buffer, flush_edge_buffer
     from iai_mcp.events import write_event, flush_event_buffer
 
@@ -302,7 +302,7 @@ def test_dryrun_30k_correct_and_fast_on_copy(tmp_path: Path):
         key = CryptoKey(store_root=real_root).get_or_create()
 
         os.environ["IAI_MCP_STORE"] = str(copy_root)
-        os.environ.pop("LILLI_STORAGE_DRIVER", None)
+        os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
         from iai_mcp.store import MemoryStore
 
         s = MemoryStore(copy_root)
@@ -324,7 +324,7 @@ def test_dryrun_30k_correct_and_fast_on_copy(tmp_path: Path):
 
     # Confirm the source reached the >= 30000 bar.
     os.environ["IAI_MCP_STORE"] = str(copy_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
     from iai_mcp.store import MemoryStore
 
     s = MemoryStore(copy_root)
@@ -342,7 +342,7 @@ def test_dryrun_30k_correct_and_fast_on_copy(tmp_path: Path):
 
     # Six-dimension co-scan through the Rust-routed dst.
     os.environ["IAI_MCP_STORE"] = str(copy_root)
-    os.environ.pop("LILLI_STORAGE_DRIVER", None)
+    os.environ["LILLI_STORAGE_DRIVER"] = "stdlib"
     rep = verify_store_equality(
         str(copy_db), dst_root, key, src_root=copy_root, sample_n=2000
     )

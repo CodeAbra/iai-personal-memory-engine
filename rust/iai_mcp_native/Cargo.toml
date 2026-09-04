@@ -28,6 +28,7 @@ pyo3-stub-gen       = { workspace = true, optional = true }
 iai_mcp_embed_core  = { path = "../iai_mcp_embed_core" }
 iai_mcp_graph_core  = { path = "../iai_mcp_graph_core" }
 iai_mcp_vec_core    = { path = "../iai_mcp_vec_core" }
+iai_mcp_rank_core   = { path = "../iai_mcp_rank_core" }
 lilli-hd            = { path = "../../crates/lilli-hd" }
 lillibrain          = { path = "../../crates/lillibrain" }
 lilliengine         = { path = "../../crates/lilliengine" }

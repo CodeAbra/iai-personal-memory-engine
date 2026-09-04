@@ -154,6 +154,7 @@ from iai_mcp.migrate._cleanup import (  # noqa: E402
     cleanup_idem_duplicates,
     cleanup_schema_duplicates,
 )
+from iai_mcp.migrate._directive_sweep import sweep_phantom_directives  # noqa: E402
 from iai_mcp.migrate._timestamps import (  # noqa: E402
     migrate_rederive_collapsed_timestamps,
     _find_transcript_ts,
@@ -171,6 +172,10 @@ from iai_mcp.migrate._to_lilli_verify import (  # noqa: E402
 from iai_mcp.migrate._to_lilli import (  # noqa: E402
     migrate_sqlite_to_lilli,
     MigrateReport,
+)
+from iai_mcp.migrate._to_lilli_swap import (  # noqa: E402
+    swap_migrated_store,
+    refuse_if_marker_present,
 )
 from iai_mcp.migrate._role_column import migrate_role_column  # noqa: E402
 from iai_mcp.migrate._live_flag_backfill import migrate_live_flag_backfill  # noqa: E402
@@ -193,6 +198,7 @@ __all__ = [
     "migrate_codec_metadata_v4_to_v5",
     "cleanup_idem_duplicates",
     "cleanup_schema_duplicates",
+    "sweep_phantom_directives",
     "migrate_rederive_collapsed_timestamps",
     "migrate_dedupe_episodic_captures",
     "migrate_salvage_torn_permanent_failed",
@@ -202,6 +208,8 @@ __all__ = [
     "VerifyReport",
     "migrate_sqlite_to_lilli",
     "MigrateReport",
+    "swap_migrated_store",
+    "refuse_if_marker_present",
     "migrate_role_column",
     "migrate_live_flag_backfill",
 ]

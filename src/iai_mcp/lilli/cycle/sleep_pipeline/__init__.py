@@ -54,6 +54,9 @@ class SleepStep(Enum):
     CURIOSITY_MINE = 15
     EMBEDDING_INTEGRITY = 16
     COMMUNITY_NAMING = 17
+    RECONSOLIDATION_VALENCE = 18
+    PROC_MINE = 19
+    TRANSCRIPT_SWEEP_BACKSTOP = 20
 
 
 class SleepPhase(Enum):
@@ -80,6 +83,9 @@ STEP_PHASE: dict[SleepStep, SleepPhase] = {
     SleepStep.CURIOSITY_MINE: SleepPhase.REM,
     SleepStep.EMBEDDING_INTEGRITY: SleepPhase.NREM,
     SleepStep.COMMUNITY_NAMING: SleepPhase.REM,
+    SleepStep.RECONSOLIDATION_VALENCE: SleepPhase.REM,
+    SleepStep.PROC_MINE: SleepPhase.REM,
+    SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: SleepPhase.NREM,
 }
 
 
@@ -105,6 +111,9 @@ _LIVENESS_SPEC: dict[SleepStep, tuple[str | None, str | None]] = {
     SleepStep.CURIOSITY_MINE: (None, None),
     SleepStep.EMBEDDING_INTEGRITY: (None, None),
     SleepStep.COMMUNITY_NAMING: ("communities_seen", "names_persisted"),
+    SleepStep.RECONSOLIDATION_VALENCE: ("candidates_labile", "valence_writes"),
+    SleepStep.PROC_MINE: ("candidates_gated", "chunks_persisted"),
+    SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: ("files_seen", "sessions_staged"),
 }
 
 
@@ -437,6 +446,9 @@ class SleepPipeline:
             SleepStep.CURIOSITY_MINE: self._step_curiosity_mine,
             SleepStep.EMBEDDING_INTEGRITY: self._step_embedding_integrity,
             SleepStep.COMMUNITY_NAMING: self._step_community_naming,
+            SleepStep.RECONSOLIDATION_VALENCE: self._step_reconsolidation_valence,
+            SleepStep.PROC_MINE: self._step_proc_mine,
+            SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: self._step_transcript_sweep_backstop,
         }
 
 
@@ -464,6 +476,19 @@ class SleepPipeline:
         # Runs after RECALL_INDEX_REBUILD so the warm lexical index is
         # current for the keyphrase scoring.
         SleepStep.COMMUNITY_NAMING,
+        # Tail-appended (see the WAL-recovery note above): re-reads the
+        # RECONSOLIDATION step's own labile_until pool, read-only.
+        SleepStep.RECONSOLIDATION_VALENCE,
+        # Tail-appended (see the WAL-recovery note above): mines/mints/decays
+        # procedural chunks from retrieval_cofired events, independent of
+        # every earlier step's output.
+        SleepStep.PROC_MINE,
+        # Tail-appended (see the WAL-recovery note above): re-runs the same
+        # transcript-sweep producer a scheduled courier process also calls,
+        # as a sleep-time backstop for a session the courier missed. Gated
+        # on the courier's own enablement flag; a no-op when the flag is
+        # absent or a transcript was already swept by the courier.
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
     )
 
     # Steps whose bodies materialize large transients (clustering / columnar
@@ -676,7 +701,8 @@ from iai_mcp.lilli.cycle.sleep_pipeline import (  # noqa: E402
     _schema_mine, _knob_tune, _dream_decay, _erasure, _optimize, _compact,
     _cluster_replay, _reconsolidation, _user_model, _dmn, _crisis,
     _cluster_summary, _recall_index, _essential_variable, _entity_link,
-    _curiosity_mine, _embed_integrity, _topic_naming,
+    _curiosity_mine, _embed_integrity, _topic_naming, _reconsolidation_valence,
+    _proc_mine, _transcript_sweep_backstop,
 )
 
 SleepPipeline._step_schema_mine = _schema_mine.step_schema_mine
@@ -698,6 +724,11 @@ SleepPipeline._step_entity_link = _entity_link.step_entity_link
 SleepPipeline._step_curiosity_mine = _curiosity_mine.step_curiosity_mine
 SleepPipeline._step_embedding_integrity = _embed_integrity.step_embedding_integrity
 SleepPipeline._step_community_naming = _topic_naming.step_community_naming
+SleepPipeline._step_reconsolidation_valence = _reconsolidation_valence.step_reconsolidation_valence
+SleepPipeline._step_proc_mine = _proc_mine.step_proc_mine
+SleepPipeline._step_transcript_sweep_backstop = (
+    _transcript_sweep_backstop.step_transcript_sweep_backstop
+)
 SleepPipeline._run_essential_variable_tracker_hook = _essential_variable.run_essential_variable_tracker_hook
 SleepPipeline._clear_crisis_mode_via_s2_or_fallback = _essential_variable.clear_crisis_mode_via_s2_or_fallback
 SleepPipeline._set_crisis_mode_via_s2_or_fallback = _essential_variable.set_crisis_mode_via_s2_or_fallback

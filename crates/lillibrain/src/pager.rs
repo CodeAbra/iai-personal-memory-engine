@@ -241,17 +241,6 @@ impl Pager {
         Ok(pager)
     }
 
-    /// Open an existing store file for lock-free read-only access.
-    ///
-    /// Takes no advisory lock and never writes, so a separate reader process
-    /// (the ANN-index rebuild worker, a daemon-down recall reader) can read
-    /// committed pages while a writer process holds the store's exclusive lock.
-    /// It performs no crash recovery — the writer owns recovery — so the caller
-    /// must read a checkpointed store (the maintenance pass checkpoints the WAL
-    /// into the main file before spawning the reader). Per-page checksums still
-    /// verify every page read, so a page torn by a concurrent commit surfaces as
-    /// an integrity error rather than silent corruption. Fails if the file does
-    /// not exist or is empty.
     /// Capture a read-only view's `(WAL overlay, main-file length, checkpoint
     /// generation, committed-tail offset)` that is ONE committed snapshot at
     /// least as new as the sidecar's tail at capture time.
@@ -274,7 +263,12 @@ impl Pager {
         wal_path: &Path,
         page_size: usize,
         main_len: &dyn Fn() -> Result<u64>,
-    ) -> Result<(HashMap<u32, Vec<u8>>, u64, Option<CheckpointGeneration>, u64)> {
+    ) -> Result<(
+        HashMap<u32, Vec<u8>>,
+        u64,
+        Option<CheckpointGeneration>,
+        u64,
+    )> {
         const ATTEMPTS: u32 = 8;
         let mut prev_probe: Option<(u64, Option<CheckpointGeneration>, u64)> = None;
         for attempt in 0..ATTEMPTS {
@@ -288,8 +282,7 @@ impl Pager {
                     true
                 } else {
                     end >= crate::consts::WAL_HEADER_SIZE as u64
-                        && wal_len_after.saturating_sub(end)
-                            < crate::consts::WAL_FRAME_SIZE as u64
+                        && wal_len_after.saturating_sub(end) < crate::consts::WAL_FRAME_SIZE as u64
                 };
                 if complete {
                     return Ok((overlay, main_len_after, gen_after, end));
@@ -302,9 +295,7 @@ impl Pager {
             } else {
                 prev_probe = None;
             }
-            std::thread::sleep(std::time::Duration::from_micros(
-                150 * (attempt as u64 + 1),
-            ));
+            std::thread::sleep(std::time::Duration::from_micros(150 * (attempt as u64 + 1)));
         }
         Err(StoreError::Integrity {
             detail: "read-only snapshot capture: WAL kept tearing across bounded retries"
@@ -312,6 +303,17 @@ impl Pager {
         })
     }
 
+    /// Open an existing store file for lock-free read-only access.
+    ///
+    /// Takes no advisory lock and never writes, so a separate reader process
+    /// (the ANN-index rebuild worker, a daemon-down recall reader) can read
+    /// committed pages while a writer process holds the store's exclusive lock.
+    /// It performs no crash recovery — the writer owns recovery — so the caller
+    /// must read a checkpointed store (the maintenance pass checkpoints the WAL
+    /// into the main file before spawning the reader). Per-page checksums still
+    /// verify every page read, so a page torn by a concurrent commit surfaces as
+    /// an integrity error rather than silent corruption. Fails if the file does
+    /// not exist or is empty.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Pager> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
@@ -1361,6 +1363,180 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brain.lilli");
         (dir, path)
+    }
+
+    fn page_of(byte: u8) -> Vec<u8> {
+        vec![byte; PAGE_SIZE]
+    }
+
+    /// `main_len` runs once per retry attempt inside `capture_ro_view`, so a
+    /// counting closure pins the exact attempt count a test observed —
+    /// stronger than a timing bound and immune to scheduler jitter.
+    fn counting_main_len(calls: &std::cell::Cell<u32>) -> impl Fn() -> Result<u64> + '_ {
+        move || {
+            calls.set(calls.get() + 1);
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn capture_ro_view_returns_empty_overlay_on_header_only_sidecar() {
+        let (_d, path) = temp_db();
+        let w = WalWriter::open(&path).unwrap();
+        let wal_path = w.path().to_path_buf();
+        drop(w);
+
+        let calls = std::cell::Cell::new(0u32);
+        let (overlay, _main_len, _gen, end) =
+            Pager::capture_ro_view(&wal_path, PAGE_SIZE, &counting_main_len(&calls)).unwrap();
+        assert!(
+            overlay.is_empty(),
+            "a header-only sidecar has nothing to overlay"
+        );
+        assert!(end <= crate::consts::WAL_HEADER_SIZE as u64);
+        assert_eq!(
+            calls.get(),
+            1,
+            "an empty sidecar must be accepted on the first attempt"
+        );
+    }
+
+    #[test]
+    fn capture_ro_view_adopts_full_overlay_when_sidecar_parse_is_complete() {
+        let (_d, path) = temp_db();
+        let mut w = WalWriter::open(&path).unwrap();
+        w.commit_transaction(&[(4, page_of(0xAA)), (5, page_of(0xBB))], 5)
+            .unwrap();
+        let wal_path = w.path().to_path_buf();
+        let sidecar_len = std::fs::metadata(&wal_path).unwrap().len();
+        drop(w);
+
+        let calls = std::cell::Cell::new(0u32);
+        let (overlay, _main_len, _gen, end) =
+            Pager::capture_ro_view(&wal_path, PAGE_SIZE, &counting_main_len(&calls)).unwrap();
+        let mut expected = HashMap::new();
+        expected.insert(4u32, page_of(0xAA));
+        expected.insert(5u32, page_of(0xBB));
+        assert_eq!(overlay, expected);
+        assert_eq!(
+            end, sidecar_len,
+            "a complete parse over a static committed sidecar consumes it to the end"
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "a complete committed sidecar must be accepted on the first attempt"
+        );
+    }
+
+    /// Writes a frame header at `offset` whose salt pair is guaranteed to
+    /// differ from `gen`'s real salts (off-by-one, never equal), so
+    /// `read_committed_wal_frames_to_end` breaks there regardless of the
+    /// (random) real salt values, independent of everything written after it.
+    fn write_bad_salt_frame(wal_path: &Path, offset: u64, gen: CheckpointGeneration, len: usize) {
+        let mut frame = vec![0xEEu8; len];
+        frame[0..4].copy_from_slice(&5u32.to_be_bytes());
+        frame[4..8].copy_from_slice(&0u32.to_be_bytes());
+        frame[8..12].copy_from_slice(&gen.salt1.wrapping_add(1).to_be_bytes());
+        frame[12..16].copy_from_slice(&gen.salt2.wrapping_add(1).to_be_bytes());
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(wal_path)
+            .unwrap();
+        f.write_all_at(&frame, offset).unwrap();
+    }
+
+    #[test]
+    fn capture_ro_view_adopts_at_rest_short_parse_on_the_second_attempt() {
+        let (_d, path) = temp_db();
+        let mut w = WalWriter::open(&path).unwrap();
+        w.commit_transaction(&[(4, page_of(0xAA))], 4).unwrap();
+        let wal_path = w.path().to_path_buf();
+        let committed_end = std::fs::metadata(&wal_path).unwrap().len();
+        let gen = read_checkpoint_generation(&wal_path).unwrap();
+        drop(w);
+
+        // Abandoned bytes beyond the last commit barrier, longer than one
+        // frame so the gap fails the completeness check on attempt 1. The
+        // bytes are never touched again, so the parse result is identical on
+        // every attempt — the at-rest case, not a live-writer race.
+        write_bad_salt_frame(
+            &wal_path,
+            committed_end,
+            gen,
+            crate::consts::WAL_FRAME_SIZE + 16,
+        );
+        let sidecar_len = std::fs::metadata(&wal_path).unwrap().len();
+        assert!(
+            sidecar_len - committed_end > crate::consts::WAL_FRAME_SIZE as u64,
+            "test setup must leave more than one frame of at-rest bytes beyond the committed tail"
+        );
+
+        let calls = std::cell::Cell::new(0u32);
+        let (overlay, _main_len, _gen, end) =
+            Pager::capture_ro_view(&wal_path, PAGE_SIZE, &counting_main_len(&calls)).unwrap();
+
+        let mut expected = HashMap::new();
+        expected.insert(4u32, page_of(0xAA));
+        assert_eq!(
+            overlay, expected,
+            "the adopted overlay must be exactly the committed prefix, not the abandoned bytes"
+        );
+        assert_eq!(end, committed_end);
+        // A static (non-changing) short parse cannot satisfy the completeness
+        // check on attempt 1 by construction; adoption requires attempt 2's
+        // stable-probe match against attempt 1's stored probe.
+        assert_eq!(
+            calls.get(),
+            2,
+            "an at-rest short parse must be adopted on the second attempt, not the first"
+        );
+    }
+
+    #[test]
+    fn capture_ro_view_exhausts_when_the_sidecar_keeps_growing_every_attempt() {
+        let (_d, path) = temp_db();
+        let mut w = WalWriter::open(&path).unwrap();
+        w.commit_transaction(&[(4, page_of(0xAA))], 4).unwrap();
+        let wal_path = w.path().to_path_buf();
+        let committed_end = std::fs::metadata(&wal_path).unwrap().len();
+        let gen = read_checkpoint_generation(&wal_path).unwrap();
+        drop(w);
+
+        let initial_len = crate::consts::WAL_FRAME_SIZE + 16;
+        write_bad_salt_frame(&wal_path, committed_end, gen, initial_len);
+
+        // Grows the sidecar by 8 bytes on every `main_len` call (one call per
+        // retry attempt). The bad-salt frame at `committed_end` still pins
+        // `end` there every attempt, but `wal_len_after` is now different on
+        // every attempt, so the stable-probe match never fires and the loop
+        // exhausts deterministically instead of racing a live writer thread.
+        let calls = std::cell::Cell::new(0u32);
+        let write_offset = std::cell::Cell::new(committed_end + initial_len as u64);
+        let grow = || -> Result<u64> {
+            calls.set(calls.get() + 1);
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_path)
+                .unwrap();
+            let off = write_offset.get();
+            f.write_all_at(&[0xEEu8; 8], off).unwrap();
+            write_offset.set(off + 8);
+            Ok(0)
+        };
+
+        let err = Pager::capture_ro_view(&wal_path, PAGE_SIZE, &grow).unwrap_err();
+        match err {
+            StoreError::Integrity { .. } => {}
+            other => panic!("expected Integrity, got {other:?}"),
+        }
+        assert_eq!(
+            calls.get(),
+            8,
+            "a sidecar that changes on every attempt must exhaust all bounded retries"
+        );
     }
 
     #[test]

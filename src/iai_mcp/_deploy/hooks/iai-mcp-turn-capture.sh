@@ -53,15 +53,17 @@ IFS="$_TAB" read -r session_id transcript_path prompt_id < "$_extract_tmp"
 mkdir -p "$HOME/.iai-mcp/logs" 2>/dev/null || true
 log="$HOME/.iai-mcp/logs/turn-capture-$(date -u +%Y-%m-%d).log"
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+channel="settings"
+[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && channel="plugin"
 
 if [ -z "$session_id" ] || [ -z "$transcript_path" ]; then
-  echo "$ts skipped: missing session_id or transcript_path" >> "$log" 2>/dev/null
+  echo "$ts skipped: missing session_id or transcript_path channel=$channel" >> "$log" 2>/dev/null
   exit 0
 fi
 
 case "$session_id" in
   *[!A-Za-z0-9._-]*)
-    echo "$ts skipped: invalid session_id" >> "$log" 2>/dev/null
+    echo "$ts skipped: invalid session_id channel=$channel" >> "$log" 2>/dev/null
     exit 0
     ;;
 esac
@@ -93,19 +95,46 @@ home = Path(os.environ.get("HOME", str(Path.home())))
 # stdin path is the result of whatever the host process had on hand at fire
 # time, which may be empty or wrong even when it physically exists on disk.
 #
-# Strategy: ALWAYS scan ~/.claude/projects/*/{session_id}.jsonl first.  If the
-# canonical file exists and is non-empty, use it — it is guaranteed to contain
-# this session only.  Fall back to the stdin path only when the canonical file
-# is absent or empty (early first-fire timing race).  If neither source has
-# content, there is nothing to walk yet — the immediate stdin-prompt capture
-# below still runs (it needs no transcript) and the Stop hook covers the rest
-# at session end.
+# Strategy: ALWAYS scan {claude_root}/projects/*/{session_id}.jsonl first,
+# where claude_root is the Claude configuration directory named by the
+# environment, defaulting to the shared home when unset, equal, or rejected
+# by validation.  If the canonical file exists and is non-empty, use it — it
+# is guaranteed to contain this session only.  Fall back to the stdin path
+# only when the canonical file is absent or empty (early first-fire timing
+# race).  If neither source has content, there is nothing to walk yet — the
+# immediate stdin-prompt capture below still runs (it needs no transcript)
+# and the Stop hook covers the rest at session end.
 #
 # This makes offset accounting safe: the offset is always relative to one
 # consistent file (canonical > stdin), preventing line-number skew across fires.
 
-def _scan_canonical(home: Path, session_id: str):
-    projects_dir = home / ".claude" / "projects"
+def _resolve_claude_root(home: Path):
+    # CLAUDE_CONFIG_DIR is host-supplied, untrusted input: it must be an
+    # absolute path, an existing directory, free of parent-directory
+    # traversal segments and restricted to letters/digits/space/"._/-"
+    # (space allowed: real install paths carry one; the traversal check
+    # below covers the actual attack surface), or the shared home is used
+    # and the rejection is logged. Returns (root, refused).
+    shared = home / ".claude"
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    if not raw:
+        return shared, False
+    candidate = Path(raw)
+    if candidate == shared:
+        return shared, False
+    if not candidate.is_absolute():
+        return shared, True
+    if not re.fullmatch(r"[A-Za-z0-9._/ -]+", raw):
+        return shared, True
+    if ".." in candidate.parts:
+        return shared, True
+    if not candidate.is_dir():
+        return shared, True
+    return candidate, False
+
+
+def _scan_canonical(claude_root: Path, session_id: str):
+    projects_dir = claude_root / "projects"
     if not projects_dir.is_dir():
         return None
     target = f"{session_id}.jsonl"
@@ -115,7 +144,22 @@ def _scan_canonical(home: Path, session_id: str):
             return candidate
     return None
 
-canonical = _scan_canonical(home, session_id)
+claude_root, _config_dir_refused = _resolve_claude_root(home)
+if _config_dir_refused:
+    try:
+        _cfg_channel = "plugin" if os.environ.get("CLAUDE_PLUGIN_ROOT") else "settings"
+        _cfg_log_dir = home / ".iai-mcp" / "logs"
+        _cfg_log_dir.mkdir(parents=True, exist_ok=True)
+        _cfg_log_path = _cfg_log_dir / f"turn-capture-{datetime.now(timezone.utc):%Y-%m-%d}.log"
+        with open(_cfg_log_path, "a") as _cfg_lf:
+            _cfg_lf.write(
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                + f" config-dir-refused channel={_cfg_channel}\n"
+            )
+    except Exception:
+        pass
+
+canonical = _scan_canonical(claude_root, session_id)
 if canonical is not None:
     transcript_path = canonical
 elif stdin_path.exists() and stdin_path.stat().st_size > 0:
@@ -227,6 +271,7 @@ _NOISE_STARTSWITH = (
     "<local-command-stderr>",
     "Base directory for this skill:",
     "<task-notification>",
+    "<system-reminder>",
 )
 _NOISE_EQUALS = ("[Request interrupted by user]",)
 
@@ -799,6 +844,6 @@ fi
 rc=$?
 # _payload_tmp / _extract_tmp cleanup runs via the EXIT trap above.
 
-echo "$ts session=$session_id rc=$rc" >> "$log" 2>/dev/null
+echo "$ts session=$session_id rc=$rc channel=$channel" >> "$log" 2>/dev/null
 
 exit 0

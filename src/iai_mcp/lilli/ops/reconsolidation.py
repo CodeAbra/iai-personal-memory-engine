@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-"""In-RAM labile-entry tracking for retrieval-reconsolidation.
+"""In-RAM labile-entry staging for the valence reconsolidation writer.
 
-Retrieval-reconsolidation is already shipped end-to-end via
-`store.reinforce_record(is_retrieval=True)` (sets `labile_until`, a SQL
-column) followed by the nightly `step_reconsolidation` critic. This module's
-`ReconsolidationBuffer` is intentionally not wired to that path: it would
-duplicate the same labile-window concept in a second, divergent (in-RAM,
-non-persistent) representation with no identified correctness gap. Kept as
-dead code deliberately, not by oversight.
+Retrieval-reconsolidation itself (the labile-window concept, `labile_until`)
+is driven end-to-end by `store.reinforce_record(is_retrieval=True)` and the
+critic step; this buffer stages per-invocation valence modifications for a
+single sleep-step call and persists them via `persist_valence`, then is
+discarded -- it is not a second cross-cycle source of truth for labile state.
 """
 
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -114,6 +113,54 @@ class ReconsolidationBuffer:
         if entry is None:
             return []
         return entry.modifications
+
+    def persist_valence(self, store: Any) -> tuple[int, int]:
+        """Writes each staged valence delta through `store.raise_valence`,
+        the single-column, kill-switch-honoring, [0.0, 1.0]-clamping write
+        primitive. Returns ``(writes, saturated)``: `writes` counts records
+        actually written (a no-op record_id, e.g. deleted since staging,
+        does not count); `saturated` counts records whose stored valence was
+        already at the 1.0 ceiling before this call, so `raise_valence`
+        correctly declined the write -- distinct from a write that failed
+        for any other reason. A per-record store error is swallowed so one
+        bad row never costs the rest of the pool.
+
+        Cross-process exclusivity on `store` is guaranteed upstream: opening
+        a `MemoryStore` under `AccessMode.EXCLUSIVE` refuses a second
+        process before any code in this loop runs. Within that single
+        holder, this loop and `raise_valence`'s own internal read span two
+        separate `store.get()` calls, so a second concurrent call on the
+        same record_id inside the same process can still race a
+        lost-increment; `raise_valence`'s monotonic-raise guard bounds that
+        to a redundant same-value write, never a silent lower."""
+        from iai_mcp.exceptions import StoreError
+
+        writes = 0
+        saturated = 0
+        for record_id, entry in self._labile.items():
+            deltas = [
+                float(m["delta"])
+                for m in entry.modifications
+                if m.get("type") == "valence"
+            ]
+            if not deltas:
+                continue
+            try:
+                current = store.get(record_id)
+                if current is None:
+                    continue
+                already_saturated = float(current.valence) >= 1.0
+                new_value = float(current.valence) + sum(deltas)
+                if store.raise_valence(record_id, new_value):
+                    writes += 1
+                elif already_saturated:
+                    saturated += 1
+            except (OSError, ValueError, RuntimeError, StoreError) as exc:
+                logger.debug(
+                    "persist_valence per-record write failed for %s: %s",
+                    record_id, exc,
+                )
+        return writes, saturated
 
 
 def compute_stability_update(

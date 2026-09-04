@@ -30,11 +30,13 @@ from pathlib import Path
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
+
 # ---------------------------------------------------------------------------
 # Driver guard: entire module is lilli-only.
 # ---------------------------------------------------------------------------
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 pytestmark = pytest.mark.skipif(
     not _LILLI,

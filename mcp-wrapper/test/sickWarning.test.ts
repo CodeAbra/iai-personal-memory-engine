@@ -35,36 +35,42 @@ function makeMockProc(opts: {
   return proc;
 }
 
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
 const stderrLines: string[] = [];
 
-function captureStderr(line: string): boolean {
-  stderrLines.push(line);
-  return true;
+function captureStderr(): void {
+  process.stderr.write = ((line: string | Uint8Array) => {
+    stderrLines.push(typeof line === "string" ? line : line.toString("utf-8"));
+    return true;
+  }) as typeof process.stderr.write;
 }
 
 afterEach(() => {
+  process.stderr.write = originalStderrWrite;
   stderrLines.length = 0;
 });
 
 describe("probeDaemonDoctor", () => {
   it("exit 0 -> no stderr line", async () => {
+    captureStderr();
     const mockSpawn = (_cmd: string, _args: ReadonlyArray<string>) =>
       makeMockProc({ exitCode: 0 }) as unknown as ReturnType<
         typeof import("node:child_process").spawn
       >;
     const code = await probeDaemonDoctor(mockSpawn as any, 5_000);
-    emitSickWarningIfNeeded(code, captureStderr);
+    emitSickWarningIfNeeded(code);
     assert.equal(code, 0);
     assert.equal(stderrLines.length, 0, "expected zero stderr writes on PASS");
   });
 
   it("exit 1 -> exactly one stderr line with exit=1", async () => {
+    captureStderr();
     const mockSpawn = () =>
       makeMockProc({ exitCode: 1 }) as unknown as ReturnType<
         typeof import("node:child_process").spawn
       >;
     const code = await probeDaemonDoctor(mockSpawn as any, 5_000);
-    emitSickWarningIfNeeded(code, captureStderr);
+    emitSickWarningIfNeeded(code);
     assert.equal(code, 1);
     assert.equal(stderrLines.length, 1, "expected one stderr write on FAIL");
     const line = stderrLines[0];
@@ -75,12 +81,13 @@ describe("probeDaemonDoctor", () => {
   });
 
   it("exit 2 -> exactly one stderr line with exit=2", async () => {
+    captureStderr();
     const mockSpawn = () =>
       makeMockProc({ exitCode: 2 }) as unknown as ReturnType<
         typeof import("node:child_process").spawn
       >;
     const code = await probeDaemonDoctor(mockSpawn as any, 5_000);
-    emitSickWarningIfNeeded(code, captureStderr);
+    emitSickWarningIfNeeded(code);
     assert.equal(code, 2);
     assert.equal(stderrLines.length, 1);
     assert.ok(
@@ -90,28 +97,31 @@ describe("probeDaemonDoctor", () => {
   });
 
   it("spawn error -> silent, probe resolves null", async () => {
+    captureStderr();
     const mockSpawn = () =>
       makeMockProc({ emitErrorBeforeClose: true }) as unknown as ReturnType<
         typeof import("node:child_process").spawn
       >;
     const code = await probeDaemonDoctor(mockSpawn as any, 5_000);
-    emitSickWarningIfNeeded(code, captureStderr);
+    emitSickWarningIfNeeded(code);
     assert.equal(code, null, "expected null on spawn error");
     assert.equal(stderrLines.length, 0, "expected silent degrade on spawn error");
   });
 
   it("timeout -> silent, probe resolves null", async () => {
+    captureStderr();
     const mockSpawn = () =>
       makeMockProc({}) as unknown as ReturnType<
         typeof import("node:child_process").spawn
       >;
     const code = await probeDaemonDoctor(mockSpawn as any, 50);
-    emitSickWarningIfNeeded(code, captureStderr);
+    emitSickWarningIfNeeded(code);
     assert.equal(code, null, "expected null on timeout");
     assert.equal(stderrLines.length, 0, "expected silent degrade on timeout");
   });
 
   it("invokes spawn with `iai-mcp` and args `[\"doctor\"]` (NOT `[\"daemon\", \"doctor\"]`)", async () => {
+    captureStderr();
     const calls: Array<{ cmd: string; args: string[] }> = [];
     const mockSpawn = (cmd: string, args: ReadonlyArray<string>) => {
       calls.push({ cmd, args: [...args] });
@@ -140,12 +150,14 @@ describe("probeDaemonDoctor", () => {
 
 describe("emitSickWarningIfNeeded", () => {
   it("null exit code is a silent no-op", () => {
-    emitSickWarningIfNeeded(null, captureStderr);
+    captureStderr();
+    emitSickWarningIfNeeded(null);
     assert.equal(stderrLines.length, 0);
   });
 
   it("exit 0 is a silent no-op", () => {
-    emitSickWarningIfNeeded(0, captureStderr);
+    captureStderr();
+    emitSickWarningIfNeeded(0);
     assert.equal(stderrLines.length, 0);
   });
 });

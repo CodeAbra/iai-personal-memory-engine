@@ -133,3 +133,82 @@ def _prime_structural_cache(store) -> None:
 
     graph, assignment, rc = _retrieve.build_runtime_graph(store)
     _rgc.save(store, assignment, rc)
+
+
+# ANN top-200 ranking on near-tied cosines carries legitimate run-to-run
+# noise; a drop within this absolute band is not treated as a regression.
+RECALL_AT_200_EPSILON = 0.02
+
+
+def diff_recall_quality_baseline_entry(
+    fresh: dict, committed: dict, epsilon: float = RECALL_AT_200_EPSILON,
+) -> list[str]:
+    """Diff one recall-quality baseline entry (the ``n1k``/``n10k`` shape:
+    ``reference_cues``, ``recall_at_200``, ``two_hop_gold_reachable_via_2hop``,
+    ``two_hop_gold_outside_ann_top200``, ``small_k_ef_blast_radius``) against
+    the previously committed values. Returns a list of violation strings --
+    empty means no regression. Never mutates either argument."""
+    violations: list[str] = []
+
+    committed_cues_by_label = {
+        c["cue_label"]: c for c in committed.get("reference_cues", [])
+    }
+    fresh_cues_by_label = {
+        c.get("cue_label"): c for c in fresh.get("reference_cues", [])
+    }
+    for label, committed_cue in committed_cues_by_label.items():
+        fresh_cue = fresh_cues_by_label.get(label)
+        if fresh_cue is None:
+            violations.append(f"{label}: cue missing from fresh recompute")
+            continue
+        if committed_cue.get("must_hit"):
+            for field in ("recall_at_5", "recall_at_10"):
+                fresh_val = fresh_cue.get(field)
+                committed_val = committed_cue.get(field)
+                if fresh_val != committed_val:
+                    violations.append(
+                        f"{label}.{field}: committed={committed_val} "
+                        f"fresh={fresh_val} (exact match required for a "
+                        "must-hit cue)"
+                    )
+        fresh_anti = fresh_cue.get("anti_hit_surfaced")
+        committed_anti = committed_cue.get("anti_hit_surfaced")
+        if fresh_anti != committed_anti:
+            violations.append(
+                f"{label}.anti_hit_surfaced: committed={committed_anti} "
+                f"fresh={fresh_anti}"
+            )
+
+    committed_r200 = committed.get("recall_at_200", {})
+    fresh_r200 = fresh.get("recall_at_200", {})
+    for label, committed_val in committed_r200.items():
+        fresh_val = fresh_r200.get(label)
+        if fresh_val is None:
+            violations.append(f"recall_at_200.{label}: missing from fresh recompute")
+            continue
+        if fresh_val < committed_val - epsilon:
+            violations.append(
+                f"recall_at_200.{label}: committed={committed_val} "
+                f"fresh={fresh_val} dropped more than epsilon={epsilon}"
+            )
+
+    for field in ("two_hop_gold_reachable_via_2hop", "two_hop_gold_outside_ann_top200"):
+        if field not in committed:
+            continue
+        fresh_val = fresh.get(field)
+        committed_val = committed.get(field)
+        if fresh_val != committed_val:
+            violations.append(f"{field}: committed={committed_val} fresh={fresh_val}")
+
+    committed_blast = committed.get("small_k_ef_blast_radius", {})
+    committed_dir = committed_blast.get("change_direction")
+    if committed_dir is not None:
+        fresh_blast = fresh.get("small_k_ef_blast_radius", {})
+        fresh_dir = fresh_blast.get("change_direction")
+        if fresh_dir != committed_dir:
+            violations.append(
+                "small_k_ef_blast_radius.change_direction: "
+                f"committed={committed_dir} fresh={fresh_dir}"
+            )
+
+    return violations

@@ -12,10 +12,17 @@ Design mirrors ProvenanceWriteQueue (provenance_queue.py):
   - worker never crashes on a per-id error (catch-log-continue)
   - atexit flush+stop
   - flush(timeout) and stop() for lifecycle management
+
+Durability: best-effort-drop only, for every write type this queue carries
+(reinforcement, hebbian pairs, profile-modulation pairs) — each is a derived,
+self-correcting signal, never primary/verbatim content, so a hard process
+kill losing in-flight items is an accepted trade-off, never a correctness
+bug. No durable spool.
 """
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import queue
 import sys
@@ -109,22 +116,35 @@ class ReinforceWriteQueue:
             return
         self._flush_event.wait(timeout=timeout)
 
-    def enqueue_pairs(self, pairs: list, delta: float) -> None:
-        """Enqueue co-activation edge pairs for deferred potentiation.
+    def enqueue_pairs(
+        self, pairs: list, delta: float, edge_type: str = "hebbian",
+    ) -> None:
+        """Enqueue edge pairs for deferred potentiation (coactivation by
+        default; callers pass edge_type for other tagged pair writes).
 
         Same contract as enqueue(): non-blocking, best-effort, dropped with a
-        marker on overflow. Keeps edge writes (which scan the hebbian edge
-        set) off the synchronous recall path.
+        marker on overflow. Keeps edge writes (which scan the matching
+        edge_type set) off the synchronous recall path.
         """
         if not pairs:
             return
         try:
-            self._q.put_nowait(("pairs", list(pairs), float(delta)))
+            self._q.put_nowait(("pairs", list(pairs), float(delta), edge_type))
         except queue.Full:
             logger.debug(
                 "reinforce_queue_pairs_overflow",
-                extra={"n_pairs": len(pairs)},
+                extra={"n_pairs": len(pairs), "edge_type": edge_type},
             )
+            try:
+                sys.stderr.write(
+                    json.dumps({
+                        "event": "reinforce_queue_pairs_overflow",
+                        "n_pairs": len(pairs),
+                        "edge_type": edge_type,
+                    }) + "\n"
+                )
+            except Exception:  # noqa: BLE001 -- stderr emission is best-effort
+                pass
 
     def enqueue(self, record_ids: "list[UUID]") -> None:
         """Enqueue record ids for deferred reinforcement.
@@ -224,8 +244,19 @@ class ReinforceWriteQueue:
 
     @staticmethod
     def _accumulate(item, ids: list, pairs: list) -> None:
-        if isinstance(item, tuple) and len(item) == 3 and item[0] == "pairs":
-            pairs.extend((a, b, item[2]) for a, b in item[1])
+        if isinstance(item, tuple) and item and item[0] == "pairs":
+            if len(item) != 4:
+                # enqueue_pairs is the sole producer of "pairs" items and
+                # always emits a 4-tuple; a different length means a
+                # malformed item -- log loudly and drop it rather than
+                # silently guessing edge_type.
+                logger.error(
+                    "reinforce_queue_malformed_pairs_item",
+                    extra={"item_len": len(item)},
+                )
+                return
+            _, item_pairs, item_delta, edge_type = item
+            pairs.extend((a, b, item_delta, edge_type) for a, b in item_pairs)
         else:
             ids.extend(item)
 
@@ -259,21 +290,21 @@ class ReinforceWriteQueue:
         return saw_stop
 
     def _flush_pairs(self, pairs: list) -> None:
-        """Potentiate deferred co-activation pairs, grouped by delta, one
+        """Potentiate deferred edge pairs, grouped by (delta, edge_type), one
         bounded write per group. Best-effort: a failed group is logged and
         dropped, never retried into the foreground."""
         if not pairs:
             return
-        by_delta: dict = {}
-        for a, b, delta in pairs:
-            by_delta.setdefault(float(delta), []).append((a, b))
-        for delta, group in by_delta.items():
+        by_key: dict = {}
+        for a, b, delta, edge_type in pairs:
+            by_key.setdefault((float(delta), edge_type), []).append((a, b))
+        for (delta, edge_type), group in by_key.items():
             try:
-                self._store.boost_edges(group, delta=delta, edge_type="hebbian")
+                self._store.boost_edges(group, delta=delta, edge_type=edge_type)
             except Exception:  # noqa: BLE001 -- worker must never die
                 logger.debug(
                     "reinforce_queue_pairs_failed",
-                    extra={"n_pairs": len(group)},
+                    extra={"n_pairs": len(group), "edge_type": edge_type},
                     exc_info=True,
                 )
 

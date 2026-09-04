@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from iai_mcp import _flock
+from iai_mcp.model_attribution import normalize_model
 import json
 import os
 import tempfile
@@ -17,6 +18,12 @@ DIGEST_SHOW_THRESHOLD_HOURS: int = 18
 
 FIRST_TURN_TTL_HOURS: int = 24
 MAX_FIRST_TURN_ENTRIES: int = 100
+
+RUNNING_AGENT_TTL_HOURS: int = 6
+MAX_RUNNING_AGENTS: int = 20
+RUNNING_AGENT_ROLE_MAX_CHARS: int = 80
+RUNNING_AGENT_ARTIFACT_MAX_CHARS: int = 200
+RUNNING_AGENT_ID_MAX_CHARS: int = 64
 
 
 def daemon_state_path(store_root: Path | str | None = None) -> Path:
@@ -273,3 +280,122 @@ def get_pending_digest(state: dict, now: datetime) -> dict | None:
 
     update_state(_consume)
     return digest
+
+
+def _sanitize_registry_field(value: object, max_chars: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = "".join(
+        char for char in value if char.isalnum() or char in " ._:/+-"
+    )
+    normalized = " ".join(normalized.split())
+    return normalized[:max_chars]
+
+
+def _sanitize_agent_id(value: object) -> str:
+    """Tighter than _sanitize_registry_field: this value becomes a dict key
+    (register_running_agent) and a key lookup (complete_running_agent), so
+    both sides must derive the same bound key from the same raw id."""
+    if not isinstance(value, str):
+        return ""
+    normalized = "".join(char for char in value if char.isalnum() or char in "-_")
+    return normalized[:RUNNING_AGENT_ID_MAX_CHARS]
+
+
+def _running_agent_timestamp(entry: object) -> datetime:
+    if not isinstance(entry, dict):
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    value = entry.get("completed_at") or entry.get("spawned_at")
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def prune_stale_agents(
+    state: dict,
+    now: datetime | None = None,
+    ttl_hours: int = RUNNING_AGENT_TTL_HOURS,
+    max_entries: int = MAX_RUNNING_AGENTS,
+) -> int:
+    agents = state.get("running_agents")
+    if not isinstance(agents, dict) or not agents:
+        return 0
+
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(hours=ttl_hours)
+
+    removed = 0
+    for agent_id, entry in list(agents.items()):
+        if _running_agent_timestamp(entry) < cutoff:
+            agents.pop(agent_id, None)
+            removed += 1
+
+    if len(agents) > max_entries:
+        ordered = sorted(
+            agents.items(),
+            key=lambda kv: _running_agent_timestamp(kv[1]),
+            reverse=True,
+        )
+        keep = dict(ordered[:max_entries])
+        removed += len(agents) - len(keep)
+        state["running_agents"] = keep
+
+    return removed
+
+
+def register_running_agent(
+    agent_id: str,
+    role: str,
+    expected_artifact: str,
+    agent_model: str | None = None,
+) -> None:
+    safe_agent_id = _sanitize_agent_id(agent_id)
+    if not safe_agent_id:
+        return
+
+    def _mutate(state: dict) -> None:
+        # setdefault + targeted key mutation inside update_state's lock —
+        # never save_state on a dict loaded outside this mutator.
+        agents = state.setdefault("running_agents", {})
+        agents[safe_agent_id] = {
+            "role": _sanitize_registry_field(role, RUNNING_AGENT_ROLE_MAX_CHARS),
+            "spawned_at": datetime.now(timezone.utc).isoformat(),
+            "expected_artifact": _sanitize_registry_field(
+                expected_artifact, RUNNING_AGENT_ARTIFACT_MAX_CHARS,
+            ),
+            "status": "pending",
+            "model": normalize_model(agent_model),
+            "completed_at": None,
+        }
+        prune_stale_agents(state)
+
+    update_state(_mutate)
+
+
+def complete_running_agent(agent_id: str) -> None:
+    # Same bound key derivation as register_running_agent -- the id an agent
+    # is registered with must be the id it completes with.
+    safe_agent_id = _sanitize_agent_id(agent_id)
+    if not safe_agent_id:
+        return
+
+    def _mutate(state: dict) -> None:
+        agents = state.get("running_agents")
+        if not isinstance(agents, dict):
+            return
+        entry = agents.get(safe_agent_id)
+        if not isinstance(entry, dict):
+            return
+        entry["status"] = "complete"
+        entry["completed_at"] = datetime.now(timezone.utc).isoformat()
+        prune_stale_agents(state)
+
+    update_state(_mutate)

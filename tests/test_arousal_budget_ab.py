@@ -30,6 +30,7 @@ def test_route_determinism(monkeypatch: pytest.MonkeyPatch) -> None:
 
     helper = bench._bench_arousal_route_for_cue  # noqa: SLF001
 
+    # non-English fixture data: multilingual behavior under test — keep
     cues = ["one", "two", "three", "русский cue", "x" * 100]
     for cue in cues:
         r1, h1 = helper(cue)
@@ -78,11 +79,13 @@ def test_env_override_shadow_forces_all_to_shadow(
         assert cue_hash == expected_hash
 
 
+# non-English fixture data: multilingual behavior under test — keep
 @pytest.mark.parametrize(
     "cue",
     [
         "alpha", "beta", "gamma", "delta",
         "Quote the original launch announcement.",
+        # non-English fixture data: multilingual behavior under test — keep
         "русский cue",
         "ceo_name probe",
         "x",

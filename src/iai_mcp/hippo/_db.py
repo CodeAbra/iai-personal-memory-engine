@@ -38,6 +38,12 @@ from iai_mcp.hippo import AccessMode  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
+# The storage driver a fresh store is created with when LILLI_STORAGE_DRIVER
+# is unset. An existing file's on-disk header always wins over this default
+# (see _resolve_effective_driver); the env var still overrides it for a fresh
+# store. Sole source of truth — no second copy of this literal exists.
+DEFAULT_STORAGE_DRIVER = "lilli"
+
 
 # Every RO pool open on a store path, so a committed write through ANY writer
 # connection for that path invalidates ALL in-process pooled readers — not just
@@ -341,18 +347,10 @@ def _validate_table_name(name: str) -> str:
 def _resolve_effective_driver(db_path: str) -> str:
     """Resolve the storage driver for a backing file, on-disk format first.
 
-    The ``LILLI_STORAGE_DRIVER`` environment variable expresses the *intended*
-    backend, but it is only visible to processes that inherit it (the daemon,
-    via its service manager). A short-lived client process — e.g. the ``iai
-    recall`` direct-store fallback — runs in a user shell where the variable is
-    unset and thus resolves to the ``"stdlib"`` default. Selecting the driver
-    from that env alone would open a native-engine store with the stdlib
-    ``sqlite3`` driver, which raises ``file is not a database`` and silently
-    yields zero results.
-
-    The on-disk file format is the authority. When a non-empty backing file
-    already exists, its full 16-byte header unambiguously identifies the
-    writer:
+    The ``LILLI_STORAGE_DRIVER`` environment variable expresses intent, and an
+    absent variable means the native engine. An existing file's on-disk header
+    always wins over both: its full 16-byte header unambiguously identifies
+    the writer:
 
     - a native-engine store begins with the engine magic (``DB_MAGIC``);
     - a stdlib ``sqlite3`` store begins with the full SQLite header magic
@@ -360,14 +358,15 @@ def _resolve_effective_driver(db_path: str) -> str:
 
     Detection wins over the env for an existing file: whichever process opens
     the store reads it with the driver that wrote it, regardless of the ambient
-    variable. The env is honoured only when there is no file to sniff yet (a
-    fresh store), so a first open still creates the intended format.
+    variable. The env (or its default) is honoured only when there is no file
+    to sniff yet (a fresh store), so a first open still creates the intended
+    format.
     """
     from iai_mcp.lillibrain.constants import DB_MAGIC  # noqa: PLC0415
 
     _SQLITE_MAGIC = b"SQLite format 3\x00"
 
-    env_driver = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower()
+    env_driver = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower()
 
     try:
         with open(db_path, "rb") as fh:
@@ -687,6 +686,11 @@ class HippoDB:
         # One-shot guard so the read-only-full-scan DEBUG signal fires at most
         # once per connection instead of on every recall (hot path stays clean).
         self._readonly_index_gap_logged: bool = False
+
+    @property
+    def storage_driver(self) -> str:
+        """The driver resolved at open time (``"lilli"`` or ``"stdlib"``)."""
+        return self._storage_driver
 
     def _debug_log_readonly_index_gap(self, conn: object) -> None:
         """Emit a one-time DEBUG signal when a read-only open serves a
@@ -1574,6 +1578,7 @@ class HippoDB:
         provenance_json: str,
         created_at: str,
         updated_at: str,
+        directive: bool = False,
     ) -> None:
         import struct as _struct
         zero_blob = _struct.pack(f"<{self._embed_dim}f", *([0.0] * self._embed_dim))
@@ -1617,9 +1622,9 @@ class HippoDB:
                 "  community_id, detail_level, centrality, stability, difficulty,"
                 "  pinned, never_decay, never_merge, s5_trust_score,"
                 "  schema_version, language,"
-                "  hv_tier, structure_hv_payload, role, live)"
+                "  hv_tier, structure_hv_payload, role, live, directive)"
                 " VALUES (?, ?, ?, '', ?, 1, ?, ?, ?, ?, '', 1, 0.0, 0.0, 0.0,"
-                "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'', ?, 1)",
+                "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'', ?, 1, ?)",
                 (
                     record_id,
                     tier,
@@ -1630,6 +1635,7 @@ class HippoDB:
                     updated_at,
                     tags_json,
                     _pending_role,
+                    1 if directive else 0,
                 ),
             )
             _upsert_record_tags(self._conn, record_id, tags_json)
@@ -2590,6 +2596,8 @@ class HippoDB:
             _DDL_HIPPO_META,
             _DDL_RECORD_TAGS,
             _DDL_RECORD_TAGS_INDEXES,
+            _DDL_PROC_TRANSITIONS,
+            _DDL_PROC_TRANSITIONS_INDEXES,
         )
         conn = self._conn
         with self._conn_lock, _txn(conn):
@@ -2605,7 +2613,10 @@ class HippoDB:
                     ("structure_hv_payload", "BLOB NOT NULL DEFAULT x''"),
                     ("embedding_pending", "INTEGER NOT NULL DEFAULT 0"),
                     ("role", "TEXT"),
+                    ("epistemic_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                    ("salience_level", "TEXT NOT NULL DEFAULT 'unflagged'"),
                     ("live", "INTEGER"),
+                    ("directive", "INTEGER"),
                 ],
             )
             for idx in _DDL_RECORDS_INDEXES:
@@ -2637,6 +2648,10 @@ class HippoDB:
 
             conn.execute(_DDL_RECORD_TAGS)
             for idx in _DDL_RECORD_TAGS_INDEXES:
+                conn.execute(idx)
+
+            conn.execute(_DDL_PROC_TRANSITIONS)
+            for idx in _DDL_PROC_TRANSITIONS_INDEXES:
                 conn.execute(idx)
 
         self._heal_null_vec_labels()
@@ -2681,6 +2696,8 @@ class HippoDB:
             "TEXT NOT NULL DEFAULT 'bsc'",
             "BLOB NOT NULL DEFAULT x''",
             "INTEGER NOT NULL DEFAULT 0",
+            "TEXT NOT NULL DEFAULT 'unknown'",
+            "TEXT NOT NULL DEFAULT 'unflagged'",
         }
         safe_table = _validate_table_name(table_name)
         pragma_stmt = "PRAGMA table_info(" + safe_table + ")"

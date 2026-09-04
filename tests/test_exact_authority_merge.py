@@ -301,9 +301,9 @@ def test_authority_hit_surfaces_at_head_when_ann_tier_misses_it(store, monkeypat
     # exact_top_k (the authority) still finds it via the resident matrix.
     _orig_query_similar = store.query_similar
 
-    def _query_similar_missing_target(vec, k=10, tier=None, *, n=None):
-        pairs = _orig_query_similar(vec, k=k, tier=tier, n=n)
-        return [(r, s) for r, s in pairs if r.id != target_id]
+    def _query_similar_missing_target(vec, *args, **kwargs):
+        pairs = _orig_query_similar(vec, *args, **kwargs)
+        return [(r, s) for r, s in pairs if getattr(r, "id", None) != target_id]
 
     monkeypatch.setattr(store, "query_similar", _query_similar_missing_target)
 
@@ -397,9 +397,9 @@ def test_kill_switch_restores_pipeline_only_behavior(store, monkeypatch):
 
     _orig_query_similar = store.query_similar
 
-    def _query_similar_missing_target(vec, k=10, tier=None, *, n=None):
-        pairs = _orig_query_similar(vec, k=k, tier=tier, n=n)
-        return [(r, s) for r, s in pairs if r.id != target_id]
+    def _query_similar_missing_target(vec, *args, **kwargs):
+        pairs = _orig_query_similar(vec, *args, **kwargs)
+        return [(r, s) for r, s in pairs if getattr(r, "id", None) != target_id]
 
     monkeypatch.setattr(store, "query_similar", _query_similar_missing_target)
     _stub_embedder_for_store(monkeypatch, cue_vec)
@@ -480,9 +480,9 @@ def test_reinforce_receives_merged_hit_ids(store, monkeypatch):
 
     _orig_query_similar = store.query_similar
 
-    def _query_similar_missing_target(vec, k=10, tier=None, *, n=None):
-        pairs = _orig_query_similar(vec, k=k, tier=tier, n=n)
-        return [(r, s) for r, s in pairs if r.id != target_id]
+    def _query_similar_missing_target(vec, *args, **kwargs):
+        pairs = _orig_query_similar(vec, *args, **kwargs)
+        return [(r, s) for r, s in pairs if getattr(r, "id", None) != target_id]
 
     monkeypatch.setattr(store, "query_similar", _query_similar_missing_target)
     _stub_embedder_for_store(monkeypatch, cue_vec)
@@ -513,9 +513,9 @@ def test_authority_hit_surface_matches_full_decrypted_surface(store, monkeypatch
 
     _orig_query_similar = store.query_similar
 
-    def _query_similar_missing_target(vec, k=10, tier=None, *, n=None):
-        pairs = _orig_query_similar(vec, k=k, tier=tier, n=n)
-        return [(r, s) for r, s in pairs if r.id != target_id]
+    def _query_similar_missing_target(vec, *args, **kwargs):
+        pairs = _orig_query_similar(vec, *args, **kwargs)
+        return [(r, s) for r, s in pairs if getattr(r, "id", None) != target_id]
 
     monkeypatch.setattr(store, "query_similar", _query_similar_missing_target)
     _stub_embedder_for_store(monkeypatch, cue_vec)

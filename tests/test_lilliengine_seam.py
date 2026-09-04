@@ -79,10 +79,11 @@ def test_raw_conn_read_only_blocks_write(lilli_driver):
     raw.close()
 
 
-def test_default_stdlib_branch_unchanged(monkeypatch):
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+def test_default_stdlib_branch_unchanged():
     path = os.path.join(tempfile.mkdtemp(), "b.sqlite3")
-    conn, _owns = _open_storage_connection(path, embed_dim=384, cached_statements=128)
+    conn, _owns = _open_storage_connection(
+        path, embed_dim=384, cached_statements=128, driver="stdlib",
+    )
     from iai_mcp import _sqlite_stdlib
     assert _sqlite_stdlib.is_stdlib_connection(conn)
 

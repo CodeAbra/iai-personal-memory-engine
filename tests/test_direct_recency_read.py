@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 
-def _make_user_turn(text: str = "generic user turn"):
+def _make_user_turn(text: str = "generic user turn", salience_level: str = "unflagged"):
     from iai_mcp.types import EMBED_DIM, MemoryRecord
 
     return MemoryRecord(
@@ -30,6 +30,7 @@ def _make_user_turn(text: str = "generic user turn"):
         updated_at=datetime.now(timezone.utc),
         tags=["role:user"],
         language="en",
+        salience_level=salience_level,
     )
 
 
@@ -54,6 +55,27 @@ def test_recency_read_daemon_up_steady(hermetic_store: Path) -> None:
     surfaces = [t.literal_surface for t in turns]
     assert any("direct recency probe text" in s for s in surfaces), (
         "stored turn not found in direct recency results"
+    )
+
+
+def test_recency_read_carries_salience_level(hermetic_store: Path) -> None:
+    from iai_mcp.store import MemoryStore, flush_record_buffer
+    from iai_mcp.direct_recency import read_recent_user_turns_direct  # type: ignore[import]
+
+    store = MemoryStore(hermetic_store)
+    try:
+        rec = _make_user_turn("salience parity probe text", salience_level="critical")
+        store.insert(rec)
+        flush_record_buffer(store)
+    finally:
+        store.close()
+
+    turns = read_recent_user_turns_direct(hermetic_store, n=5)
+    matches = [t for t in turns if "salience parity probe text" in t.literal_surface]
+    assert matches, "stored turn not found in direct recency results"
+    assert matches[0].salience_level == "critical", (
+        f"direct recency lister must carry the stored salience_level, "
+        f"got {matches[0].salience_level!r}"
     )
 
 

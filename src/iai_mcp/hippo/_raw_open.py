@@ -1,13 +1,13 @@
 """Driver-aware raw open for production direct-access store paths.
 
 Production analog of tests/_store_raw.open_store_raw, but with a deliberately
-more conservative shape: returns a None sentinel on the default driver so each
-production caller keeps its existing sqlite3.connect(...) line byte-for-byte
+more conservative shape: returns a None sentinel on the legacy sqlite format so
+each production caller keeps its existing sqlite3.connect(...) line byte-for-byte
 (the production sites carry heterogeneous stdlib kwargs — isolation_level=None,
 timeout=2.0, uri=True — that differ per site; centralizing them would risk
-silent kwarg drift). On the lilli driver: strips any file:...?mode=ro URI to a
-bare filesystem path and returns the engine's crypto-blind raw connection via
-get_lilli_raw_conn.
+silent kwarg drift). On the native engine format: strips any file:...?mode=ro
+URI to a bare filesystem path and returns the engine's crypto-blind raw
+connection via get_lilli_raw_conn.
 
 The engine stores ciphertext BLOBs; decryption is the caller's responsibility,
 above this seam — no key crosses into the engine, and this factory takes no key
@@ -40,10 +40,11 @@ def open_store_conn(
 ):
     """Open the backing store for raw direct access, driver-aware.
 
-    Returns None on the default driver: the caller keeps its existing
+    Returns None on the legacy sqlite format: the caller keeps its existing
     sqlite3.connect(...) call verbatim — no kwargs are altered. Returns the
-    engine raw connection on the lilli driver (live registered connection when
-    HippoDB is open, else a temporary reopen for closed stores).
+    engine raw connection on the native engine format (live registered
+    connection when HippoDB is open, else a temporary reopen for closed
+    stores).
 
     read_only is enforced at the adapter level on the lilli driver: the
     returned adapter's execute() intercepts PRAGMA query_only=ON and rejects

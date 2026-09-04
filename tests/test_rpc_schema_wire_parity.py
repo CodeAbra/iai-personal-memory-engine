@@ -199,6 +199,7 @@ def _params_for(tool: str, store: MemoryStore, recs: list[MemoryRecord]) -> dict
         "events_query": {"kind": "s4_contradiction", "limit": 5},
         "topology": {},
         "episodes_recent": {"n": 3},
+        "claim_check": {"cue": "parity record", "session_id": "parity"},
     }
     return table[tool]
 

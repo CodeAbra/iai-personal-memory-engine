@@ -22,6 +22,7 @@ _CANONICAL_TABLES = sorted([
     "budget_ledger",
     "edges",
     "events",
+    "proc_transitions",
     "ratelimit_ledger",
     "record_tags",
     "records",

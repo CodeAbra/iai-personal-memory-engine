@@ -455,6 +455,10 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         snap_offset = -1
         prev_pending: list = []
         snap_fp = ""
+        # Co-fire carry-forward: additive next to `pending`, read back the
+        # same way. Never mutated by anything other than the co-fire block
+        # below.
+        prev_pending_recall: dict | None = None
         if turnstate_path.exists():
             try:
                 snap = _json.loads(turnstate_path.read_text(encoding="utf-8"))
@@ -466,10 +470,14 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
                     loaded_fp = snap.get("fp")
                     if isinstance(loaded_fp, str):
                         snap_fp = loaded_fp
+                    loaded_pending_recall = snap.get("pending_recall")
+                    if isinstance(loaded_pending_recall, dict):
+                        prev_pending_recall = loaded_pending_recall
             except (ValueError, TypeError, OSError):
                 snap_offset = -1
                 prev_pending = []
                 snap_fp = ""
+                prev_pending_recall = None
 
         legacy_offset = 0
         if offset_path.exists():
@@ -488,6 +496,7 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
             # never fabrication.
             prev_offset = legacy_offset
             prev_pending = []
+            prev_pending_recall = None
 
         with transcript.open(encoding="utf-8") as fh:
             all_lines = fh.readlines()
@@ -511,6 +520,7 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         if (snap_fp and stream_fp and snap_fp != stream_fp) or prev_offset > total:
             prev_offset = 0
             prev_pending = []
+            prev_pending_recall = None
 
         new_lines = all_lines[prev_offset:]
         consumed = 0
@@ -518,6 +528,7 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         max_emit = int(getattr(args, "max_turns_per_call", 200))
         cwd = os.getcwd()
         trailers = _ToolTrailerState(prev_pending)
+        raw_objs: list = []
         for line in new_lines:
             if emitted >= max_emit:
                 break
@@ -528,19 +539,52 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
                 _obj = {}
             if not isinstance(_obj, dict):
                 _obj = {}
+            raw_objs.append(_obj)
             parsed = trailers.feed(
                 _obj, _parse_transcript_obj(_obj) if _obj else None
             )
             if parsed is None:
                 continue
-            role, text, src_uuid, src_ts = parsed
             write_deferred_event(
-                args.session_id, role, text,
+                args.session_id, parsed.role, parsed.text,
                 cwd=cwd,
-                ts=src_ts,
-                source_uuid=src_uuid,
+                ts=parsed.timestamp,
+                source_uuid=parsed.source_uuid,
+                model=parsed.model,
             )
             emitted += 1
+
+        # Ambient co-firing: additive, best-effort, kill-switch-guarded. The
+        # SAME raw_objs walk above feeds it -- no second file read. A failure
+        # here must never sink the write_deferred_event calls above or the
+        # offset/pending publish below; it never touches offset/pending/fp.
+        # Extraction and per-pair spooling are separate try scopes: once
+        # extraction succeeds, new_pending_recall is never reverted by a
+        # later pair's spool-write failure.
+        new_pending_recall = prev_pending_recall
+        if os.environ.get("IAI_MCP_COFIRE_OFF") != "1":
+            try:
+                from iai_mcp.cofire import (
+                    compute_used_ids,
+                    extract_recall_pairs_carrying,
+                    write_cofire_spool,
+                )
+
+                cofire_pairs, new_pending_recall = extract_recall_pairs_carrying(
+                    raw_objs, prev_pending_recall
+                )
+            except Exception as exc:  # noqa: BLE001 -- co-fire trigger is best-effort, never sinks capture
+                logger.debug("capture-turn-deferred cofire trigger failed: %s", exc)
+                new_pending_recall = prev_pending_recall
+            else:
+                for pair in cofire_pairs:
+                    try:
+                        used_ids = compute_used_ids(
+                            pair["hit_ids"], pair["hit_surfaces"], pair["assistant_text"]
+                        )
+                        write_cofire_spool(args.session_id, pair["hit_ids"], used_ids)
+                    except Exception as exc:  # noqa: BLE001 -- per-pair spool write is best-effort
+                        logger.debug("capture-turn-deferred cofire spool write failed: %s", exc)
 
         new_offset = prev_offset + consumed
         # Snapshot first, legacy offset second: a crash between them leaves
@@ -548,13 +592,14 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         snap_tmp = turnstate_path.parent / (
             f"{turnstate_path.name}.tmp{os.getpid()}"
         )
-        snap_body = _json.dumps(
-            {
-                "offset": new_offset,
-                "pending": trailers.pending[:256],
-                "fp": stream_fp,
-            }
-        )
+        snap_fields = {
+            "offset": new_offset,
+            "pending": trailers.pending[:256],
+            "fp": stream_fp,
+        }
+        if new_pending_recall:
+            snap_fields["pending_recall"] = new_pending_recall
+        snap_body = _json.dumps(snap_fields)
         _write_state_file(snap_tmp, snap_body)
         os.replace(snap_tmp, turnstate_path)
 
@@ -781,6 +826,16 @@ def _per_turn_recall_hook_paths() -> tuple:
     return src, dst
 
 
+def _recall_render_helper_paths() -> tuple:
+    # Deployed next to the per-turn hook in lockstep -- the hook imports it
+    # by sys.path-inserting its own directory (HOOK_DIR), so a stale or
+    # missing copy here silently drops the dated-staleness render, not the
+    # whole accelerator.
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "_recall_render.py"
+    dst = Path.home() / ".claude" / "hooks" / "_recall_render.py"
+    return src, dst
+
+
 def _load_settings(path):
     import json as _json
     if not path.exists():
@@ -900,6 +955,17 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
         pt_dst.write_bytes(pt_src.read_bytes())
         pt_dst.chmod(pt_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         print(f"installed: {pt_dst}")
+
+        # Deploy the render helper in lockstep with the hook that imports
+        # it -- an old hook next to a missing/stale _recall_render.py would
+        # silently lose the dated-staleness signal.
+        render_src, render_dst = _recall_render_helper_paths()
+        if render_src.exists():
+            render_dst.parent.mkdir(parents=True, exist_ok=True)
+            render_dst.write_bytes(render_src.read_bytes())
+            print(f"installed: {render_dst}")
+        else:
+            print(f"WARN: recall render helper missing in package data: {render_src}")
 
         pt_cmd = f"bash {pt_dst}"
         already_pt = any(
@@ -1128,6 +1194,7 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     turn_src, turn_dst = _turn_hook_paths()
     src_recall, dst_recall, _ = _session_recall_hook_paths()
     pt_src, pt_dst = _per_turn_recall_hook_paths()
+    render_src, render_dst = _recall_render_helper_paths()
 
     def _installed_state(template, installed) -> str:
         # PRESENT alone hides a stale install: an old hook body silently
@@ -1151,6 +1218,8 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     print(f"Recall installed:     {dst_recall}  {_installed_state(src_recall, dst_recall)}")
     print(f"Per-turn template:    {pt_src}  {'PRESENT' if pt_src.exists() else 'MISSING'}")
     print(f"Per-turn installed:   {pt_dst}  {_installed_state(pt_src, pt_dst)}")
+    print(f"Recall-render template:  {render_src}  {'PRESENT' if render_src.exists() else 'MISSING'}")
+    print(f"Recall-render installed: {render_dst}  {_installed_state(render_src, render_dst)}")
 
     data = _load_settings(settings)
     stop_list = data.get("hooks", {}).get("Stop", [])

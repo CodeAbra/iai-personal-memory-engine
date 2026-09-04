@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from iai_mcp.hippo._db import _resolve_effective_driver
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER, _resolve_effective_driver
 from iai_mcp.lillibrain.constants import DB_MAGIC
 
 
@@ -49,10 +49,10 @@ def test_resolve_driver_honours_env_for_absent_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db = tmp_path / "hippo" / "brain.sqlite3"  # not created
-    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
-    assert _resolve_effective_driver(str(db)) == "lilli"
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     assert _resolve_effective_driver(str(db)) == "stdlib"
+    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    assert _resolve_effective_driver(str(db)) == "lilli"
 
 
 def test_resolve_driver_defers_to_env_on_unknown_header(
@@ -83,7 +83,7 @@ def test_resolve_driver_rejects_six_byte_sqlite_prefix_match(
 
 
 @pytest.mark.skipif(
-    os.environ.get("LILLI_STORAGE_DRIVER", "").lower() != "lilli",
+    os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() != "lilli",
     reason="engine-written store requires the lilli driver at write time",
 )
 def test_lilli_store_reopens_when_env_unset(

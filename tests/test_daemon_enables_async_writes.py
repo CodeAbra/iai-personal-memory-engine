@@ -30,10 +30,11 @@ from uuid import uuid4
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 
 def _make_record(text: str = "hello world") -> MemoryRecord:

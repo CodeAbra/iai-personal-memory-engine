@@ -1,0 +1,31 @@
+[package]
+name    = "iai_mcp_rank_core"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name       = "iai_mcp_rank_core"
+crate-type = ["rlib"]    # only the native wrapper crate (iai_mcp_native) ships the cdylib
+
+[dependencies]
+pyo3          = { workspace = true }
+numpy         = { workspace = true }
+parking_lot   = "0.12.5"
+thiserror     = { workspace = true }
+
+# auto-initialize: embeds a Python interpreter for the crate's own test
+# binaries only (never affects the extension-module build iai_mcp_native
+# ships) -- the concurrency test needs a live interpreter + GIL to prove
+# py.detach forward progress.
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+
+[[bench]]
+name    = "apply_cost"
+harness = false
+
+[[bench]]
+name    = "scan_cost"
+harness = false

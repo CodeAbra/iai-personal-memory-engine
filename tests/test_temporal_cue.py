@@ -5,7 +5,7 @@ English month words must not fire.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -92,14 +92,19 @@ class TestRankTerm:
                 updated_at=created, tags=[], language="en",
             )
 
+        # Relative to `now`, not hardcoded absolute dates: both must stay
+        # under AGE_HALF_LIFE_DAYS (30) or the age penalty saturates at its
+        # 1.0 cap for both records and the age term carries no signal at
+        # all, regardless of which record is actually newer.
+        now = datetime.now(timezone.utc)
         store = MemoryStore(path=tmp_path / "lancedb")
         on_day = make(
             one_hot(0), "picked the venue",
-            datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc),
+            now - timedelta(days=5),
         )
         off_day = make(
             one_hot(0), "confirmed the venue",
-            datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+            now - timedelta(days=20),
         )
         for r in (on_day, off_day):
             store.insert(r)
@@ -135,14 +140,20 @@ class TestRankTerm:
         from iai_mcp.pipeline import recall_for_benchmark
 
         store, graph, assignment, emb, on_day, off_day = self._setup(tmp_path)
+        cue_date = on_day.created_at.date().isoformat()
         resp = recall_for_benchmark(
             store=store, graph=graph, assignment=assignment, rich_club=[],
-            embedder=emb, cue="what venue did we pick on July 4",
+            embedder=emb, cue=f"what venue did we pick on {cue_date}",
             session_id="bench", k_hits=5,
         )
         ranks = {h.record_id: i for i, h in enumerate(resp.hits)}
         assert ranks[on_day.id] < ranks[off_day.id], (
             "the record created on the mentioned date must outrank its twin"
+        )
+        winner = resp.hits[ranks[on_day.id]]
+        assert "xtemp" in winner.reason, (
+            "the win must come from the date-match boost, not a base-score "
+            f"coincidence: {winner.reason!r}"
         )
 
     def test_plain_cue_leaves_order_to_base_scores(self, tmp_path):

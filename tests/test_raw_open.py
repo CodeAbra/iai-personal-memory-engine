@@ -50,10 +50,20 @@ def test_bare_path_strips_file_uri_no_query() -> None:
 
 
 def test_default_returns_none_sentinel(tmp_path: Path, monkeypatch) -> None:
-    """With LILLI_STORAGE_DRIVER unset, open_store_conn returns None."""
+    """On an existing legacy sqlite file, open_store_conn returns None regardless
+    of the driver env — on-disk format detection wins over env intent, which
+    only governs a fresh/absent path (see _resolve_effective_driver)."""
     monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    path = tmp_path / "legacy.sqlite3"
+    # A bare connect+close leaves a zero-byte file (sqlite3 lazily writes the
+    # header); a CREATE TABLE forces the header page to land so the on-disk
+    # sniff in _resolve_effective_driver has bytes to detect.
+    legacy_conn = sqlite3.connect(str(path))
+    legacy_conn.execute("CREATE TABLE t (id INTEGER)")
+    legacy_conn.commit()
+    legacy_conn.close()
 
-    result = open_store_conn(tmp_path / "any.sqlite3")
+    result = open_store_conn(path)
     assert result is None, f"Expected None sentinel, got {type(result)}"
 
 

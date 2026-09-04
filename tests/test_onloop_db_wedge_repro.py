@@ -15,6 +15,7 @@ from tests._helpers import short_socket_path as _short_socket_path_base
 
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.daemon import _probe_status_roundtrip
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.socket_server import SocketServer
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryRecord
@@ -24,7 +25,7 @@ _PROBE_READ_TIMEOUT = 1.0
 _HOLD_SEC = 3.0
 _SERVED_RTT_CEIL = 1.0
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _lilli_only = pytest.mark.skipif(
     not _LILLI,

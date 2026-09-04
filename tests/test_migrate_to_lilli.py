@@ -121,7 +121,7 @@ def _build_source_store(
     root: Path, *, monkeypatch: pytest.MonkeyPatch, n_records: int, n_events: int = 0
 ) -> str:
     """Build a synthetic stdlib source store; return its db path."""
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_STORE", str(root))
     from iai_mcp.store import MemoryStore, flush_record_buffer, flush_edge_buffer
     from iai_mcp.events import write_event, flush_event_buffer
@@ -186,7 +186,7 @@ def migrated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     report = migrate_sqlite_to_lilli(src_db, dst_root, batch=20)
     key = _crypto_key(src_root)
     monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     return src_db, src_root, dst_root, key, report
 
 
@@ -317,7 +317,7 @@ def test_same_path_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # dst_root whose brain.sqlite3 resolves to the SAME file as src_db.
     same_root = src_root  # <root>/hippo/brain.sqlite3 == src_db
     monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     with pytest.raises(ValueError, match="same store"):
         migrate_sqlite_to_lilli(src_db, same_root, batch=10)
 
@@ -347,7 +347,7 @@ def test_fresh_dest_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     pre_existing.close()
 
     monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     with pytest.raises(ValueError, match="already exists"):
         migrate_sqlite_to_lilli(src_db, dst_root, batch=10)
 

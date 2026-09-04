@@ -8,7 +8,7 @@ import pytest
 
 from iai_mcp.core import dispatch
 from iai_mcp.daemon import PaskConfig, _load_pask_config
-from iai_mcp.events import query_events
+from iai_mcp.events import flush_event_buffer, query_events
 from iai_mcp.pask_teachback import verify_hit_set
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryRecord
@@ -198,6 +198,10 @@ def test_memory_recall_emits_pask_event_with_dry_run_flag(
 
     assert "pask_teachback" in response
 
+    # pask_teachback_pass is written buffered=True (matching the sibling
+    # recall_dispatched event); flush before reading, same precedent as
+    # test_anticipation_economy.py.
+    flush_event_buffer(store)
     events = query_events(
         store, kind="pask_teachback_pass", limit=10,
     )
@@ -232,6 +236,7 @@ def test_pask_disabled_skips_response_key_and_event(
         f"key; got keys {sorted(response.keys())!r}"
     )
 
+    flush_event_buffer(store)
     events = query_events(
         store, kind="pask_teachback_pass", limit=10,
     )

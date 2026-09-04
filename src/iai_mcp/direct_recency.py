@@ -194,6 +194,7 @@ def _row_to_record(row: dict, *, key: bytes | None) -> Any:
         hv_tier=hv_tier,
         structure_hv_payload=structure_hv_payload,
         embedding_pending=int(row.get("embedding_pending") or 0),
+        salience_level=row.get("salience_level") or "unflagged",
     )
     if language == "__LEGACY_EMPTY__":
         rec.language = ""

@@ -106,6 +106,7 @@ def test_identity_tier_cross_language_warning(tmp_path):
     store.insert(anchor_en)
 
     rus = _identity_record(
+        # non-English fixture data: multilingual behavior under test — keep
         text="Пользователь - креативный продюсер",
         language="ru",
     )
@@ -135,6 +136,7 @@ def test_identity_tier_monolingual_commit(tmp_path, storage_driver):
     # Discrimination arm on the same store: a different-language update must
     # warn, so the zero above reflects a matched read, not an empty one.
     other_lang = _identity_record(
+        # non-English fixture data: multilingual behavior under test — keep
         text="Пользователь - креативный продюсер", language="ru",
     )
     ok, _reason = check_identity_anchor_on_write(store, other_lang, profile_state={})
@@ -176,6 +178,7 @@ def test_identity_tier_cross_language_warning_bounded_scan_both_drivers(
     store.insert(anchor_en)
 
     rus = _identity_record(
+        # non-English fixture data: multilingual behavior under test — keep
         text="Пользователь - креативный продюсер",
         language="ru",
     )

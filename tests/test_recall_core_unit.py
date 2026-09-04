@@ -77,6 +77,7 @@ def _build_store_and_graph(
             "tier": rec.tier,
             "tags": [],
             "language": "en",
+            "created_at": str(getattr(rec, "created_at", "") or ""),
         })
     return store, graph, recs
 
@@ -823,6 +824,15 @@ def test_stage14_profile_modulates_chunked_not_large_batch(tmp_path, monkeypatch
             f"(> _BOOST_SMALL_BATCH=4). This triggers the large-batch "
             f"edges.to_pandas() scan on the recall hot path."
         )
+
+def test_boost_edges_small_batch_constant_pinned():
+    """Anchor for the hardcoded `<= 4` above: pipeline.py, boost_edges, and
+    the sync fallback in store/_store.py all read one shared constant. This
+    assertion is what catches a future drift in that constant -- the test
+    above only re-asserts the literal, so it would silently pass a drift if
+    nothing else pinned the constant's value."""
+    from iai_mcp.store._store import BOOST_EDGES_SMALL_BATCH
+    assert BOOST_EDGES_SMALL_BATCH == 4
 
 def test_ann_path_used_field_on_recall_response():
     from iai_mcp.types import RecallResponse

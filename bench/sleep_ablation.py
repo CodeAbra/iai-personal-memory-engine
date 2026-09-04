@@ -29,7 +29,7 @@ PRODUCTION_STORE = Path.home() / ".iai-mcp"
 BENCH_PASSPHRASE = "bench-throwaway-v83"
 
 DEFAULT_STORE_BASE = "/tmp/iai-bench-store-ablation"
-DEFAULT_OUTPUT = "bench/results/sleep_ablation.json"
+DEFAULT_OUTPUT = "bench/results/v8.3/sleep_ablation.json"
 DEFAULT_SEEDS = [13, 42, 137]
 DEFAULT_K = 10
 K_PROBE = 50
@@ -826,7 +826,7 @@ def _build_env_metadata(
 
     return {
         "benchmark": "sleep_ablation",
-        "version": "2.0.0",
+        "version": "v8.3",
         "run_utc": datetime.now(timezone.utc).isoformat(),
         "seed_list": seed_list,
         "store_base": str(store_base),
@@ -856,7 +856,7 @@ def _build_env_metadata(
             "IAI_MCP_CRYPTO_PASSPHRASE=bench-throwaway-v83 "
             "python bench/sleep_ablation.py "
             "--seeds 13 42 137 "
-            "--output bench/results/sleep_ablation.json"
+            "--output bench/results/v8.3/sleep_ablation.json"
         ),
     }
 

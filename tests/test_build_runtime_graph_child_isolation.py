@@ -31,8 +31,6 @@ import numpy as np
 import pytest
 
 
-_LILLI_DRIVER = os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() == "lilli"
-
 from iai_mcp import retrieve, runtime_graph_cache
 from iai_mcp.store import MemoryStore
 from iai_mcp.types import MemoryRecord
@@ -287,6 +285,10 @@ _RSS_ARM_WORKER = textwrap.dedent(
 def _run_isolation_arm(seed_base: int, in_parent: bool, root: Path) -> int:
     env = os.environ.copy()
     env["IAI_MCP_CRYPTO_PASSPHRASE"] = "test-passphrase-not-secret"
+    # This arm is only ever spawned by the legacy-driver RSS-isolation proof
+    # below (the native engine's per-record write cost exceeds the wall at
+    # this volume), so the child always opens the legacy format explicitly.
+    env["LILLI_STORAGE_DRIVER"] = "stdlib"
     proc = subprocess.run(
         [
             sys.executable, "-c", _RSS_ARM_WORKER,
@@ -307,22 +309,19 @@ def _run_isolation_arm(seed_base: int, in_parent: bool, root: Path) -> int:
     platform.system() != "Darwin",
     reason="settled-RSS isolation proof calibrated on this host's allocator",
 )
-@pytest.mark.skipif(
-    _LILLI_DRIVER,
-    reason=(
-        "RSS-isolation proof: it asserts detection-arena residency stays in the "
-        "ephemeral child vs the parent — driver-independent, validated under the "
-        "stdlib driver. The proof seeds 6000 records across two arms purely to "
-        "build the graph twice; the lilli engine's per-record write cost at that "
-        "volume exceeds the default wall, and the WHERE-detection-runs property "
-        "the test proves does not depend on the storage driver."
-    ),
-)
 @retry_once_on_assertion
 def test_parent_rss_lower_with_child_isolation(tmp_path: Path):
     """Building the runtime graph with child isolation keeps the parent RSS
     materially below the in-parent-detection baseline, proving the detection
     arenas no longer reside in the parent.
+
+    RSS-isolation proof: it asserts detection-arena residency stays in the
+    ephemeral child vs the parent -- driver-independent, validated under the
+    legacy driver (set explicitly by _run_isolation_arm below). The proof
+    seeds 6000 records across two arms purely to build the graph twice; the
+    native engine's per-record write cost at that volume exceeds the default
+    wall, and the WHERE-detection-runs property the test proves does not
+    depend on the storage driver.
 
     Each arm runs in its OWN fresh process and reports its own peak RSS
     (getrusage RUSAGE_SELF, ru_maxrss on Darwin is bytes). The in-parent arm

@@ -103,6 +103,30 @@ def _make_schema_hub_with_pattern(vec: list[float], text: str, pattern: str) -> 
         language="en",
     )
 
+def _make_proc_chunk(vec: list[float], text: str) -> MemoryRecord:
+    now = datetime.now(timezone.utc)
+    return MemoryRecord(
+        id=uuid4(),
+        tier="procedural",
+        literal_surface=text,
+        aaak_index="",
+        embedding=list(vec),
+        community_id=None,
+        centrality=0.0,
+        detail_level=1,
+        pinned=False,
+        stability=0.7,
+        difficulty=0.3,
+        last_reviewed=None,
+        never_decay=False,
+        never_merge=False,
+        provenance=[],
+        created_at=now,
+        updated_at=now,
+        tags=["chunk", "source:cofire"],
+        language="en",
+    )
+
 @pytest.fixture(autouse=True)
 def _isolated_keyring(monkeypatch: pytest.MonkeyPatch):
     import keyring as _keyring
@@ -286,4 +310,64 @@ def test_concept_mode_patterns_observed_pattern_field_matches_tag(tmp_path):
         assert entry["pattern"] == expected_patterns[sid], (
             f"pattern field mismatch for schema {sid}: "
             f"expected {expected_patterns[sid]!r}, got {entry['pattern']!r}"
+        )
+
+def test_concept_mode_drops_procedural_chunks_silently(tmp_path):
+    from iai_mcp.pipeline import recall_for_response
+    from iai_mcp.retrieve import build_runtime_graph
+
+    (store_base, embedder_base, graph_base, assignment_base, rich_club_base,
+     _verbatim_ids_base, _hub_records_base, cue_text_base
+     ) = _seed_10_verbatim_plus_5_schema_hubs(tmp_path / "baseline")
+    resp_baseline = recall_for_response(
+        store=store_base, graph=graph_base, assignment=assignment_base,
+        rich_club=rich_club_base, embedder=embedder_base, cue=cue_text_base,
+        session_id="r287_baseline", mode="concept",
+    )
+
+    (store, embedder, graph, assignment, rich_club,
+     _verbatim_ids, hub_records, cue_text) = _seed_10_verbatim_plus_5_schema_hubs(tmp_path / "with_chunk")
+
+    cue_vec = embedder.fixed[cue_text]
+    proc_vec = _unit_vector_with_cosine(cue_vec, 0.75)
+    proc_rec = _make_proc_chunk(proc_vec, "procedural chunk cofire pair label")
+    store.insert(proc_rec)
+
+    graph, assignment, rich_club = build_runtime_graph(store)
+
+    candidate_ids = {r.id for r, _ in store.query_similar(cue_vec, k=32)}
+    assert proc_rec.id in candidate_ids, (
+        "test setup: procedural chunk must be a real ranking contender, "
+        "not orthogonal noise excluded by construction"
+    )
+
+    resp = recall_for_response(
+        store=store, graph=graph, assignment=assignment,
+        rich_club=rich_club, embedder=embedder, cue=cue_text,
+        session_id="r287_drop", mode="concept",
+    )
+    assert resp.cue_mode == "concept"
+
+    hit_ids = {h.record_id for h in resp.hits}
+    assert proc_rec.id not in hit_ids, (
+        f"procedural chunk must be dropped from resp.hits under concept mode; "
+        f"hits={hit_ids}"
+    )
+
+    for entry in resp.patterns_observed:
+        assert entry["schema_id"] != str(proc_rec.id), (
+            "procedural chunks get no patterns_observed summary entry (silent drop); "
+            f"found one for {proc_rec.id}"
+        )
+    assert len(resp.patterns_observed) == len(resp_baseline.patterns_observed), (
+        "the procedural chunk must not add or remove any patterns_observed "
+        f"entry vs the no-chunk baseline: got {len(resp.patterns_observed)}, "
+        f"expected {len(resp_baseline.patterns_observed)}"
+    )
+
+    hub_id_set = {h.id for h in hub_records}
+    for h in resp.hits:
+        assert h.record_id not in hub_id_set, (
+            "the pre-existing schema pattern:-tag strip must still exclude "
+            f"schema hits alongside the new procedural drop; leaked {h.record_id}"
         )

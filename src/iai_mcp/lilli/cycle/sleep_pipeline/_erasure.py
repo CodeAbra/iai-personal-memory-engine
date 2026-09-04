@@ -46,7 +46,11 @@ def step_erasure_agent(
         f"AND created_at < '{age_cutoff_str}' "
         f"AND pinned = false "
         f"AND never_decay = false "
-        f"AND tombstoned_at IS NULL"
+        f"AND tombstoned_at IS NULL "
+        # A live directive persists until an explicit contradict() call
+        # clears the flag -- self-cleaning, since the guard reads the
+        # live column rather than a frozen mint-time marker.
+        f"AND (directive = 0 OR directive IS NULL)"
     )
 
     try:

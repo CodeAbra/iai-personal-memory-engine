@@ -23,9 +23,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.store import MemoryStore
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", "").lower() == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() == "lilli"
 
 _EMBED_DIM = 384
 
@@ -221,7 +222,7 @@ def test_edges_count_rows_does_not_block_during_vacuum_hold(tmp_path: Path) -> N
 def test_stdlib_count_rows_blocks_during_vacuum_hold_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     store = _make_store(tmp_path)
     assert store.db._storage_driver == "stdlib"
     for i in range(20):

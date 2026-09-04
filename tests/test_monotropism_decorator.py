@@ -322,9 +322,9 @@ def test_authority_hit_carries_community_id_end_to_end_and_gets_promoted(tmp_pat
 
     _orig_query_similar = store.query_similar
 
-    def _query_similar_missing_both(vec, k=10, tier=None, *, n=None):
-        pairs = _orig_query_similar(vec, k=k, tier=tier, n=n)
-        return [(r, s) for r, s in pairs if r.id not in (hot_id, cold_id)]
+    def _query_similar_missing_both(vec, *args, **kwargs):
+        pairs = _orig_query_similar(vec, *args, **kwargs)
+        return [(r, s) for r, s in pairs if getattr(r, "id", None) not in (hot_id, cold_id)]
 
     monkeypatch.setattr(store, "query_similar", _query_similar_missing_both)
     stub_embedder_for_store(monkeypatch, _StubEmbedder(cue_vec))

@@ -58,8 +58,10 @@ def test_record_buffer_survives_add_failure_then_persists_byte_exact(tmp_path: P
     from iai_mcp import store as store_mod
     from iai_mcp.store import RECORDS_TABLE, MemoryStore, flush_record_buffer
 
+    # non-English fixture data: multilingual behavior under test — keep
     surfaces = [
         "verbatim content one — must survive a transient write fault",
+        # non-English fixture data: multilingual behavior under test — keep
         "雪 второй verbatim 🧠 unicode literal_surface",
         '{"json": "verbatim payload", "n": 3}',
     ]

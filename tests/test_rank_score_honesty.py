@@ -71,6 +71,7 @@ def test_every_record_view_construction_carries_rank_fields() -> None:
     import re
 
     from iai_mcp import core, pipeline, retrieve, runtime_graph_cache
+    from iai_mcp.store import _store as store_module
 
     def _call_text(src: str, start: int) -> str:
         depth = 0
@@ -83,15 +84,21 @@ def test_every_record_view_construction_carries_rank_fields() -> None:
                     return src[start - 1:i]
         return src[start - 1:]
 
-    for mod in (pipeline, retrieve):
+    view_constructions = 0
+    for mod in (pipeline, retrieve, store_module):
         src = inspect.getsource(mod)
-        for m in re.finditer(r"SimpleRecordView\(", src):
+        for m in re.finditer(r"(?:SimpleRecordView|RankCandidateView)\(", src):
+            view_constructions += 1
             call = _call_text(src, m.end())
             for field_name in ("aaak_index=", "created_at=", "stability="):
                 assert field_name in call, (
-                    f"{mod.__name__}: SimpleRecordView construction misses "
+                    f"{mod.__name__}: rank-view construction misses "
                     f"{field_name} — rank term goes silently dead:\n{call[:300]}"
                 )
+    assert view_constructions >= 1, (
+        "guard self-check: expected to scan at least 1 SimpleRecordView/"
+        "RankCandidateView construction, saw 0 — the scan pattern went stale"
+    )
 
     # Same contract for every full node-payload dict: any dict literal
     # carrying "surface" must carry the rank columns too, in every module
@@ -135,13 +142,18 @@ def test_aaak_overlap_matches_inflected_name_forms() -> None:
 
     # The anchor is stored as it appeared in text — often an inflected
     # form. The nominative cue must still match it, and vice versa.
+    # non-English fixture data: multilingual behavior under test — keep
     idx = "W:E/R:0057543b/E:зефирбота,parse_kits/T:capture"
+    # non-English fixture data: multilingual behavior under test — keep
     assert _aaak_overlap("зефирбот", idx) == 1.0
     assert _aaak_overlap("parse_kit", idx) == 1.0
+    # non-English fixture data: multilingual behavior under test — keep
     assert _aaak_overlap("что умеет зефирбот?", idx) > 0.0
-    # A short stem must not fuzzy-match: "бот" is not "ботлнек".
+    # A short stem must not fuzzy-match a longer token that merely shares its prefix.
+    # non-English fixture data: multilingual behavior under test — keep
     assert _aaak_overlap("бот", "W:E/R:x/E:ботлнек/T:capture") == 0.0
     # Nor may a long tail ride a shared prefix.
+    # non-English fixture data: multilingual behavior under test — keep
     assert _aaak_overlap("зефир", idx) == 0.0
 
 

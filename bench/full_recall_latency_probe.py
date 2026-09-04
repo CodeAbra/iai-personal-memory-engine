@@ -42,6 +42,7 @@ responsibilities (see how-to-verify in the plan checkpoint).
 from __future__ import annotations
 
 import argparse
+import asyncio
 import cProfile
 import io
 import pstats
@@ -179,122 +180,108 @@ def run_probe(store_path: str, n: int = 40, prof_out: str = "/tmp/recall_spread_
     # Open in SHARED mode so the HNSW ANN index is built — the Layer-1 recall
     # path requires the index (read-only open leaves it unbuilt).
     store = MemoryStore(path=sp, access_mode=AccessMode.SHARED)
+    asyncio.run(store.enable_async_writes())
 
-    real_embedder = embedder_for_store(store)
-    shim = _VecInjectionEmbedder(real_embedder)
+    try:
+        real_embedder = embedder_for_store(store)
+        shim = _VecInjectionEmbedder(real_embedder)
 
-    # Sample a probe cue: pick any active record's embedding as the vector seed.
-    with store.db._conn_lock:
-        row = store.db._conn.execute(
-            "SELECT id, embedding FROM records"
-            " WHERE tombstoned_at IS NULL"
-            " AND COALESCE(embedding_pending, 0) = 0"
-            " LIMIT 1"
-        ).fetchone()
+        # Sample a probe cue: pick any active record's embedding as the vector seed.
+        with store.db._conn_lock:
+            row = store.db._conn.execute(
+                "SELECT id, embedding FROM records"
+                " WHERE tombstoned_at IS NULL"
+                " AND COALESCE(embedding_pending, 0) = 0"
+                " LIMIT 1"
+            ).fetchone()
 
-    if row is None:
-        print("ERROR: store has no active records.", file=sys.stderr)
-        store.close()
-        sys.exit(1)
+        if row is None:
+            print("ERROR: store has no active records.", file=sys.stderr)
+            sys.exit(1)
 
-    raw_emb = row["embedding"]
-    probe_vec = np.frombuffer(raw_emb, dtype=np.float32).copy()
-    pn = float(np.linalg.norm(probe_vec))
-    if pn > 0.0:
-        probe_vec = probe_vec / pn
+        raw_emb = row["embedding"]
+        probe_vec = np.frombuffer(raw_emb, dtype=np.float32).copy()
+        pn = float(np.linalg.norm(probe_vec))
+        if pn > 0.0:
+            probe_vec = probe_vec / pn
 
-    # Add small orthogonal noise so the cue is not a verbatim copy of the stored
-    # embedding (mirrors the _perturb_vec pattern in bench/recall_accuracy.py).
-    rng = np.random.default_rng(20260701)
-    noise_dir = rng.standard_normal(len(probe_vec)).astype(np.float32)
-    noise_dir -= float(np.dot(noise_dir, probe_vec)) * probe_vec
-    nn = float(np.linalg.norm(noise_dir))
-    if nn > 0.0:
-        noise_dir /= nn
-    perturbed = probe_vec + 0.15 * noise_dir
-    pn2 = float(np.linalg.norm(perturbed))
-    if pn2 > 0.0:
-        perturbed = perturbed / pn2
+        # Add small orthogonal noise so the cue is not a verbatim copy of the stored
+        # embedding (mirrors the _perturb_vec pattern in bench/recall_accuracy.py).
+        rng = np.random.default_rng(20260701)
+        noise_dir = rng.standard_normal(len(probe_vec)).astype(np.float32)
+        noise_dir -= float(np.dot(noise_dir, probe_vec)) * probe_vec
+        nn = float(np.linalg.norm(noise_dir))
+        if nn > 0.0:
+            noise_dir /= nn
+        perturbed = probe_vec + 0.15 * noise_dir
+        pn2 = float(np.linalg.norm(perturbed))
+        if pn2 > 0.0:
+            perturbed = perturbed / pn2
 
-    # ---- Reinforce-defer shim -----------------------------------------------
-    # In non-daemon contexts (this probe), store._reinforce_queue is None so
-    # queue_reinforce falls back to per-id synchronous reinforce_record calls.
-    # The profiled cost is ~2.6 s per recall — a bench artifact, not a production
-    # cost.  In production the daemon has a live ReinforceWriteQueue so the call
-    # returns immediately (deferred off the recall thread).
-    #
-    # Neutralise queue_reinforce so the timed path mirrors the daemon: reinforce
-    # is deferred and does not run on the recall response thread.  The sync write
-    # path (reinforce_record → boost_edges) is a real production concern worth its
-    # own dedicated reinforce-write perf investigation — that is out of this
-    # recall-latency scope.
-    store.queue_reinforce = lambda *_a, **_kw: None  # type: ignore[method-assign]
+        with _InjectEmbedderCtx(shim):
+            sentinel = shim.register("probe_cue", perturbed.tolist())
 
-    with _InjectEmbedderCtx(shim):
-        sentinel = shim.register("probe_cue", perturbed.tolist())
-
-        # ---- Warm-up: one throwaway recall so lazy caches are hot -----------
-        _reset_spread_on()
-        _run_one_dispatch(store, sentinel)
-        print("Warm-up recall complete.")
-
-        # ---- p50/p95 measurement loop ----------------------------------------
-        latency_samples: list[float] = []
-        print(f"Running {n} timed spread-ON recalls...")
-        for _ in range(n):
+            # ---- Warm-up: one throwaway recall so lazy caches are hot -----------
             _reset_spread_on()
-            t0 = time.perf_counter()
             _run_one_dispatch(store, sentinel)
-            latency_samples.append((time.perf_counter() - t0) * 1000.0)
+            print("Warm-up recall complete.")
 
-        p50, p95 = _p50_p95(latency_samples)
-        print(f"\n--- Spread-ON wall-clock, reinforce-DEFERRED (n={n}) ---")
-        print(f"  p50 = {p50:.1f} ms  [production-representative: reinforce deferred]")
-        print(f"  p95 = {p95:.1f} ms  [production-representative: reinforce deferred]")
-        print(f"  min = {min(latency_samples):.1f} ms")
-        print(f"  max = {max(latency_samples):.1f} ms")
-        print()
-        print("  NOTE: sync-reinforce (~2.6 s) was a non-daemon bench artifact and is")
-        print("  excluded from this measurement.  The deferred baseline above (~1.5 s)")
-        print("  matches the production path (daemon: reinforce is off the recall thread).")
+            # ---- p50/p95 measurement loop ----------------------------------------
+            latency_samples: list[float] = []
+            print(f"Running {n} timed spread-ON recalls...")
+            for _ in range(n):
+                _reset_spread_on()
+                t0 = time.perf_counter()
+                _run_one_dispatch(store, sentinel)
+                latency_samples.append((time.perf_counter() - t0) * 1000.0)
 
-        if p95 < 1000.0:
-            print(
-                "\nWARNING: p95 is already sub-second. "
-                "The spread-ON path may not be exercised (degrade still active?) "
-                "or the store is small. Escalate before locking the fix design."
-            )
+            p50, p95 = _p50_p95(latency_samples)
+            print(f"\n--- Spread-ON wall-clock, async write queue live (n={n}) ---")
+            print(f"  p50 = {p50:.1f} ms")
+            print(f"  p95 = {p95:.1f} ms")
+            print(f"  min = {min(latency_samples):.1f} ms")
+            print(f"  max = {max(latency_samples):.1f} ms")
+            print()
+            print("  Reinforce and provenance writes are deferred through the real async")
+            print("  write queue (enable_async_writes()), matching the daemon's own path.")
 
-        # ---- cProfile: one warm spread-ON recall ----------------------------
-        print(f"\nRunning cProfile on one warm spread-ON recall -> {prof_out}")
-        _reset_spread_on()
+            if p95 < 1000.0:
+                print(
+                    "\nWARNING: p95 is already sub-second. "
+                    "The spread-ON path may not be exercised (degrade still active?) "
+                    "or the store is small. Escalate before locking the fix design."
+                )
 
-        pr = cProfile.Profile()
-        pr.enable()
-        _run_one_dispatch(store, sentinel)
-        pr.disable()
+            # ---- cProfile: one warm spread-ON recall ----------------------------
+            print(f"\nRunning cProfile on one warm spread-ON recall -> {prof_out}")
+            _reset_spread_on()
 
-        pr.dump_stats(prof_out)
+            pr = cProfile.Profile()
+            pr.enable()
+            _run_one_dispatch(store, sentinel)
+            pr.disable()
 
-        # Print top-30 cumulative frames to stdout
-        buf = io.StringIO()
-        ps = pstats.Stats(pr, stream=buf)
-        ps.sort_stats("cumulative")
-        ps.print_stats(30)
-        print(buf.getvalue())
+            pr.dump_stats(prof_out)
 
-        # ---- Frame-targeted attribution summary -----------------------------
-        print("--- Attribution targets (look for these frames in the cProfile output) ---")
-        print("  H1 (per-candidate decode):  _from_row")
-        print("  H1 detail — BLOB decode:    np.frombuffer (in _decode_raw_row)")
-        print("  H2 (global degree fan-out): incident_edges  (with top_k=None, all hebbian)")
-        print("  H3 (repeated edge scans):   incident_edges  (hop-1 / hop-2 SQL scans)")
-        print("  Layer-1 path confirm:       query_similar -> incident_edges -> recall_for_response")
-        print("  Fallback path (BAD if seen): build_runtime_graph")
-        print()
-        print("Record the p50/p95 and the dominant frame into the phase PROFILE.md.")
+            # Print top-30 cumulative frames to stdout
+            buf = io.StringIO()
+            ps = pstats.Stats(pr, stream=buf)
+            ps.sort_stats("cumulative")
+            ps.print_stats(30)
+            print(buf.getvalue())
 
-    store.close()
+            # ---- Frame-targeted attribution summary -----------------------------
+            print("--- Attribution targets (look for these frames in the cProfile output) ---")
+            print("  H1 (per-candidate decode):  _from_row")
+            print("  H1 detail — BLOB decode:    np.frombuffer (in _decode_raw_row)")
+            print("  H2 (global degree fan-out): incident_edges  (with top_k=None, all hebbian)")
+            print("  H3 (repeated edge scans):   incident_edges  (hop-1 / hop-2 SQL scans)")
+            print("  Layer-1 path confirm:       query_similar -> incident_edges -> recall_for_response")
+            print("  Fallback path (BAD if seen): build_runtime_graph")
+            print()
+            print("Record the p50/p95 and the dominant frame into the phase PROFILE.md.")
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------

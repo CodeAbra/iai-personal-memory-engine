@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -75,6 +76,9 @@ def _patch_pipeline_steps_to_noop(
         (SleepStep.CURIOSITY_MINE, "_step_curiosity_mine"),
         (SleepStep.EMBEDDING_INTEGRITY, "_step_embedding_integrity"),
         (SleepStep.COMMUNITY_NAMING, "_step_community_naming"),
+        (SleepStep.RECONSOLIDATION_VALENCE, "_step_reconsolidation_valence"),
+        (SleepStep.PROC_MINE, "_step_proc_mine"),
+        (SleepStep.TRANSCRIPT_SWEEP_BACKSTOP, "_step_transcript_sweep_backstop"),
     ]
 
     for step, method_name in _NOOP_STEPS:
@@ -108,23 +112,26 @@ def test_happy_path_runs_pipeline_and_prints_progress(
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sleep cycle started." in out
-    assert "[1/17] schema_mine" in out
-    assert "[2/17] knob_tune" in out
-    assert "[3/17] optimize_hippo" in out
-    assert "[4/17] hippo_cleanup" in out
-    assert "[5/17] dream_decay" in out
-    assert "[6/17] erasure_agent" in out
-    assert "[7/17] cluster_replay" in out
-    assert "[8/17] reconsolidation" in out
-    assert "[9/17] user_model_update" in out
-    assert "[10/17] dmn_reflection" in out
-    assert "[11/17] crisis_recluster" in out
-    assert "[12/17] cluster_summary" in out
-    assert "[13/17] recall_index_rebuild" in out
-    assert "[14/17] entity_link" in out
-    assert "[15/17] curiosity_mine" in out
-    assert "[16/17] embedding_integrity" in out
-    assert "[17/17] community_naming" in out
+    assert "[1/20] schema_mine" in out
+    assert "[2/20] knob_tune" in out
+    assert "[3/20] optimize_hippo" in out
+    assert "[4/20] hippo_cleanup" in out
+    assert "[5/20] dream_decay" in out
+    assert "[6/20] erasure_agent" in out
+    assert "[7/20] cluster_replay" in out
+    assert "[8/20] reconsolidation" in out
+    assert "[9/20] user_model_update" in out
+    assert "[10/20] dmn_reflection" in out
+    assert "[11/20] crisis_recluster" in out
+    assert "[12/20] cluster_summary" in out
+    assert "[13/20] recall_index_rebuild" in out
+    assert "[14/20] entity_link" in out
+    assert "[15/20] curiosity_mine" in out
+    assert "[16/20] embedding_integrity" in out
+    assert "[17/20] community_naming" in out
+    assert "[18/20] reconsolidation_valence" in out
+    assert "[19/20] proc_mine" in out
+    assert "[20/20] transcript_sweep_backstop" in out
     assert "Sleep cycle complete" in out
 
 
@@ -178,8 +185,8 @@ def test_force_runs_pipeline_when_quarantined(
     rc = cmd_maintenance_sleep_cycle(_make_args(force=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[13/17] recall_index_rebuild" in out
-    assert "[14/17] entity_link" in out
+    assert "[13/20] recall_index_rebuild" in out
+    assert "[14/20] entity_link" in out
     assert "Sleep cycle complete" in out
 
     record_after = load_state(LIFECYCLE_STATE_PATH)
@@ -250,9 +257,9 @@ def test_failure_returns_nonzero_with_error_in_stderr(
     rc = cmd_maintenance_sleep_cycle(_make_args())
     assert rc == 1
     captured = capsys.readouterr()
-    assert "[1/17] schema_mine" in captured.out
-    assert "[2/17] knob_tune" in captured.out
-    assert "[3/17] optimize_hippo ... FAILED" in captured.err
+    assert "[1/20] schema_mine" in captured.out
+    assert "[2/20] knob_tune" in captured.out
+    assert "[3/20] optimize_hippo ... FAILED" in captured.err
     assert "synthetic optimize failure" in captured.err
 
 
@@ -324,3 +331,95 @@ def test_store_open_failure_returns_2(
     err = capsys.readouterr().err
     assert "could not open MemoryStore" in err
     assert "disk full" in err
+
+
+def test_lock_held_returns_1_with_actionable_message(
+    iai_root, monkeypatch, capsys,
+):
+    from iai_mcp.hippo import HippoLockHeldError
+
+    def _raise_lock_held(path=None, **kw):
+        raise HippoLockHeldError(str(Path(path or "") / "hippo" / ".lock"), "12345")
+
+    monkeypatch.setattr(
+        "iai_mcp.store.MemoryStore", _raise_lock_held,
+    )
+
+    from iai_mcp.cli import cmd_maintenance_sleep_cycle
+
+    rc = cmd_maintenance_sleep_cycle(_make_args())
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "daemon holds the store lock" in err.lower()
+    assert "iai-mcp daemon status" in err
+
+
+def _spawn_hold_exclusive_lock(store_path_str, ready_evt, release_evt, error_q):
+    """Module-level so multiprocessing spawn can pickle-reference it by
+    qualified name; a closure or nested function is not picklable."""
+    from pathlib import Path as _Path
+
+    try:
+        from iai_mcp.hippo import AccessMode
+        from iai_mcp.store import MemoryStore
+
+        store = MemoryStore(
+            path=_Path(store_path_str), access_mode=AccessMode.EXCLUSIVE,
+        )
+    except Exception as exc:  # noqa: BLE001 -- reported to parent, not raised here
+        error_q.put(f"{type(exc).__name__}: {exc}")
+        ready_evt.set()
+        return
+    try:
+        ready_evt.set()
+        release_evt.wait(timeout=30)
+    finally:
+        store.close()
+
+
+def test_second_process_refused_while_lock_held_spawn_context(
+    iai_root, monkeypatch, capsys,
+):
+    """Genuine cross-process refusal: a `spawn`-context child (not `fork`,
+    which false-shares the fd; not a same-process open, which
+    `_PROCESS_LOCKS` refcounts as the same holder) opens the store
+    exclusively and blocks. The CLI's store-open in this process must be
+    refused with exit 1 while the child holds it, and must succeed once
+    the child releases it."""
+    import multiprocessing as mp
+
+    _patch_pipeline_steps_to_noop(monkeypatch)
+
+    store_path = iai_root
+    ctx = mp.get_context("spawn")
+    ready_evt = ctx.Event()
+    release_evt = ctx.Event()
+    error_q = ctx.Queue()
+
+    child = ctx.Process(
+        target=_spawn_hold_exclusive_lock,
+        args=(str(store_path), ready_evt, release_evt, error_q),
+    )
+    child.start()
+    try:
+        got_ready = ready_evt.wait(timeout=30)
+        assert got_ready, "spawn-context child never signaled readiness"
+        if not error_q.empty():
+            pytest.fail(f"spawn-context child failed to open the store: {error_q.get()}")
+
+        from iai_mcp.cli import cmd_maintenance_sleep_cycle
+
+        rc = cmd_maintenance_sleep_cycle(_make_args())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "daemon holds the store lock" in err.lower()
+    finally:
+        release_evt.set()
+        child.join(timeout=15)
+
+    assert child.exitcode == 0
+
+    rc_after_release = cmd_maintenance_sleep_cycle(_make_args())
+    assert rc_after_release == 0
+    out = capsys.readouterr().out
+    assert "Sleep cycle complete" in out

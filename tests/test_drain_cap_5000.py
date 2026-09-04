@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.skipif(
 # default gate (fast), and on the engine backend they run under --runslow. The
 # drain logic itself is correct on both — its assertions are unchanged, and the
 # small-file cap test below stays in the default gate on both backends.
-_ENGINE_BACKEND = os.environ.get("LILLI_STORAGE_DRIVER") == "lilli"
+_ENGINE_BACKEND = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER) == "lilli"
 
 
 def _slow_on_lilli(fn):

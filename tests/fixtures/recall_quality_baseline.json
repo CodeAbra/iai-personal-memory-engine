@@ -33,15 +33,15 @@
         "recall_at_10": 1.0,
         "returned_hit_ids_top10": [
           "00000000-0000-0000-0000-000000000003",
-          "00000000-0000-0000-0000-000000000004",
           "00000000-0000-0000-0000-000000000001",
-          "00000000-0000-0000-0000-000000000002",
+          "00000000-0000-0000-0000-000000000004",
           "00000000-0000-0000-0000-000000000005",
-          "a5060ee6-02a0-4e8c-9e26-e5d7dfab736c",
-          "4be1e5d1-82b9-4e43-aa64-9ab6c423fef6",
-          "9774ffb8-1076-44b9-8a59-74d5109ba42e",
-          "a81e299f-9c4d-406f-9e20-ff9b38b1ed61",
-          "1dc7df84-4715-4f61-87f2-7a00eca398f4"
+          "dadc4629-9366-47d6-8a2a-14801c8e3691",
+          "d5fdce07-dc19-4066-885b-7cb94a7888cf",
+          "00000000-0000-0000-0000-000000000002",
+          "00000000-0000-0000-0000-000000000bb9",
+          "c076aba6-6e29-4faa-a53e-49d19218306a",
+          "ee332088-9acf-4bb7-9688-7d71ddda53ad"
         ],
         "anti_hit_surfaced": false
       }
@@ -55,11 +55,11 @@
     "ef_50_behaviour": "returned-200",
     "ef_50_result_count": 200,
     "recall_at_200": {
-      "lexical-generic": 0.98,
-      "lexical-specific": 0.975
+      "lexical-generic": 1.0,
+      "lexical-specific": 1.0
     },
     "recall_at_200_note": "Random uniform unit-vector filler in 384-d produces near-tied cosines (std ~0.051). ANN at ef=200 struggles to rank near-tied neighbors consistently. Production clustered embeddings yield higher recall@200. The threshold for 200th-nearest-neighbor cosine at N=10k is ~0.10.",
-    "ann_boundary_specific_cue": 0.0289,
+    "ann_boundary_specific_cue": 0.0291,
     "two_hop_gold_cosine_vs_cue": 0.02,
     "two_hop_gold_outside_ann_top200": true,
     "two_hop_gold_reachable_via_2hop": true,
@@ -67,12 +67,12 @@
       "k": 3,
       "ef_from": 50,
       "ef_to": 200,
-      "p50_ms_ef50": 1.29,
-      "p95_ms_ef50": 1.53,
-      "p50_ms_ef200": 1.44,
-      "p95_ms_ef200": 1.48,
-      "latency_delta_p50_ms": 0.15,
-      "latency_delta_p95_ms": -0.06,
+      "p50_ms_ef50": 0.99,
+      "p95_ms_ef50": 1.22,
+      "p50_ms_ef200": 0.9,
+      "p95_ms_ef200": 1.06,
+      "latency_delta_p50_ms": -0.09,
+      "latency_delta_p95_ms": -0.16,
       "top_set_changed": false,
       "change_direction": "toward-exact-or-unchanged",
       "memory_delta_rss_mb": 0.0
@@ -110,15 +110,15 @@
         "recall_at_10": 1.0,
         "returned_hit_ids_top10": [
           "00000000-0000-0000-0000-000000000003",
-          "00000000-0000-0000-0000-000000000004",
           "00000000-0000-0000-0000-000000000001",
-          "00000000-0000-0000-0000-000000000002",
+          "00000000-0000-0000-0000-000000000004",
           "00000000-0000-0000-0000-000000000005",
-          "04e852ad-9ad5-4dbd-a4d8-e4a5ca489e7c",
-          "a5060ee6-02a0-4e8c-9e26-e5d7dfab736c",
-          "88f4b93f-1b98-47b2-b047-70609951a852",
-          "4be1e5d1-82b9-4e43-aa64-9ab6c423fef6",
-          "ccf37736-ebd5-4b97-8461-963f367a3cb7"
+          "cf2b7010-35e0-4ffe-845b-46ef06e119e7",
+          "dadc4629-9366-47d6-8a2a-14801c8e3691",
+          "582e3055-80cf-4bb2-a427-fbac8945ae5b",
+          "d5fdce07-dc19-4066-885b-7cb94a7888cf",
+          "5dae34b8-6cb7-4894-bb2a-8de262968766",
+          "cac3eba8-f2b2-4e0b-b73c-712f2b0dc317"
         ],
         "anti_hit_surfaced": false
       }
@@ -132,8 +132,8 @@
     "ef_50_behaviour": "returned-200",
     "ef_50_result_count": 200,
     "recall_at_200": {
-      "lexical-generic": 0.445,
-      "lexical-specific": 0.505
+      "lexical-generic": 1.0,
+      "lexical-specific": 1.0
     },
     "recall_at_200_note": "Random uniform unit-vector filler in 384-d produces near-tied cosines (std ~0.051). ANN at ef=200 struggles to rank near-tied neighbors consistently. Production clustered embeddings yield higher recall@200. The threshold for 200th-nearest-neighbor cosine at N=10k is ~0.10.",
     "ann_boundary_specific_cue": 0.0576,
@@ -144,13 +144,13 @@
       "k": 3,
       "ef_from": 50,
       "ef_to": 200,
-      "p50_ms_ef50": 1.49,
-      "p95_ms_ef50": 2.18,
-      "p50_ms_ef200": 2.08,
-      "p95_ms_ef200": 2.29,
-      "latency_delta_p50_ms": 0.59,
-      "latency_delta_p95_ms": 0.11,
-      "top_set_changed": true,
+      "p50_ms_ef50": 3.29,
+      "p95_ms_ef50": 3.96,
+      "p50_ms_ef200": 3.17,
+      "p95_ms_ef200": 3.33,
+      "latency_delta_p50_ms": -0.12,
+      "latency_delta_p95_ms": -0.64,
+      "top_set_changed": false,
       "change_direction": "toward-exact-or-unchanged",
       "memory_delta_rss_mb": 0.0
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -80,6 +81,97 @@ def clear_expired_task_support_probe_marker(work_post: dict, now: datetime) -> b
     del new_kp["probe_active_until"]
     work_post["task_support"] = new_kp
     return True
+
+
+def _pair_retrieval_feedback(
+    reinforced_rows: list[dict], used_rows: list[dict],
+) -> list[dict]:
+    """Join retrieval_reinforced x retrieval_used by nearest-preceding
+    same-session pairing. Every unattributed literal is excluded on both kinds --
+    callers that set no session_id share one, so it cannot tell them apart and
+    pairing across it would match a reinforce to an unrelated session's recall.
+    A reinforce with no preceding same-session retrieval_used in the window is
+    DROPPED, never scored as a zero use_rate.
+    """
+    from iai_mcp.events import is_attributed_session
+
+    used_by_session: dict[str, list[tuple[datetime, dict]]] = {}
+    for row in used_rows:
+        sid = row.get("session_id")
+        if not is_attributed_session(sid):
+            continue
+        used_by_session.setdefault(sid, []).append((row["ts"], row.get("data") or {}))
+    for sid, entries in used_by_session.items():
+        entries.sort(key=lambda pair: pair[0])
+
+    window_rows: list[dict] = []
+    for row in reinforced_rows:
+        sid = row.get("session_id")
+        if not is_attributed_session(sid):
+            continue
+        candidates = used_by_session.get(sid)
+        if not candidates:
+            continue
+        ts_list = [c[0] for c in candidates]
+        idx = bisect_right(ts_list, row["ts"]) - 1
+        if idx < 0:
+            continue
+        hit_ids = set(candidates[idx][1].get("hit_ids") or [])
+        reinforced_ids = set((row.get("data") or {}).get("reinforced_ids") or [])
+        # Intersect, not union -- reinforced_ids may name ids outside THIS
+        # recall's hits (an earlier recall, a capture); counting those would
+        # push use_rate past 1.0, outside the bounded-delta premise.
+        used_ids = reinforced_ids & hit_ids
+        window_rows.append({"hit_ids": list(hit_ids), "reinforced_ids": list(used_ids)})
+    return window_rows
+
+
+def tune_retrieval_weight(
+    store: Any, cutoff: datetime, max_events: int,
+) -> dict[str, Any]:
+    """Parallel observe/apply for the retrieval rank weight -- its own
+    namespace, never TUNING_SPECS or profile_state. Reads
+    retrieval_reinforced x retrieval_used, pairs each reinforce with its
+    nearest preceding same-session recall, and moves W_COSINE by one
+    bounded nightly step under its own persistence key.
+    """
+    from iai_mcp import retrieval_weight_cache
+    from iai_mcp.events import query_events, write_event
+    from iai_mcp.lilli.profile.retrieval_tuning import (
+        RETRIEVAL_MIN_SAMPLES,
+        apply_retrieval_weight,
+        load_retrieval_weights_state,
+        observe_retrieval_weight,
+        save_retrieval_weights_state,
+    )
+
+    reinforced_rows = query_events(
+        store, kind="retrieval_reinforced", since=cutoff, limit=max_events,
+    )
+    used_rows = query_events(store, kind="retrieval_used", since=cutoff, limit=max_events)
+    window_rows = _pair_retrieval_feedback(reinforced_rows, used_rows)
+
+    observed, n, _signal = observe_retrieval_weight(window_rows)
+    current = load_retrieval_weights_state(store)["W_COSINE"]
+
+    if n < RETRIEVAL_MIN_SAMPLES:
+        data = {
+            "n": n, "min_samples": RETRIEVAL_MIN_SAMPLES, "skipped": True, "w_cosine": current,
+        }
+        write_event(store, kind="retrieval_weight_tuned", data=data, severity="info")
+        return data
+
+    new_w = apply_retrieval_weight(current, observed, n)
+    persisted = save_retrieval_weights_state(store, {"W_COSINE": new_w})
+    if persisted:
+        retrieval_weight_cache.invalidate(store)
+    data = {
+        "n": n, "min_samples": RETRIEVAL_MIN_SAMPLES, "skipped": False,
+        "w_cosine": new_w if persisted else current, "prev": current,
+        "persisted": persisted,
+    }
+    write_event(store, kind="retrieval_weight_tuned", data=data, severity="info")
+    return data
 
 
 def step_knob_tune(
@@ -263,6 +355,10 @@ def step_knob_tune(
         },
         severity=severity,
     )
+
+    # retrieval-weight tuning is a parallel namespace -- never enters
+    # TUNING_SPECS or profile_state.
+    tune_retrieval_weight(store, cutoff, MAX_EVENTS)
 
     return True, {
         "knobs_moved": moved,

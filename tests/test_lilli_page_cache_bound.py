@@ -22,10 +22,11 @@ from pathlib import Path
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 from iai_mcp.lillibrain.constants import PAGE_SIZE
 from iai_mcp.lillibrain.pager import Pager
 
-_LILLI = os.environ.get("LILLI_STORAGE_DRIVER") == "lilli"
+_LILLI = os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER) == "lilli"
 
 pytestmark = pytest.mark.skipif(
     not _LILLI,

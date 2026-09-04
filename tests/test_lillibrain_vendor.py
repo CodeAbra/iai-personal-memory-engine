@@ -135,16 +135,14 @@ def test_both_drivers_import() -> None:
     assert _HippoDB is HippoDB
 
 
-def test_default_driver_is_stdlib(
+def test_default_driver_is_lilli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no driver env set, HippoDB opens a stdlib sqlite3 connection."""
+    """With no driver env set, a fresh HippoDB opens the native engine connection."""
     monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
     db = HippoDB(tmp_path)
     try:
-        from iai_mcp import _sqlite_stdlib
-        assert _sqlite_stdlib.is_stdlib_connection(db._conn)
-        assert not isinstance(db._conn, LilliBrainConnection)
+        assert isinstance(db._conn, engine.Connection)
     finally:
         db.close()
 
@@ -158,7 +156,7 @@ def test_driver_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         db_lilli.close()
 
-    monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     db_stdlib = HippoDB(tmp_path / "stdlib")
     try:
         from iai_mcp import _sqlite_stdlib
@@ -180,6 +178,7 @@ def test_lilli_opens_and_creates_tables(
             "budget_ledger",
             "edges",
             "events",
+            "proc_transitions",
             "ratelimit_ledger",
             "record_tags",
             "records",

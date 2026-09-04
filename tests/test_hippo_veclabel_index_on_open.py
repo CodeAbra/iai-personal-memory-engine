@@ -53,6 +53,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
+
 if TYPE_CHECKING:
     pass
 
@@ -72,7 +74,7 @@ def _native_available() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _native_available() or os.environ.get("LILLI_STORAGE_DRIVER", "stdlib").lower() != "lilli",
+    not _native_available() or os.environ.get("LILLI_STORAGE_DRIVER", DEFAULT_STORAGE_DRIVER).lower() != "lilli",
     reason=(
         "iai_mcp_native.engine submodule not installed or LILLI_STORAGE_DRIVER != lilli — "
         "full_scan_count is only available on the native engine path"

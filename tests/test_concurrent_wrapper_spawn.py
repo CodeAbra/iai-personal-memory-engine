@@ -248,6 +248,7 @@ def _count_binders(sock_path: Path) -> int:
     return len(pids)
 
 
+@pytest.mark.live
 def test_5_concurrent_wrapper_cold_starts_yield_singleton(
     built_wrapper, test_launchagent,
 ):

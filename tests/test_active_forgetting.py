@@ -28,6 +28,7 @@ def _make_record(
     created_at: datetime,
     embed_dim: int,
     literal_surface: str = "alice prefers tea over coffee",
+    directive: bool = False,
 ) -> MemoryRecord:
     return MemoryRecord(
         id=uuid4(),
@@ -48,6 +49,7 @@ def _make_record(
         created_at=created_at,
         updated_at=created_at,
         language="en",
+        directive=directive,
     )
 
 def _build_three_cohort_store(
@@ -199,7 +201,7 @@ def test_low_utility_cohort_tombstoned_after_one_pass(pipeline):
         row = _row_for(df, rid)
         assert row is not None, f"protected row {rid} disappeared"
         assert not _is_tombstoned(row), (
-            f"protected row {rid} should NOT be tombstoned (R3 carve-out), "
+            f"protected row {rid} should NOT be tombstoned (protected carve-out), "
             f"got tombstoned_at={row.get('tombstoned_at')!r} "
             f"pinned={row.get('pinned')} never_decay={row.get('never_decay')}"
         )
@@ -220,7 +222,7 @@ def test_protected_cohort_survives_multiple_passes(pipeline):
             )
             assert not _is_tombstoned(row), (
                 f"pass {pass_idx}: protected row {rid} was tombstoned; "
-                f"R3 carve-out failed. "
+                f"protected carve-out failed. "
                 f"pinned={row.get('pinned')} never_decay={row.get('never_decay')}"
             )
 
@@ -305,7 +307,7 @@ def test_dry_run_mode_emits_event_no_mutation(
     for _, row in df.iterrows():
         assert not _is_tombstoned(row.to_dict()), (
             f"dry-run wrote a tombstone on row id={row.get('id')}; "
-            f"mutation path must be inert when dry_run=True (R7)"
+            f"mutation path must be inert when dry_run=True"
         )
 
     events = query_events(store, kind="erasure_agent_pass", limit=10)
@@ -326,7 +328,7 @@ def test_erasure_event_body_shape_and_uniqueness(pipeline):
 
     events = query_events(store, kind="erasure_agent_pass", limit=10)
     assert len(events) == 1, (
-        f"exactly one erasure_agent_pass event per pass (R5), "
+        f"exactly one erasure_agent_pass event per pass, "
         f"got {len(events)} -> {events}"
     )
 
@@ -356,3 +358,97 @@ def test_erasure_event_body_shape_and_uniqueness(pipeline):
     assert body["total_records_after"] == TOTAL_N, body
     assert body["threshold_used"] == 0.02, body
     assert body["dry_run_mode"] is False, body
+
+def test_directive_flagged_record_survives_erasure_agent(
+    iai_home, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("IAI_MCP_ERASURE_DRY_RUN", "false")
+    monkeypatch.setattr(
+        "iai_mcp.lilli.cycle.sleep_pipeline._utc_now", lambda: FROZEN_NOW,
+    )
+
+    store = MemoryStore()
+    age_60d = FROZEN_NOW - timedelta(days=60)
+    rec = _make_record(
+        tier="episodic",
+        centrality=0.005,
+        pinned=False,
+        never_decay=False,
+        last_reviewed=None,
+        created_at=age_60d,
+        embed_dim=store._embed_dim,
+        literal_surface="alice always wants terse commit messages",
+        directive=True,
+    )
+    store.insert(rec)
+
+    pipe = SleepPipeline(
+        store=store,
+        lifecycle_state_path=tmp_path / "lifecycle_state.json",
+    )
+    ok, payload = pipe._step_erasure_agent(None)
+    assert ok is True, payload
+    assert payload.get("count_quarantined") == 0, (
+        f"a live directive must never be erasure-eligible, got {payload}"
+    )
+
+    tbl = store.db.open_table(RECORDS_TABLE)
+    df = tbl.to_pandas()
+    row = _row_for(df, rec.id)
+    assert row is not None, "directive record disappeared"
+    assert not _is_tombstoned(row), (
+        f"directive-flagged record must be exempt from erasure eligibility, "
+        f"got tombstoned_at={row.get('tombstoned_at')!r}"
+    )
+
+def test_retired_directive_loses_erasure_exemption(
+    iai_home, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("IAI_MCP_ERASURE_DRY_RUN", "false")
+    monkeypatch.setattr(
+        "iai_mcp.lilli.cycle.sleep_pipeline._utc_now", lambda: FROZEN_NOW,
+    )
+
+    store = MemoryStore()
+    embed_dim = store._embed_dim
+    age_60d = FROZEN_NOW - timedelta(days=60)
+    rec = _make_record(
+        tier="episodic",
+        centrality=0.005,
+        pinned=False,
+        never_decay=False,
+        last_reviewed=None,
+        created_at=age_60d,
+        embed_dim=embed_dim,
+        literal_surface="alice always wants terse commit messages",
+        directive=True,
+    )
+    store.insert(rec)
+
+    from iai_mcp.retrieve import contradict
+    contradict(
+        store, rec.id,
+        "alice now prefers verbose commit messages",
+        [0.9] * embed_dim,
+    )
+
+    pipe = SleepPipeline(
+        store=store,
+        lifecycle_state_path=tmp_path / "lifecycle_state.json",
+    )
+    ok, payload = pipe._step_erasure_agent(None)
+    assert ok is True, payload
+    assert payload.get("count_quarantined") == 1, (
+        f"a retired directive must return to normal erasure eligibility, "
+        f"got {payload}"
+    )
+
+    tbl = store.db.open_table(RECORDS_TABLE)
+    df = tbl.to_pandas()
+    row = _row_for(df, rec.id)
+    assert row is not None, "retired directive record disappeared"
+    assert _is_tombstoned(row), (
+        "a retired (contradict-cleared) directive must return to normal "
+        "erasure eligibility -- the guard tracks the live flag, not a "
+        "frozen mint-time marker"
+    )

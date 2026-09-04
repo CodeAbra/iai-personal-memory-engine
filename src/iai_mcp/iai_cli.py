@@ -581,15 +581,61 @@ def cmd_capture(args: argparse.Namespace) -> int:
     text = args.text
     session_id = getattr(args, "session_id", None) or "-"
     use_json = getattr(args, "json", False)
+    is_directive = getattr(args, "directive", False)
 
-    resp = _send_jsonrpc_request(
-        "memory_capture",
-        {
-            "text": text,
-            "session_id": session_id,
-            "tier": "episodic",
-        },
-    )
+    # Only this user-run command mints a directive; the memory_capture
+    # RPC/tool cannot. Goes through capture_turn directly (not the RPC, and
+    # not the lighter write_turn_direct) so the directive budget gate and
+    # the synchronous directive-cache refresh both still apply.
+    if is_directive:
+        from uuid import UUID
+
+        from iai_mcp.capture import capture_turn
+
+        store = _open_store_shared_or_fail("capture")
+        if store is None:
+            return 1
+        result: dict = {}
+        landed = None
+        try:
+            try:
+                result = capture_turn(
+                    store, cue="iai capture --directive", text=text,
+                    session_id=session_id, role="user",
+                    live_turn=True, directive=True,
+                )
+                if result.get("status") == "inserted" and result.get("record_id"):
+                    landed = store.get(UUID(result["record_id"]))
+            except Exception as exc:  # noqa: BLE001 -- CLI boundary: translate, never traceback
+                print(f"capture failed: {exc}", file=sys.stderr)
+                return 1
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 -- close-after-capture must not fail user
+                pass
+
+        if result.get("status") != "inserted" or landed is None or not landed.directive:
+            print(
+                f"capture failed: {result.get('reason', 'directive rejected')}",
+                file=sys.stderr,
+            )
+            return 1
+
+        rid = result["record_id"]
+        if use_json:
+            import json as _json
+            print(_json.dumps({"id": rid, "status": "inserted", "_source": "direct-store"}))
+        else:
+            print(_color(f"captured  id={rid}  [direct-store]"))
+        return 0
+
+    rpc_params: dict[str, Any] = {
+        "text": text,
+        "session_id": session_id,
+        "tier": "episodic",
+    }
+    resp = _send_jsonrpc_request("memory_capture", rpc_params)
     if not isinstance(resp, dict):
         store_root_env = os.environ.get("IAI_MCP_STORE")
         if store_root_env:
@@ -1707,6 +1753,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Emit result as JSON on stdout (for programmatic use)",
+    )
+    p_capture.add_argument(
+        "--directive",
+        action="store_true",
+        default=False,
+        help="Mark this capture as an explicit standing order the user typed themselves",
     )
     p_capture.set_defaults(func=cmd_capture)
 

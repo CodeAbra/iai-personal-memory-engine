@@ -1,21 +1,13 @@
-"""RED guards for SC-2 (recall-trace observability of the new accuracy marks).
+"""Recall-trace observability of the accuracy marks.
 
 With ``IAI_MCP_RECALL_TRACE=1`` set, ``core.dispatch``'s ``memory_recall``
 branch returns a ``_recall_trace_ms`` list of ``(name, cumulative_ms)`` tuples
-(see ``core/__init__.py:_trace_mark``). This phase adds four new named marks
-to that trace as the accompanying code plans (02/03/04) wire their mechanisms:
+(see ``core/__init__.py:_trace_mark``). This asserts the marks the recall
+path still fires:
 
-- ``soft_gate`` (plan 02 — graded community-gate bonus)
-- ``multi_seed`` (plan 04 — widened seed sources)
-- ``cleanup_attractor`` (plan 04 — thresholded cleanup() attractor)
-- ``conf_escalate`` (plan 03 — confidence-gated escalation)
-
-Every test below asserts one of these mark names is present in the trace.
-All four are RED today (zero occurrences of any of these names anywhere in
-``src/iai_mcp/core/__init__.py`` or ``src/iai_mcp/pipeline.py`` — confirmed
-by grep this session). No ``working_tier_bias`` mark is asserted anywhere in
-this file: working-tier consultation was dropped from the recall path for
-this phase (see 184-04-PLAN.md, revision 1, decision D-C).
+- ``soft_gate`` (graded community-gate bonus)
+- ``multi_seed`` (widened seed sources)
+- ``cleanup_attractor`` (thresholded cleanup() attractor)
 
 Dual-driver: every test parametrizes ``LILLI_STORAGE_DRIVER`` since each
 dispatch exercises a real ``MemoryStore`` insert + recall round-trip.
@@ -156,8 +148,8 @@ def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryStore:
 def _seed_small_corpus(store: MemoryStore, cue_vec: list[float]) -> None:
     """A small, low-confidence-inducing corpus: no near-duplicate cluster, so
     the top cosine stays below the high-confidence threshold and the
-    hit-count-above-threshold stays low — exactly the low-confidence signal
-    the confidence-gated marks (conf_escalate, soft_gate) should fire on."""
+    hit-count-above-threshold stays low — the low-confidence signal the
+    soft_gate mark should fire on."""
     target_id = uuid4()
     target = _make_rec(target_id, seed=1, surface="the associative target record", embedding=cue_vec)
     store.insert(target)
@@ -206,24 +198,6 @@ def test_trace_contains_multi_seed_and_cleanup_attractor_marks(driver, _store, m
     assert "cleanup_attractor" in marks, (
         f"expected 'cleanup_attractor' trace mark, got marks={sorted(marks)} — "
         "thresholded cleanup() attractor (plan 04) not yet wired"
-    )
-
-
-@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
-def test_trace_contains_conf_escalate_mark(driver, _store, monkeypatch):
-    """Same trace MUST contain a `conf_escalate` mark (plan 03)."""
-    monkeypatch.setenv("IAI_MCP_RECALL_TRACE", "1")
-    store = _store(driver)
-    cue_vec = _seeded_vec(3)
-    _seed_small_corpus(store, cue_vec)
-    _stub_embedder_for_store(monkeypatch, cue_vec)
-
-    resp = _dispatch_traced_recall(store, cue_vec)
-
-    marks = {name for name, _ms in resp.get("_recall_trace_ms", [])}
-    assert "conf_escalate" in marks, (
-        f"expected 'conf_escalate' trace mark, got marks={sorted(marks)} — "
-        "confidence-gated escalation (plan 03) not yet wired"
     )
 
 

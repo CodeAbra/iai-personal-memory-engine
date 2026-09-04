@@ -5,6 +5,619 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-09-03
+
+### Added
+- Standing-order directives are now created only by an
+  explicit user action -- a message that begins with `standing directive:`,
+  or the new `iai capture --directive` command -- instead of being
+  auto-detected from phrasing like "from now on" or "always". This removes a
+  class of phantom directives that could be captured from non-user text
+  (session summaries, tool output) and makes directive creation predictable
+  and intentional. A packaged `/iai-directive` command wraps the explicit
+  channel.
+- A kill-switch environment variable
+  (`IAI_MCP_DIRECTIVES_OFF=1`) fully disables the standing-orders directive
+  tier: none is injected at session start, and none is injected into the
+  per-turn context block. Off by default -- current behavior is unchanged
+  unless the variable is explicitly set.
+- `iai-mcp directive-sweep` is a new operator
+  maintenance command that retires phantom standing-order directives --
+  live directive records with no explicit-declaration provenance. Default
+  mode is `--dry-run`; `--apply` snapshots the store directory first and
+  clears only the flag column, never touching the record's stored text.
+  Idempotent: explicitly-declared directives always survive, and a second
+  `--apply` retires nothing further.
+
+### Security
+- `iai-mcp transcript-sweep run` now refuses to run
+  against this machine's own memory store unless launched by the scheduled
+  background sweep or passed `--allow-live-home` by hand. A bare manual
+  invocation used to stage every discovered Claude conversation into the
+  real store with no confirmation step.
+
+- The bundled MCP wrapper no longer ships a vulnerable
+  copy of `fast-uri`, a transitive URI-parsing dependency. The prior version
+  did not validate a port value before treating a URI as trusted, letting a
+  crafted authority component be misparsed and potentially redirect a
+  lookup to an attacker-controlled host (GHSA-qw65-cvwx-89v3). Bumped to
+  `fast-uri` 3.1.7, which the advisory fixes.
+
+### Fixed
+- One unreadable or corrupted transcript no longer
+  silently stalls the background sweep for every other Claude conversation
+  in the same pass. The sweep now isolates a per-file failure, logs it, and
+  keeps going; its summary output gains a `files_failed` count.
+
+- `iai-mcp cowork uninstall` now warns, by name, when
+  it finds an agent config's settings.json still referencing the retired
+  reachability check's hook script under `hooks.SessionStart`. This one
+  in-place mutation cannot be safely reversed automatically; the warning
+  names the file and asks for the array entry to be removed by hand,
+  instead of the command silently reporting a clean exit.
+
+- Sweeping a transcript while its final line is still
+  being written no longer permanently drops that turn. The high-water mark
+  used to resume a later pass now only advances past lines that were read
+  whole; a torn final line is retried, complete, on the next pass instead
+  of being counted and silently skipped forever.
+
+- A daemon-down direct write (`iai capture`) that sets
+  an explicit directive now stamps the `directive` flag and its provenance
+  in the same insert, instead of a follow-up update after the record already
+  committed. A failure between the two steps used to leave the record
+  permanently stamped `directive_source=explicit-command` with the flag
+  itself still `False`, an orphan state nothing reconciled.
+
+- `iai-mcp directive-sweep` no longer aborts the whole
+  batch when one directive record's provenance is undecryptable or
+  malformed. The sweep now skips that record, counts it in a new `failed`
+  field, and still retires every other phantom directive; the CLI reports
+  the failure and exits non-zero when any record could not be read.
+  `directives_found` now counts only successfully-read directive records
+  (previously always the full matching set).
+
+### Changed
+- The `memory_capture` MCP tool no longer accepts a
+  `directive` parameter. An assistant call could previously pass it to mint
+  a standing-order directive on its own initiative; that channel is closed.
+  `iai capture --directive`, the user-run command, still creates a
+  directive the same way it always has, now via a direct store write
+  instead of the daemon. It can report the store as busy during the
+  daemon's own nightly consolidation window, same as `iai teach`/`iai
+  upload` already do.
+
+- `iai-mcp cowork install` no longer stages a Cowork
+  plugin. It installs a small background process instead -- a macOS
+  launchd agent or a Linux systemd user timer -- that periodically reads
+  new Claude conversations already on disk and hands them to the memory
+  system. The process opens no store connection and holds no store lock.
+  On a platform with no supported scheduler, install declines cleanly and
+  points at the memory system's own overnight consolidation as a fallback.
+
+- `iai-mcp cowork status` now prints a one-line note
+  that its exit status reflects only the agent-session tier, and points at
+  `capture-hooks status` for the code-session surface.
+
+- `iai-mcp cowork status` no longer has an UNSUPPORTED
+  tier or a confirmed-build gate for the agent-session surface -- it now
+  reads the background sweep's own receipt log, so a session captured
+  locally reports ACTIVE regardless of the installed Claude Desktop build.
+  STAGED now means the background sweep is enabled but has not captured a
+  session yet, replacing the previous staged-plugin-files meaning.
+
+- New command: `iai-mcp transcript-sweep run` reads
+  the Claude conversations already on disk and hands their new content to
+  the memory system. It opens no store connection and holds no store lock
+  while it runs.
+
+- The nightly consolidation cycle now includes a
+  backstop pass that reads the Claude conversations already on disk, the
+  same way the background sweep does. A session missed by the background
+  sweep -- the machine was asleep, or the sweep process was not running
+  at the time -- is still picked up on the next consolidation cycle
+  instead of waiting indefinitely. This pass only runs when the
+  background sweep is installed, and running both over the same session
+  never double-captures it.
+
+- `iai-mcp cowork uninstall` now removes the
+  background sweep, its schedule, and any leftovers an older version left
+  behind: a previously-staged plugin marketplace, its Cowork registration,
+  and a spent reachability check's own artifacts. It reports every case it
+  finds -- including a clean machine that never ran anything -- and never
+  stops partway through.
+
+- Local Cowork sessions are now captured
+  automatically: the background service reads the conversation transcripts
+  the app already saves to disk and folds them into memory, whether the
+  machine was awake or asleep when the session ran. Mechanism reported by
+  @mbusch-regis, public issue #159.
+
+- The turn-capture and session-capture hook scripts
+  now resolve the transcript scan root from the Claude configuration
+  directory named in the hook's own environment, falling back to the
+  shared home when that variable is unset, equal to the shared home, or
+  rejected by validation (not an absolute path, not an existing directory,
+  a parent-directory traversal segment, or a character outside letters,
+  digits, space, and `._/-`). A rejected value is logged and never blocks
+  the hook, and no other file location moves. A hook running in the
+  ordinary shared-home configuration is unaffected.
+
+- Every line the four packaged hook scripts append
+  to their daily logs now carries which channel invoked the hook -- a
+  fixed "plugin" or "settings" literal, never the plugin-root path itself
+  -- on both success and early-exit paths. Existing fields keep their
+  name, order, and meaning; only the new field is added, so any tooling
+  that already parses these lines keeps working unchanged.
+
+- The production `W_COSINE` auto-tuner clamp band is
+  narrowed from `[0.85, 1.15]` to `[0.90, 1.10]`. The wider band's edge no
+  longer covers the current live corpus: a defensive worst-case test that
+  forces the clamp to its edge started dropping more candidates than its
+  margin allows after new records and edges raised near-cutoff candidate
+  density. The live persisted operating point (`W_COSINE = 1.0`) sits well
+  inside the new band and is unaffected; only the defensive edge case
+  re-calibrates.
+
+- An unknown or unparseable `created_at` on a graph-node
+  payload is now represented as `None` in the recall pipeline instead of
+  being silently substituted with the current wall-clock time. The recall
+  backfill step can now detect the missing value and recover the real
+  stored timestamp from the database, which it previously could not do
+  once a fabricated present-tense value had masked the gap. Age scoring
+  still treats an unknown timestamp with no age penalty (the same net
+  effect the fabricated value produced) and no longer crashes on it either.
+  Ranking for records that already carry a real timestamp is unchanged.
+
+- Newly minted cluster-summary records no longer carry
+  a "Cluster summary (N records, lang=X): " boilerplate prefix in their
+  stored text -- the language and cluster fan-in count are already stored
+  losslessly elsewhere on the record (the `language` field and
+  `consolidated_from` edges), so the prefix only spent render and embedding
+  budget. The session-start rich-club renderer now also caps a cluster-summary
+  line at 30 characters once its stored text no longer starts with the old
+  boilerplate prefix; a cluster-summary line minted before this change (still
+  carrying the historical prefix) keeps the prior 60-character cap so it is
+  never truncated into boilerplate mid-migration, and every other memory line
+  is unaffected either way.
+
+- The live recall path now scores candidates through
+  the Rust hybrid scorer by default instead of the pure-Python per-candidate
+  loop: per-call-state terms (profile gain, tier/salience boost, temporal
+  match, historical-verbatim rewrite) and the served reason string now
+  apply to only the bounded winner set instead of every candidate. Set
+  `IAI_MCP_RECALL_RUST_SCORER_OFF=1` to force the previous Python scorer.
+  Ranking output (scores, hit ordering, reasons) is unchanged; recall using
+  a nonzero structural-similarity weight (a knob off by default) also
+  continues to use the Python scorer automatically. Existing accuracy,
+  rank-fusion, and anti-hit test suites pass unchanged. Candidate-retrieval
+  decrypt work (the ANN rank-view fetch upstream of scoring) is unchanged
+  by this entry -- it still runs at candidate-pool scale on both scorer
+  paths and is not addressed here.
+
+- The live recall path's rank-feature index now
+  persists across calls on a store-resident builder graph instead of
+  rebuilding from scratch on every recall, and a hop/rich-club candidate
+  already hydrated by a prior recall on the same store is served from that
+  resident copy instead of a fresh decrypt. Existing accuracy, byte-identity,
+  and stage-profile test suites pass unchanged. Known caveat: a resident
+  candidate's cached fields (surface text, tags, tier, salience level, etc.)
+  reflect the record's state as of the call that first hydrated it, not
+  necessarily the record's very latest state if it was updated in between --
+  the corpus write path does not yet push updates into this builder graph.
+  This bounded staleness window is a known, deferred hardening item, not
+  fixed by this change.
+- Raising a record's salience level (the ambient-capture
+  dedup path's "this looks more important than last time" signal) now marks
+  the in-memory graph and its dependent freshness-tracked structures as
+  dirty, the same way every other field update already does. Previously the
+  raise wrote its column directly and left the graph's own resident copy of
+  that record silently out of date until an unrelated update touched the
+  same record. No API or return value changed; only the freshness/staleness
+  timing of graph-dependent reads after a salience raise.
+- The daemon now disables Python's automatic garbage
+  collector and freezes the boot-resident object set (corpus + runtime
+  graph) once boot warm-up finishes, exempting it from every later
+  collection scan for a tail-latency reduction. Manual `gc.collect()` calls
+  elsewhere in the daemon (sleep-pipeline relief, capture drain) are
+  unaffected and still run on demand. Set `IAI_MCP_GC_TAMING_OFF=1` to
+  revert to unmanaged, always-on automatic collection.
+- The confidence-escalation widen (fires on a
+  low-confidence recall cue) now fetches a smaller candidate pool by
+  default: its ANN query ceiling drops from 2000 to 1800 candidates and its
+  over-fetch padding (headroom for tombstoned/pending rows) drops from 3x to
+  2x. Every returned candidate is still ranked exactly, the tombstone/
+  pending liveness filter is unchanged, and a corpus's own tombstone
+  fraction gives comfortable headroom against underfill. On the deepest
+  measured real-corpus cues, the widen previously surfaced load-bearing
+  candidates at ranks up to 1615 of 2000 — inside the new 1800 ceiling —
+  but a sufficiently unusual cue could in principle need a candidate ranked
+  deeper than 1800 that the pre-bound widen would have surfaced. Set
+  `IAI_MCP_ESCALATION_BOUND_OFF=1` to force the previous 2000/3x behavior.
+  Distinct from the pre-existing `IAI_MCP_CONF_ESCALATE_OFF`, which
+  disables the widen entirely.
+- Recall's per-call candidate-view sweep (`records_cache`)
+  is now cached on the graph's existing content-version stamp: a second
+  recall over the same graph build (no intervening insert/update/delete)
+  reuses the cached view instead of re-walking every node. Any write that
+  changes the graph invalidates it on the very next recall. The served view
+  is always a fresh shallow copy, so one recall's confidence-escalation
+  widen can never leak into another recall's results. Set
+  `IAI_MCP_GENERATIONAL_CACHE_OFF=1` to force the previous unconditional
+  per-recall rebuild.
+- Recall's ranking degree-map sweep (the bench/graph
+  path, not the real-store global-degree override) is now cached on the
+  same content-version stamp as `records_cache`: a second recall over the
+  same graph build reuses the cached degree map instead of re-running the
+  degree sweep. Any edge add or node removal invalidates it on the very
+  next recall. Shares the `IAI_MCP_GENERATIONAL_CACHE_OFF=1` kill-switch
+  with the records_cache tracer.
+- The profile-modulation edge boost written after each
+  recall (`edge_type=profile_modulates`) now defers off the synchronous
+  answer path through the same background write queue already used for
+  reinforcement and coactivation writes, when that queue is live (daemon
+  mode). The edge lands with the identical pairs and weights, just after a
+  short delay instead of before the response returns; a determined caller
+  issuing two recalls back-to-back may observe a brief eventual-consistency
+  window on this one edge type. Falls back to the previous synchronous write
+  when the queue is not running (tests, non-daemon use). Set
+  `IAI_MCP_DEFER_PROFILE_BOOST_OFF=1` to force the old synchronous behavior.
+  The `pask_teachback_pass` telemetry event is now also buffered the same
+  way as the sibling `recall_dispatched` event — a caller reading
+  `events_query`/`memory_temporal_recall` immediately after a recall may see
+  it land one flush cycle later.
+- A correction-seeking recall cue ("вспомни правильный
+  X", "напомни как мы делаем X") now has its trigger phrase stripped and its
+  intent classification stays on the default rank-fusion path instead of
+  falling through to `historical_verbatim`. Any such cue containing a
+  historical marker word (e.g. "ранее") previously classified as
+  `historical_verbatim` (stale-downweight/supersede-cap OFF for that turn);
+  it now classifies `intent=None` (stale-downweight/supersede-cap stay ON).
+  Cues without a correction trigger are unaffected.
+- Ambient captures now receive an automatically
+  classified `epistemic_status` (fact, estimate, hypothesis, or unknown) at
+  capture time when the caller does not supply one, instead of always
+  defaulting to unknown. The classifier is validated for precision on a
+  labelled sample before shipping on the ambient path, so a wrong fact tag
+  stays rarer than a safe unknown verdict.
+- A newly created memory store now uses the in-tree
+  native storage engine instead of the legacy SQLite format. An existing
+  store keeps opening in whatever format wrote it -- nothing changes for a
+  store that already exists. Setting the storage-driver environment variable
+  to the legacy name still creates the legacy format for a fresh store.
+
+### Added
+- A live user turn that reads as a correction of a
+  recently-surfaced memory (e.g. "no, actually ...", "на самом деле ...")
+  now queues a confirmation candidate, surfaced through the existing
+  `curiosity_pending` / `get_pending_questions` reader — no new tool, no new
+  event kind. This path only ever queues; it never writes a contradiction
+  itself. A pattern match with nothing surfaced to correct within the last
+  10 minutes queues nothing (recency-bounded), and at most 2 unresolved
+  questions are pending per session at once (mirrors the existing curiosity
+  miner's per-session cap), so a chatty phrase cannot crowd out genuine
+  curiosity questions.
+- `memory_capture` and `memory_contradict` accept an
+  optional `epistemic_status` argument (`fact` / `estimate` / `hypothesis` /
+  `opinion` / `unknown`), letting a session mark a captured or corrected
+  fact's confidence at the moment it is written. Omitting the argument keeps
+  today's behavior exactly — every existing caller defaults to `unknown`.
+- `memory_recall` hits and anti-hits now carry the
+  `epistemic_status` their source record was captured with, so a host can
+  render a tag such as "estimate, unconfirmed" without re-parsing prose.
+- `memory_capture` accepts an optional `salience_level`
+  argument (`unflagged` / `notable` / `critical`) letting a session mark a
+  captured record's importance at the moment it is written. A flagged
+  record ranks higher at recall (a bounded, per-level multiplier); omitting
+  the argument keeps today's behavior exactly — every existing caller
+  defaults to `unflagged` with zero ranking change. A near-duplicate
+  capture fold raises an existing record's stored level when the incoming
+  value is higher and never lowers it. The mark never sets `never_merge` or
+  any other merge/drop lock — it only ever changes recall order.
+- A new operator-only `salience` verb on the brain-view
+  relay (mirroring the existing `pin` verb) lets an operator set or clear a
+  record's `salience_level` directly, independent of capture. It is fully
+  reversible per-call and writes only the `salience_level` column — never
+  `pinned` or `never_merge` — giving a mis-flagged record a correction path
+  the model itself does not have.
+- Reconsolidation now writes the record `valence`
+  column for the first time. Previously the column was read at recall time
+  as a ranking multiplier, but nothing ever wrote it.
+- A new retrieval-feedback loop lets a
+  `memory_reinforce` call feed nightly profile tuning: the resulting signal
+  is consumed during the nightly knob-tuning step and nudges the recall
+  ranking's cosine-similarity weight (`W_COSINE`) within a narrow,
+  production-clamped band.
+- A new standing-orders (directive) tier captures
+  instructions phrased for all future sessions (for example "from now on" or
+  "always/never") at capture time and injects them unconditionally at
+  session start and on every prompt, in their own marked block. Directives
+  share a hard joint token budget with the live-state block below, can carry
+  an expiry, and are never silently dropped -- retirement always requires an
+  explicit correction.
+- Session continuity now re-injects a verbatim
+  live-session-state record on every prompt in its own marked block,
+  restores a registry of running background agents into a fresh context, and
+  distinguishes an explicit context clear from an incidental compaction.
+- A new `claim_check` tool, the fifteenth on the
+  wrapper, is read-only and returns counter-evidence for a claim the
+  assistant just made, merging supporting and contradicting matches with a
+  freshness verdict in one call.
+- Captured events now record which model produced
+  them: an optional per-event model label is normalized and stored in the
+  captured record's provenance.
+- A new procedural-memory tier (internally
+  `tier="procedural"`) stores chunk records minted from patterns that repeat
+  across sessions. Chunks are indexed and reachable by recall's retrieval
+  machinery but are never served as visible text, so the session-start token
+  budget is unaffected.
+- A new nightly sleep step (`PROC_MINE`) mines these
+  repeating patterns, taking the sleep pipeline to 19 steps; the step is
+  resumable from the write-ahead log like every other step.
+- A priming cache is written nightly from the mined
+  patterns and read at session wake. During recall, a bounded seed-widening
+  nudge uses the cache to suggest candidates that typically follow a
+  recognized pattern, clamped so a primed candidate can never outrank the
+  top organically-ranked result.
+- A new ambient co-firing trigger fires whenever a
+  recall hit is actually reflected in the assistant's own generated reply,
+  emitting a `retrieval_cofired` event that feeds the pattern-mining
+  pipeline above -- distinct from the ranker's own scoring output, so it
+  cannot self-confirm.
+- A second, read-only pattern miner parses the
+  tool-call trailer already recorded on stored assistant turns and mines
+  repeated tool-call sequences (recorded under `tool_sequence`). Both this
+  miner and the pattern-mining step above write into the same new
+  `proc_transitions` table, a schema addition.
+- The daemon's recall path now caches cue embeddings
+  so a repeated cue skips re-running the embedding model; results stay
+  byte-identical, and the store-versus-embedder identity guard still re-runs
+  on every cache hit so a model swap can never be silently masked. A
+  kill-switch, `IAI_MCP_CUE_EMBED_CACHE`, disables and purges the cache.
+- `iai-mcp migrate-to-lilli` gains a `--swap` mode
+  that replaces an existing store's own directory in place with a verified
+  native copy, instead of only copying into a separate destination. It
+  previews by default -- there is no separate `--dry-run` flag; omitting
+  `--apply` is the preview -- performing the swap requires both a
+  confirmation flag and an apply flag together. The previous store is kept
+  under a dated backup directory until removed, and the swap refuses to
+  run while the daemon is serving the store.
+- `iai-mcp doctor` reports the store's on-disk
+  format, and on a store still in the legacy sqlite format names the known
+  defect -- an external read-only open orphans the write-ahead-log
+  sidecars under a running daemon -- and prints the exact command sequence
+  to migrate it. The check reads only the file's header and never opens
+  the store to answer.
+- `iai-mcp doctor` also reports when a running
+  daemon is on an older build than the currently installed package -- the
+  case where a supervised daemon kept running through an in-place upgrade
+  -- and names the stop-then-start remedy.
+- The daemon now logs the resolved store format and
+  store path once at boot, so a journal shows which storage engine is
+  active next to the first failure, if any.
+- `iai-mcp doctor`'s nightly-insight-mint check now
+  names the underlying sleep-step failure alongside the "N consecutive
+  nights without an insight" symptom, when one was recorded.
+
+### Fixed
+- `iai-mcp migrate-to-lilli --swap` now actually
+  pre-warms the runtime graph cache when the store uses a file-based
+  encryption key with no passphrase set -- previously the pre-warm step
+  silently failed to persist a cache in that mode while still reporting
+  success, so the first daemon boot after such a migration always paid a
+  cold rebuild regardless of the pre-warm's own result.
+- Daemon shutdown no longer hangs until the
+  supervisor's stop timeout when an idle memory client is still attached
+  -- the daemon now shuts down promptly and completes its own close-out
+  work instead of being force-killed. A client with a request already in
+  flight now gets its response before shutdown proceeds, and the shutdown
+  sequence completes cleanly even if the supervisor issues a second stop
+  signal while it is still finishing up.
+- The session-start brief served over the memory
+  socket was losing three of its blocks -- most-recent-work continuity,
+  standing orders, and session-continuity state -- because the response
+  builder omitted them from the wire format even though the memory system
+  had already produced them, so a host reading the JSON result rendered
+  those sections empty. They are now delivered again.
+- `MemoryStore.get_batch` (and the pending-marker SQL
+  fallback that shares its column list) decoded every record's
+  `epistemic_status` as `unknown` regardless of what was actually stored —
+  a batch-scoped read silently dropped the field that a single-record
+  `get()` returned correctly.
+- `memory_recall` anti-hits resolved through the
+  graph-view cache, and every hit and anti-hit on the `recall_for_benchmark`
+  path, rendered `epistemic_status: null` regardless of the stored value —
+  the enrichment that repaired this for primary `memory_recall` hits never
+  ran on those two surfaces. A single shared backfill now covers both hits
+  and anti-hits on every recall entry point.
+- `memory_capture` / `memory_contradict` now coerce an
+  out-of-enum `epistemic_status` value to `unknown` instead of raising — a
+  non-enum-enforcing MCP host forwarding an invalid value no longer aborts
+  the capture (and can no longer abort an entire batch-captured turn),
+  matching the read path's existing fail-open behavior.
+- `memory_recall` hits and anti-hits, on every recall
+  entry point and JSON response surface (including the graph-view-cached
+  and crisis-degraded paths), now carry the `salience_level` their source
+  record was captured with instead of silently rendering `null` — the same
+  shared backfill that repairs `epistemic_status` on those surfaces now
+  repairs `salience_level` in the same pass.
+- Confidence-gated candidate widening (the ANN
+  index re-query triggered on a low-confidence recall) silently returned
+  an empty widen once a store's active record count passed 1000 — the
+  underlying label-resolution query raised on a single-statement limit,
+  and the widen's caller swallowed the error. The resolution query now
+  chunks so widening works at any corpus size; low-confidence recall on a
+  large store is no longer degraded.
+- `iai-mcp doctor` no longer reports a false liveness
+  failure after several consecutive nights where every reconsolidation write
+  happened to already be at maximum valence -- a saturated night is no
+  longer misread as a broken background process.
+- An explicit clear of the current focus or next
+  action on a still-open task no longer leaves the retracted value visibly
+  persisting in the session-continuity file; the clear now takes effect
+  immediately.
+
+### Removed
+- The within-session watermark delta renderer
+  (`render_session_delta`) and its refresh helper
+  (`session_refresh_if_stale`) are removed as unused code -- no
+  production caller remained. This is a different code path from the
+  live per-turn delta and session-refresh behavior described elsewhere
+  in this file, which is unaffected and keeps running on every prompt.
+- The hypervector bit-flip decay operation
+  (`temporal_decay`) and its edge-decay counterpart
+  (`decay_structure_edge`) are removed -- both had zero production
+  callers. This is a different operation from the live nightly
+  edge-weight decay step (`DREAM_DECAY`), which is unaffected and keeps
+  running every night.
+
+### Changed
+- `iai-mcp capture-hooks status` relabels the Claude
+  Desktop line to "Claude Desktop MCP tools:" so it no longer implies
+  ambient capture hooks are wired when the check only reflects MCP server
+  registration.
+- The session-start "Key memories" display label
+  shortens: instead of the full `W:{wing}/R:{room}/E:{entities}/T:{tags}`
+  index, each line now shows a one-character tier plus entities only when
+  present (`S (12d): ...` / `E ·entity,entity (7d): ...`), dropping the
+  record-hash and tag fields (near-zero reader value, measured ~35% of the
+  block). The record budget was reduced by the same proportion so the same
+  set of memories is shown, not more of them. Set
+  `IAI_MCP_RICH_CLUB_COMPACT_LABEL=0` to restore the previous label and
+  budget.
+- The compact label's entity list is capped at 4
+  (with a trailing `…` when longer), so records with a long provenance
+  tag dump no longer defeat their own compaction by hitting the shared
+  88-char index-truncation guard as hard as the old verbose label did.
+- The record budget selection is now decoupled from
+  the display label: which records get admitted is always decided by the
+  cost of the full legacy (verbose) label, and only the already-selected
+  record's label is rendered compact. This makes the admitted set identical
+  to the pre-compaction render *by construction*, at any corpus size,
+  instead of depending on a budget constant hand-tuned to today's store.
+  Output is unchanged from the prior recalibration: rich_club tiktoken
+  2145 -> 1353 (36.9%), whole-payload tiktoken 2487 -> 1695 (31.8%), 0
+  records dropped.
+- The compact label's entity list is now also capped
+  by character length (not just count): four long entity names could still
+  produce a joined string long enough to hit the 88-char index-truncation
+  guard and read as noise. A capped-by-length entity string carries the
+  same trailing `…` marker as a capped-by-count one.
+
+### Fixed
+- A forced sleep (operator-triggered REM or a
+  user-sleep request) could dispatch the SLEEP transition twice within the
+  same lifecycle tick, collapsing WAKE straight to SLEEP before the tick
+  ever reached the drowsy-edge drain gate — so any turn still parked in the
+  live capture spool at that moment was skipped and the forced sleep
+  consolidated a store missing recently captured turns. The drain gate now
+  also fires on every entry into SLEEP (not only the natural WAKE-to-DROWSY
+  edge), so a forced collapse drains the spool before consolidation; the
+  natural DROWSY-to-SLEEP re-fire stays a no-op via the drain's existing
+  offset-tracked idempotency.
+- The deferred-capture drain telemetry hard-labeled
+  every drain pass `phase: "drowsy"` (event name `deferred_drain_drowsy`)
+  even when it fired on a forced WAKE-to-SLEEP collapse, so diagnosing that
+  exact case showed a misleading drowsy-edge event. The drain now labels
+  each pass by the transition that actually fired it: `phase: "drowsy"` /
+  event `deferred_drain_drowsy` on the natural WAKE-to-DROWSY edge, and
+  `phase: "sleep_edge"` / event `deferred_drain_sleep_edge` on entry into
+  SLEEP. Counts were always accurate; only the label changes.
+- The at-rest deferred-capture backlog doctor check
+  could itself crash `iai-mcp doctor` on an unreadable-but-existing
+  deferred-captures directory (an uncaught `OSError` out of the backlog
+  enumeration), instead of degrading like the sibling capture-state hygiene
+  check — now caught and downgraded to a WARN. Separately, the live-spool
+  pending count treated a torn (no trailing newline) partial final line as
+  a full pending event, which could push the check to FAIL by exactly one
+  event the drain itself does not consider drainable; the count now uses
+  the same completeness rule as the drain writer, so doctor's count matches
+  what the drain would actually drain. (Entry recorded in a follow-up commit
+  to the code change that required it.)
+- Per-turn context injection went silent for a solo
+  active session: turns captured by the hooks were only promoted from the
+  spool into the store at boot, at the drowsy edge, after a sleep cycle, or
+  when ANOTHER session refreshed — so a single active session never got its
+  working-tier snapshot, its own turns stayed invisible to recall for hours,
+  and a fresh session started on a session-start brief that could be hours
+  stale. The daemon now promotes the spool on a WAKE cadence
+  (`IAI_MCP_WAKE_SPOOL_SWEEP_SEC`, default 30 s; signature-gated so an
+  unchanged spool costs one directory stat per tick; never during SLEEP)
+  and refreshes the session-start brief after a promoting sweep, debounced
+  by `IAI_MCP_PRECACHE_REFRESH_MIN_SEC` (default 300 s). `iai-mcp daemon
+  status` reports the last sweep under `wake_spool_sweep` (`status` is
+  `ok`, `gate_busy` or `error`, so a dead promotion path is visible).
+- The per-turn "New since last turn" delta echoed the
+  refreshing session's own turns (stored and still-pending) back into that
+  session; it now carries cross-session records only. The refresh reply now
+  carries an explicit `caught_up` flag — true only when every promotion
+  step ran to completion and no delta was suppressed — and the hooks
+  advance their freshness sidecars ONLY on that flag (a debounced or
+  partial reply, or an older daemon that does not report it, keeps them),
+  so an own-turn store advance no longer re-fires the refresh RPC on every
+  prompt and a still-pending cross-session turn can no longer fall below
+  the watermark unseen. The live-spool drain gained the same single-flight
+  rail as the deferred drain, so overlapping promoters no longer re-capture
+  the same lines; and when the store rejects a live turn (a soft insert
+  failure), the drain now holds its offset and reports the pass incomplete
+  instead of advancing past the un-stored turn, so `caught_up` stays false
+  and the caller keeps its watermark until the turn actually lands.
+- Local-command host lines (`<local-command-caveat>`,
+  `<local-command-stdout>`, `<local-command-stderr>`, `<command-args>`) and
+  any transcript entry the host marks `isMeta` are no longer captured as
+  user turns — a `/model` switch used to seed the working-tier goal with the
+  caveat boilerplate. Both capture parsers (inline hook and daemon) drop
+  them and are guarded to stay in lockstep.
+- A reader could briefly see fewer stored memories
+  than were actually committed while writes were in flight — in the worst
+  case a whole batch of recent memories vanished from one read and
+  reappeared on the next. Root cause: a read-only snapshot captured its
+  view of the write-ahead log in a single unguarded pass; racing a live
+  writer could tear that pass mid-file (or at the header during a
+  checkpoint), silently truncating the view to an older prefix that was
+  then served as current — and a later capture could even roll an
+  already-fresher reader backward. Snapshot capture now verifies it
+  consumed the log to its true committed tail (bounded retry loop), a
+  refresh can never regress a reader onto an older view, and a capture
+  that cannot be verified fails loud and falls back to the
+  strongly-consistent writer path instead of serving a phantom snapshot.
+  Verified under a concurrent-write stress harness that reproduced both
+  the silent undercount and a page-bounds error before the fix and runs
+  clean after.
+- Defense in depth for the same class: every cached
+  row-count formation point (populate, publish, sidecar persist, adopt)
+  now re-checks its freshness fence across the count read and recounts
+  instead of caching when the fence moved, so a stale count can never be
+  paired with a current generation even if a future path widens the
+  window.
+- The working tier reflected the current prompt one
+  turn late: the per-turn hook fires before the host appends the prompt to
+  the transcript, so only the NEXT turn's walk ever saw it. The hook now
+  also reads the prompt straight from its own stdin and spools it
+  immediately, keyed by the prompt's own id; the later transcript walk
+  (both the inline hook and the daemon parser) keys user turns by the same
+  id so it reinforces the same record instead of inserting a duplicate. A
+  raw `/command` prompt (confirmed to arrive unexpanded on stdin) and any
+  prompt shorter than the existing capture floor are skipped on this path,
+  same as the transcript walk.
+- Three of the recall path's five Python-side
+  candidate-pool caches (the embedding pool matrix, its L2-normalized copy,
+  and the ranking degree map) are no longer memoized on the graph across
+  calls -- each is recomputed fresh on every recall instead. Ranking output
+  is unchanged (recall-scoring differential gate: 28/28 green, both storage
+  drivers); the tradeoff is a small resident-memory reduction in exchange
+  for repeating this work every call instead of reusing it across recalls
+  on the same build. Two caches (the candidate records view, the warm
+  lexical postings index) are kept -- both have live readers this change
+  does not touch.
+- The resident rank index's bounded delta overlay
+  (populated by every insert/update/delete once a live consumer exists) now
+  folds back into the committed structure automatically once it accumulates
+  enough untouched entries (default 500, `IAI_MCP_RANK_OVERLAY_FOLD_THRESHOLD`),
+  triggered only from the write path -- never during a recall. Previously
+  nothing ever reclaimed this overlay, so it would have grown unbounded
+  over long daemon uptime once a production consumer existed.
+
 ## [3.0.8] - 2026-08-23
 
 ### Fixed

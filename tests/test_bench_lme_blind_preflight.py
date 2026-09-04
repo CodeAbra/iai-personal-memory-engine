@@ -12,7 +12,6 @@ import pytest
 pytestmark = pytest.mark.bench
 
 
-
 class _StubLMESession:
 
     def __init__(self, qid: str, question_type: str = "test") -> None:

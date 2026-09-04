@@ -169,6 +169,15 @@ def test_task_notification_dropped():
     )
 
 
+def test_system_reminder_dropped():
+    line = _user_line("<system-reminder>\nStale context from a prior tool call.\n</system-reminder>")
+    result = _parse_transcript_line(line)
+    assert result is None, (
+        f"system-reminder line should be filtered (got {result!r}); "
+        "_parse_transcript_line must apply the noise filter"
+    )
+
+
 def test_interrupted_dropped():
     line = _user_line("[Request interrupted by user]")
     result = _parse_transcript_line(line)

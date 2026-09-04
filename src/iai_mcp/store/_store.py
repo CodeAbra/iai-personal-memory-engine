@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Sequence
@@ -27,7 +28,10 @@ from iai_mcp.crypto import (
     is_encrypted,
 )
 from iai_mcp.types import (
+    EPISTEMIC_STATUS_ENUM,
     HV_TIER_ENUM,
+    SALIENCE_LEVEL_ENUM,
+    SALIENCE_LEVEL_RANK,
     SCHEMA_VERSION_CURRENT,
     MemoryRecord,
     TIER_ENUM,
@@ -41,9 +45,15 @@ from iai_mcp.store._buffers import (
     _edge_buffer, _edge_last_flush_at,
     flush_record_buffer, should_flush_record_buffer,
     flush_edge_buffer, should_flush_edge_buffer,
+    reset_store_buffers,
 )
 
 logger = logging.getLogger(__name__)
+
+# boost_edges' cheap per-pair branch vs its full edge_type-table scan
+# branch. Every write site that chunks pairs into boost_edges must stay
+# at or under this size, or it falls onto the full-table scan.
+BOOST_EDGES_SMALL_BATCH = 4
 
 
 def _utc_now() -> datetime:
@@ -151,6 +161,57 @@ def _derive_live(tombstoned_at: "str | None") -> int:
     the same write.
     """
     return 0 if tombstoned_at else 1
+
+
+def _parse_ts_field(val: Any) -> "datetime | None":
+    """Shared by _from_row and _from_row_rank_view — must stay one source
+    of truth so the two decode tiers can never disagree on a timestamp."""
+    import pandas as pd
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, datetime):
+        return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
+    if hasattr(val, "to_pydatetime"):
+        dt = val.to_pydatetime()
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+@dataclass
+class RankCandidateView:
+    """Cheap rank-only candidate decode — literal_surface is the only
+    AES-decrypted field; every other field is a plaintext column. Mutable,
+    but the recall scoring loop no longer writes community_id or
+    profile_modulation_gain onto instances sitting in records_cache -- those
+    per-call values are tracked in call-local dicts and read back at hit
+    construction instead, so a records_cache value that IS cache-shared
+    across calls (SimpleRecordView) is never field-mutated."""
+
+    id: UUID
+    embedding: "list[float] | None"
+    literal_surface: str
+    aaak_index: str = ""
+    created_at: datetime = field(default_factory=_utc_now)
+    stability: float = 0.0
+    tier: str = "episodic"
+    tags: list = field(default_factory=list)
+    language: str = "en"
+    community_id: "UUID | None" = None
+    structure_hv: bytes = b""
+    salience_level: str = "unflagged"
+    provenance: list = field(default_factory=list)
+    profile_modulation_gain: dict = field(default_factory=dict)
+    valence: float = 0.0
+    directive: bool = False
 
 
 class MemoryStore:
@@ -400,12 +461,7 @@ class MemoryStore:
         if self.db is None:
             return
 
-        from iai_mcp.events import (
-            _BUFFER_LOCK,
-            _event_buffer,
-            _last_flush_at,
-            flush_event_buffer,
-        )
+        from iai_mcp.events import _BUFFER_LOCK, flush_event_buffer
 
         with _BUFFER_LOCK:
             _log = logging.getLogger(__name__)
@@ -443,12 +499,6 @@ class MemoryStore:
                     },
                 )
 
-            _event_buffer.pop(id(self), None)
-            _last_flush_at.pop(id(self), None)
-            _record_buffer.pop(id(self), None)
-            _record_last_flush_at.pop(id(self), None)
-            _edge_buffer.pop(id(self), None)
-            _edge_last_flush_at.pop(id(self), None)
             try:
                 from iai_mcp.retrieve import _tv_cache, _tv_cache_dirty
                 # Weak-keyed on the store object (evicts with it); explicit
@@ -462,6 +512,15 @@ class MemoryStore:
 
             self.db.close()
             self.db = None
+
+        # Outside _BUFFER_LOCK: reset_store_buffers dispatches to every
+        # registered id(store)-keyed family. Lock position here cannot close
+        # a write-during-close race either way: write_event's buffered path
+        # (events.py) appends to _event_buffer without ever taking
+        # _BUFFER_LOCK, so a concurrent buffered write on a store already
+        # inside close() (db already None) is caller misuse, not something
+        # this lock scope can prevent.
+        reset_store_buffers(id(self))
 
     def _drain_async_writes_on_close(self) -> None:
         """Drain and tear down a live async write queue before closing the store.
@@ -1451,6 +1510,44 @@ class MemoryStore:
             self.boost_edges(list(pairs), delta=delta, edge_type="hebbian")
         except Exception as exc:  # noqa: BLE001 -- best-effort, never raise into caller
             logger.debug("queue_coactivation_sync_fallback_failed: %s", exc)
+
+    def queue_profile_modulate(
+        self, pairs: "list[tuple[UUID, UUID]]", deltas: "list[float]",
+    ) -> None:
+        """Deferred pairwise profile-modulation potentiation, one call per
+        recall. Rides the reinforce queue exactly like queue_coactivation so
+        the edge write never runs on the synchronous recall path; without the
+        queue (tests, non-daemon) it degrades to a direct bounded write.
+
+        Accepts per-pair deltas: boost_edges accumulates weight per canonical
+        edge additively regardless of how many calls carry a given pair, so
+        grouping pairs by delta value before enqueue is exact-equivalent to
+        passing the full per-pair delta list through in one synchronous call.
+        """
+        if not pairs:
+            return
+        if len(deltas) != len(pairs):
+            raise ValueError(
+                f"deltas length {len(deltas)} != pairs length {len(pairs)}"
+            )
+        q = self._reinforce_queue
+        if q is not None and hasattr(q, "enqueue_pairs"):
+            by_delta: dict[float, list] = {}
+            for (a, b), d in zip(pairs, deltas):
+                by_delta.setdefault(float(d), []).append((a, b))
+            for delta, group in by_delta.items():
+                q.enqueue_pairs(group, delta, edge_type="profile_modulates")
+            return
+        # profile_modulates edges share one endpoint (PROFILE_SENTINEL_UUID)
+        # -- keep this chunk size == BOOST_EDGES_SMALL_BATCH or this fallback
+        # re-triggers the full-table scan on the recall hot path.
+        for start in range(0, len(pairs), BOOST_EDGES_SMALL_BATCH):
+            chunk_pairs = pairs[start:start + BOOST_EDGES_SMALL_BATCH]
+            chunk_deltas = deltas[start:start + BOOST_EDGES_SMALL_BATCH]
+            try:
+                self.boost_edges(chunk_pairs, delta=chunk_deltas, edge_type="profile_modulates")
+            except Exception as exc:  # noqa: BLE001 -- best-effort, never raise into caller
+                logger.debug("queue_profile_modulate_sync_fallback_failed: %s", exc)
 
     def queue_reinforce(self, record_ids: "list[UUID]") -> None:
         """Enqueue record ids for deferred reinforcement, or reinforce synchronously.
@@ -2447,7 +2544,19 @@ class MemoryStore:
         *,
         n: int | None = None,
         over_fetch_factor: int = 3,
-    ) -> list[tuple[MemoryRecord, float]]:
+        decode: str = "full",
+        substage_timings: "dict | None" = None,
+    ) -> "list[tuple[MemoryRecord | RankCandidateView, float]]":
+        # substage_timings is only wired on the fast-decode branch
+        # (IAI_MCP_ANN_FAST_DECODE_OFF unset) — the fallback DataFrame path
+        # is not sub-instrumented.
+        # decode="rank" is the only lazy tier; any other value (including a
+        # typo) falls back to the eager full decode — never a silent no-op.
+        _lazy_decode = (
+            decode == "rank"
+            and os.environ.get("IAI_MCP_LAZY_DECODE_OFF") != "1"
+        )
+        _decode_row = self._from_row_rank_view if _lazy_decode else self._from_row
         _return_records_only = n is not None
         if n is not None:
             k = n
@@ -2477,6 +2586,10 @@ class MemoryStore:
         # query_similar_temporal's existing over-fetch discipline.
         k_effective = max(1, int(k) * max(1, int(over_fetch_factor)))
         q = q.limit(k_effective)
+        if _lazy_decode:
+            # Same query object feeds both the fast row-dict arm and the
+            # pandas fallback arm below — one gate covers both.
+            q = q.select_rank_view()
 
         out: list[tuple[MemoryRecord, float]] | None = None
         _slow_t0 = time.perf_counter()
@@ -2490,17 +2603,39 @@ class MemoryStore:
             # _from_row. The DataFrame materialization stays available (and
             # exercised, byte-for-byte) behind the kill-switch below.
             try:
-                row_dicts = q.to_row_dicts()
+                row_dicts = (
+                    q.to_row_dicts(substage_timings=substage_timings)
+                    if substage_timings is not None
+                    else q.to_row_dicts()
+                )
                 _fetch_ms = (time.perf_counter() - _slow_t0) * 1000.0
                 _rows_fetched = len(row_dicts)
+                if substage_timings is not None:
+                    substage_timings["rows_fetched"] = float(_rows_fetched)
                 _decode_t0 = time.perf_counter()
                 fast_out: list[tuple[MemoryRecord, float]] = []
+                # Decode-then-stop at k valid rows -- never the whole
+                # over-fetched pool. The tombstoned_at/embedding_pending
+                # re-check is redundant with the SQL WHERE clause but
+                # load-bearing if that predicate is ever not native-side;
+                # a skipped row is never counted toward k, so the scan
+                # tops up into the remaining fetched rows automatically.
                 for row in row_dicts:
-                    record = self._from_row(row)
+                    if row.get("tombstoned_at") is not None:
+                        continue
+                    if row.get("embedding_pending") not in (None, 0, False):
+                        continue
+                    record = _decode_row(row)
                     distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
                     score = 1.0 - distance
                     fast_out.append((record, score))
+                    if len(fast_out) >= k:
+                        break
                 _decode_ms = (time.perf_counter() - _decode_t0) * 1000.0
+                if substage_timings is not None:
+                    substage_timings["escalation_decode_ms"] = (
+                        substage_timings.get("escalation_decode_ms", 0.0) + _decode_ms
+                    )
                 out = fast_out
             except Exception as exc:  # noqa: BLE001 — fail-safe: never break recall
                 logger.debug(
@@ -2513,7 +2648,7 @@ class MemoryStore:
             results = q.to_pandas()
             out = []
             for _, row in results.iterrows():
-                record = self._from_row(row.to_dict())
+                record = _decode_row(row.to_dict())
                 distance = float(row.get("_distance", 1.0)) if "_distance" in row else 1.0
                 score = 1.0 - distance
                 out.append((record, score))
@@ -2531,6 +2666,8 @@ class MemoryStore:
             )
 
         out = out[:k]
+        if substage_timings is not None:
+            substage_timings["rows_served"] = float(len(out))
         if _return_records_only:
             return [r for r, _s in out]
         return out
@@ -2703,7 +2840,10 @@ class MemoryStore:
         ANN's approximate window.
         """
         # exact score is the truth; ANN score is the prefilter
-        if getattr(record, "never_merge", False):
+        # A budget-accepted directive must land its own row -- folding it
+        # into an existing neighbour would silently drop the standing-order
+        # intent, same as a never_merge lock.
+        if getattr(record, "never_merge", False) or getattr(record, "directive", False):
             return None
         for exact_id, exact_cos in self._exact_scan_full_corpus(record):
             if exact_cos < threshold:
@@ -2963,7 +3103,7 @@ class MemoryStore:
         " s5_trust_score, profile_modulation_gain_json, schema_version,"
         " hv_tier, structure_hv_payload,"
         " COALESCE(embedding_pending, 0) AS embedding_pending,"
-        " role"
+        " role, epistemic_status, salience_level, valence, directive"
     )
 
     # Soft-tombstoned rows (tombstoned_at IS NOT NULL) are dead and must never
@@ -3102,9 +3242,17 @@ class MemoryStore:
     # candidate set into a handful of statements.
     _GET_BATCH_CHUNK = 400
 
-    def get_batch(self, ids: "list[UUID]") -> "dict[UUID, MemoryRecord]":
+    def get_batch(
+        self, ids: "list[UUID]", *, decode: str = "full", conn=None,
+    ) -> "dict[UUID, MemoryRecord | RankCandidateView]":
         if not ids:
             return {}
+
+        _lazy_decode = (
+            decode == "rank"
+            and os.environ.get("IAI_MCP_LAZY_DECODE_OFF") != "1"
+        )
+        _decode_row = self._from_row_rank_view if _lazy_decode else self._from_row
 
         # Dedup the input so a repeated id is fetched once, then resolve the
         # whole set through chunked `id IN (...)` statements on ONE borrowed
@@ -3121,9 +3269,11 @@ class MemoryStore:
                 seen_ids.add(id_str)
                 uniq.append(id_str)
 
-        out: dict[UUID, MemoryRecord] = {}
+        out: "dict[UUID, MemoryRecord | RankCandidateView]" = {}
         skipped = 0
-        with self.db.ro_conn() as conn:
+
+        def _run_chunks(_conn) -> None:
+            nonlocal skipped
             for start in range(0, len(uniq), self._GET_BATCH_CHUNK):
                 chunk = uniq[start : start + self._GET_BATCH_CHUNK]
                 ph = ", ".join("?" for _ in chunk)
@@ -3131,11 +3281,14 @@ class MemoryStore:
                     f"SELECT {self._RECORD_COLS} FROM records"  # noqa: S608
                     f" WHERE id IN ({ph})"
                 )
-                raw_rows = conn.execute(sql, chunk).fetchall()
+                raw_rows = _conn.execute(sql, chunk).fetchall()
                 for raw in raw_rows:
+                    # _decode_raw_row must run before either decode fn: it is
+                    # the only place the embedding BLOB is turned into a
+                    # float list — skipping it silently mis-reads the vector.
                     row_dict = self._decode_raw_row(dict(raw))
                     try:
-                        rec = self._from_row(row_dict)
+                        rec = _decode_row(row_dict)
                         out[rec.id] = rec
                     except Exception as exc:  # noqa: BLE001 — skip corrupt rows, never crash
                         skipped += 1
@@ -3145,6 +3298,17 @@ class MemoryStore:
                             type(exc).__name__,
                         )
                         continue
+
+        # conn=None (default, every caller but the single-borrow auth-liveness
+        # site): own borrow, unchanged. conn=<borrowed connection>: reuse the
+        # caller's borrow for every chunk instead of opening a second one —
+        # chunking (self._GET_BATCH_CHUNK) is preserved either way so the
+        # lilli engine's IN-list cap is respected on both routes.
+        if conn is not None:
+            _run_chunks(conn)
+        else:
+            with self.db.ro_conn() as _owned_conn:
+                _run_chunks(_owned_conn)
         if skipped:
             logger.warning(
                 "skipped %d undeserializable record(s) in get_batch", skipped
@@ -3320,7 +3484,6 @@ class MemoryStore:
 
         tbl = self.db.open_table(EDGES_TABLE)
 
-        _SMALL_BATCH = 4
         update_rows: list[dict] = []
         insert_rows: list[dict] = []
         new_weights: dict[tuple[str, str], float] = {}
@@ -3330,7 +3493,7 @@ class MemoryStore:
         # this is a read-modify-write — an RO snapshot can miss an edge this
         # same call graph just committed, and a write-path verb must never
         # queue behind (or wedge on) RO-slot opens.
-        if len(coalesced) <= _SMALL_BATCH:
+        if len(coalesced) <= BOOST_EDGES_SMALL_BATCH:
             for (src_str, dst_str), accum_delta in coalesced.items():
                 with self.db._conn_lock:
                     row = self.db._conn.execute(
@@ -3500,6 +3663,64 @@ class MemoryStore:
                 logger.debug("records column missing, skipped: %s", exc)
         return result
 
+    def raise_salience_level_if_higher(self, record_id: UUID, level: str) -> bool:
+        """Monotone raise, scoped to exactly one column -- never reads,
+        compares, or writes pinned or never_merge. An invalid level is a
+        no-op (never a lower-than-intended write from coerced garbage)."""
+        if level not in SALIENCE_LEVEL_ENUM:
+            return False
+        flush_record_buffer(self)
+        current = self.get(record_id)
+        if current is None:
+            return False
+        if SALIENCE_LEVEL_RANK.get(level, 0) <= SALIENCE_LEVEL_RANK.get(
+            current.salience_level, 0
+        ):
+            return False
+        tbl = self.db.open_table(RECORDS_TABLE)
+        tbl.update(
+            where=f"id = '{_uuid_literal(record_id)}'",
+            values={"salience_level": level},
+        )
+        # Mutate the already-fetched object (never a cache-shared instance --
+        # `current` came fresh off `self.get()` above) and route through the
+        # registered hook, mirroring upgrade_tier's identical pattern: this
+        # bumps graph._pool_content_version and feeds the rank index as a
+        # side effect of the normal write-time sync, no bespoke sync point.
+        current.salience_level = level
+        self._fire_graph_sync_hook("update", current)
+        return True
+
+    def raise_valence(self, record_id: UUID, new_value: float) -> bool:
+        """Monotone raise, scoped to exactly one column. Clamped to [0.0, 1.0]
+        at the write boundary (the only path that sets this column) so a
+        poisoned caller value can never reach the rank multiplier unbounded."""
+        if os.environ.get("IAI_MCP_VALENCE_WRITE_OFF") == "1":
+            return False
+        try:
+            _raw = float(new_value)
+        except (TypeError, ValueError):
+            return False
+        clamped = 0.0 if _raw != _raw else max(0.0, min(1.0, _raw))
+        flush_record_buffer(self)
+        current = self.get(record_id)
+        if current is None:
+            return False
+        if clamped <= current.valence:
+            return False
+        tbl = self.db.open_table(RECORDS_TABLE)
+        tbl.update(
+            where=f"id = '{_uuid_literal(record_id)}'",
+            values={"valence": clamped},
+        )
+        # Mutate the already-fetched object and route through the registered
+        # hook, mirroring raise_salience_level_if_higher's identical pattern:
+        # bumps graph._pool_content_version and feeds the rank index as a
+        # side effect of the normal write-time sync, no bespoke sync point.
+        current.valence = clamped
+        self._fire_graph_sync_hook("update", current)
+        return True
+
     def upgrade_tier(
         self,
         record_id: UUID,
@@ -3616,9 +3837,13 @@ class MemoryStore:
             "hv_tier": r.hv_tier,
             "structure_hv_payload": bytes(r.structure_hv_payload or b""),
             "role": _derive_role(r.tags),
+            "epistemic_status": r.epistemic_status,
+            "salience_level": r.salience_level,
+            "valence": float(r.valence),
             # A freshly-inserted record is always live by construction — no
             # write path through _to_row ever carries a pre-set tombstone.
             "live": _derive_live(None),
+            "directive": bool(r.directive),
         }
 
     def _maybe_tag_schema_bypass(self, record: MemoryRecord) -> None:
@@ -3759,7 +3984,7 @@ class MemoryStore:
     def _from_row(self, row: dict) -> MemoryRecord:
         from uuid import UUID as _UUID
 
-        import pandas as pd
+        _parse_ts = _parse_ts_field
 
         def _safe_int(val: Any, default: int) -> int:
             if val is None:
@@ -3771,25 +3996,6 @@ class MemoryStore:
                 return int(fval)
             except (TypeError, ValueError):
                 return default
-
-        def _parse_ts(val: Any) -> datetime | None:
-            if val is None:
-                return None
-            try:
-                if pd.isna(val):
-                    return None
-            except (TypeError, ValueError):
-                pass
-            if isinstance(val, datetime):
-                return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
-            if hasattr(val, "to_pydatetime"):
-                dt = val.to_pydatetime()
-                return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-            try:
-                dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                return None
-            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
         if "id" not in row:
             raise KeyError(
@@ -3913,6 +4119,27 @@ class MemoryStore:
         role_raw = row.get("role")
         role = str(role_raw) if role_raw is not None else None
 
+        epistemic_status_raw = row.get("epistemic_status")
+        if epistemic_status_raw is None or epistemic_status_raw not in EPISTEMIC_STATUS_ENUM:
+            epistemic_status = "unknown"
+        else:
+            epistemic_status = str(epistemic_status_raw)
+
+        salience_level_raw = row.get("salience_level")
+        if salience_level_raw is None or salience_level_raw not in SALIENCE_LEVEL_ENUM:
+            salience_level = "unflagged"
+        else:
+            salience_level = str(salience_level_raw)
+
+        valence_raw = row.get("valence")
+        try:
+            _valence = float(valence_raw) if valence_raw is not None else 0.0
+            valence = _valence if (_valence == _valence and 0.0 <= _valence <= 1.0) else 0.0
+        except (TypeError, ValueError):
+            valence = 0.0
+
+        directive = bool(row.get("directive") or False)
+
         rec = MemoryRecord(
             id=row_uuid,
             tier=row.get("tier", "episodic"),
@@ -3945,7 +4172,104 @@ class MemoryStore:
             structure_hv_payload=structure_hv_payload,
             embedding_pending=_safe_int(row.get("embedding_pending"), 0),
             role=role,
+            epistemic_status=epistemic_status,
+            salience_level=salience_level,
+            valence=valence,
+            directive=directive,
         )
         if language == "__LEGACY_EMPTY__":
             rec.language = ""
         return rec
+
+    def _from_row_rank_view(self, row: dict) -> RankCandidateView:
+        if "id" not in row:
+            raise KeyError(
+                "query_similar/get_batch rank-view decode requires 'id' in "
+                "the column projection"
+            )
+        row_uuid = UUID(row["id"])
+
+        structure_raw = row.get("structure_hv")
+        if isinstance(structure_raw, (bytes, bytearray, memoryview)):
+            structure_hv = bytes(structure_raw)
+        else:
+            structure_hv = b""
+
+        _community_val = row.get("community_id")
+        try:
+            import math as _math
+            if _community_val is not None and not isinstance(_community_val, str):
+                if _math.isnan(float(_community_val)):
+                    _community_val = None
+        except (TypeError, ValueError):
+            pass
+        community_raw = (_community_val or "")
+        community_id = (
+            UUID(community_raw)
+            if community_raw and isinstance(community_raw, str)
+            else None
+        )
+
+        literal_raw = row.get("literal_surface", "")
+        if is_encrypted(literal_raw):
+            literal_raw = self._decrypt_for_record(row_uuid, literal_raw)
+
+        tags_json_raw = row.get("tags_json")
+        tags = json.loads(
+            (tags_json_raw or "[]") if isinstance(tags_json_raw, str) else "[]"
+        )
+
+        salience_level_raw = row.get("salience_level")
+        if salience_level_raw is None or salience_level_raw not in SALIENCE_LEVEL_ENUM:
+            salience_level = "unflagged"
+        else:
+            salience_level = str(salience_level_raw)
+
+        valence_raw = row.get("valence")
+        try:
+            _valence = float(valence_raw) if valence_raw is not None else 0.0
+            valence = _valence if (_valence == _valence and 0.0 <= _valence <= 1.0) else 0.0
+        except (TypeError, ValueError):
+            valence = 0.0
+
+        directive = bool(row.get("directive") or False)
+
+        # Must stay identical to _from_row's legacy-schema-v1 language
+        # handling -- row already carries schema_version at zero extra cost
+        # (part of the shared _RECORD_COLS projection used by both decode
+        # tiers), so there is no reason for this tier to diverge.
+        lang_raw = row.get("language")
+        raw_version = row.get("schema_version")
+        try:
+            schema_version = int(raw_version) if raw_version is not None else SCHEMA_VERSION_CURRENT
+        except (TypeError, ValueError):
+            schema_version = SCHEMA_VERSION_CURRENT
+        is_empty_language = lang_raw is None or (isinstance(lang_raw, str) and lang_raw == "")
+        if is_empty_language and schema_version == 1:
+            language = "__LEGACY_EMPTY__"
+        elif is_empty_language:
+            language = "en"
+        else:
+            language = str(lang_raw)
+
+        rv = RankCandidateView(
+            id=row_uuid,
+            embedding=(
+                list(row["embedding"]) if row.get("embedding") is not None else []
+            ),
+            literal_surface=literal_raw,
+            aaak_index=row.get("aaak_index") or "",
+            created_at=_parse_ts_field(row.get("created_at")) or _utc_now(),
+            stability=float(row.get("stability") or 0.0),
+            tier=row.get("tier", "episodic"),
+            tags=tags,
+            language=language,
+            community_id=community_id,
+            structure_hv=structure_hv,
+            salience_level=salience_level,
+            valence=valence,
+            directive=directive,
+        )
+        if language == "__LEGACY_EMPTY__":
+            rv.language = ""
+        return rv

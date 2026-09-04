@@ -766,6 +766,37 @@ _INSIGHT_MINT_QUERY_LIMIT: int = 200
 _INSIGHT_MINT_CHECK_NAME: str = "(bb) nightly insight mint"
 
 
+def _read_last_sleep_step_failure() -> str | None:
+    """Best-effort read of the last recorded sleep-step failure.
+
+    Reads the lifecycle-state record directly -- a local file, independent
+    of daemon reachability -- and returns the ``sleep_cycle_progress.last_error``
+    string when present. Every failure mode (missing file, unreadable file,
+    malformed payload, missing sub-dict, wrong types) returns ``None``; this
+    helper must never raise, since a diagnostic that crashes the checklist
+    is worse than one that omits a hint.
+    """
+    try:
+        from iai_mcp import lifecycle_state
+
+        record = lifecycle_state.load_state()
+        progress = record.get("sleep_cycle_progress")
+        if not isinstance(progress, dict):
+            return None
+        last_error = progress.get("last_error")
+        return last_error if isinstance(last_error, str) and last_error else None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _with_last_sleep_step_failure(detail: str) -> str:
+    """Append the last recorded sleep-step failure to a WARN/FAIL detail."""
+    failure = _read_last_sleep_step_failure()
+    if not failure:
+        return detail
+    return f"{detail}; last recorded nightly-step failure: {failure}"
+
+
 def _evaluate_nightly_insight_events(
     events: list[dict],
     now: Any,
@@ -856,7 +887,7 @@ def _evaluate_nightly_insight_events(
             return CheckResult(
                 name=name,
                 passed=True,
-                detail=(
+                detail=_with_last_sleep_step_failure(
                     f"{consecutive} consecutive nights without a confirmed mint; "
                     "some event data was unreadable"
                 ),
@@ -865,14 +896,18 @@ def _evaluate_nightly_insight_events(
         return CheckResult(
             name=name,
             passed=False,
-            detail=f"{consecutive} consecutive nights without a minted insight",
+            detail=_with_last_sleep_step_failure(
+                f"{consecutive} consecutive nights without a minted insight"
+            ),
             status="FAIL",
         )
 
     return CheckResult(
         name=name,
         passed=True,
-        detail=f"{consecutive} consecutive night(s) without a minted insight",
+        detail=_with_last_sleep_step_failure(
+            f"{consecutive} consecutive night(s) without a minted insight"
+        ),
         status="WARN",
     )
 
@@ -1134,6 +1169,15 @@ def _row_identity(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _row_fully_saturated(row: dict[str, Any], candidates: int) -> bool:
+    """True when a row's zero-processed candidates are all accounted for by
+    a producer-reported saturation count (every labile candidate was already
+    at its value ceiling, so the write was correctly declined) rather than
+    left unexplained."""
+    saturated = row.get("valence_saturated")
+    return isinstance(saturated, int) and saturated == candidates
+
+
 def _classify_liveness_window(rows: list[dict[str, Any]], alarm_rows: int) -> str:
     """Verdict for one identity's last ``alarm_rows`` recorded rows.
 
@@ -1143,11 +1187,13 @@ def _classify_liveness_window(rows: list[dict[str, Any]], alarm_rows: int) -> st
     counted as evidence either way; a row with an unreadable
     candidate/processed/spec-version triple is excluded the same way but
     marks the identity unknown so an ambiguous window can never resolve to a
-    silent PASS.
+    silent PASS. A zero-processed window where every candidate is
+    saturation-accounted-for (see ``_row_fully_saturated``) is healthy
+    operation, not a stall.
     """
     window = sorted(rows, key=lambda r: r.get("ts") or "")[-alarm_rows:]
 
-    usable: list[tuple[int, int]] = []
+    usable: list[tuple[int, int, dict[str, Any]]] = []
     saw_unknown = False
     for row in window:
         if row.get("error") is not None:
@@ -1161,11 +1207,13 @@ def _classify_liveness_window(rows: list[dict[str, Any]], alarm_rows: int) -> st
         ):
             saw_unknown = True
             continue
-        usable.append((candidates, processed))
+        usable.append((candidates, processed, row))
 
-    if len(usable) == alarm_rows and all(c > 0 and p == 0 for c, p in usable):
+    if len(usable) == alarm_rows and all(c > 0 and p == 0 for c, p, _r in usable):
+        if all(_row_fully_saturated(r, c) for c, _p, r in usable):
+            return "pass"
         return "fail"
-    if len(usable) == alarm_rows and all(c == 0 for c, _p in usable):
+    if len(usable) == alarm_rows and all(c == 0 for c, _p, _r in usable):
         return "warn"
     if saw_unknown:
         return "unknown"
@@ -1265,3 +1313,140 @@ def check_cc_background_liveness(*, now: Any = None) -> CheckResult:
         detail=f"{len(rows_by_identity)} identity(ies) healthy",
         status="PASS",
     )
+
+
+_CODE_CURRENT_CHECK_NAME = "(ff) daemon sleep-path code current"
+
+
+def check_ff_daemon_code_current() -> CheckResult:
+    """Compare the daemon's boot-time source stamp against the source on disk.
+
+    Never FAILs: the only remedy is a daemon stop+start, an operator decision.
+    """
+    from iai_mcp.daemon_state import load_state
+
+    name = _CODE_CURRENT_CHECK_NAME
+    try:
+        state = load_state() or {}
+    except Exception as e:  # noqa: BLE001 -- an unreadable state file is advisory here
+        logger.debug("check_ff: daemon-state.json unreadable: %s", e)
+        return CheckResult(
+            name, True, f"daemon-state.json unreadable: {type(e).__name__}", status="WARN",
+        )
+
+    if state.get("daemon_pid") is None:
+        return CheckResult(name, True, "no daemon booted")
+
+    boot_stamp = state.get("code_stamp")
+    try:
+        from iai_mcp.code_stamp import stamp_divergence
+
+        divergence = stamp_divergence(boot_stamp)
+    except OSError as e:
+        return CheckResult(
+            name, True, f"sleep-path source unreadable: {type(e).__name__}: {e}", status="WARN",
+        )
+
+    if divergence == "missing":
+        return CheckResult(
+            name,
+            True,
+            "daemon booted without a code stamp — stop and start it to enable this check",
+            status="WARN",
+        )
+    if divergence == "roots":
+        booted_from = ", ".join(str(r) for r in (boot_stamp.get("roots") or []))
+        return CheckResult(
+            name,
+            True,
+            f"daemon booted from a different sleep-path source root: {booted_from}",
+            status="WARN",
+        )
+    if divergence == "digest":
+        return CheckResult(
+            name,
+            True,
+            "daemon is running sleep-path code older than the source on disk — run "
+            "`iai-mcp daemon stop && iai-mcp daemon start` to load it",
+            status="WARN",
+        )
+
+    return CheckResult(
+        name,
+        True,
+        f"sleep-path source matches the daemon boot stamp "
+        f"({boot_stamp.get('files', 0)} files)",
+    )
+
+
+_BUILD_SKEW_CHECK_NAME = "(hh) daemon build matches installed package"
+
+
+def check_hh_daemon_build_skew() -> CheckResult:
+    """The daemon's own reported package version vs the installed one.
+
+    Never FAILs; the only remedy is an operator-decided stop and start.
+    Warns on the package-version dimension only -- the source-digest
+    dimension stays owned by the check above, so one underlying skew never
+    produces two warnings.
+    """
+    name = _BUILD_SKEW_CHECK_NAME
+    from iai_mcp import doctor as _pkg
+
+    status = None
+    try:
+        status = asyncio.run(
+            _pkg._socket_status_probe(_pkg._resolve_socket_path(), 2.0)
+        )
+    except Exception as exc:  # noqa: BLE001 -- any probe failure reads as no-daemon
+        logger.debug("check_hh: socket probe failed: %s", exc)
+
+    if not isinstance(status, dict):
+        return CheckResult(name, True, "no daemon reachable to compare against")
+
+    try:
+        from iai_mcp import __version__ as installed_version
+    except (ImportError, AttributeError):
+        installed_version = None
+
+    daemon_version = status.get("version")
+
+    if daemon_version is None:
+        return CheckResult(
+            name,
+            True,
+            "the daemon's status reply carries no version field -- stop and "
+            "start it (`iai-mcp daemon stop && iai-mcp daemon start`) to "
+            "make this row meaningful",
+        )
+
+    if installed_version is None:
+        return CheckResult(
+            name,
+            True,
+            f"daemon reports version {daemon_version}; the installed "
+            "package version could not be determined",
+        )
+
+    if daemon_version != installed_version:
+        return CheckResult(
+            name,
+            True,
+            f"daemon is running version {daemon_version}, installed "
+            f"package is {installed_version} -- run `iai-mcp daemon stop "
+            "&& iai-mcp daemon start` to bring the daemon onto the "
+            "installed build",
+            status="WARN",
+        )
+
+    detail = f"daemon and installed package both report version {daemon_version}"
+    try:
+        from iai_mcp.code_stamp import stamp_divergence
+
+        divergence = stamp_divergence(status.get("code_stamp"))
+        stamp_state = "matches" if divergence is None else f"diverges ({divergence})"
+        detail += f"; sleep-path source stamp {stamp_state}"
+    except OSError as exc:
+        logger.debug("check_hh: source stamp comparison failed: %s", exc)
+
+    return CheckResult(name, True, detail)

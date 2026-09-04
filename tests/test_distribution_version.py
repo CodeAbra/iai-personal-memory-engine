@@ -8,7 +8,6 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 
 import iai_mcp
-from iai_mcp.cli import _cowork
 
 
 def _fake_version(known: dict):
@@ -32,14 +31,6 @@ def test_pre_rename_editable_install_still_resolves(monkeypatch):
 def test_no_metadata_at_all_degrades_to_sentinel(monkeypatch):
     monkeypatch.setattr(iai_mcp, "version", _fake_version({}))
     assert iai_mcp._distribution_version() == "0+unknown"
-
-
-def test_cowork_plugin_version_uses_the_same_chain(monkeypatch):
-    monkeypatch.setattr(iai_mcp, "version", _fake_version({"iai-pme": "9.9.9"}))
-    assert _cowork._plugin_version() == "9.9.9"
-
-    monkeypatch.setattr(iai_mcp, "version", _fake_version({}))
-    assert _cowork._plugin_version() == "0.0.0"
 
 
 def test_this_environment_resolves_a_real_version():

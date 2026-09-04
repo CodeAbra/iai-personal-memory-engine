@@ -131,6 +131,12 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
                 role=role,
                 ts=ev.get("ts"),
                 source_uuid=ev.get("source_uuid"),
+                # This is the ambient transcript-batch drain: the drained
+                # event's role/text are a verbatim record of the human's
+                # actual turn, not an assistant-composed string. This is the
+                # ONE call site allowed to mint a directive from the typed
+                # marker.
+                directive_marker_allowed=True,
             )
             status = result.get("status")
             if status == "inserted":

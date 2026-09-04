@@ -139,6 +139,7 @@ def test_tools_list_returns_without_daemon(
             "topology",
             "episodes_recent",
             "memory_temporal_recall",
+            "claim_check",
         }
         assert names == expected, (
             f"tools/list returned {len(names)} tools, expected {len(expected)}: "

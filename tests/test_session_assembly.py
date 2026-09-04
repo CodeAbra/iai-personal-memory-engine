@@ -14,6 +14,7 @@ from iai_mcp.session import (
     TOTAL_CACHED_BUDGET,
     SessionStartPayload,
     _approx_tokens,
+    _display_aaak,
     assemble_session_start,
 )
 from iai_mcp.store import MemoryStore
@@ -94,7 +95,21 @@ def test_l0_segment_excludes_literal_only_at_cap(tmp_path):
     payload = assemble_session_start(
         store, CommunityAssignment(), [], profile_state=_STANDARD,
     )
-    assert "W:" in payload.l0
+    # l0 must lead with a derived index line, never raw literal text --
+    # under the compact label (default) the index is a short tier token
+    # instead of the legacy "W:.../R:.../E:.../T:..." string.
+    index_line, _, rest = payload.l0.partition("\n")
+    assert index_line, "l0 segment must lead with a derived index line"
+    assert index_line != rest, "index line must not just echo the literal content"
+    assert len(index_line) < len(rest)
+    # Positive format check (not just "shorter than content"): the index
+    # line is exactly the derived display for the seeded record, so a
+    # malformed/near-empty index would be caught here, not just a long one.
+    expected = _display_aaak(store.get(L0_RECORD_UUID))
+    assert index_line == expected, (
+        f"l0 index line must be exactly _display_aaak(rec): got {index_line!r}, "
+        f"expected {expected!r}"
+    )
 
 def test_total_cached_budget_respected(tmp_path):
     store = MemoryStore(path=tmp_path)

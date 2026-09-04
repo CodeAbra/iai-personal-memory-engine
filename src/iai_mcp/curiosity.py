@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from iai_mcp.events import query_events, write_event
 from iai_mcp.store import MemoryStore
+from iai_mcp.store._purge_registry import register_store_purge
 
 
 ENTROPY_LOW: float = 0.4
@@ -528,6 +529,14 @@ class _CuriosityCache:
 # process (e.g. tests, or a future multi-store host) do not share state.
 _caches: dict[int, _CuriosityCache] = {}
 _caches_lock = threading.Lock()
+
+
+def reset_curiosity_cache(store_id: int) -> None:
+    with _caches_lock:
+        _caches.pop(store_id, None)
+
+
+register_store_purge(reset_curiosity_cache)
 
 
 def _cache_for(store: MemoryStore) -> _CuriosityCache:

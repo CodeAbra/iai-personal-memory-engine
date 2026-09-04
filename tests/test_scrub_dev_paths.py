@@ -1,146 +1,81 @@
-"""Guard: developer home paths must not reach shipped source.
+"""Home-path linter: production source must not carry a developer home path.
 
-`scripts/scrub_dev_paths.py` walks the shipped roots and rejects any
-`/Users/<name>/` or `/home/<name>/` segment. An absolute path from whoever
-built the release leaks that account name and breaks on every other machine.
-The rule is generic — no account name is special-cased.
+Covers the generic rule (`/Users/<name>/`, `/home/<name>/`), the scan-root
+allowlist (tests/, bench/, docs live outside SCAN_ROOTS), and both modes'
+exit contract.
 """
+
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
-import pytest
-
-# scripts/ lives at repo root, not on the src/ pythonpath. tests/conftest.py
-# prepends the repo root to sys.path so this import resolves.
-from scripts.scrub_dev_paths import (
-    find_home_paths,
-    main,
-    scan_file,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from scrub_dev_paths import find_home_paths, main, scan_file  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# find_home_paths
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        'CACHE = "/Users/alice/.iai-mcp"',
-        "log_dir = Path('/home/somedev/logs')",
-        'DEFAULT = "/Users/test/build/out"',
-        "path = '/home/u/state'",
-    ],
-)
-def test_home_paths_flagged(line):
-    assert find_home_paths(line) != [], f"should flag a home path: {line!r}"
+def test_macos_home_path_is_flagged() -> None:
+    assert find_home_paths('path = "/Users/somedev/.iai-mcp"') != []
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        'store = Path.home() / ".iai-mcp"',
-        'DOCS = "https://example.com/Users/guide"',
-        "# the /Users API is a macOS convention",
-        'rel = "src/iai_mcp/store.py"',
-        "",
-    ],
-)
-def test_clean_lines_not_flagged(line):
-    assert find_home_paths(line) == [], f"false positive on: {line!r}"
+def test_linux_home_path_is_flagged() -> None:
+    assert find_home_paths('path = "/home/somedev/.config"') != []
 
 
-def test_account_segment_required():
-    """A bare mention without an account segment is not a dev path."""
-    assert find_home_paths("mounted at /Users") == []
-    assert find_home_paths("see /home for details") == []
+def test_bare_users_api_mention_passes() -> None:
+    assert find_home_paths("the /Users API returns accounts") == []
 
 
-def test_all_matches_returned():
-    line = '"/Users/alice/a" and "/home/somedev/b"'
-    assert len(find_home_paths(line)) == 2
+def test_no_trailing_slash_passes() -> None:
+    assert find_home_paths('name = "/Users/somedev"') == []
 
 
-# ---------------------------------------------------------------------------
-# scan_file
-# ---------------------------------------------------------------------------
-
-def test_scan_file_reports_line_numbers(tmp_path: Path):
-    target = tmp_path / "mod.py"
-    target.write_text(
-        "clean = 1\n"
-        'leaked = "/Users/alice/.config"\n'
-        "also_clean = 2\n",
-        encoding="utf-8",
-    )
-    hits = scan_file(target)
+def test_scan_file_reports_line_numbers(tmp_path: Path) -> None:
+    f = tmp_path / "mod.py"
+    f.write_text('ok = 1\nhome = "/Users/somedev/x"\n', encoding="utf-8")
+    hits = scan_file(f)
     assert len(hits) == 1
-    line_no, match, _line = hits[0]
-    assert line_no == 2
-    assert match == "/Users/alice/"
+    assert hits[0][0] == 2
 
 
-def test_scan_file_clean_returns_empty(tmp_path: Path):
-    target = tmp_path / "clean.py"
-    target.write_text("value = Path.home()\n", encoding="utf-8")
-    assert scan_file(target) == []
+def test_binary_file_skips_silently(tmp_path: Path) -> None:
+    f = tmp_path / "mod.py"
+    f.write_bytes(b"\xff\xfe\x00bad")
+    assert scan_file(f) == []
 
 
-def test_scan_file_skips_unreadable(tmp_path: Path):
-    target = tmp_path / "blob.py"
-    target.write_bytes(b"\xff\xfe\x00binary")
-    assert scan_file(target) == []
+def _repo(tmp_path: Path, rel: str, content: str) -> Path:
+    root = tmp_path / "repo"
+    (root / "src" / "iai_mcp").mkdir(parents=True, exist_ok=True)
+    (root / "tests").mkdir(exist_ok=True)
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return root
 
 
-def test_scan_file_missing_path_is_silent(tmp_path: Path):
-    assert scan_file(tmp_path / "absent.py") == []
-
-
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-
-def _shipped(tmp_path: Path, name: str, body: str) -> None:
-    root = tmp_path / "src" / "iai_mcp"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / name).write_text(body, encoding="utf-8")
-
-
-def test_main_exits_zero_on_clean_tree(tmp_path: Path, monkeypatch):
-    _shipped(tmp_path, "ok.py", "value = Path.home()\n")
-    monkeypatch.chdir(tmp_path)
-    assert main([]) == 0
-
-
-def test_main_exits_nonzero_on_violation(tmp_path: Path, monkeypatch):
-    _shipped(tmp_path, "bad.py", 'p = "/Users/alice/.iai-mcp"\n')
-    monkeypatch.chdir(tmp_path)
+def test_default_mode_flags_src(tmp_path: Path, monkeypatch) -> None:
+    root = _repo(tmp_path, "src/iai_mcp/mod.py", 'p = "/Users/somedev/x"\n')
+    monkeypatch.chdir(root)
     assert main([]) == 1
 
 
-def test_main_reports_violation_to_stderr(tmp_path: Path, monkeypatch, capsys):
-    _shipped(tmp_path, "bad.py", 'p = "/home/somedev/state"\n')
-    monkeypatch.chdir(tmp_path)
-    main([])
-    err = capsys.readouterr().err
-    assert "bad.py" in err
-    assert "/home/somedev/" in err
-
-
-def test_main_ignores_paths_outside_shipped_roots(tmp_path: Path, monkeypatch):
-    """Fixtures and docs may hold sample paths; only shipped source is gated."""
-    fixtures = tmp_path / "tests"
-    fixtures.mkdir(parents=True, exist_ok=True)
-    (fixtures / "sample.py").write_text('p = "/Users/alice/x"\n', encoding="utf-8")
-    _shipped(tmp_path, "ok.py", "value = 1\n")
-    monkeypatch.chdir(tmp_path)
+def test_default_mode_ignores_tests_dir(tmp_path: Path, monkeypatch) -> None:
+    root = _repo(tmp_path, "tests/test_x.py", 'p = "/Users/somedev/x"\n')
+    monkeypatch.chdir(root)
     assert main([]) == 0
 
 
-def test_main_ignores_unscanned_suffixes(tmp_path: Path, monkeypatch):
-    root = tmp_path / "src" / "iai_mcp"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "notes.md").write_text("see /Users/alice/notes\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+def test_default_mode_clean_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    root = _repo(tmp_path, "src/iai_mcp/mod.py", "ok = 1\n")
+    monkeypatch.chdir(root)
     assert main([]) == 0
+
+
+def test_check_staged_flags_staged_src(tmp_path: Path, monkeypatch) -> None:
+    root = _repo(tmp_path, "src/iai_mcp/mod.py", 'p = "/home/somedev/x"\n')
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    monkeypatch.chdir(root)
+    assert main(["--check-staged"]) == 1

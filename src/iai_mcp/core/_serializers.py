@@ -19,6 +19,8 @@ def _hit_to_json(h) -> dict:
         "community_id": (
             str(_cid) if (_cid := getattr(h, "community_id", None)) is not None else None
         ),
+        "epistemic_status": getattr(h, "epistemic_status", None),
+        "salience_level": getattr(h, "salience_level", None),
     }
 
 
@@ -36,4 +38,7 @@ def _payload_to_json(payload) -> dict:
         "topic_cluster_hint": getattr(payload, "topic_cluster_hint", ""),
         "compact_handle": getattr(payload, "compact_handle", ""),
         "wake_depth": getattr(payload, "wake_depth", "minimal"),
+        "recent_thread": getattr(payload, "recent_thread", ""),
+        "directives": getattr(payload, "directives", ""),
+        "live_state": getattr(payload, "live_state", ""),
     }

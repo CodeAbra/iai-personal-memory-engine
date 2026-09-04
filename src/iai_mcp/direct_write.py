@@ -28,6 +28,7 @@ def write_turn_direct(
     cue: str | None = None,
     tier: str = "episodic",
     source_uuid: str | None = None,
+    directive: bool | None = None,
 ) -> dict[str, Any]:
     from iai_mcp.capture import _idem_tag, MIN_CAPTURE_LEN, MAX_CAPTURE_LEN, TIER_ENUM
     from iai_mcp.crypto import CryptoKey
@@ -78,7 +79,10 @@ def write_turn_direct(
         record_id = str(uuid4())
         tags = ["capture", f"role:{role}", idem_t]
         tags_json = json.dumps(tags)
-        provenance = [{"ts": ts_norm, "cue": cue or "(direct-write)", "session_id": session_id, "role": role}]
+        provenance_entry = {"ts": ts_norm, "cue": cue or "(direct-write)", "session_id": session_id, "role": role}
+        if directive:
+            provenance_entry["directive_source"] = "explicit-command"
+        provenance = [provenance_entry]
         provenance_json = json.dumps(provenance)
 
         embedding: list[float] | None = None
@@ -89,7 +93,10 @@ def write_turn_direct(
                 embedding = None
 
         if embedding is not None and len(embedding) == db._embed_dim:
-            _insert_row_with_embedding(db, record_id, tier, text, tags_json, provenance_json, ts_norm, ts_norm, embedding)
+            _insert_row_with_embedding(
+                db, record_id, tier, text, tags_json, provenance_json, ts_norm, ts_norm,
+                embedding, directive=bool(directive),
+            )
             _write_sidecar(root, record_id, embedding, db)
         else:
             db.insert_pending_row(
@@ -100,6 +107,7 @@ def write_turn_direct(
                 provenance_json=provenance_json,
                 created_at=ts_norm,
                 updated_at=ts_norm,
+                directive=bool(directive),
             )
 
         # The daemon is never a gatekeeper: a daemon-down capture must feed
@@ -185,6 +193,8 @@ def _insert_row_with_embedding(
     created_at: str,
     updated_at: str,
     embedding: list[float],
+    *,
+    directive: bool = False,
 ) -> None:
     blob = struct.pack(f"<{len(embedding)}f", *embedding)
     # Encrypt the confidential columns at rest with the same uuid-derived
@@ -201,9 +211,9 @@ def _insert_row_with_embedding(
             "  community_id, detail_level, centrality, stability, difficulty,"
             "  pinned, never_decay, never_merge, s5_trust_score,"
             "  schema_version, language,"
-            "  hv_tier, structure_hv_payload, live)"
+            "  hv_tier, structure_hv_payload, live, directive)"
             " VALUES (?, ?, ?, '', ?, 0, ?, ?, ?, ?, '', 1, 0.0, 0.0, 0.0,"
-            "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'', 1)",
+            "  0, 0, 0, 0.5, 1, 'en', 'bsc', x'', 1, ?)",
             (
                 record_id,
                 tier,
@@ -213,6 +223,7 @@ def _insert_row_with_embedding(
                 created_at,
                 updated_at,
                 tags_json,
+                1 if directive else 0,
             ),
         )
         db._conn.commit()

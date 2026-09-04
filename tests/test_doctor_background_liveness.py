@@ -53,6 +53,7 @@ def _seed_step_row(
     candidates: int | None,
     processed: int | None,
     spec_version: int | None = 1,
+    valence_saturated: int | None = None,
 ) -> None:
     event: dict = {
         "event": "sleep_step_completed",
@@ -62,6 +63,8 @@ def _seed_step_row(
     }
     if spec_version is not None:
         event["liveness_spec_version"] = spec_version
+    if valence_saturated is not None:
+        event["valence_saturated"] = valence_saturated
     log.append(event, now=_ts(day_offset))
 
 
@@ -302,6 +305,55 @@ class TestIdentityAuditWiredReality:
         assert result.passed is True
         assert "identity_audit" in result.detail
         assert "no wiring yet" not in result.detail
+
+
+class TestSaturatedOnlyNightsAreHealthy:
+    def test_three_saturated_only_nights_is_not_fail(
+        self, lifecycle_log_dir: Path,
+    ) -> None:
+        log = LifecycleEventLog(log_dir=lifecycle_log_dir)
+        for offset in range(_BACKGROUND_LIVENESS_ALARM_ROWS):
+            _seed_step_row(
+                log, "RECONSOLIDATION_VALENCE",
+                day_offset=offset, candidates=5, processed=0,
+                valence_saturated=5,
+            )
+
+        result = check_cc_background_liveness(now=_NOW)
+        assert result.status != "FAIL"
+        assert result.passed is True
+        assert "RECONSOLIDATION_VALENCE" not in _fail_names(result)
+
+
+class TestGenuineStallStillFails:
+    def test_partial_saturation_with_unexplained_remainder_still_fails(
+        self, lifecycle_log_dir: Path,
+    ) -> None:
+        log = LifecycleEventLog(log_dir=lifecycle_log_dir)
+        for offset in range(_BACKGROUND_LIVENESS_ALARM_ROWS):
+            _seed_step_row(
+                log, "RECONSOLIDATION_VALENCE",
+                day_offset=offset, candidates=5, processed=0,
+                valence_saturated=2,
+            )
+
+        result = check_cc_background_liveness(now=_NOW)
+        assert result.status == "FAIL"
+        assert "RECONSOLIDATION_VALENCE" in result.detail
+
+    def test_no_saturation_signal_at_all_still_fails(
+        self, lifecycle_log_dir: Path,
+    ) -> None:
+        log = LifecycleEventLog(log_dir=lifecycle_log_dir)
+        for offset in range(_BACKGROUND_LIVENESS_ALARM_ROWS):
+            _seed_step_row(
+                log, "RECONSOLIDATION_VALENCE",
+                day_offset=offset, candidates=5, processed=0,
+            )
+
+        result = check_cc_background_liveness(now=_NOW)
+        assert result.status == "FAIL"
+        assert "RECONSOLIDATION_VALENCE" in result.detail
 
 
 class TestRegistration:

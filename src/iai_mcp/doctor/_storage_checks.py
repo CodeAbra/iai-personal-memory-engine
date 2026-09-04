@@ -162,6 +162,49 @@ def check_i_hippo_db_size() -> CheckResult:
     )
 
 
+def check_gg_store_format() -> CheckResult:
+    """The backing file's on-disk format, from its 16-byte header only.
+
+    Never constructs a store and never calls the raw-open helper.
+    """
+    from iai_mcp.hippo._db import _resolve_effective_driver
+
+    name = "(gg) store format"
+    db_path = _resolve_hippo_db_path()
+    if not db_path.exists():
+        return CheckResult(
+            name,
+            True,
+            "no store yet -- brain.sqlite3 not present",
+            status="PASS",
+        )
+
+    detected = _resolve_effective_driver(str(db_path))
+    if detected == "lilli":
+        return CheckResult(
+            name,
+            True,
+            "native engine format",
+            status="PASS",
+        )
+
+    return CheckResult(
+        name,
+        True,
+        (
+            f"this store is in the legacy sqlite format at {db_path}.\n"
+            "  That format has a known defect: an external read-only open "
+            "orphans the write-ahead-log sidecars under a running daemon, "
+            "and later reads fail. Migrate it:\n"
+            "  iai-mcp daemon stop\n"
+            f"  iai-mcp migrate-to-lilli --src {db_path} --swap\n"
+            f"  iai-mcp migrate-to-lilli --src {db_path} --swap --apply --yes\n"
+            "  iai-mcp daemon start"
+        ),
+        status="WARN",
+    )
+
+
 def check_w_no_permanent_failed() -> CheckResult:
     import fnmatch
 

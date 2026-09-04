@@ -27,9 +27,13 @@ P50_THRESHOLD_MS = 30.0
 P95_THRESHOLD_MS = 80.0
 
 SNAPSHOT_PATH = pathlib.Path(
-    "bench/snapshots/live_n2000.npz"
+    ".planning/research/v8.0/phase50-mosaicsigma/snapshots/live_n2000.npz"
 )
-DECISION_JSON_PATH = pathlib.Path("bench/results/centrality-perf-gate.json")
+DECISION_JSON_PATH = pathlib.Path(
+    ".planning/phases/"
+    "50-mosaicsigma-networkx-custom-rust-pyo3-graph-engine-lilli-gra/"
+    "50-10-perf-gate.json"
+)
 
 
 def _build_memory_graph_from_edges(

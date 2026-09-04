@@ -267,6 +267,7 @@ from ._analytics import (
 
 from ._maintenance import (
     cmd_blob_quarantine,
+    cmd_directive_sweep,
     cmd_edge_backfill,
     cmd_entity_backfill,
     cmd_idem_dedup,
@@ -330,6 +331,8 @@ from ._cowork import (
     cmd_cowork_uninstall,
     cmd_cowork_status,
 )
+
+from ..transcript_sweep import cmd_transcript_sweep_run
 
 from ._daemon import (
     cmd_daemon_install,
@@ -477,10 +480,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mtl.add_argument(
         "--dst",
-        required=True,
+        required=False,
+        default=None,
         help=(
             "NEW destination store root (must not be the live store; the lilli "
-            "schema is auto-created there)"
+            "schema is auto-created there). Required unless --swap is given."
         ),
     )
     mtl.add_argument(
@@ -496,6 +500,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "skip events older than this UTC datetime string (telemetry only; "
             "off by default -- lossless, every event copied)."
+        ),
+    )
+    mtl.add_argument(
+        "--swap",
+        action="store_true",
+        default=False,
+        help=(
+            "replace the live store's own hippo/ directory in place with a "
+            "verified native copy, instead of copying into a separate --dst "
+            "root. A preview unless both --apply and --yes are given; the "
+            "previous store is kept under a dated backup directory until you "
+            "remove it. Refuses while the daemon is running -- stop it first "
+            "with `iai-mcp daemon stop`."
+        ),
+    )
+    mtl.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help=(
+            "perform the swap in place; also requires --yes to confirm. "
+            "Omitting --apply previews the swap without writing anything "
+            "(the default with --swap)."
+        ),
+    )
+    mtl.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help=(
+            "confirm --apply -- both flags are required together to actually "
+            "replace the live store's hippo/ directory"
         ),
     )
     mtl.add_argument("--verbose", "-v", action="store_true")
@@ -730,25 +766,54 @@ def _build_parser() -> argparse.ArgumentParser:
     cw = sub.add_parser(
         "cowork",
         help=(
-            "install/uninstall/status the iai-mcp plugin for Claude Cowork "
-            "(desktop local-agent mode): recall + capture hooks in every "
-            "Cowork session"
+            "install/uninstall/status the background sweep that keeps "
+            "Claude Cowork (desktop local-agent mode) sessions in the "
+            "memory system"
         ),
     )
     cw_sub = cw.add_subparsers(dest="cowork_cmd", required=True)
     cw_sub.add_parser(
         "install",
-        help="stage the plugin marketplace under ~/.iai-mcp/ and wire it into "
-             "each Cowork home's cowork_settings.json",
+        help="install the background process that reads new Claude "
+             "conversations already on disk and hands them to the memory "
+             "system",
     ).set_defaults(func=cmd_cowork_install)
     cw_sub.add_parser(
         "uninstall",
-        help="unwire the plugin from Cowork and remove the staged marketplace",
+        help="remove the background sweep, its schedule, and any "
+             "leftovers older versions installed",
     ).set_defaults(func=cmd_cowork_uninstall)
     cw_sub.add_parser(
         "status",
-        help="show plugin staging and per-home Cowork wiring",
+        help="report Cowork code- and agent-session wiring, verified from session receipts",
+        description="report Cowork code- and agent-session wiring, verified from session receipts",
     ).set_defaults(func=cmd_cowork_status)
+
+    tsw = sub.add_parser(
+        "transcript-sweep",
+        help=(
+            "read the Claude conversations already on disk and hand them "
+            "to the memory system"
+        ),
+    )
+    tsw_sub = tsw.add_subparsers(dest="transcript_sweep_cmd", required=True)
+    tsw_run = tsw_sub.add_parser(
+        "run",
+        help=(
+            "sweep every discovered conversation once and stage its new "
+            "content into the memory system"
+        ),
+        description=(
+            "reads the Claude conversations already on disk and hands "
+            "their new content to the memory system"
+        ),
+    )
+    tsw_run.add_argument(
+        "--allow-live-home",
+        action="store_true",
+        help="confirm running this against this machine's real memory store",
+    )
+    tsw_run.set_defaults(func=cmd_transcript_sweep_run)
 
     a = sub.add_parser(
         "audit",
@@ -1007,6 +1072,39 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     blq.set_defaults(func=cmd_blob_quarantine)
+
+    dsw = sub.add_parser(
+        "directive-sweep",
+        help=(
+            "retire phantom standing-order directives -- live directive "
+            "records with no explicit-declaration provenance stamp. "
+            "Default mode is --dry-run; --apply snapshots the store dir "
+            "first. Idempotent."
+        ),
+    )
+    dsw_mode = dsw.add_mutually_exclusive_group()
+    dsw_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) report the counts without mutating the store",
+    )
+    dsw_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="snapshot the store dir + clear the unstamped directives",
+    )
+    dsw.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    dsw.set_defaults(func=cmd_directive_sweep)
 
     ebf = sub.add_parser(
         "edge-backfill",

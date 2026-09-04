@@ -7,7 +7,7 @@ contributor identity into the shipped surface and always indicates a
 config value that should come from `Path.home()` or the environment.
 
 Out of scope by construction (not under SCAN_ROOTS): tests/, docs/,
-bench/, mcp-wrapper/test/, repo-root files. Fixtures and
+bench/, .planning/, mcp-wrapper/test/, repo-root files. Fixtures and
 harnesses may legitimately carry example paths.
 
 Modes:
