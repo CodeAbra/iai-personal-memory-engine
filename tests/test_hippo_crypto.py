@@ -416,20 +416,28 @@ def test_merge_insert_encrypts_records(
 
 
 def test_update_id_keyed_with_encrypted_value(
-    hippo_with_key: HippoDB, brain_db_path: Path
+    hippo_with_key: HippoDB, brain_db_path: Path, test_key: bytes
 ) -> None:
+    """literal_surface is write-once: HippoTable.update() only accepts an
+    already-encrypted value (the ciphertext-swap shape every real caller --
+    key rotation, redaction -- submits), never a raw plaintext rewrite."""
+    from iai_mcp.crypto import encrypt_field
+
     row = _record_row(literal_surface="original text")
     tbl = hippo_with_key.open_table("records")
     tbl.add([row])
 
+    ciphertext = encrypt_field(
+        "updated text", test_key, associated_data=row["id"].lower().encode("ascii")
+    )
     tbl.update(
         where=f"id = '{row['id']}'",
-        values={"literal_surface": "updated text"},
+        values={"literal_surface": ciphertext},
     )
 
     raw = _raw_records_col(brain_db_path, "literal_surface", row["id"])
     assert raw is not None
-    assert raw.startswith("iai:enc:v1:"), f"Update did not encrypt; got: {raw!r}"
+    assert raw.startswith("iai:enc:v1:"), f"Update did not store ciphertext; got: {raw!r}"
 
     df = tbl.to_pandas()
     raw_val = df[df["id"] == row["id"]].iloc[0]["literal_surface"]
@@ -439,16 +447,25 @@ def test_update_id_keyed_with_encrypted_value(
 
 
 def test_update_non_id_keyed_encrypted_column_raises(
-    hippo_with_key: HippoDB,
+    hippo_with_key: HippoDB, test_key: bytes,
 ) -> None:
+    """A non-id-keyed WHERE on an encrypted column is refused for AAD
+    binding, even when the submitted value is already ciphertext-shaped
+    (the write-once literal_surface gate passes first; this asserts the
+    id-keyed-WHERE requirement underneath it)."""
+    from iai_mcp.crypto import encrypt_field
+
     row = _record_row(literal_surface="some text")
     tbl = hippo_with_key.open_table("records")
     tbl.add([row])
 
+    ciphertext = encrypt_field(
+        "danger zone", test_key, associated_data=row["id"].lower().encode("ascii")
+    )
     with pytest.raises(ValueError, match="id-keyed WHERE"):
         tbl.update(
             where="tier = 'episodic'",
-            values={"literal_surface": "danger zone"},
+            values={"literal_surface": ciphertext},
         )
 
 

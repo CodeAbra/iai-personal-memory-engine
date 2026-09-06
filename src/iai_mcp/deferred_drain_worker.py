@@ -53,6 +53,47 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
         capture_turn,
     )
 
+    import logging
+
+    log = logging.getLogger(__name__)
+
+    def _maybe_retire_from_remove_marker(text: str) -> None:
+        # REMOVE mirrors the SET marker's fail-closed shape: this worker is
+        # the sole directive_marker_allowed=True site, drained text is a
+        # verbatim record of the human's own turn, and the same
+        # _MARKER_GUARD_PREFIXES blob guard applies. A no-op on an
+        # unresolvable id is deliberate -- a bad remove marker must never
+        # abort the drain.
+        try:
+            is_blob = False
+            try:
+                from iai_mcp.migrate._blob_quarantine import _MARKER_GUARD_PREFIXES
+                head = (text or "").lstrip()
+                is_blob = any(head.startswith(p) for p in _MARKER_GUARD_PREFIXES)
+            except Exception as exc:  # noqa: BLE001 -- fail-safe: fall back to the anchored check alone
+                log.debug("directive_remove_marker_blob_guard_import_failed: %s", exc)
+            if is_blob:
+                return
+            from iai_mcp.directive_marker import parse_directive_remove_marker
+            token = parse_directive_remove_marker(text)
+            if not token:
+                return
+            from iai_mcp.directive_ops import (
+                ResolveOutcome,
+                resolve_directive_short_id,
+                retire_directive,
+            )
+            result = resolve_directive_short_id(store, token)
+            if result.outcome != ResolveOutcome.LIVE:
+                log.debug(
+                    "directive_remove_marker_no_op outcome=%s token=%s",
+                    result.outcome, token,
+                )
+                return
+            retire_directive(store, result.record_id)
+        except Exception as exc:  # noqa: BLE001 -- drain fail-safe
+            log.debug("directive_remove_marker_failed: %s", exc)
+
     inserted = 0
     reinforced = 0
     skipped = 0
@@ -141,6 +182,11 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
             status = result.get("status")
             if status == "inserted":
                 inserted += 1
+                # Idempotent for free: a re-drained duplicate of this same
+                # turn dedups to "reinforced"/skipped above and never
+                # reaches this branch again.
+                if role == "user":
+                    _maybe_retire_from_remove_marker(ev.get("text", ""))
             elif status == "reinforced":
                 reinforced += 1
             else:

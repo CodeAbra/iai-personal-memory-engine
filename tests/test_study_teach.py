@@ -10,13 +10,21 @@ Real embedder, temp stores only, both storage drivers.
 """
 from __future__ import annotations
 
+import logging
+import os
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
 
 from iai_mcp.capture import capture_turn
 from iai_mcp.store import MemoryStore
-from iai_mcp.study import study_document
+from iai_mcp.study import (
+    STUDY_DIR_MAX_FILES_ENV,
+    iter_study_files,
+    study_directory,
+    study_document,
+)
 
 
 def _select_driver(driver: str, monkeypatch) -> None:
@@ -376,3 +384,102 @@ def test_study_directory_walks_code_and_docs(driver, tmp_path, monkeypatch):
     with store.db._conn_lock:
         row = store.db._conn.execute("SELECT COUNT(*) FROM records").fetchone()
     assert int(row[0]) == n_before
+
+
+def test_iter_study_files_warns_on_cap_truncation(tmp_path, caplog):
+    """Over-cap files are never silently dropped: the walk stays bounded at
+    the cap but a loud warning names the true skipped count and the raise-cap
+    env var. Walk-level only — no store, no embedder."""
+    for i in range(6):
+        (tmp_path / f"note{i}.md").write_text(f"note body {i}", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="iai_mcp.study"):
+        capped = iter_study_files(tmp_path, max_files=2)
+    assert len(capped) == 2, capped
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("4" in w and STUDY_DIR_MAX_FILES_ENV in w for w in warnings), warnings
+
+    uncapped = iter_study_files(tmp_path, max_files=1_000_000)
+    assert len(uncapped) == 6, uncapped
+
+
+def test_iter_study_files_excludes_dot_directories(tmp_path):
+    """`.obsidian/` (and every other hidden dot-directory) is never walked,
+    so vault config never enters memory as content. Walk-level only — no
+    store, no embedder."""
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "a.md").write_text("a real vault note", encoding="utf-8")
+
+    obsidian = tmp_path / ".obsidian"
+    obsidian.mkdir()
+    (obsidian / "config.json").write_text("{}", encoding="utf-8")
+    plugins = obsidian / "plugins"
+    plugins.mkdir()
+    (plugins / "x.json").write_text("{}", encoding="utf-8")
+
+    found = iter_study_files(tmp_path, max_files=1_000_000)
+    rels = {str(p.relative_to(tmp_path)) for p in found}
+    assert "notes/a.md" in rels, rels
+    assert not any(".obsidian" in str(p) for p in found), found
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_studied_note_created_at_reflects_file_mtime(driver, tmp_path, monkeypatch):
+    """An imported note's stored created_at tracks the file's mtime, not
+    import time — an old note ranks as old in recency-weighted recall. A
+    text-only call with no backing file still defaults to now()."""
+    _select_driver(driver, monkeypatch)
+    store = MemoryStore(path=tmp_path / "store")
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    old_note = vault / "old.md"
+    old_note.write_text(
+        "The hippocampus replays spatial memories from a much earlier era of research.",
+        encoding="utf-8",
+    )
+    old_mtime = (datetime.now(timezone.utc) - timedelta(days=1200)).timestamp()
+    os.utime(old_note, (old_mtime, old_mtime))
+
+    fresh_note = vault / "fresh.md"
+    fresh_note.write_text(
+        "Quantum entanglement enables correlated particle measurements across distance.",
+        encoding="utf-8",
+    )
+
+    totals = study_directory(store, vault)
+    assert totals["inserted"] >= 2, totals
+
+    def _created_at(tag: str) -> datetime:
+        with store.db._conn_lock:
+            rows = store.db._conn.execute(
+                "SELECT created_at FROM records WHERE tags_json LIKE ?",
+                (f'%"{tag}"%',),
+            ).fetchall()
+        assert rows, tag
+        dt = datetime.fromisoformat(str(rows[0][0]))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    age_old = now - _created_at("doc:old.md")
+    age_fresh = now - _created_at("doc:fresh.md")
+
+    assert age_old > timedelta(days=300), (
+        f"[{driver}] old note's created_at must reflect its file mtime, not now(): {age_old}"
+    )
+    assert age_fresh < timedelta(days=1), (
+        f"[{driver}] freshly written note must stay near now(): {age_fresh}"
+    )
+
+    # Text-only call has no backing file -> safe fallback preserved (now()).
+    inline_report = study_document(
+        store, text="An inline note with no file backing at all.",
+        source_name="inline-note.md",
+    )
+    assert inline_report["inserted"] >= 1, inline_report
+    age_inline = now - _created_at("doc:inline-note.md")
+    assert age_inline < timedelta(days=1), (
+        f"[{driver}] text-only study_document must default ts to now(): {age_inline}"
+    )

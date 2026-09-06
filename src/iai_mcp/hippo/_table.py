@@ -734,6 +734,50 @@ class HippoTable:
         from iai_mcp.hippo import _txn, _ENCRYPTED_RECORD_COLUMNS, _ENCRYPTED_EVENTS_COLUMNS
         if not values:
             return
+        # Primary enforcement: values arrive here as a column-name-keyed
+        # mapping, so this check is precise with zero SQL-parsing fragility.
+        # events content is write-once except the encryption envelope
+        # column (key-rotation / redaction ciphertext swap); an unknown
+        # column fails closed, so a new content column stays protected
+        # until deliberately added to _ENCRYPTED_EVENTS_COLUMNS. The
+        # connection-layer regex in hippo/_db.py is a best-effort backstop
+        # for raw _conn.execute paths that bypass this class entirely -- it
+        # does not claim completeness.
+        if self._name == "events":
+            mutable_cols = set(_ENCRYPTED_EVENTS_COLUMNS)
+            forbidden_cols = set(values) - mutable_cols
+            if forbidden_cols:
+                raise errors.CanonicalSourceViolation(
+                    "events content is write-once; only the encryption "
+                    f"envelope column(s) {sorted(mutable_cols)!r} may be "
+                    "rewritten (ciphertext-swap only). Refused column(s): "
+                    f"{sorted(forbidden_cols)!r}. To add a legitimately-"
+                    "mutable events column, extend _ENCRYPTED_EVENTS_COLUMNS "
+                    "in hippo/__init__.py deliberately."
+                )
+        # literal_surface is write-once by CONTENT, not by ciphertext
+        # encoding: key rotation / redaction legitimately rewrites it as a
+        # ciphertext swap (encrypt_field(same plaintext, new key)). The
+        # discriminator is the shape of the value the CALLER submitted --
+        # every legitimate writer in this codebase pre-encrypts before
+        # calling update() (or accepts an idempotent pass-through encrypt
+        # below), so an un-encrypted submitted value is unambiguously a
+        # content rewrite attempt. is_encrypted() only proves the value
+        # went through encrypt_field, NOT that it decrypts to the same
+        # plaintext already stored -- a caller that encrypts genuinely new
+        # content passes this check too. Checked on the RAW submitted
+        # value, before the pass-through-or-encrypt step below, or a
+        # plaintext value would silently become "encrypted" and defeat
+        # this check.
+        if "literal_surface" in values:
+            from iai_mcp.crypto import is_encrypted
+            if not is_encrypted(values["literal_surface"]):
+                raise errors.CanonicalSourceViolation(
+                    "literal_surface is write-once; only a ciphertext-swap "
+                    "rewrite (an already-encrypted value, e.g. key rotation "
+                    "or redaction) may update it. HippoTable.update() "
+                    "refused: submitted value is not encrypted-shaped."
+                )
 
         enc_cols: tuple[str, ...] = ()
         if self._db is not None and self._db._crypto_key_provider is not None:
@@ -813,6 +857,26 @@ class HippoTable:
         requested_cols: set[str] = set()
         for _rid, values in rows:
             requested_cols.update(values)
+        if self._name == "events":
+            forbidden_cols = requested_cols - set(_ENCRYPTED_EVENTS_COLUMNS)
+            if forbidden_cols:
+                raise errors.CanonicalSourceViolation(
+                    "events content is write-once; only the encryption "
+                    f"envelope column(s) {sorted(_ENCRYPTED_EVENTS_COLUMNS)!r} "
+                    "may be rewritten. Refused column(s): "
+                    f"{sorted(forbidden_cols)!r}."
+                )
+        if "literal_surface" in requested_cols:
+            from iai_mcp.crypto import is_encrypted
+            for _rid, values in rows:
+                lit = values.get("literal_surface")
+                if lit is not None and not is_encrypted(lit):
+                    raise errors.CanonicalSourceViolation(
+                        "literal_surface is write-once; only a "
+                        "ciphertext-swap rewrite (an already-encrypted "
+                        "value) may update it. update_many_by_id() refused: "
+                        "submitted value is not encrypted-shaped."
+                    )
         unknown = sorted(requested_cols - known_cols)
         if unknown:
             raise ValueError(
@@ -862,6 +926,14 @@ class HippoTable:
 
     def delete(self, where: str) -> None:
         from iai_mcp.hippo import _txn
+        # Primary enforcement: no legitimate path deletes events rows --
+        # tombstone instead. Unlike update(), DELETE has no column concept
+        # to allow-list; the ban is unconditional. See update()'s guard
+        # above for the column-precise events content rule.
+        if self._name == "events":
+            raise errors.CanonicalSourceViolation(
+                "events table is append-only: HippoTable.delete() refused"
+            )
         if self._name == "records" and self._db is not None:
             db = self._db
             with db._hnsw_lock:

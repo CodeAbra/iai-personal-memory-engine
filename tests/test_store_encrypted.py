@@ -206,22 +206,35 @@ def test_ad_binding_prevents_row_swap(tmp_path):
         store.get(r_b.id)
 
 def test_get_passes_through_plaintext_rows(tmp_path):
-    from iai_mcp.store import MemoryStore, RECORDS_TABLE
-    from iai_mcp.store import _uuid_literal
+    from iai_mcp.store import MemoryStore
+    from tests._store_raw import open_store_raw
 
     store = MemoryStore(path=tmp_path)
     rec = _make(text="plaintext-legacy")
     store.insert(rec)
 
-    tbl = store.db.open_table(RECORDS_TABLE)
-    tbl.update(
-        where=f"id = '{_uuid_literal(rec.id)}'",
-        values={
-            "literal_surface": "plaintext-legacy",
-            "provenance_json": json.dumps(rec.provenance),
-            "profile_modulation_gain_json": json.dumps(rec.profile_modulation_gain),
-        },
-    )
+    # Staging a legacy-format (never-encrypted) row is not a sanctioned
+    # HippoTable.update() path -- literal_surface is write-once there by
+    # design. Use the raw at-rest seam other legacy-row fixtures use
+    # (test_migrate_encryption.py::_write_plaintext_row) instead of the
+    # table API, since this is simulating pre-existing on-disk state, not
+    # a live rewrite.
+    db_path = store.root / "hippo" / "brain.sqlite3"
+    conn = open_store_raw(db_path)
+    try:
+        conn.execute(
+            "UPDATE records SET literal_surface = ?, provenance_json = ?, "
+            "profile_modulation_gain_json = ? WHERE id = ?",
+            (
+                "plaintext-legacy",
+                json.dumps(rec.provenance),
+                json.dumps(rec.profile_modulation_gain),
+                str(rec.id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     got = store.get(rec.id)
     assert got is not None

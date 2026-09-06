@@ -588,6 +588,16 @@ def cmd_capture(args: argparse.Namespace) -> int:
     # not the lighter write_turn_direct) so the directive budget gate and
     # the synchronous directive-cache refresh both still apply.
     if is_directive:
+        # FIRST statement -- non-overridable refusal, no --yes/--force/env
+        # bypass: the invoker (a model on the Bash tool) controls every
+        # flag it types, so any override defeats the gate.
+        if not sys.stdin.isatty():
+            print(
+                "error: --directive requires an interactive terminal",
+                file=sys.stderr,
+            )
+            return 2
+
         from uuid import UUID
 
         from iai_mcp.capture import capture_turn
@@ -615,7 +625,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001 -- close-after-capture must not fail user
                 pass
 
-        if result.get("status") != "inserted" or landed is None or not landed.directive:
+        if result.get("status") != "inserted" or landed is None:
             print(
                 f"capture failed: {result.get('reason', 'directive rejected')}",
                 file=sys.stderr,
@@ -623,6 +633,23 @@ def cmd_capture(args: argparse.Namespace) -> int:
             return 1
 
         rid = result["record_id"]
+
+        # Budget-full downgrade: capture_turn still inserted the text, just
+        # not as a directive -- a distinct outcome from failure, so it must
+        # not print "capture failed" or exit 1 (the caller would re-submit
+        # and duplicate the ordinary-tier record).
+        if not landed.directive:
+            reason = result.get("reason", "directive budget full")
+            if use_json:
+                import json as _json
+                print(_json.dumps({
+                    "id": rid, "status": "inserted", "directive": False,
+                    "reason": reason, "_source": "direct-store",
+                }))
+            else:
+                print(f"captured as an ordinary memory record (not a directive): {reason}")
+            return 0
+
         if use_json:
             import json as _json
             print(_json.dumps({"id": rid, "status": "inserted", "_source": "direct-store"}))
@@ -686,10 +713,185 @@ def cmd_capture(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_directive(args: argparse.Namespace) -> int:
+    if args.action == "list":
+        return cmd_directive_list(args)
+    return cmd_directive_remove(args)
+
+
+def cmd_directive_list(args: argparse.Namespace) -> int:
+    from iai_mcp.directive_ops import iter_live_directives
+
+    store = _open_store_shared_or_fail("directive")
+    if store is None:
+        return 1
+    try:
+        live = iter_live_directives(store)
+        if not live:
+            print("no live directives")
+            return 0
+        for short_id, _record_id, text in live:
+            print(f"{short_id}  {text}")
+        return 0
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 -- close-after-command must not fail user
+            pass
+
+
+def cmd_directive_remove(args: argparse.Namespace) -> int:
+    # FIRST statement -- non-overridable refusal, no --yes/--force/env
+    # bypass: the invoker (a model on the Bash tool) controls every flag it
+    # types, so any override defeats the gate.
+    if not sys.stdin.isatty():
+        print(
+            "error: directive remove requires an interactive terminal",
+            file=sys.stderr,
+        )
+        return 2
+
+    from iai_mcp.directive_ops import (
+        ResolveOutcome,
+        resolve_directive_short_id,
+        retire_directive,
+    )
+
+    token = getattr(args, "id", None)
+    store = _open_store_shared_or_fail("directive")
+    if store is None:
+        return 1
+    try:
+        result = resolve_directive_short_id(store, token)
+        if result.outcome == ResolveOutcome.UNKNOWN:
+            print(f"unknown directive id: {token}", file=sys.stderr)
+            return 2
+        if result.outcome == ResolveOutcome.ALREADY_RETIRED:
+            print(f"directive already retired: {token}", file=sys.stderr)
+            return 2
+        if result.outcome == ResolveOutcome.AMBIGUOUS:
+            print(f"ambiguous directive id prefix: {token}", file=sys.stderr)
+            return 2
+        retire_directive(store, result.record_id)
+        print(f"retired  id={result.record_id.hex[:8]}")
+        return 0
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 -- close-after-command must not fail user
+            pass
+
+
 def _resolve_store_root():
     from iai_mcp.tz import store_root
 
     return store_root()
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """One-command cold-start: seed an empty store from the user's existing
+    Claude Code and/or Codex CLI transcripts through the same O(N)
+    `capture_transcript` spine live capture uses -- never a new ingest path,
+    never a parallel writer. Re-running is idempotent for free via the
+    existing exact-key idem tag. `--dry-run` never opens the store.
+    """
+    from pathlib import Path
+
+    from iai_mcp.import_sessions import (
+        DEFAULT_CLAUDE_ROOT,
+        DEFAULT_CODEX_ROOT,
+        discover_claude_files,
+        discover_codex_files,
+        import_transcripts,
+        resolve_source,
+    )
+
+    print(
+        "import: imported content is stored as-is and is not scanned for "
+        "secrets (API keys, passwords, tokens) -- review your sources "
+        "first if that is a concern",
+        file=sys.stderr,
+    )
+
+    explicit_source = getattr(args, "source", None)
+    raw_path = getattr(args, "path", None)
+    dry_run = bool(getattr(args, "dry_run", False))
+    include_subagents = bool(getattr(args, "include_subagents", False))
+
+    resolved = resolve_source(raw_path, explicit_source)
+    if resolved is not None:
+        default_root = DEFAULT_CLAUDE_ROOT if resolved == "claude" else DEFAULT_CODEX_ROOT
+        root = Path(raw_path).expanduser() if raw_path else default_root
+        targets: list[tuple[str, Path]] = [(resolved, root)]
+    elif raw_path is None:
+        targets = [("claude", DEFAULT_CLAUDE_ROOT), ("codex", DEFAULT_CODEX_ROOT)]
+    else:
+        print(
+            f"import failed: cannot infer source for {raw_path}; "
+            "pass --source claude|codex",
+            file=sys.stderr,
+        )
+        return 1
+
+    def _discover(source: str, root: Path) -> list[Path]:
+        if source == "claude":
+            return discover_claude_files(root, include_subagents=include_subagents)
+        return discover_codex_files(root)
+
+    per_source = [(source, _discover(source, root)) for source, root in targets]
+
+    if dry_run:
+        for source, files in per_source:
+            summary = import_transcripts(None, files, source=source, dry_run=True)
+            print(_color(
+                f"import[{source}] (dry-run): {summary['files']} files -- "
+                f"would_import={summary['would_import']}  "
+                f"empty_files={summary['empty_files']}"
+            ))
+        if not any(files for _source, files in per_source):
+            print("import: no transcripts found", file=sys.stderr)
+        return 0
+
+    if not any(files for _source, files in per_source):
+        roots = ", ".join(str(root) for _source, root in targets)
+        print(f"import: no transcripts found under {roots}", file=sys.stderr)
+        return 0
+
+    from iai_mcp.store import flush_record_buffer
+
+    def _stderr_progress(i: int, total: int, filename: str, counts: dict) -> None:
+        print(
+            f"import: [{i}/{total}] {Path(filename).name}  "
+            f"inserted={counts.get('inserted', 0)}  "
+            f"reinforced={counts.get('reinforced', 0)}",
+            file=sys.stderr,
+        )
+
+    store = _open_store_shared_or_fail("import")
+    if store is None:
+        return 1
+    try:
+        for source, files in per_source:
+            if not files:
+                continue
+            summary = import_transcripts(
+                store, files, source=source, progress=_stderr_progress,
+            )
+            print(_color(
+                f"import[{summary['source']}]: {summary['files']} files -- "
+                f"inserted={summary['inserted']}  reinforced={summary['reinforced']}  "
+                f"skipped={summary['skipped']}  errors={summary['errors']}  "
+                f"empty_files={summary['empty_files']}"
+            ))
+    finally:
+        try:
+            flush_record_buffer(store)
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 -- close-after-import must not fail user
+                pass
+    return 0
 
 
 def _open_store_shared(store_root=None):
@@ -1693,6 +1895,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_teach.set_defaults(func=cmd_teach)
 
+    p_import = sub.add_parser(
+        "import",
+        help="Seed memory from your existing Claude Code / Codex transcripts",
+        description=(
+            "One-command cold-start: walks your Claude Code and/or Codex "
+            "CLI session transcripts and imports every turn through the "
+            "same spine live capture uses (idempotent -- re-running adds "
+            "nothing new). With no path or --source, both default "
+            "locations (~/.claude/projects and ~/.codex) are scanned. "
+            "Sub-agent transcripts are excluded by default."
+        ),
+    )
+    p_import.add_argument(
+        "path", nargs="?", default=None,
+        help="Directory to scan (default: both source roots)",
+    )
+    p_import.add_argument(
+        "--source", choices=["claude", "codex"], default=None,
+        help="Transcript source to import (default: infer from path, or "
+             "both when neither path nor --source is given)",
+    )
+    p_import.add_argument(
+        "--include-subagents", action="store_true", default=False,
+        help="Also import sub-agent transcript files (excluded by default)",
+    )
+    p_import.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Report discovered file/turn counts and write nothing",
+    )
+    p_import.set_defaults(func=cmd_import)
+
     p_search = sub.add_parser(
         "search",
         help="Hybrid lexical+semantic search (daemon-free)",
@@ -1761,6 +1994,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Mark this capture as an explicit standing order the user typed themselves",
     )
     p_capture.set_defaults(func=cmd_capture)
+
+    p_directive = sub.add_parser(
+        "directive",
+        help="List or remove standing-order directives",
+        description="Manage standing-order directives minted via "
+        "`iai capture --directive` or a genuine `remove directive:` chat "
+        "turn. `remove` requires an interactive terminal and retires "
+        "(flips the flag, never deletes) the record.",
+    )
+    p_directive.add_argument("action", choices=["list", "remove"])
+    p_directive.add_argument("id", nargs="?", default=None, metavar="ID")
+    p_directive.set_defaults(func=cmd_directive)
 
     p_ask = sub.add_parser(
         "ask",

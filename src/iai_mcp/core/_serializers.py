@@ -41,4 +41,5 @@ def _payload_to_json(payload) -> dict:
         "recent_thread": getattr(payload, "recent_thread", ""),
         "directives": getattr(payload, "directives", ""),
         "live_state": getattr(payload, "live_state", ""),
+        "source_watermark": getattr(payload, "source_watermark", ""),
     }

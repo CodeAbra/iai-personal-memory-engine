@@ -282,6 +282,7 @@ class SleepPipeline:
         last_error: str | None,
         *,
         started_at: str | None = None,
+        pre_cycle_watermark: str | None = None,
     ) -> SleepCycleProgress:
         record = self._load_state_record()
         prior = record.get("sleep_cycle_progress") or {}
@@ -295,14 +296,49 @@ class SleepPipeline:
                 else prior.get("started_at", _utc_now_iso())
             ),
         }
+        # Carries forward once pinned: an explicit value always wins, else the
+        # already-persisted value survives every subsequent save of the SAME
+        # cycle (never re-derived), else the in-flight value this call's
+        # cycle captured but has not saved yet (first save of a fresh cycle
+        # that self-interrupts on its very first step).
+        resolved_watermark = (
+            pre_cycle_watermark
+            if pre_cycle_watermark is not None
+            else prior.get(
+                "pre_cycle_watermark",
+                getattr(self, "_active_pre_cycle_watermark", None),
+            )
+        )
+        if resolved_watermark is not None:
+            progress["pre_cycle_watermark"] = resolved_watermark
         record["sleep_cycle_progress"] = progress
         self._save_state_record(record)
         return progress
 
-    def _clear_progress(self) -> None:
+    def _clear_progress(self, *, consolidated_watermark: str | None = None) -> None:
         record = self._load_state_record()
         record["sleep_cycle_progress"] = None
+        # Single load-then-save so the progress-null and the watermark-set
+        # land atomically together -- a separate save() for each would let
+        # the two observably diverge on a crash between them.
+        if consolidated_watermark:
+            record["consolidated_watermark"] = consolidated_watermark
         self._save_state_record(record)
+
+    def _read_pre_cycle_watermark(self) -> str | None:
+        # t0, read before any step mutates the store -- the persisted value
+        # must mean "input to this completed cycle", never "as of cycle end".
+        try:
+            from iai_mcp import store_watermark
+            if self._store is None:
+                return None
+            sidecar_dir = getattr(
+                self._store.db, "_hippo_dir", self._store.root / "hippo",
+            )
+            return store_watermark.read(sidecar_dir)
+        except Exception as exc:  # noqa: BLE001 -- watermark capture must never break a cycle
+            logger.debug("pre-cycle watermark read failed: %s", exc)
+            return None
 
 
     def _emit_step_started(self, step: SleepStep) -> None:
@@ -406,6 +442,7 @@ class SleepPipeline:
             last_completed_index=last_completed_index,
             attempt=attempt,
             last_error=last_error,
+            pre_cycle_watermark=getattr(self, "_active_pre_cycle_watermark", None),
         )
         logger.warning(
             "sleep_step_deferred step=%s chunk_idx=%d%s",
@@ -527,6 +564,16 @@ class SleepPipeline:
         t0 = time.monotonic()
         completed_steps: list[SleepStep] = []
 
+        progress = self._load_progress()
+        # A resume (progress carries a pinned t0) MUST reuse the ORIGINAL
+        # cycle's watermark -- steps skipped below via resume_step_index only
+        # ever saw data up to that point, never a freshly re-read value.
+        if progress is not None and progress.get("pre_cycle_watermark"):
+            pre_cycle_watermark = progress["pre_cycle_watermark"]
+        else:
+            pre_cycle_watermark = self._read_pre_cycle_watermark()
+        self._active_pre_cycle_watermark = pre_cycle_watermark
+
         if not force and self._check_and_maybe_auto_recover_quarantine():
             return {
                 "completed_steps": [],
@@ -542,6 +589,9 @@ class SleepPipeline:
         except Exception as exc:  # noqa: BLE001 -- tracker is best-effort observer
             logger.warning("essential_variable_tracker hook failed: %s", exc, exc_info=True)
 
+        # Re-read: preserves the pre-existing behavior of computing the
+        # resume index from a POST-hook snapshot (the hook's own
+        # load/mutate-other-fields/save round-trips lifecycle_state.json).
         progress = self._load_progress()
         last_completed_index = (
             int(progress.get("last_completed_index", -1))
@@ -551,6 +601,13 @@ class SleepPipeline:
         if last_completed_index >= len(self._STEP_ORDER) - 1:
             last_completed_index = -1
         resume_step_index = last_completed_index + 1
+        if resume_step_index == 0:
+            # Nothing is skipped -- a wrap-to-fresh cycle (the prior cycle
+            # completed every step but crashed before _clear_progress, e.g.
+            # between the final _save_progress and the cls-emit block) must
+            # not inherit the prior cycle's pinned t0.
+            pre_cycle_watermark = self._read_pre_cycle_watermark()
+            self._active_pre_cycle_watermark = pre_cycle_watermark
 
         step_payloads: dict[SleepStep, dict] = {}
 
@@ -577,6 +634,7 @@ class SleepPipeline:
                     last_completed_index=step_idx - 1,
                     attempt=new_attempt,
                     last_error=err_str,
+                    pre_cycle_watermark=pre_cycle_watermark,
                 )
                 self._emit_step_completed(
                     step,
@@ -616,6 +674,7 @@ class SleepPipeline:
                 last_completed_index=self._STEP_ORDER.index(step),
                 attempt=0,
                 last_error=None,
+                pre_cycle_watermark=pre_cycle_watermark,
             )
             self._emit_step_completed(
                 step,
@@ -665,7 +724,7 @@ class SleepPipeline:
         except Exception as exc:  # noqa: BLE001 -- cls emit is best-effort introspection
             logger.debug("pipeline-level cls_consolidation_run emit failed: %s", exc)
 
-        self._clear_progress()
+        self._clear_progress(consolidated_watermark=pre_cycle_watermark)
         return {
             "completed_steps": completed_steps,
             "failed_step": None,

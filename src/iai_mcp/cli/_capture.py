@@ -56,6 +56,10 @@ def _is_custom_store() -> bool:
         return False
 
 
+_AVAILABILITY_MARKER_UNAVAILABLE = "[iai-mcp memory: UNAVAILABLE]"
+_AVAILABILITY_MARKER_HEALTHY = "[iai-mcp memory: HEALTHY]"
+
+
 def cmd_session_start(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
 
@@ -66,17 +70,24 @@ def cmd_session_start(args: argparse.Namespace) -> int:
             "session_start_payload", {"session_id": session_id}
         )
         if not isinstance(resp, dict) or "result" not in resp:
+            _cli.sys.stdout.write(_AVAILABILITY_MARKER_UNAVAILABLE)
             return 0
         result = resp.get("result")
         if not isinstance(result, dict):
+            _cli.sys.stdout.write(_AVAILABILITY_MARKER_UNAVAILABLE)
             return 0
         rendered = format_payload_as_markdown(result)
         if not rendered:
             return 0
-        _cli.sys.stdout.write(_truncate_for_claude_code_hook(rendered, cap=10000))
+        marker_suffix = f"\n\n{_AVAILABILITY_MARKER_HEALTHY}"
+        payload_budget = 10000 - len(marker_suffix)
+        rendered = _truncate_for_claude_code_hook(rendered, cap=payload_budget)
+        rendered = f"{rendered}{marker_suffix}"
+        _cli.sys.stdout.write(rendered)
         return 0
     except Exception as exc:
         logger.error("session-start failed: %s", exc)
+        _cli.sys.stdout.write(_AVAILABILITY_MARKER_UNAVAILABLE)
         return 0
 
 
@@ -184,6 +195,27 @@ def write_watermark(session_id: str, ts: str) -> None:
     os.replace(tmp, d / f"{session_id}.watermark")
 
 
+_PRECACHE_WATERMARK_RE = re.compile(r"^<!-- iai-mcp:source_watermark=(.*) -->$")
+
+
+def _read_precache_source_watermark() -> str | None:
+    # Path literal MUST mirror daemon.SESSION_START_CACHE_PATH -- duplicated
+    # here (not imported) to keep this per-turn hot path daemon-independent;
+    # a rename of that constant without updating this literal silently
+    # desyncs the two.
+    p = Path.home() / ".iai-mcp" / ".session-start-payload.cached.md"
+    try:
+        if not p.exists():
+            return None
+        lines = p.read_text(encoding="utf-8").splitlines()
+        if not lines:
+            return None
+        m = _PRECACHE_WATERMARK_RE.match(lines[0])
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
 def cmd_session_refresh_if_stale(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
 
@@ -198,7 +230,12 @@ def cmd_session_refresh_if_stale(args: argparse.Namespace) -> int:
         live_size = get_other_sessions_live_size(session_id)
 
         if wm is None:
-            write_watermark(session_id, current)
+            # Seed from what was actually SERVED at session start, not the
+            # live store max at this later first-turn call -- otherwise a
+            # gap opened between precache-write and this call is silently
+            # absorbed into the baseline and can never surface as a delta.
+            seed = _read_precache_source_watermark() or current
+            write_watermark(session_id, seed)
             write_live_fingerprint(session_id, live_size)
             return 0
 
@@ -626,6 +663,24 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
             _drive_trajectory_metrics(args.session_id, state_dir)
         except Exception as exc:  # noqa: BLE001 -- best-effort, never blocks the turn capture
             logger.debug("capture-turn-deferred trajectory driver failed: %s", exc)
+
+        # Cheap expected==captured leg: no store access, single transcript
+        # pass, must fit the Stop hook's budget and must never sink capture.
+        try:
+            from iai_mcp.capture import reconcile_session_capture
+
+            recon = reconcile_session_capture(
+                args.session_id, transcript_path=transcript, include_durable=False,
+            )
+            if recon["status"] == "partial":
+                logger.warning(
+                    "capture-turn-deferred shortfall session=%s expected=%s "
+                    "captured=%s missing=%s parse_failed=%s",
+                    args.session_id, recon["expected_turns"], recon["captured_turns"],
+                    recon["missing_turns"], recon["parse_failed"],
+                )
+        except Exception as exc:  # noqa: BLE001 -- reconciliation must never break capture
+            logger.debug("capture-turn-deferred reconciliation failed: %s", exc)
 
         return 0
     except Exception as e:

@@ -224,7 +224,7 @@ episodes_recent            curiosity_pending
 健康检查与更新：
 
 ```bash
-iai-mcp doctor          # 36 项检查
+iai-mcp doctor          # 38 项检查
 iai-mcp daemon status
 iai-mcp self-update
 ```

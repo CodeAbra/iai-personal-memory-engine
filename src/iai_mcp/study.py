@@ -89,6 +89,17 @@ def study_document(
     source_name = source_name or "inline"
     doc_tag = _doc_tag(source_name)
 
+    # Note age = file mtime, not import time, so recency-weighted recall
+    # ranks an old note as old. None (text-only calls) defers to now().
+    note_ts: "str | None" = None
+    if path is not None:
+        try:
+            note_ts = datetime.fromtimestamp(
+                Path(path).stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+        except OSError:
+            note_ts = None
+
     report: dict[str, Any] = {
         "source": source_name,
         "doc_tag": doc_tag,
@@ -165,6 +176,7 @@ def study_document(
                 session_id=session_id,
                 role="user",
                 source_uuid=chunk_sha,
+                ts=note_ts,
                 provenance_extra={
                     "source": "study",
                     "filename": source_name,
@@ -551,13 +563,13 @@ def iter_study_files(root: "str | Path", *, max_files: "int | None" = None) -> "
             max_files = 500
 
     files: "list[Path]" = []
+    skipped_over_cap = 0
     for dirpath, dirnames, filenames in _os.walk(str(root), followlinks=False):
         dirnames[:] = sorted(
-            d for d in dirnames if d not in _SKIP_DIR_NAMES
+            d for d in dirnames
+            if d not in _SKIP_DIR_NAMES and not d.startswith(".")
         )
         for name in sorted(filenames):
-            if len(files) >= max_files:
-                return files
             path = Path(dirpath) / name
             # Symlinked files can point outside the studied tree; never follow.
             if path.is_symlink() or not path.is_file():
@@ -569,7 +581,18 @@ def iter_study_files(root: "str | Path", *, max_files: "int | None" = None) -> "
                     continue
             except OSError:
                 continue
+            if len(files) >= max_files:
+                # Keep walking to count the true over-cap total instead of
+                # returning early, so the warning below is not a guess.
+                skipped_over_cap += 1
+                continue
             files.append(path)
+    if skipped_over_cap:
+        logger.warning(
+            "study dir %s: %d eligible files exceed the %d-file cap and were "
+            "skipped (raise %s to study more)",
+            root, skipped_over_cap, max_files, STUDY_DIR_MAX_FILES_ENV,
+        )
     return files
 
 

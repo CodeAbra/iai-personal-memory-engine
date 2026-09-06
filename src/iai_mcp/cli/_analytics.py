@@ -293,9 +293,13 @@ def cmd_migrate_to_lilli(args: argparse.Namespace) -> int:
 
     src_root = Path(src).resolve().parent.parent
 
-    report = migrate_sqlite_to_lilli(
-        src, dst, batch=batch, prune_telemetry_before=prune_before
-    )
+    try:
+        report = migrate_sqlite_to_lilli(
+            src, dst, batch=batch, prune_telemetry_before=prune_before
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=_sys.stderr)
+        return 1
     print(
         f"copied {sum(report.rows_copied.values())} rows "
         f"({', '.join(f'{t}={n}' for t, n in report.rows_copied.items())}) "

@@ -9,6 +9,7 @@ The no-flag path is unaffected and still goes through the daemon RPC.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from uuid import UUID
 
@@ -16,6 +17,15 @@ import pytest
 
 from iai_mcp import iai_cli
 from iai_mcp.store import MemoryStore
+
+
+@pytest.fixture(autouse=True)
+def _simulate_tty(monkeypatch):
+    """Every --directive mint in this file exercises the write path itself,
+    not the isatty gate (covered separately in
+    test_directive_mint_isatty_gate.py) -- simulate an interactive terminal
+    so pytest's captured, non-tty stdin doesn't trip the gate here."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
 
 
 def _select_driver(driver: str, monkeypatch) -> None:

@@ -78,14 +78,6 @@ class MigrateReport:
     # then pays a one-time cold rebuild (correct but slower).
     col_index_persisted: bool = False
     col_index_persist_error: str = ""
-    # Migrate-finalize tombstone compaction. A fresh migrate copies every
-    # source row verbatim (including rows already past the tombstone TTL in
-    # source time) -- this pass drops those aged-past-TTL rows so the fresh
-    # store does not start out re-importing stale bloat, rather than waiting
-    # for the first nightly sleep cycle to age them out. Best-effort: a
-    # failure here is logged and never fails the migration.
-    tombstone_compact_dropped: int = 0
-    tombstone_compact_error: str = ""
 
 
 def _rss_mb() -> float:
@@ -222,122 +214,6 @@ def _persist_col_index(dst: "object", report: MigrateReport) -> None:
         report.col_index_persist_error = str(exc)[:200]
 
 
-def _source_time_now(dst: "object") -> "datetime":
-    """The migrated store's own timeline "now", anchored to its own data.
-
-    ``tombstoned_at`` (and ``created_at``) values travel verbatim from the
-    source (source-time wall-clock) -- the drop predicate below must
-    evaluate the grace window against a "now" on that SAME timeline, not the
-    migrate host's real wall-clock, which can be arbitrarily far from the
-    source data's own timeline (a migrate can run long after the source data
-    was written). ``MAX(created_at)`` over the copied records is the
-    freshest timestamp the store itself has recorded -- using it as "now"
-    means a row tombstoned recently relative to the source's own activity
-    stays within its grace window regardless of how much real wall-clock
-    time has elapsed since that data was generated. Falls back to the real
-    wall-clock only when the destination has no records at all (nothing to
-    anchor to, and nothing to compact either).
-    """
-    from datetime import datetime, timezone
-
-    from iai_mcp.store import RECORDS_TABLE
-
-    try:
-        tbl = dst.open_table(RECORDS_TABLE)
-        row = tbl.count_rows()
-        if row == 0:
-            return datetime.now(timezone.utc)
-        conn = getattr(dst, "_conn", None)
-        lock = getattr(dst, "_conn_lock", None)
-        from contextlib import nullcontext
-        lock_ctx = lock if lock is not None else nullcontext()
-        with lock_ctx:
-            result = conn.execute(
-                "SELECT MAX(created_at) FROM records",
-            ).fetchone()
-        max_created_at = result[0] if result is not None else None
-        if max_created_at is None:
-            return datetime.now(timezone.utc)
-        if isinstance(max_created_at, datetime):
-            parsed = max_created_at
-        else:
-            # Both storage drivers may format the timestamp with or without a
-            # UTC offset suffix (e.g. "2026-06-01 12:00:00" vs.
-            # "2026-06-01 12:00:00+00:00") -- fromisoformat accepts either.
-            parsed = datetime.fromisoformat(str(max_created_at))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
-    except Exception:  # noqa: BLE001 -- fall back to wall-clock on any read failure
-        return datetime.now(timezone.utc)
-
-
-def _compact_aged_tombstones_at_finalize(dst: "object", report: MigrateReport) -> None:
-    """Drop aged-past-TTL tombstoned rows from the freshly migrated dest.
-
-    A fresh migrate is a fresh consolidation event: ``tombstoned_at`` was
-    copied VERBATIM from the source (source-time wall-clock), so the drop
-    predicate compares that copied source-time value against
-    ``source_time_now - tombstone_ttl_sec`` -- the same grace-windowed
-    predicate the sleep step's ``step_compact_hippo`` uses, evaluated on the
-    migrated store's OWN timeline (see ``_source_time_now``), NOT a clock
-    restarted at migrate time (that would treat already-source-aged
-    tombstones as freshly tombstoned and drop nothing).
-
-    Pin-protect mirrors the sleep step: pinned/never_decay rows are
-    untombstoned before the drop so a pinned record can never be physically
-    removed here.
-
-    Best-effort / fail-safe: any failure is logged and recorded on the
-    report; the migrated DATA and MigrateReport must survive regardless (the
-    aged bloat is then cleaned up by the first nightly sleep cycle instead).
-    """
-    from datetime import timedelta
-
-    from iai_mcp.daemon_config import _load_erasure_config
-    from iai_mcp.maintenance import batched_tombstone_drop
-    from iai_mcp.store import RECORDS_TABLE
-
-    try:
-        cfg = _load_erasure_config()
-        ttl_sec = cfg.tombstone_ttl_sec
-        now = _source_time_now(dst)
-        drop_cutoff = now - timedelta(seconds=ttl_sec)
-        drop_cutoff_str = drop_cutoff.strftime("%Y-%m-%d %H:%M:%S")
-
-        tbl = dst.open_table(RECORDS_TABLE)
-
-        untomb_where = (
-            "tombstoned_at IS NOT NULL "
-            "AND (pinned = true OR never_decay = true)"
-        )
-        try:
-            count_untombstoned = int(tbl.count_rows(filter=untomb_where))
-        except Exception:  # noqa: BLE001 -- best-effort count, never fails migrate
-            count_untombstoned = 0
-        if count_untombstoned > 0:
-            tbl.update(
-                where=untomb_where,
-                values={"tombstoned_at": None, "live": 1},
-            )
-
-        drop_where = (
-            "tombstoned_at IS NOT NULL "
-            f"AND tombstoned_at < '{drop_cutoff_str}'"
-        )
-        report.tombstone_compact_dropped = batched_tombstone_drop(
-            tbl, drop_where,
-        )
-    except Exception as exc:  # noqa: BLE001 -- compaction must never fail migrate
-        _log.warning(
-            "migrate-finalize tombstone compaction failed; migrated data is "
-            "intact, aged bloat will be cleaned up by the first sleep cycle: %s",
-            exc,
-            exc_info=True,
-        )
-        report.tombstone_compact_error = str(exc)[:200]
-
-
 def _prewarm_graph_cache(
     dst_root: str | Path,
     report: MigrateReport,
@@ -455,6 +331,22 @@ def migrate_sqlite_to_lilli(
     if src_db == dst_db:
         raise ValueError("source and destination resolve to the same store")
 
+    # Already-native preflight: the on-disk-magic sniff, same one the --swap
+    # path already uses. Only the explicit "lilli" detection (real DB_MAGIC
+    # header match) short-circuits here -- the function's fallback-to-env
+    # behavior on an unreadable/corrupt file is for its bootstrap callers,
+    # not this preflight, so any other return falls through to the normal
+    # stdlib open below (which reports its own error for a genuinely corrupt
+    # or missing source).
+    from iai_mcp.hippo._db import _resolve_effective_driver  # noqa: PLC0415
+
+    if _resolve_effective_driver(str(src_db)) == "lilli":
+        raise ValueError(
+            f"{src_db} is already a native lilli store -- nothing to migrate. "
+            "Use 'iai-mcp migrate-to-lilli --swap' if you meant to cut over "
+            "the live store instead."
+        )
+
     # Fresh-dest guard: the docstring contract requires dst_root to be a NEW
     # store root. LILLI_STORAGE_DRIVER=lilli below only governs a fresh
     # (absent) file -- driver selection is on-disk-magic-first, so an
@@ -556,18 +448,6 @@ def migrate_sqlite_to_lilli(
             # Pitfall 3: rebuild the ANN from the copied embeddings before close
             # so recall works on first open (no stale empty index).
             dst._rebuild_index_from_sqlite()
-            sampled = _rss_mb()
-            if sampled > peak_rss:
-                peak_rss = sampled
-
-            # Compact aged-past-TTL tombstoned rows so the fresh store does not
-            # start out re-importing the source's stale tombstone bloat. Runs
-            # AFTER the ANN rebuild above (not before): the rebuild populates
-            # the hnsw label map from the copied vec_labels, and HippoTable's
-            # records-table delete path marks the corresponding hnsw label
-            # deleted per removed row -- running compaction before the rebuild
-            # would try to mark labels deleted in a still-empty index.
-            _compact_aged_tombstones_at_finalize(dst, report)
             sampled = _rss_mb()
             if sampled > peak_rss:
                 peak_rss = sampled

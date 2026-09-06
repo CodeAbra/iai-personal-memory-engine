@@ -16,6 +16,7 @@ BENCH_SCRIPTS_NEEDING_SHIM = [
     "consolidation_rss_peak.py",
     "contradiction_longitudinal_claude.py",
     "convomem_blind.py",
+    "cross_session_quality_delta.py",
     "embedder_baseline.py",
     "longmemeval_blind.py",
     "locomo_blind.py",

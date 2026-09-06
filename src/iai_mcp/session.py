@@ -108,6 +108,7 @@ class SessionStartPayload:
     recent_thread: str = ""
     directives: str = ""
     live_state: str = ""
+    source_watermark: str = ""
 
 
 def _approx_tokens(text: str) -> int:
@@ -911,6 +912,11 @@ def _compose_session_start_payload(
     directives_segment = render_directive_segment(store)
     live_state_segment = render_live_state_segment()
 
+    from iai_mcp import store_watermark
+    source_watermark = store_watermark.read(
+        getattr(store.db, "_hippo_dir", store.root / "hippo")
+    ) or ""
+
     if wake_depth == "minimal":
         l0_rec = _fetch_record(store, L0_RECORD_UUID)
         identity_short = str(L0_RECORD_UUID)[:8] if l0_rec is not None else ""
@@ -938,6 +944,7 @@ def _compose_session_start_payload(
             wake_depth="minimal",
             directives=directives_segment,
             live_state=live_state_segment,
+            source_watermark=source_watermark,
         )
     else:
         l0 = _l0_segment(store)
@@ -988,6 +995,7 @@ def _compose_session_start_payload(
             recent_thread=recent_thread,
             directives=directives_segment,
             live_state=live_state_segment,
+            source_watermark=source_watermark,
         )
 
     return payload
@@ -1040,6 +1048,7 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
         recent_thread = payload.get("recent_thread") or ""
         directives = payload.get("directives") or ""
         live_state = payload.get("live_state") or ""
+        source_watermark = payload.get("source_watermark") or ""
     else:
         l0 = payload.l0
         l1 = payload.l1
@@ -1048,6 +1057,7 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
         recent_thread = payload.recent_thread
         directives = payload.directives
         live_state = payload.live_state
+        source_watermark = payload.source_watermark
     blocks: list[str] = []
     if directives:
         blocks.append(f"## Standing orders (always active)\n{directives}")
@@ -1085,7 +1095,14 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
                 blocks.append(f"_{_upd}_")
         except Exception:  # noqa: BLE001 — an update notice must never break recall
             pass
-    return "\n\n".join(blocks)
+    text = "\n\n".join(blocks)
+    # Leading placement is load-bearing: every downstream truncation (daemon
+    # cache write, CLI hook cap, shell head -c) cuts from the end, so only a
+    # first-line marker survives all three. Rides real content only, per the
+    # update-notice precedent above.
+    if text and source_watermark:
+        text = f"<!-- iai-mcp:source_watermark={source_watermark} -->\n\n{text}"
+    return text
 
 
 def max_record_created_at(store: MemoryStore) -> str | None:

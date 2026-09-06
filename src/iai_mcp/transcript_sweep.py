@@ -75,8 +75,11 @@ def _validated_env_root(raw: str) -> "Path | None":
 def _transcript_roots() -> "list[Path]":
     """Every live Claude Code ``projects/`` tree on this machine: the
     shared host home, every dormant agent home under each Cowork session
-    root, and a validated configuration-directory override read from this
-    process's own environment. De-duped by resolved path."""
+    root (both the direct ``device_dir/<entry>/.claude`` layout and the
+    legacy ``device_dir/agent/<entry>/.claude`` layout -- both are checked
+    since either or both may be populated on a given machine), and a
+    validated configuration-directory override read from this process's
+    own environment. De-duped by resolved path."""
     from iai_mcp.cli._cowork import _cowork_session_roots
 
     candidates: "list[Path]" = [Path.home() / ".claude"]
@@ -89,6 +92,12 @@ def _transcript_roots() -> "list[Path]":
             for device_dir in _safe_iterdir(account_dir):
                 if not device_dir.is_dir():
                     continue
+                for entry_dir in _safe_iterdir(device_dir):
+                    if not entry_dir.is_dir():
+                        continue
+                    candidate = entry_dir / ".claude"
+                    if candidate.is_dir():
+                        candidates.append(candidate)
                 agent_dir = device_dir / "agent"
                 for ditto_dir in _safe_iterdir(agent_dir):
                     candidate = ditto_dir / ".claude"

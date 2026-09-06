@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-09-08
+
+### Added
+- `iai import [path]` is a new one-command cold-start: it walks your existing
+  Claude Code session transcripts and imports every turn through the same spine
+  live capture uses, so a fresh install is not cold for its first sessions.
+  Re-running is idempotent; sub-agent transcripts are excluded unless
+  `--include-subagents` is passed.
+- `iai import` also imports Codex CLI rollout transcripts (`--source codex`),
+  infers the source from a supplied path when `--source` is omitted, and scans
+  both `~/.claude/projects` and `~/.codex` when neither is given. It resumes on
+  re-run via a per-source state file, and `--dry-run` reports discovered
+  file/turn counts and writes nothing.
+- `iai directive list` and `iai directive remove <id>` are new commands: `list`
+  shows each live standing directive with a short stable id; `remove` retires
+  one by id (flips the flag, stays searchable, never deleted). A genuine chat
+  turn `remove directive: <id>` typed by the user retires a directive the same
+  way. `/iai-directive` now covers `list` and `remove`.
+- Session-start now emits an availability marker: `HEALTHY` on a rendered pack,
+  and a visible `UNAVAILABLE` marker (instead of nothing) when the daemon is
+  unreachable or the render layer errors. A reachable-but-empty store still
+  renders nothing — empty is not unavailable.
+- The per-turn `<iai-mcp-recall>` block now carries a `DEGRADED (<reason>)`
+  marker when recall used a fallback or degraded read path, so a degraded
+  answer is visibly distinct from a healthy one. Healthy recalls are unchanged.
+- Every rendered session-start pack now leads with a `source_watermark` comment
+  recording how current the store was when composed; the shell hook appends
+  `[iai-mcp memory: STALE]` when the served pack and the live store diverge by a
+  full clock-hour.
+- `iai-mcp doctor` gained two checks: `(kk) stop-hook failure marker` (WARN/FAIL
+  when recent capture failures are on record), and a watermark-fence check that
+  FAILs when a derived watermark is impossibly ahead of its source and WARNs
+  when consolidation has fallen far behind.
+- New `iai_mcp.availability` module accounts for measurable sessions so
+  self-measurement excludes unavailable sessions from the pass/fail denominator.
+
+### Changed
+- Rewrote the top of the README (tagline and overview) in plainer language and
+  refreshed the project banner.
+- The Stop capture hook now writes a durable failure marker when it cannot find
+  the CLI or the capture call fails or times out, instead of only logging to a
+  dated file. It still exits 0. Existing installs need `iai-mcp capture-hooks
+  install` to redeploy the updated hook.
+- On daemon boot, per-session working-tier cache files and the continuity
+  live-state block are cleared, so a restart no longer re-serves a stale
+  pre-restart focal task.
+- The nightly consolidation watermark now pins to the original cycle's start and
+  survives an interrupted or resumed run, instead of certifying data that
+  skipped steps never saw.
+
+### Fixed
+- The transcript sweeper now discovers Cowork/local-agent sessions on both known
+  Claude Desktop layouts, not only the legacy `agent/` one. On a host where only
+  the newer direct layout is populated, every sweep previously reported zero
+  files; on upgrade the fix triggers a one-time backfill of every
+  previously-missed transcript. (#165)
+- `iai-mcp doctor`'s "(dd) exact-index coercions" check reads through the
+  daemon's own socket first instead of colliding with the daemon's exclusive
+  lock. Restart the daemon so it serves the new query kind.
+- `iai-mcp migrate-to-lilli` (the `--src`/`--dst` copy path without `--swap`)
+  refuses an already-native source with a clear message instead of crashing.
+- `iai-mcp migrate-to-lilli --swap` no longer fails verification on a store
+  older than the tombstone TTL. The migration is now a faithful verbatim copy —
+  aged-tombstone cleanup defers to the nightly consolidation cycle instead of
+  running on the migration path — so source/destination equality holds by
+  construction. (#166)
+- A record with a missing or unparseable `created_at`/`updated_at` decodes to a
+  fixed epoch-min sentinel and sorts as the oldest record, instead of
+  masquerading as "just now".
+- The session-start hook's staleness comparison resolves the store sidecar under
+  `IAI_MCP_STORE` when set, instead of always reading the default path.
+- Obsidian vault import warns on file-cap truncation, excludes dot-directories,
+  and stamps `created_at` from file mtime.
+
+### Security
+- A provable write-once guard now protects `literal_surface` and the `events`
+  content on both storage drivers: an attempt to overwrite either raises
+  `CanonicalSourceViolation` rather than silently rewriting captured memory.
+- `iai import` warns that imported content is stored unredacted and may contain
+  secrets.
+- `iai capture --directive` refuses to mint a standing directive unless run from
+  an interactive terminal, with no override flag or environment variable.
+
 ## [3.1.0] - 2026-09-03
 
 ### Added
