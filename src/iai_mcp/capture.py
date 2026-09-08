@@ -2912,6 +2912,143 @@ def drain_permanent_failed_files(
     }
 
 
+def _count_transcript_turns_independent(transcript_path: Path) -> tuple[int, int]:
+    """Fresh, from-scratch transcript walk. Returns (expected_turns, parse_failed).
+
+    Never reuses cmd_capture_turn_deferred's parse: that path coerces a
+    decode failure to {} and silently advances past it, which would make a
+    dropped line invisible to both sides of a reconciliation. A complete
+    line (ends in a newline) that fails json.loads still counts toward
+    expected_turns AND parse_failed -- it is never silently discarded. A
+    torn tail (no trailing newline) is an in-progress write and is never
+    counted either way.
+    """
+    expected = 0
+    parse_failed = 0
+    path = Path(transcript_path)
+    if not path.exists():
+        return expected, parse_failed
+    trailers = _ToolTrailerState()
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.endswith("\n"):
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                parse_failed += 1
+                expected += 1
+                continue
+            if not isinstance(obj, dict):
+                continue
+            parsed = trailers.feed(obj, _parse_transcript_obj(obj))
+            if parsed is None:
+                continue
+            expected += 1
+    return expected, parse_failed
+
+
+def _iter_spool_session_events(paths: list[Path]) -> list[dict]:
+    """Decode every event line (line 0 of each file is its header) across the
+    given spool files. A line that fails to decrypt or parse is skipped --
+    it never contributes to a durable-leg count, mirroring the drain's own
+    skip-and-continue handling of an unreadable line."""
+    events: list[dict] = []
+    for path in paths:
+        try:
+            with path.open(encoding="utf-8") as fh:
+                lines = [ln for ln in fh if ln.strip()]
+        except OSError:
+            continue
+        for line in lines[1:]:
+            try:
+                events.append(json.loads(_decode_spool_line(line)))
+            except (json.JSONDecodeError, ValueError, SpoolKeyUnavailable):
+                continue
+    return events
+
+
+def reconcile_session_capture(
+    session_id: str,
+    *,
+    transcript_path: Path | None = None,
+    store: MemoryStore | None = None,
+    include_durable: bool = False,
+) -> dict[str, int | str | None]:
+    """Per-session expected/captured/durable reconciliation.
+
+    expected_turns stays None unless transcript_path is given -- the
+    durable leg runs off the active path, after a PRIOR session's spool
+    drains, and has no access to that session's host transcript, so it
+    reconciles captured against durable only. durable_turns stays None
+    unless include_durable=True -- a session's own turns are legitimately
+    not yet drained while it is active, and reading that gap as a
+    shortfall would false-positive. status/missing_turns are derived only
+    from the legs actually evaluated; a leg the caller did not ask for is
+    never read as a zero.
+    """
+    if include_durable and store is None:
+        raise ValueError("include_durable=True requires a store")
+
+    expected_turns: int | None = None
+    parse_failed: int | None = None
+    if transcript_path is not None:
+        expected_turns, parse_failed = _count_transcript_turns_independent(
+            Path(transcript_path)
+        )
+
+    from iai_mcp.deferred_drain import _count_events
+
+    session_files = sorted(deferred_captures_dir().glob(f"{session_id}.*jsonl"))
+    captured_turns = sum(_count_events(p) for p in session_files)
+
+    durable_turns: int | None = None
+    if include_durable:
+        durable_turns = 0
+        for ev in _iter_spool_session_events(session_files):
+            # This tally assumes every spool event is conversational
+            # (tier=episodic, role in {user, assistant}) -- capture_turn
+            # only idem-tags a record when _is_episodic_conversational() is
+            # true, so a non-conversational event would insert without a
+            # matching tag here and undercount durable_turns even though it
+            # landed. True for every producer today; a future non-
+            # conversational spool event would need this leg updated too.
+            #
+            # Mirrors capture_turn's own text normalization before it hashes
+            # the idem tag -- must match exactly or a long/whitespace-padded
+            # turn recomputes a different key and durable_turns undercounts.
+            ev_text = (ev.get("text") or "").strip()[:MAX_CAPTURE_LEN]
+            ts_iso = _resolve_ts(ev.get("ts")).isoformat()
+            idem_t = _idem_tag(
+                session_id, ev.get("role", "user"), ts_iso, ev_text,
+                source_uuid=ev.get("source_uuid"),
+            )
+            if store.find_record_by_tag(idem_t) is not None:
+                durable_turns += 1
+
+    if expected_turns is not None and durable_turns is not None:
+        status = "ok" if expected_turns == captured_turns == durable_turns else "partial"
+        missing_turns = max(0, expected_turns - min(captured_turns, durable_turns))
+    elif expected_turns is not None:
+        status = "ok" if expected_turns == captured_turns else "partial"
+        missing_turns = max(0, expected_turns - captured_turns)
+    elif durable_turns is not None:
+        status = "ok" if captured_turns == durable_turns else "partial"
+        missing_turns = max(0, captured_turns - durable_turns)
+    else:
+        status = "ok"
+        missing_turns = 0
+
+    return {
+        "status": status,
+        "expected_turns": expected_turns,
+        "captured_turns": captured_turns,
+        "durable_turns": durable_turns,
+        "parse_failed": parse_failed,
+        "missing_turns": missing_turns,
+    }
+
+
 def drain_active_live_captures(
     store: MemoryStore,
     *,
@@ -2945,6 +3082,8 @@ def _drain_active_live_captures_locked(
     state_dir = Path.home() / ".iai-mcp" / ".capture-state"
     if not deferred_dir.exists():
         return counts
+
+    drained_session_ids: set[str] = set()
 
     for fpath in sorted(deferred_dir.iterdir()):
         if not fpath.is_file():
@@ -3056,6 +3195,38 @@ def _drain_active_live_captures_locked(
 
         if file_had_insert:
             counts["files_drained"] += 1
+        if new_offset != prev_offset:
+            # The offset advanced past at least one new line this pass --
+            # genuine progress, whether it landed (inserted/reinforced) or
+            # was filtered (e.g. too-short text, still worth durable-leg
+            # checking below). A pass that broke on the very first new
+            # line (SpoolKeyUnavailable, or an immediate insert-failed)
+            # makes zero progress and must NOT enter the durable-leg
+            # reconciliation below -- that would re-report the same
+            # pre-existing shortfall every pass with no new information.
+            drained_session_ids.add(file_session_id)
+
+    # Durable leg: catches a stalled/broken drain (turns captured to spool
+    # but never durable) for each session just drained this pass. No
+    # transcript access here -- the drained session's host transcript path
+    # is not known to this process -- so only captured-vs-durable is
+    # evaluated. Must never break the drain itself.
+    for drained_session_id in drained_session_ids:
+        try:
+            recon = reconcile_session_capture(
+                drained_session_id, store=store, include_durable=True,
+            )
+        except Exception as exc:  # noqa: BLE001 -- reconciliation must never break drain
+            log.debug(
+                "drain_active_reconcile_failed session=%s: %s",
+                drained_session_id, exc,
+            )
+            continue
+        if recon["captured_turns"] != recon["durable_turns"]:
+            log.warning(
+                "drain_active_durable_shortfall session=%s captured=%s durable=%s",
+                drained_session_id, recon["captured_turns"], recon["durable_turns"],
+            )
 
     # Rail: post-drain memory relief on the wake-edge live-drain path too — hand
     # idle allocator pages back to the OS after real work. Reuses the existing

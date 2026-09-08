@@ -46,6 +46,10 @@ class SleepCycleProgress(TypedDict, total=False):
     attempt: int
     last_error: str | None
     started_at: str
+    # The ORIGINAL cycle's t0, pinned on the first save of a fresh cycle and
+    # carried through every resume -- a resumed run must certify only what
+    # steps skipped via resume_step_index actually saw, never a fresh re-read.
+    pre_cycle_watermark: str
 
 
 class Quarantine(TypedDict):
@@ -68,6 +72,9 @@ class LifecycleStateRecord(TypedDict):
     crisis_mode_since_ts: NotRequired[str | None]
     essential_variable_consecutive_breaches: NotRequired[int]
     essential_variable_consecutive_clears: NotRequired[int]
+    # Top-level sibling of sleep_cycle_progress -- never nest this there, a
+    # clean-cycle finish nulls that dict on every run and would wipe it.
+    consolidated_watermark: NotRequired[str]
 
 
 def _utc_now_iso() -> str:
@@ -155,6 +162,12 @@ def _validate_record(raw: object) -> LifecycleStateRecord:
     if progress is not None and not isinstance(progress, dict):
         raise ValueError(
             f"lifecycle_state.sleep_cycle_progress must be dict or null, got {progress!r}"
+        )
+
+    consolidated_watermark = raw.get("consolidated_watermark")
+    if consolidated_watermark is not None and not isinstance(consolidated_watermark, str):
+        raise ValueError(
+            f"lifecycle_state.consolidated_watermark must be a string, got {consolidated_watermark!r}"
         )
 
     quarantine = raw.get("quarantine")

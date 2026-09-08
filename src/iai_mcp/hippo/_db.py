@@ -67,6 +67,152 @@ def _mark_path_pools_stale(db_path: str) -> None:
             _log.debug("mark_stale failed for pool on %s: %s", db_path, exc)
 
 
+# events is append-only (except its ciphertext envelope column) and
+# literal_surface is write-once. HippoTable.update()/.delete() is the
+# PRIMARY, column-precise enforcement (values arrive there as a
+# column-name-keyed mapping). This module's check is a best-effort
+# backstop at the connection-execute boundary for raw _conn.execute paths
+# that bypass HippoTable entirely (e.g. a direct-write migration) -- a
+# text-pattern check cannot see column semantics with full SQL-parser
+# accuracy, so it does NOT claim completeness; it only catches the shapes
+# below. Mirrors _ENCRYPTED_EVENTS_COLUMNS in hippo/__init__.py -- keep in
+# sync (test_write_once_guard.py asserts they match).
+_EVENTS_MUTABLE_COLUMNS = frozenset({"data_json"})
+
+_SQL_EVENTS_IDENT = r'(?:"events"|`events`|\[events\]|events\b)'
+_SQL_SCHEMA_PREFIX = r"(?:\w+\s*\.\s*)?"
+_SQL_EVENTS_REF = rf"{_SQL_SCHEMA_PREFIX}{_SQL_EVENTS_IDENT}"
+# Tolerates a leading SQL line/block comment (or none) before the verb --
+# comment text is not whitespace, so an anchor on \s* alone misses it.
+_LEADING_COMMENT_OR_SPACE = r"(?:\s|--[^\n]*\n|/\*.*?\*/)*"
+
+_EVENTS_UPDATE_RE = re.compile(
+    rf"^{_LEADING_COMMENT_OR_SPACE}UPDATE\s+{_SQL_EVENTS_REF}\s+SET\b",
+    re.I | re.S,
+)
+_EVENTS_DELETE_RE = re.compile(
+    rf"^{_LEADING_COMMENT_OR_SPACE}DELETE\s+FROM\s+{_SQL_EVENTS_REF}",
+    re.I | re.S,
+)
+# Non-greedy up to WHERE (or end) isolates the SET clause from any WHERE
+# predicate that happens to reference the same column name, so a read
+# filter on literal_surface (or on an events column) is never mistaken for
+# a rewrite of it.
+_SET_CLAUSE_RE = re.compile(r"\bSET\b(?P<clause>.*?)(?:\bWHERE\b|$)", re.I | re.S)
+_LITERAL_SURFACE_ASSIGN_RE = re.compile(
+    r'(?:"literal_surface"|`literal_surface`|\[literal_surface\]|\bliteral_surface\b)\s*=',
+    re.I,
+)
+# Column-assignment scanner for a SET clause: each quoted form is already
+# unambiguously delimited by its closing quote/bracket and needs no \b; the
+# bareword form gets its own \b so it does not match a longer identifier
+# that merely starts with the same characters.
+_SET_ASSIGN_COLUMN_RE = re.compile(
+    r'(?:"(?P<dq>\w+)"|`(?P<bq>\w+)`|\[(?P<bk>\w+)\]|\b(?P<bare>\w+)\b)\s*='
+)
+
+
+def _set_clause_columns(clause: str) -> set[str]:
+    cols: set[str] = set()
+    for m in _SET_ASSIGN_COLUMN_RE.finditer(clause):
+        name = m.group("dq") or m.group("bq") or m.group("bk") or m.group("bare")
+        if name:
+            cols.add(name.lower())
+    return cols
+
+
+# Captures the RHS token of a literal_surface assignment: a bound `?`
+# placeholder, or anything else (an inline literal, `excluded.col`, ...).
+# Unlike the events column check, literal_surface's legitimate/illegitimate
+# split is a VALUE-shape distinction (already-ciphertext vs plaintext), not
+# a column-name distinction -- the SQL text never carries the value for a
+# `?` placeholder, so telling them apart requires the caller's bound params.
+_LITERAL_SURFACE_ASSIGN_VALUE_RE = re.compile(
+    r'(?:"literal_surface"|`literal_surface`|\[literal_surface\]|\bliteral_surface\b)'
+    r"\s*=\s*(?P<rhs>\?|[^\s,]+)",
+    re.I,
+)
+
+
+def _literal_surface_swap_permitted(clause: str, params: Any) -> bool:
+    """True only when the SET clause's literal_surface value is a bound `?`
+    placeholder whose corresponding positional parameter is already
+    ciphertext-shaped -- the shape every legitimate key-rotation/redaction
+    swap submits. This is a shape check only: it proves the value went
+    through encrypt_field, not that it decrypts to the same plaintext
+    already stored, so it cannot distinguish a ciphertext swap from a
+    caller encrypting genuinely new content under the same shape. Fails
+    closed (False) for any inline/non-placeholder RHS, a missing/malformed
+    params sequence, or a `?` index outside params -- this backstop trades
+    recall for precision, per its own best-effort charter.
+
+    `params` may be a single flat bind sequence (execute()) or a batch of
+    per-row sequences (executemany() -- e.g. HippoMergeInsert's fallback
+    UPDATE path, which real production migrations use). Distinguished by
+    whether the first element is itself a sequence: a scalar bound value
+    (execute()) vs. a row tuple (executemany()). Every row in a batch must
+    be ciphertext-shaped, or the whole statement fails closed.
+    """
+    m = _LITERAL_SURFACE_ASSIGN_VALUE_RE.search(clause)
+    if not m or m.group("rhs") != "?":
+        return False
+    if not isinstance(params, (list, tuple)) or not params:
+        return False
+    idx = clause[: m.start("rhs")].count("?")
+    first = params[0]
+    rows = params if isinstance(first, (list, tuple)) else [params]
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or idx >= len(row):
+            return False
+        if not is_encrypted(row[idx]):
+            return False
+    return True
+
+
+def _reject_if_forbidden(sql: Any, params: Any = None) -> None:
+    """Best-effort backstop for raw _conn.execute paths that bypass
+    HippoTable's column-precise primary guard (see module docstring above).
+
+    DELETE FROM events is unconditionally forbidden -- tombstone instead,
+    no legitimate path deletes an event row. UPDATE events SET ... is
+    permitted only when every assigned column is in
+    _EVENTS_MUTABLE_COLUMNS (the ciphertext envelope, rewritten by key
+    rotation / redaction as a ciphertext swap); any other assigned column,
+    or a SET clause this backstop cannot parse, fails closed. A
+    literal_surface SET assignment is rejected in either a bare UPDATE or
+    an INSERT ... ON CONFLICT DO UPDATE SET upsert, UNLESS its bound
+    value(s) are already ciphertext-shaped (see
+    _literal_surface_swap_permitted -- covers both a single execute() call
+    and an executemany() batch, e.g. HippoMergeInsert's fallback UPDATE
+    path). A statement with no params visible fails closed. The one
+    legitimate write -- the initial column-list INSERT -- carries no SET
+    clause and is unaffected.
+    """
+    try:
+        text = str(sql)
+    except Exception:  # noqa: BLE001 -- an unstringable statement is not this guard's concern
+        return
+    if _EVENTS_DELETE_RE.match(text):
+        raise errors.CanonicalSourceViolation(
+            f"events table is append-only: {text[:120]!r}"
+        )
+    set_match = _SET_CLAUSE_RE.search(text)
+    if _EVENTS_UPDATE_RE.match(text):
+        clause = set_match.group("clause") if set_match else ""
+        assigned_cols = _set_clause_columns(clause)
+        if not assigned_cols or (assigned_cols - _EVENTS_MUTABLE_COLUMNS):
+            raise errors.CanonicalSourceViolation(
+                "events content is write-once; only the encryption envelope "
+                f"column(s) {sorted(_EVENTS_MUTABLE_COLUMNS)!r} may be "
+                f"rewritten (ciphertext-swap only): {text[:120]!r}"
+            )
+    if set_match and _LITERAL_SURFACE_ASSIGN_RE.search(set_match.group("clause")):
+        if not _literal_surface_swap_permitted(set_match.group("clause"), params):
+            raise errors.CanonicalSourceViolation(
+                f"literal_surface is write-once: {text[:120]!r}"
+            )
+
+
 class _MutationSignallingConn:
     """Writer-connection proxy that reports mutations to the RO reader pools.
 
@@ -131,12 +277,24 @@ class _MutationSignallingConn:
                 _log.debug("RO-pool mutation signal failed: %s", exc)
 
     def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if args:
+            # Bound params (positional arg 1) are needed to tell a
+            # legitimate literal_surface ciphertext swap from a content
+            # rewrite -- see _literal_surface_swap_permitted. executemany()
+            _reject_if_forbidden(args[0], args[1] if len(args) > 1 else None)
         result = self._wrapped.execute(*args, **kwargs)
         if args:
             self._signal_if_mutating(args[0])
         return result
 
     def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        if args:
+            # HippoMergeInsert's fallback UPDATE path (used by the v2->v3
+            # encryption migration when the table has extra columns) is a
+            # real executemany() caller of a literal_surface rewrite --
+            # threading params through here is required for the same
+            # ciphertext-swap exemption execute() gets above.
+            _reject_if_forbidden(args[0], args[1] if len(args) > 1 else None)
         result = self._wrapped.executemany(*args, **kwargs)
         if args:
             self._signal_if_mutating(args[0])
@@ -554,6 +712,11 @@ class HippoDB:
             # needs the Row factory (assigning it on the lilli branch would
             # lazily import sqlite3 into an engine-only process).
             self._conn.row_factory = _sqlite_stdlib.Row
+            # The legacy driver has no RO-pool staleness signal to bump, but
+            # the canonical-source guard must see every statement on this
+            # branch too -- a guard wired only into the lilli branch would
+            # leave a legacy-format store unprotected.
+            self._conn = _MutationSignallingConn(self._conn, lambda: None)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")

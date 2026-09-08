@@ -9,6 +9,10 @@ can never silently outrank an unhedged stale claim already in context.
 
 Kept inside the pre-existing 3-hit / [:400]-char budget: no session-start
 or per-turn byte-count regression.
+
+Also renders a positive-allow-list availability marker: a healthy result
+(`_source` unset and `_structural_source` full-quality) renders unchanged,
+any other signal renders a visibly distinct ``DEGRADED (...)`` line.
 """
 from __future__ import annotations
 
@@ -16,6 +20,26 @@ from datetime import datetime, timezone
 
 MAX_HITS = 3
 MAX_CHARS = 400
+
+_FULL_QUALITY_STRUCTURAL_SOURCES = {None, "normal", "overlay"}
+_DEGRADE_REASONS = {
+    "cortex-fallback": "cortex fallback",
+    "cold-structural-degrade": "cold structural",
+    "embedder-build-degrade": "embedder building",
+}
+
+
+def _availability_marker(result: dict) -> "str | None":
+    """HEALTHY is a positive allow-list; any other signal renders visibly."""
+    source = result.get("_source")
+    structural_source = result.get("_structural_source")
+    if source is None and structural_source in _FULL_QUALITY_STRUCTURAL_SOURCES:
+        return None
+    if source is not None:
+        return f"DEGRADED ({_DEGRADE_REASONS.get(source, 'unknown')})"
+    if structural_source == "last_good":
+        return "DEGRADED (stale structural)"
+    return "DEGRADED (unknown)"
 
 
 def _parse_iso(value: object) -> "datetime | None":
@@ -71,9 +95,13 @@ def render_recall_block(result: dict, *, now: "datetime | None" = None) -> str:
     """Pure function: parsed socket result -> rendered block text (or "")."""
     hits = (result.get("hits") or [])[:MAX_HITS]
     lines = [ln for ln in (render_hit_line(h, now=now) for h in hits) if ln]
-    if not lines:
+    marker = _availability_marker(result)
+    if not lines and not marker:
         return ""
-    body = ["<iai-mcp-recall>", *lines]
+    body = ["<iai-mcp-recall>"]
+    if marker:
+        body.append(marker)
+    body.extend(lines)
     corrector = _corrector_line(result.get("anti_hits") or [], now=now)
     if corrector:
         body.append(corrector)

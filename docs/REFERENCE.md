@@ -371,14 +371,14 @@ iai-mcp daemon status
 iai-mcp daemon logs --tail 50
 ```
 
-`iai-mcp doctor` runs 36 checks across the process, socket or loopback transport, store, index, encryption, capture state, lifecycle, embedder, and background work.
+`iai-mcp doctor` runs 38 checks across the process, socket or loopback transport, store, index, encryption, capture state, lifecycle, embedder, and background work.
 
 `--apply` offers repairs and asks before anything that touches memory. Corrupt state and indexes are renamed aside rather than deleted. `--auto` is the unattended subset: no prompts, killed processes, or store mutation. The assistant can invoke it when the engine remains unreachable during session startup.
 
 A failed socket check while the engine is in `SLEEP` or `DREAMING` may be normal because consolidation temporarily owns the store. Multiple failures, or failures on daemon process, store readability, or embedder construction, require attention.
 
 <details>
-<summary><b>All 36 doctor checks</b></summary>
+<summary><b>All 38 doctor checks</b></summary>
 
 | # | Check | Meaning |
 |---|---|---|
@@ -417,6 +417,8 @@ A failed socket check while the engine is in `SLEEP` or `DREAMING` may be normal
 | ff | daemon sleep-path code current | The running daemon's sleep-path code matches the installed package |
 | gg | store format | Reports the on-disk store format (native engine or legacy SQLite) |
 | hh | daemon build matches installed package | The running daemon's version matches the installed wheel |
+| jj | cross-layer watermark fence | No derived watermark is ahead of its source; consolidation is not far behind |
+| kk | stop-hook failure marker | The Stop capture hook records no recent capture failures |
 | + | update available | New PyPI release is reported when online |
 
 </details>

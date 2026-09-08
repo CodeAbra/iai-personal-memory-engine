@@ -110,6 +110,17 @@ def _cache_path(store: Any = None, session_id: str = "-") -> Path:
     return base / f".working-tier.{_sanitize_session_id(session_id)}.cached.md"
 
 
+def working_tier_cache_paths(base: "Path | str") -> list[Path]:
+    """Every per-session snapshot file under base, matching the exact glob
+    _cache_path's pattern writes to (".working-tier.<sid>.cached.md") --
+    reused by the daemon's boot-time invalidation sweep so the pattern is
+    defined in exactly one place."""
+    try:
+        return sorted(Path(base).glob(".working-tier.*.cached.md"))
+    except OSError:
+        return []
+
+
 def _record_model(record: Any) -> str | None:
     try:
         for entry in getattr(record, "provenance", None) or []:
@@ -770,6 +781,7 @@ __all__ = [
     "populate_from_sensory",
     "update_from_record",
     "encode_structure",
+    "working_tier_cache_paths",
     "WORKING_TIER_MAX_SLOTS",
     "WORKING_TIER_PARK_SLOTS",
     "WORKING_TIER_IDLE_CLOSE_SEC",

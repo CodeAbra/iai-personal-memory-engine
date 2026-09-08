@@ -396,6 +396,97 @@ def check_ee_deferred_capture_backlog_at_rest() -> CheckResult:
     )
 
 
+_STOP_HOOK_FAILURES_CHECK_NAME = "(kk) stop-hook failure marker"
+_STOP_HOOK_FAILURE_RECENT_WINDOW_SEC = 3600
+_STOP_HOOK_FAILURE_FAIL_THRESHOLD = 2
+
+
+def check_kk_stop_hook_failures() -> CheckResult:
+    """WARN/FAIL on recent Stop-hook capture failures (CLI-not-found or
+    capture-turn-deferred nonzero/timeout) recorded in the durable marker;
+    PASS when the marker is absent or holds only failures outside the
+    recent window -- a single old blip does not keep failing this check
+    forever, and later successful hook fires are trusted to have moved on.
+    """
+    import json as _json
+    from datetime import datetime
+
+    from iai_mcp.capture import capture_state_dir
+
+    marker = capture_state_dir() / ".stop-hook-failures.jsonl"
+    if not marker.exists():
+        return CheckResult(
+            name=_STOP_HOOK_FAILURES_CHECK_NAME,
+            passed=True,
+            detail="no failure marker on record",
+            status="PASS",
+        )
+
+    now = time.time()
+    recent = 0
+    older = 0
+    try:
+        with marker.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = _json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                ts_raw = entry.get("ts")
+                if not isinstance(ts_raw, str):
+                    continue
+                try:
+                    ts_epoch = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+                if now - ts_epoch <= _STOP_HOOK_FAILURE_RECENT_WINDOW_SEC:
+                    recent += 1
+                else:
+                    older += 1
+    except OSError as exc:
+        return CheckResult(
+            name=_STOP_HOOK_FAILURES_CHECK_NAME,
+            passed=True,
+            detail=f"could not scan stop-hook failure marker: {exc}",
+            status="WARN",
+        )
+
+    if recent == 0:
+        return CheckResult(
+            name=_STOP_HOOK_FAILURES_CHECK_NAME,
+            passed=True,
+            detail=(
+                "no recent stop-hook failures"
+                + (f" ({older} older on record)" if older else "")
+            ),
+            status="PASS",
+        )
+    if recent >= _STOP_HOOK_FAILURE_FAIL_THRESHOLD:
+        return CheckResult(
+            name=_STOP_HOOK_FAILURES_CHECK_NAME,
+            passed=False,
+            detail=(
+                f"{recent} stop-hook failure(s) in the last "
+                f"{_STOP_HOOK_FAILURE_RECENT_WINDOW_SEC // 60}m — capture may not be running"
+            ),
+            status="FAIL",
+        )
+    return CheckResult(
+        name=_STOP_HOOK_FAILURES_CHECK_NAME,
+        passed=True,
+        detail=(
+            f"{recent} stop-hook failure(s) in the last "
+            f"{_STOP_HOOK_FAILURE_RECENT_WINDOW_SEC // 60}m"
+        ),
+        status="WARN",
+    )
+
+
 def check_aa_capture_state_hygiene() -> CheckResult:
     from iai_mcp.capture import sweep_capture_state
 
@@ -676,6 +767,7 @@ def check_s_hippo_schema_version() -> CheckResult:
 
 _HIPPO_COMPACTED_CHECK_NAME = "(t) hippo_compacted freshness"
 _CENTRALITY_CHECK_NAME = "(u) recall centrality regression"
+_EXACT_INDEX_COERCIONS_CHECK_NAME = "(dd) exact-index coercions"
 
 
 def _hippo_compacted_verdict(ts_value: object, now: "object") -> CheckResult:
@@ -879,6 +971,99 @@ def _check_u_via_socket(now: "object") -> CheckResult:
     return _centrality_verdict([e.get("data") or {} for e in events], emit_store=None)
 
 
+def _coercions_verdict(events: list[dict]) -> CheckResult:
+    """Shared PASS/WARN verdict for check_dd, fed by either read path."""
+    coerced = [
+        e for e in events if (e.get("data") or {}).get("action") == "coerced"
+    ]
+    if not coerced:
+        return CheckResult(
+            name=_EXACT_INDEX_COERCIONS_CHECK_NAME,
+            passed=True,
+            detail="no non-finite coercions recorded",
+            status="PASS",
+        )
+
+    # A single build/cue emit can cover multiple coercions in one event
+    # (`count`), so event-count != coercion-count — the payload's own
+    # running `total` is exact on both lanes.
+    row_total = max(
+        (
+            int(e["data"].get("total", 0))
+            for e in coerced
+            if e["data"].get("source") == "row"
+        ),
+        default=0,
+    )
+    cue_total = max(
+        (
+            int(e["data"].get("total", 0))
+            for e in coerced
+            if e["data"].get("source") == "cue"
+        ),
+        default=0,
+    )
+    latest = max((e.get("ts") for e in coerced), default=None)
+    return CheckResult(
+        name=_EXACT_INDEX_COERCIONS_CHECK_NAME,
+        passed=True,
+        detail=(
+            f"non-finite coercions observed (cue={cue_total}, row={row_total}); "
+            f"latest {latest} — a stored row or cue carried NaN/inf; "
+            "ranking degraded, not crashed"
+        ),
+        status="WARN",
+    )
+
+
+def _check_dd_via_socket() -> CheckResult:
+    """Read ``TELEMETRY_EMBED_NONFINITE`` coercion events through the daemon socket.
+
+    Same fall-back contract as ``_check_t_via_socket``/``_check_u_via_socket``:
+    ``_SocketUnavailable`` when the daemon cannot be reached at all, so the
+    caller falls back to a direct store open; any other unusable reply is a
+    genuine WARN (the daemon answered, but the answer was not usable) —
+    never a blind PASS.
+    """
+    from iai_mcp.cli import _send_jsonrpc_request
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
+    from iai_mcp.events import TELEMETRY_EMBED_NONFINITE
+
+    resp = _send_jsonrpc_request(
+        "events_query",
+        {"kind": TELEMETRY_EMBED_NONFINITE, "severity": "warning", "limit": 500},
+        connect_timeout=1.0,
+        read_timeout=5.0,
+    )
+    if resp is None:
+        raise _SocketUnavailable()
+    if not isinstance(resp, dict) or "result" not in resp:
+        return CheckResult(
+            name=_EXACT_INDEX_COERCIONS_CHECK_NAME,
+            passed=True,
+            detail="unable to read exact-index coercions via daemon socket",
+            status="WARN",
+        )
+    result = resp["result"]
+    events = result.get("events") if isinstance(result, dict) else None
+    if events is None:
+        # A running daemon older than this check's own whitelist addition
+        # (`embed_nonfinite_rejected`) answers with `result.error`, not an
+        # exception -- surface it so this WARN self-diagnoses version skew
+        # instead of reading as a generic, unexplained socket failure.
+        detail = "unable to read exact-index coercions via daemon socket"
+        err = result.get("error") if isinstance(result, dict) else None
+        if err:
+            detail = f"{detail}: {err}"
+        return CheckResult(
+            name=_EXACT_INDEX_COERCIONS_CHECK_NAME,
+            passed=True,
+            detail=detail,
+            status="WARN",
+        )
+    return _coercions_verdict(events)
+
+
 def check_t_hippo_compacted_freshness() -> CheckResult:
     from datetime import datetime as _dt
     from datetime import timezone as _tz
@@ -1074,10 +1259,29 @@ def check_dd_exact_index_coercions() -> CheckResult:
     read-only; never the live in-process counter (a doctor-opened store gets
     its own cold index with zero counters), never by calling ``exact_top_k``
     or ``_build_exact_index_sync`` (a diagnostic must not trigger a
-    whole-corpus build)."""
-    name = "(dd) exact-index coercions"
+    whole-corpus build). Tries the daemon socket first (reads through the
+    daemon's own already-open store handle, same as check_t/check_u) and
+    only falls back to a direct store open when the daemon is unreachable —
+    a direct open while the daemon holds the store always loses the native
+    engine's cross-process exclusive lock."""
+    name = _EXACT_INDEX_COERCIONS_CHECK_NAME
     if not _store_file_present():
         return CheckResult(name=name, passed=True, detail="no store yet (skip)")
+
+    from iai_mcp.doctor._lifecycle_checks import _SocketUnavailable
+
+    try:
+        return _check_dd_via_socket()
+    except _SocketUnavailable:
+        pass
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never crash the run
+        logger.debug("check_dd: socket read failed: %s", exc)
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"events query failed: {type(exc).__name__}: {exc}",
+            status="WARN",
+        )
 
     store = None
     try:
@@ -1085,54 +1289,16 @@ def check_dd_exact_index_coercions() -> CheckResult:
         from iai_mcp.hippo import AccessMode
         from iai_mcp.store import MemoryStore
 
-        store = MemoryStore(access_mode=AccessMode.SHARED, read_only=True)
+        store = MemoryStore(
+            access_mode=AccessMode.SHARED, read_only=True, persist_index=False,
+        )
         # No `since` window: legacy bad rows surface at the first cold build
         # after ANY daemon start, so a 24h window on a long-up daemon would
         # falsely PASS a still-degraded ranking.
         events = query_events(
             store, kind=TELEMETRY_EMBED_NONFINITE, severity="warning", limit=500
         )
-        coerced = [
-            e for e in events if (e.get("data") or {}).get("action") == "coerced"
-        ]
-        if not coerced:
-            return CheckResult(
-                name=name,
-                passed=True,
-                detail="no non-finite coercions recorded",
-                status="PASS",
-            )
-
-        # A single build/cue emit can cover multiple coercions in one event
-        # (`count`), so event-count != coercion-count — the payload's own
-        # running `total` is exact on both lanes.
-        row_total = max(
-            (
-                int(e["data"].get("total", 0))
-                for e in coerced
-                if e["data"].get("source") == "row"
-            ),
-            default=0,
-        )
-        cue_total = max(
-            (
-                int(e["data"].get("total", 0))
-                for e in coerced
-                if e["data"].get("source") == "cue"
-            ),
-            default=0,
-        )
-        latest = max((e.get("ts") for e in coerced), default=None)
-        return CheckResult(
-            name=name,
-            passed=True,
-            detail=(
-                f"non-finite coercions observed (cue={cue_total}, row={row_total}); "
-                f"latest {latest} — a stored row or cue carried NaN/inf; "
-                "ranking degraded, not crashed"
-            ),
-            status="WARN",
-        )
+        return _coercions_verdict(events)
     except Exception as exc:  # noqa: BLE001 -- a diagnostic must never crash the run
         return CheckResult(
             name=name,
@@ -1328,6 +1494,65 @@ def check_ii_embed_identity() -> CheckResult:
             f"{type(exc).__name__}: {str(exc)[:120]}",
             status="WARN",
         )
+
+
+_WATERMARK_FENCE_CHECK_NAME = "(jj) cross-layer watermark fence"
+
+
+def check_jj_watermark_fence() -> CheckResult:
+    """FAIL on any impossible layer (derived>source); WARN on consolidation
+    lag past CONSOLIDATION_LAG_WARN_SEC; else PASS. Pack lag and a
+    never-run consolidation are reported in the message but never escalate
+    the status -- pack lag is the common, expected steady state (the
+    session-start hook's own serve-time STALE marker owns that user
+    surface) and a perpetually-WARN doctor row would be noise."""
+    from iai_mcp import store as _store_mod
+    from iai_mcp.watermark_fence import (
+        CONSOLIDATION_LAG_WARN_SEC,
+        check_fence,
+        read_consolidation_watermark,
+        read_episodic_watermark,
+        read_pack_watermark,
+    )
+
+    store_env = os.environ.get("IAI_MCP_STORE")
+    root = Path(store_env) if store_env else Path(_store_mod.DEFAULT_STORAGE_PATH)
+
+    episodic = read_episodic_watermark(root)
+    consolidation = read_consolidation_watermark(root)
+    pack = read_pack_watermark()
+
+    result = check_fence(episodic, consolidation, pack)
+
+    detail = (
+        f"episodic={episodic!r} "
+        f"pack={pack!r} ({result.pack.status}) "
+        f"consolidation={consolidation!r} ({result.consolidation.status})"
+    )
+
+    if not result.ok:
+        return CheckResult(
+            name=_WATERMARK_FENCE_CHECK_NAME,
+            passed=False,
+            detail=f"{detail} -- a derived layer is AHEAD of its source",
+            status="FAIL",
+        )
+    if result.consolidation.status == "lagging":
+        return CheckResult(
+            name=_WATERMARK_FENCE_CHECK_NAME,
+            passed=True,
+            detail=(
+                f"{detail} -- consolidation has not run in over "
+                f"{CONSOLIDATION_LAG_WARN_SEC / 3600:.0f}h"
+            ),
+            status="WARN",
+        )
+    return CheckResult(
+        name=_WATERMARK_FENCE_CHECK_NAME,
+        passed=True,
+        detail=detail,
+        status="PASS",
+    )
 
 
 def check_p_anthropic_sdk_absent() -> CheckResult:

@@ -28,6 +28,7 @@ EVENTS_QUERY_WHITELIST: frozenset[str] = frozenset({
     "first_turn_recall",
     "profile_tuned",
     "retrieval_weight_tuned",
+    "embed_nonfinite_rejected",
 })
 
 # events_query strips free-text insight synthesis from the wire; only

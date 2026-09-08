@@ -117,6 +117,26 @@ def _make_record(i: int, vec: list[float], *, created_at: datetime):
     )
 
 
+def _build_native_source_store(
+    root: Path, *, monkeypatch: pytest.MonkeyPatch, n_records: int = 3
+) -> str:
+    """Build a synthetic NATIVE lilli-format source store; return its db path."""
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    monkeypatch.setenv("IAI_MCP_STORE", str(root))
+    from iai_mcp.store import MemoryStore, flush_record_buffer
+
+    store = MemoryStore(root)
+    rng = np.random.RandomState(7)
+    base = datetime(2026, 5, 1, 9, 0, 0, tzinfo=timezone.utc)
+    for i in range(n_records):
+        vec = rng.randn(384).tolist()
+        store.insert(_make_record(i, vec, created_at=base + timedelta(seconds=i)))
+    flush_record_buffer(store)
+    src_db = str(root / "hippo" / "brain.sqlite3")
+    store.db.close()
+    return src_db
+
+
 def _build_source_store(
     root: Path, *, monkeypatch: pytest.MonkeyPatch, n_records: int, n_events: int = 0
 ) -> str:
@@ -356,3 +376,89 @@ def test_full_report_green(migrated):
     src_db, src_root, dst_root, key, report = migrated
     rep = verify_store_equality(src_db, dst_root, key, src_root=src_root)
     assert rep.ok is True, {k: v.reason for k, v in rep.dimensions.items()}
+
+
+def test_already_native_source_raises_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Pointing the non-swap migrator at an already-native source refuses
+    cleanly, naming the condition and pointing at --swap, instead of the
+    raw stdlib sqlite3 error a direct open of a native-format file raises."""
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_native_source_store(src_root, monkeypatch=monkeypatch)
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    with pytest.raises(ValueError, match="already a native lilli store"):
+        migrate_sqlite_to_lilli(src_db, dst_root, batch=10)
+    with pytest.raises(ValueError, match="--swap"):
+        migrate_sqlite_to_lilli(src_db, dst_root, batch=10)
+
+
+def test_already_native_source_creates_no_dst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The already-native preflight fires before any destination write --
+    a refused migration must leave no partial dst_root behind."""
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_native_source_store(src_root, monkeypatch=monkeypatch)
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    with pytest.raises(ValueError):
+        migrate_sqlite_to_lilli(src_db, dst_root, batch=10)
+
+    assert not dst_root.exists()
+
+
+def test_legacy_stdlib_source_preflight_does_not_fire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: the already-native preflight must not fire on a genuine
+    legacy stdlib source -- it still migrates exactly as before."""
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(src_root, monkeypatch=monkeypatch, n_records=5)
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+    report = migrate_sqlite_to_lilli(src_db, dst_root, batch=10)
+    assert report.rows_copied.get("records", 0) == 5
+    assert dst_root.exists()
+
+
+def test_cli_already_native_source_exits_1_with_clear_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """cmd_migrate_to_lilli against a native source: exit 1, a clear stderr
+    message, and no raw traceback / underlying sqlite3 error text."""
+    from iai_mcp.cli import _build_parser
+    from iai_mcp.cli._analytics import cmd_migrate_to_lilli
+
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_native_source_store(src_root, monkeypatch=monkeypatch)
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+
+    parser = _build_parser()
+    ns = parser.parse_args(
+        ["migrate-to-lilli", "--src", src_db, "--dst", str(dst_root)]
+    )
+    rc = cmd_migrate_to_lilli(ns)
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "already a native lilli store" in captured.err
+    assert "--swap" in captured.err
+    assert "Traceback (most recent call last)" not in captured.err
+    assert "Traceback (most recent call last)" not in captured.out
+    assert "sqlite3.DatabaseError" not in captured.err
+    assert not dst_root.exists()

@@ -6,7 +6,9 @@
 # iai-mcp CLI to fetch the cached session prefix from the daemon, and prints
 # the result to stdout for Claude Code to inject as additionalContext. The
 # CLI itself caps stdout at 10000 characters; this script relays the bytes
-# verbatim.
+# verbatim, except on a cache-hit where the served pack's embedded source
+# watermark is compared against the live store sidecar (pure file read, no
+# daemon call) and a STALE marker is appended on divergence.
 #
 # Fail-safe by design: every error path exits 0 with empty stdout so a
 # recall miss never blocks session start. Logs go to
@@ -65,6 +67,22 @@ channel="settings"
   echo "$ts session=$session_id source=$source_evt channel=$channel"
 } >> "$log" 2>/dev/null
 
+# Staleness marker: mirrors cli/_capture.py's [iai-mcp memory: HEALTHY] /
+# [iai-mcp memory: UNAVAILABLE] bracket vocabulary. Its length is reserved
+# out of the 10000-char cap BEFORE reading the cache (same payload_budget
+# pattern cli/_capture.py uses) so an appended marker can never itself be
+# truncated.
+stale_marker="[iai-mcp memory: STALE]"
+stale_suffix=$(printf '\n\n%s' "$stale_marker")
+cache_head_cap=$((10000 - ${#stale_suffix}))
+
+# Live store-advance sidecar: resolves under IAI_MCP_STORE when set (mirrors
+# doctor's check_jj_watermark_fence store-root resolution), falling back to
+# the default $HOME/.iai-mcp root -- a custom store's staleness comparison
+# must read its OWN sidecar, never an unrelated or nonexistent default one.
+store_root="${IAI_MCP_STORE:-$HOME/.iai-mcp}"
+live_watermark_path="$store_root/hippo/.max-created-at"
+
 # Precache for the SessionStart hook:
 # read the daemon-written cache whenever it is non-empty (no age cap).
 # Each branch writes a contract log marker. Falls through to the live CLI path
@@ -78,11 +96,29 @@ if [ -s "$cache_path" ]; then
   else
     now_epoch=$(date +%s)
     age=$(( now_epoch - cache_mtime ))
-    cache_out=$(head -c 10000 "$cache_path" 2>/dev/null || true)
+    cache_out=$(head -c "$cache_head_cap" "$cache_path" 2>/dev/null || true)
     if [ -n "$cache_out" ]; then
-      printf '%s' "$cache_out"
+      # Anchored to line 1 ONLY: a crafted cache cannot inject a fake
+      # sentinel anywhere but the leading line to spoof staleness.
+      embedded_wm=$(printf '%s\n' "$cache_out" | sed -n '1{/^<!-- iai-mcp:source_watermark=.* -->$/{s/^<!-- iai-mcp:source_watermark=\(.*\) -->$/\1/p;};}')
+      live_wm=""
+      [ -f "$live_watermark_path" ] && live_wm=$(cat "$live_watermark_path" 2>/dev/null || true)
+      is_stale=false
+      if [ -n "$embedded_wm" ] && [ -n "$live_wm" ]; then
+        # Hour-granularity prefix equality (YYYY-MM-DDTHH), not lexicographic
+        # ordering -- string equality sidesteps Z-vs-+00:00 / microsecond
+        # suffix differences entirely.
+        embedded_prefix=$(printf '%s' "$embedded_wm" | cut -c1-13)
+        live_prefix=$(printf '%s' "$live_wm" | cut -c1-13)
+        [ "$embedded_prefix" != "$live_prefix" ] && is_stale=true
+      fi
+      if [ "$is_stale" = true ]; then
+        printf '%s%s' "$cache_out" "$stale_suffix"
+      else
+        printf '%s' "$cache_out"
+      fi
       emit_continuity_agent_block
-      echo "$ts cache-hit age=${age}s bytes=${#cache_out} channel=$channel" >> "$log" 2>/dev/null
+      echo "$ts cache-hit age=${age}s bytes=${#cache_out} stale=$is_stale channel=$channel" >> "$log" 2>/dev/null
       exit 0
     fi
     echo "$ts cache-miss empty (file existed but read returned 0 bytes) channel=$channel" >> "$log" 2>/dev/null

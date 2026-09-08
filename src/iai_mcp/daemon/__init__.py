@@ -1799,6 +1799,53 @@ def _log_store_format(store: object) -> None:
         return
 
 
+def _rebuild_session_caches_on_boot(store: object) -> None:
+    """Boot-time invalidation of the two per-session staleness surfaces:
+    deletes stale .working-tier.<sid>.cached.md files and forces the
+    continuity live-state block empty via
+    write_continuity_cache(allow_downgrade=True), bypassing its default
+    preserve-guard (that guard is for /clear reconstruction, not this
+    path). The agent-registry block is independently recomputed from
+    daemon_state.json, unaffected. Fail-soft per file: a cache-cleanup
+    error must never abort boot.
+    """
+    try:
+        from iai_mcp import working_tier
+
+        # Both run, unconditionally: the env-override path (when set) escapes
+        # the base-relative glob below and needs its own direct unlink; the
+        # glob sweep still runs regardless of the override so an orphan left
+        # by a PRIOR non-override deployment is not stranded (idempotent --
+        # unlink(missing_ok=True) and an empty glob are both no-ops).
+        env_override = os.environ.get(working_tier.WORKING_TIER_CACHE_ENV)
+        if env_override:
+            try:
+                Path(env_override).unlink(missing_ok=True)
+            except OSError as exc:
+                log.debug(
+                    "boot working-tier sweep: unlink failed for override %s: %s",
+                    env_override, exc,
+                )
+        root = getattr(store, "root", None)
+        if root is not None:
+            for path in working_tier.working_tier_cache_paths(root):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.debug(
+                        "boot working-tier sweep: unlink failed for %s: %s", path, exc,
+                    )
+    except Exception as exc:  # noqa: BLE001 -- boot must never fail on cache cleanup
+        log.debug("boot working-tier sweep failed: %s", exc)
+
+    try:
+        from iai_mcp import session
+
+        session.write_continuity_cache(store, allow_downgrade=True)
+    except Exception as exc:  # noqa: BLE001 -- boot must never fail on cache cleanup
+        log.debug("boot continuity cache rebuild failed: %s", exc)
+
+
 async def main() -> int:
     _set_process_title()
     _rotate_launchd_stderr()
@@ -2150,6 +2197,13 @@ async def main() -> int:
             )
         except Exception:  # noqa: BLE001
             log.debug("hippo boot health check failed", exc_info=True)
+
+        # Before the socket accepts any per-turn hook read -- a stale
+        # pre-restart focal-task cache must never be served to a fresh turn.
+        try:
+            await asyncio.to_thread(_rebuild_session_caches_on_boot, store)
+        except Exception:  # noqa: BLE001 -- boot must never fail on cache cleanup
+            log.debug("boot session cache rebuild failed", exc_info=True)
 
         if os.environ.get("IAI_MCP_ASYNC_WRITES_OFF", "").strip() not in (
             "1", "true", "TRUE", "yes",

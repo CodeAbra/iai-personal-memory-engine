@@ -1,49 +1,40 @@
-"""Physical tombstone compaction in sleep AND at migrate finalize (C), plus the
-B-fix's closure of the grace-window live-scan-surface gap.
+"""Physical tombstone compaction: sleep-step deletion, grace-window live-scan
+filtering, and batched deletes.
 
-The existing sleep step ``step_compact_hippo`` (``iai_mcp.lilli.cycle
-.sleep_pipeline._optimize``) already physically DELETEs tombstoned rows once
-they age past ``tombstone_ttl_sec`` (default 7 days) -- three gaps were
-tracked here (the finalize-compaction fix closes two of them; the third was
-already closed by the deletion-sweep fix):
+The sleep step ``step_compact_hippo`` (``iai_mcp.lilli.cycle
+.sleep_pipeline._optimize``) is the sole site that physically DELETEs
+tombstoned rows, once they age past ``tombstone_ttl_sec`` (default 7 days).
+Migration never compacts (see point 3 below) -- physical removal always
+happens on the next scheduled maintenance cycle.
 
-1. **Grace-window bloat -- CLOSED BY B, not C.** A record tombstoned but not
-   yet past ``tombstone_ttl_sec`` stays PHYSICALLY present in the table
-   (correct, per the TTL contract -- C's compaction must never drop a
-   not-yet-aged row). Before the B fix landed, the recency/count queries
-   still walked every grace-window-tombstoned row for the full grace window
-   (default 7 days) -- physical compaction (C) cannot shrink this cost on its
-   own, since the rows are not yet eligible for removal. The B fix (the
-   indexed ``live`` column, filtering the production recency query to
-   ``WHERE live = 1``) closes this gap independently of C: the live-scan
-   surface now skips grace-window tombstones without violating the TTL
-   contract (nothing is dropped early -- the rows are simply no longer
-   walked). ``test_grace_window_tombstones_bloat_live_scan_surface`` now
-   pins the POST-B-fix behavior: the recency query visits zero cells (fully
-   index-served) rather than scaling with the full physical row count.
+1. **Grace-window rows stay physically present, but are not scanned.** A
+   record tombstoned but not yet past ``tombstone_ttl_sec`` stays PHYSICALLY
+   present in the table (correct, per the TTL contract -- compaction must
+   never drop a not-yet-aged row). The production recency/count query filters
+   on the indexed ``live`` column (``WHERE live = 1``), so grace-window
+   tombstones are skipped without violating the TTL contract (nothing is
+   dropped early -- the rows are simply no longer walked).
+   ``test_grace_window_tombstones_bloat_live_scan_surface`` pins this: the
+   recency query visits zero cells (fully index-served) rather than scaling
+   with the full physical row count.
 
-2. **Unbatched delete.** ``HippoTable.delete`` (``iai_mcp/hippo/_table.py``)
-   issues ONE ``DELETE FROM records WHERE <predicate>`` for the entire aged
-   set. On a large tombstoned set this single delete can trigger a B-tree
-   pager rebalance storm (many pages touched in one transaction). The fix
-   must batch the delete into bounded chunks. RED: this module asserts (by
-   monkeypatching ``HippoTable.delete``) that ``step_compact_hippo`` issues
-   MULTIPLE bounded delete calls for a large aged-tombstone set, not one
-   unbounded call -- see ``test_aged_tombstone_drop_is_batched``.
+2. **Batched delete.** ``HippoTable.delete`` (``iai_mcp/hippo/_table.py``)
+   issues a single ``DELETE FROM records WHERE <predicate>`` per call. On a
+   large tombstoned set, one unbounded delete over the entire aged set can
+   trigger a B-tree pager rebalance storm (many pages touched in one
+   transaction), so ``step_compact_hippo`` must batch the aged-tombstone drop
+   into multiple bounded delete calls instead of one unbounded call -- see
+   ``test_aged_tombstone_drop_is_batched``.
 
-3. **No migrate-finalize compaction.** ``migrate_sqlite_to_lilli``
+3. **Migrate finalize is verbatim, no compaction.** ``migrate_sqlite_to_lilli``
    (``iai_mcp/migrate/_to_lilli.py``) copies EVERY row verbatim, including
-   rows already past their TTL in the source -- there is no compaction pass
-   at finalize, so a fresh migrate imports the full tombstone bloat rather
-   than starting clean. RED: this module migrates a source store where a
-   fraction of rows are tombstoned well past TTL and asserts the migrated
-   destination's physical row count is STRICTLY LESS than the source's (a
-   compaction pass ran, dropping the aged rows) -- this assertion FAILS on
-   HEAD (dst equals src; no compaction runs) -- see
-   ``test_migrate_finalize_imports_full_tombstone_bloat``.
+   rows already past their TTL in the source -- a fresh migrate never
+   compacts. Aged tombstones present immediately after migrate are cleaned
+   up by the next nightly ``step_compact_hippo`` cycle instead -- see
+   ``test_migrate_finalize_is_verbatim_no_compaction``.
 
-Correctness pin (must hold before AND after the C fix): live records survive
-compaction untouched; only tombstoned-and-aged rows are removed -- see
+Correctness pin: live records survive compaction untouched; only
+tombstoned-and-aged rows are removed -- see
 ``test_compaction_removes_only_aged_tombstoned_rows``.
 
 Both drivers where meaningful: the compaction step operates on the lilli
@@ -339,32 +330,28 @@ def test_aged_tombstone_drop_is_batched(
             f"expected the aged-tombstone drop to issue MULTIPLE bounded "
             f"DELETE batches for a {n_aged}-row aged set; got "
             f"{len(drop_calls)} delete call(s) matching the drop predicate "
-            f"({drop_calls}) -- HEAD issues exactly one unbounded "
-            f"tbl.delete(drop_where) covering the entire aged set, risking a "
-            f"B-tree pager rebalance storm on a large tombstoned set. "
-            f"Expected RED state on HEAD; the C fix (179-03/04) must batch "
-            f"this delete into bounded chunks."
+            f"({drop_calls}) -- one unbounded tbl.delete(drop_where) "
+            f"covering the entire aged set risks a B-tree pager rebalance "
+            f"storm on a large tombstoned set; the aged-tombstone drop must "
+            f"be batched into bounded chunks to avoid it."
         )
     finally:
         store.close()
 
 
 # ---------------------------------------------------------------------------
-# Gap 3 -- migrate finalize does not compact: a fresh migrate imports the
-# full tombstone bloat verbatim, including rows already past TTL.
+# Migrate finalize is verbatim: a fresh migrate imports the full tombstone
+# bloat as-is, including rows already past TTL. Compaction is the nightly
+# sleep step's job, not migrate's.
 # ---------------------------------------------------------------------------
 
 
-def test_migrate_finalize_imports_full_tombstone_bloat(
+def test_migrate_finalize_is_verbatim_no_compaction(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh migrate must not import tombstoned rows already past their TTL
-    verbatim -- a compaction pass at finalize should drop them so the fresh
-    store starts clean rather than importing stale bloat.
-
-    RED on HEAD: ``migrate_sqlite_to_lilli`` copies every row verbatim with
-    no compaction step; the migrated destination's physical row count still
-    equals the source's full row count (live + aged-tombstoned + grace).
+    """A fresh migrate copies every row verbatim, including tombstoned rows
+    already past their TTL -- no compaction pass runs at finalize. Aged
+    tombstones are cleaned up by the next nightly compaction cycle instead.
     """
     monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
     monkeypatch.setenv("IAI_MCP_ERASURE_TOMBSTONE_TTL_SEC", "60")
@@ -396,10 +383,8 @@ def test_migrate_finalize_imports_full_tombstone_bloat(
 
     report = migrate_sqlite_to_lilli(src_db_path, dst_root, batch=20)
     assert report.rows_copied.get("records") == src_physical, (
-        "the migrator's own verbatim-copy contract: every row (live + "
-        "tombstoned, any age) is copied as-is -- this is not the bug, it is "
-        "the CURRENT design that the compaction-at-finalize fix must run "
-        "AFTER"
+        "verbatim-copy contract: every row (live + tombstoned, any age) is "
+        "copied as-is"
     )
 
     monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
@@ -415,27 +400,125 @@ def test_migrate_finalize_imports_full_tombstone_bloat(
     finally:
         dst.close()
 
-    # THE RED MARKER: a compaction pass must run at migrate finalize so the
-    # aged-past-TTL tombstoned rows are dropped rather than imported
-    # verbatim -- dst_physical must be strictly LESS than src_physical (the
-    # aged rows gone). migrate_sqlite_to_lilli runs a compaction pass at
-    # finalize; without it the full tombstone bloat, aged rows included,
-    # would be imported verbatim and dst_physical == src_physical.
-    assert dst_physical < src_physical, (
-        f"expected a compaction pass to run at migrate finalize, dropping "
-        f"the {n_aged} aged-past-TTL tombstoned rows so dst_physical < "
-        f"src_physical; got src_physical={src_physical} "
+    # No compaction runs at migrate finalize: the migrated destination's
+    # physical row count equals the source's full row count (live +
+    # aged-tombstoned + grace), aged rows included.
+    assert dst_physical == src_physical, (
+        f"expected a verbatim copy (no finalize compaction), so "
+        f"dst_physical == src_physical; got src_physical={src_physical} "
         f"({n_live} live + {n_aged} aged-past-TTL + {n_grace} grace-window), "
-        f"dst_physical={dst_physical} (equal -- the full tombstone bloat "
-        f"was imported verbatim, no finalize compaction ran). Expected RED "
-        f"state on HEAD; the C fix (179-03/04) must add a compaction pass "
-        f"at migrate finalize."
+        f"dst_physical={dst_physical}"
     )
-    assert dst_physical >= n_live + n_grace, (
-        "sanity: the migrated store must at minimum retain every live and "
-        "grace-window row (these must never be silently dropped by any "
-        "future finalize-compaction change)"
+
+
+# ---------------------------------------------------------------------------
+# Regression guard -- a source store with aged tombstones must pass verify
+# GREEN after migrate, and a pinned+tombstoned-aged row must survive the
+# next nightly compaction while the unpinned aged rows are dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_verify_green_with_aged_tombstones(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verify_store_equality is GREEN after migrating a source store that
+    holds tombstones older than the retention window; the migrated
+    destination retains those tombstones verbatim until the next nightly
+    compaction, which drops them while a pinned+tombstoned row survives.
+    """
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+    monkeypatch.setenv("IAI_MCP_ERASURE_TOMBSTONE_TTL_SEC", "60")
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    src_store = MemoryStore(path=src_root)
+    n_live, n_aged, n_grace = 10, 5, 3
+    ttl_sec = 60
+    aged_past_ttl_sec = 3600
+    ids = _seed_store(
+        src_store,
+        n_live=n_live,
+        n_tombstoned_aged=n_aged,
+        n_tombstoned_grace=n_grace,
+        now=now,
+        aged_past_ttl_sec=aged_past_ttl_sec,
+        ttl_sec=ttl_sec,
     )
+
+    rng = np.random.default_rng(13)
+    pinned_rec = _make_record(_unit_vec(rng), created_at=now)
+    src_store.insert(pinned_rec)
+    flush_record_buffer(src_store)
+    aged_ts = now - timedelta(seconds=ttl_sec + aged_past_ttl_sec)
+    aged_str = aged_ts.strftime("%Y-%m-%d %H:%M:%S")
+    src_tbl = src_store.db.open_table(RECORDS_TABLE)
+    src_tbl.update(
+        where=f"id = '{pinned_rec.id}'",
+        values={"tombstoned_at": aged_str, "pinned": True},
+    )
+
+    src_physical = src_tbl.count_rows()
+    assert src_physical == n_live + n_aged + n_grace + 1
+
+    from iai_mcp.crypto import CryptoKey
+
+    key = CryptoKey(store_root=src_root).get_or_create()
+    src_db_path = str(src_root / "hippo" / "brain.sqlite3")
+    src_store.db.close()
+
+    from iai_mcp.migrate import migrate_sqlite_to_lilli, verify_store_equality
+
+    migrate_sqlite_to_lilli(src_db_path, dst_root, batch=20)
+
+    verify_report = verify_store_equality(src_db_path, dst_root, key, src_root=src_root)
+    assert verify_report.ok is True, {
+        name: dim.reason for name, dim in verify_report.dimensions.items()
+    }
+
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    monkeypatch.setenv("IAI_MCP_STORE", str(dst_root))
+    from iai_mcp.hippo import HippoDB
+
+    dst = HippoDB(dst_root)
+    try:
+        with dst._conn_lock:
+            dst_physical = int(
+                dst._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+            )
+    finally:
+        dst.close()
+    assert dst_physical == src_physical, (
+        "aged tombstones (and the pinned+tombstoned row) must be present "
+        "verbatim immediately after migrate"
+    )
+
+    dst_store = MemoryStore(path=dst_root)
+    try:
+        from iai_mcp.lilli.cycle.sleep_pipeline._optimize import step_compact_hippo
+
+        done, _info = step_compact_hippo(_PipelineShim(dst_store, now), None)
+        assert done is True
+
+        tbl = dst_store.db.open_table(RECORDS_TABLE)
+        for rid in ids["aged"]:
+            row = tbl.count_rows(filter=f"id = '{rid}'")
+            assert row == 0, (
+                f"aged-past-TTL tombstoned record {rid} must be dropped by "
+                f"the next nightly compaction after migrate"
+            )
+        pinned_row = tbl.count_rows(
+            filter=f"id = '{pinned_rec.id}' AND tombstoned_at IS NULL",
+        )
+        assert pinned_row == 1, (
+            "the pinned+tombstoned-aged record must survive compaction "
+            "(restored to live, never physically removed)"
+        )
+    finally:
+        dst_store.close()
 
 
 # ---------------------------------------------------------------------------

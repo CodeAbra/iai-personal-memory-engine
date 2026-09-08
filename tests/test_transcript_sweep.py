@@ -141,6 +141,18 @@ def _build_agent_home_tree(
     return claude_dir
 
 
+def _build_direct_device_home_tree(
+    cowork_session_root: Path,
+    *,
+    account: str = "11111111-2222-4333-8444-555555555555",
+    device: str = "66666666-7777-4888-9999-aaaaaaaaaaaa",
+    ditto: str = "local_c7954de1-alice",
+) -> Path:
+    claude_dir = cowork_session_root / account / device / ditto / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    return claude_dir
+
+
 def test_transcript_roots_finds_shared_and_agent_home(tmp_path, monkeypatch):
     import iai_mcp.cli._cowork as cowork_mod
     from iai_mcp.transcript_sweep import _transcript_roots
@@ -159,6 +171,51 @@ def test_transcript_roots_finds_shared_and_agent_home(tmp_path, monkeypatch):
     resolved = {r.resolve() for r in roots}
     assert shared_claude.resolve() in resolved
     assert agent_claude.resolve() in resolved
+
+
+def test_transcript_roots_finds_direct_device_home(tmp_path, monkeypatch):
+    """Regression: Desktop's current layout writes .claude directly under
+    device_dir/<local_uuid>/, with no intermediate agent/ level."""
+    import iai_mcp.cli._cowork as cowork_mod
+    from iai_mcp.transcript_sweep import _transcript_roots
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    cowork_session_root = tmp_path / "cowork-sessions"
+    direct_claude = _build_direct_device_home_tree(cowork_session_root)
+    (direct_claude / "projects" / "-sessions-slug").mkdir(parents=True)
+    monkeypatch.setattr(cowork_mod, "_cowork_session_roots", lambda: [cowork_session_root])
+
+    roots = _transcript_roots()
+    resolved = {r.resolve() for r in roots}
+    assert direct_claude.resolve() in resolved
+
+
+def test_transcript_roots_finds_both_shapes_together(tmp_path, monkeypatch):
+    """Both the legacy agent/ layout and the current direct layout can
+    coexist under the same account/device on a real machine -- both must be
+    discovered together, with no duplicates and no double-capture risk."""
+    import iai_mcp.cli._cowork as cowork_mod
+    from iai_mcp.transcript_sweep import _transcript_roots
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    shared_claude = tmp_path / ".claude"
+    (shared_claude / "projects").mkdir(parents=True)
+
+    cowork_session_root = tmp_path / "cowork-sessions"
+    agent_claude = _build_agent_home_tree(cowork_session_root)
+    direct_claude = _build_direct_device_home_tree(cowork_session_root)
+    monkeypatch.setattr(cowork_mod, "_cowork_session_roots", lambda: [cowork_session_root])
+
+    roots = _transcript_roots()
+    resolved = [r.resolve() for r in roots]
+    assert shared_claude.resolve() in resolved
+    assert agent_claude.resolve() in resolved
+    assert direct_claude.resolve() in resolved
+    assert len(resolved) == len(set(resolved))
 
 
 def test_transcript_roots_env_override_validated(tmp_path, monkeypatch):

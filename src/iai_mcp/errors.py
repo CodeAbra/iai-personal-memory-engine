@@ -31,6 +31,12 @@ class IntegrityError(DatabaseError):
     pass
 
 
+class CanonicalSourceViolation(IntegrityError):
+    """A write attempted to mutate the write-once canonical source: an
+    UPDATE/DELETE on the append-only events table, or a rewrite of
+    literal_surface after its initial write."""
+
+
 class ProgrammingError(DatabaseError):
     pass
 

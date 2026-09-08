@@ -389,3 +389,137 @@ def test_check_f_malformed_socket_reply_degrades_to_warn_not_pass(monkeypatch) -
     assert result.passed is True
 
 
+def test_check_dd_daemon_up_reads_clean_through_socket(tmp_path, monkeypatch) -> None:
+    """A green PASS here can only mean the socket served the read: the
+    direct store open is monkeypatched to raise. Reproduces the fixed
+    shape of the field bug -- pre-fix, this check had no socket path at
+    all and always hit the direct open (which collides with a live
+    daemon's cross-process store lock)."""
+    from iai_mcp.doctor._storage_checks import check_dd_exact_index_coercions
+    from iai_mcp.events import write_event
+    from iai_mcp.store import MemoryStore
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    sock_dir, sock_path = _short_socket_path("dd-clean")
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+
+    store = MemoryStore(tmp_path)
+    srv = None
+    thread = None
+    try:
+        # Unrelated event so the store is non-empty, but no coercion rows.
+        write_event(store, kind="hippo_compacted", data={"phase": "sleep_cycle"})
+
+        srv, thread, ctx = _spawn_socket_server(store, sock_path)
+
+        monkeypatch.setattr("iai_mcp.store.MemoryStore", _refuse_direct_store_open)
+
+        result = check_dd_exact_index_coercions()
+
+        assert result.status == "PASS"
+        assert result.passed is True
+        assert "no non-finite coercions recorded" in result.detail
+    finally:
+        if srv is not None:
+            _stop_socket_server(srv, thread, ctx)
+        store.close()
+        try:
+            if sock_path.exists():
+                sock_path.unlink()
+            sock_dir.rmdir()
+        except OSError:
+            pass
+
+
+def test_check_dd_daemon_up_reads_coercions_through_socket(tmp_path, monkeypatch) -> None:
+    """A green WARN with real cue/row totals here can only mean the socket
+    served the read: the direct store open is monkeypatched to raise."""
+    from iai_mcp.doctor._storage_checks import check_dd_exact_index_coercions
+    from iai_mcp.events import TELEMETRY_EMBED_NONFINITE, write_event
+    from iai_mcp.store import MemoryStore
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    sock_dir, sock_path = _short_socket_path("dd-warn")
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(sock_path))
+
+    store = MemoryStore(tmp_path)
+    srv = None
+    thread = None
+    try:
+        write_event(
+            store,
+            kind=TELEMETRY_EMBED_NONFINITE,
+            data={"action": "coerced", "source": "row", "total": 3},
+            severity="warning",
+        )
+        write_event(
+            store,
+            kind=TELEMETRY_EMBED_NONFINITE,
+            data={"action": "coerced", "source": "cue", "total": 1},
+            severity="warning",
+        )
+
+        srv, thread, ctx = _spawn_socket_server(store, sock_path)
+
+        monkeypatch.setattr("iai_mcp.store.MemoryStore", _refuse_direct_store_open)
+
+        result = check_dd_exact_index_coercions()
+
+        assert result.status == "WARN"
+        assert result.passed is True
+        assert "events query failed" not in result.detail
+        assert "cue=1" in result.detail
+        assert "row=3" in result.detail
+    finally:
+        if srv is not None:
+            _stop_socket_server(srv, thread, ctx)
+        store.close()
+        try:
+            if sock_path.exists():
+                sock_path.unlink()
+            sock_dir.rmdir()
+        except OSError:
+            pass
+
+
+def test_check_dd_malformed_socket_reply_degrades_to_warn_not_pass(monkeypatch) -> None:
+    """A wire-shape-malformed reply (result present, no 'events' key) must
+    never look like a legitimate answer."""
+    from iai_mcp.doctor._storage_checks import check_dd_exact_index_coercions
+
+    def _fake_send(method, params, *, connect_timeout=1.0, read_timeout=5.0):
+        return {"jsonrpc": "2.0", "id": 1, "result": {"error": "not user-visible"}}
+
+    monkeypatch.setenv("IAI_MCP_STORE", "/tmp/iai-rps-does-not-matter")
+    monkeypatch.setattr("iai_mcp.cli._send_jsonrpc_request", _fake_send)
+    monkeypatch.setattr(
+        "iai_mcp.doctor._storage_checks._store_file_present", lambda: True,
+    )
+
+    result = check_dd_exact_index_coercions()
+
+    assert result.status == "WARN"
+    assert result.passed is True
+
+
+def test_check_dd_no_daemon_falls_back_to_direct_open(tmp_path, monkeypatch) -> None:
+    """No daemon socket at all: the direct-open fallback (today's only
+    path, pre-fix) must still work post-fix -- this is the control that
+    proves the fallback branch wasn't broken by adding the socket-first
+    branch in front of it."""
+    from iai_mcp.doctor._storage_checks import check_dd_exact_index_coercions
+    from iai_mcp.store import MemoryStore
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(tmp_path / "no-daemon.sock"))
+
+    store = MemoryStore(tmp_path)
+    store.close()
+
+    result = check_dd_exact_index_coercions()
+
+    assert result.status == "PASS"
+    assert result.passed is True
+    assert "no non-finite coercions recorded" in result.detail
+
+

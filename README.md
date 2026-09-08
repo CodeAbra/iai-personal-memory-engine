@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <b>Captures conversations verbatim, recalls relevant context across sessions,<br>
-  and keeps both old and current wording retrievable when facts change.</b>
+  <b>Keeps every conversation word-for-word and gives your AI agent the right<br>
+  context on every turn — including the old wording when a fact changes.</b>
 </p>
 
 <p align="center">
@@ -41,24 +41,25 @@
 
 ## What it is
 
-iai-memory gives the coding assistant you already use a persistent memory on your
-machine. With ambient hooks enabled, it records both sides of a conversation,
-keeps the captured wording, and supplies a bounded slice of relevant history
-when a session starts or advances. You do not maintain a memory file or keep
-saying “remember this.”
+Your AI agent forgets everything the moment you close the session. iai-memory
+fixes that, on your own machine. Switch the hooks on and it records both sides of
+every conversation word-for-word, then feeds the agent the part of your history
+that matters on every message — not just when a session starts. No memory file to
+maintain, no “remember this.”
 
-Corrections do not rewrite history. A changed fact becomes a new record linked
-to the superseded one, so both the current statement and the earlier wording
-remain queryable. Recall can return contradictory or superseded records beside
-matching ones instead of letting an obsolete fact pass as current.
+When a fact changes, the old one isn't overwritten. The new version is stored and
+linked back to what it replaced, so you can still pull up both. When something
+contradicts itself, recall shows you the conflict instead of quietly handing over
+a stale answer as if it were true.
 
-This is a **personal engine for an assistant you already use**, not a
-multi-tenant memory API for an application. Episodic capture is write-once and
-verbatim; storage, embeddings, retrieval, graph operations, and the dashboard
-run locally. No external vector or graph database is required.
+It's memory built around you and one agent — not a memory API for a multi-tenant
+app, and not a wrapper around someone else's database. What you say is stored
+once, verbatim, and never rewritten. The store, the search, the graph, the
+dashboard: all of it runs on your machine.
 
-**The memory style is autistic by design:** verbatim over paraphrase, precise
-cues, sustained focus, and rare events kept rare. [Why the name](#about-the-name).
+The memory style is autistic by design. It keeps the literal wording instead of
+smoothing it into a paraphrase, holds onto precise cues, and leaves rare things
+rare instead of averaging them away. [Why the name](#about-the-name).
 
 ---
 
@@ -273,7 +274,7 @@ store introspection.
 Health and updates:
 
 ```bash
-iai-mcp doctor          # 36 checks
+iai-mcp doctor          # 38 checks
 iai-mcp daemon status
 iai-mcp self-update
 ```

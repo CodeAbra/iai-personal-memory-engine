@@ -5,6 +5,7 @@ L0/L1/L2 floor.
 """
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -281,3 +282,93 @@ def test_procedural_chunk_never_grows_session_start_budget(tmp_path, monkeypatch
         f"sensitivity mutant failed to move total_cached_tokens: "
         f"baseline={baseline_tokens}, sensitivity={sensitivity_payload.total_cached_tokens}"
     )
+
+
+def test_cmd_session_start_healthy_marker_stays_within_budget(tmp_path, monkeypatch, capsys):
+    """Drives the real cmd_session_start CLI entry point (not just the
+    composed payload) on a seeded non-empty store, proving the HEALTHY
+    availability marker rides the served output without breaching the
+    3000-token session-start budget.
+    """
+    from iai_mcp import cli as cli_mod
+    from iai_mcp.core import dispatch
+
+    store = MemoryStore(path=tmp_path)
+    _seed_l0_identity(store)
+    _seed_alice_pinned(store, n=8)
+
+    def _stub(method, params, **_kw):
+        return {"jsonrpc": "2.0", "id": 1, "result": dispatch(store, method, params)}
+
+    monkeypatch.setattr(cli_mod, "_send_jsonrpc_request", _stub)
+
+    rc = cli_mod.cmd_session_start(argparse.Namespace(session_id="uat-budget-cli"))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert out != "", "seeded store must produce a non-empty payload -- proves the driven branch is non-vacuous"
+    assert "HEALTHY" in out
+    assert _approx_tokens(out) <= 3000
+
+
+def test_source_watermark_line_stays_within_token_budget(tmp_path, monkeypatch):
+    """The leading source-watermark line every rendered pack now carries
+    must not push a real standard-branch render over the 3000-token ceiling.
+    """
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"identity": {"name": "alice", "languages": "en", "role": "developer"}})
+    )
+    monkeypatch.setattr("iai_mcp.capture.read_pending_live_events", lambda *a, **k: [])
+
+    store = MemoryStore(path=tmp_path / "store")
+    _seed_l0_identity(store)
+    seeded_ids = _seed_alice_pinned(store, n=8)
+
+    assignment = _assignment_with_members(seeded_ids[:3])
+    rich_club = seeded_ids[3:6]
+
+    from iai_mcp.profile import default_state
+    profile_state = {**default_state(), "wake_depth": "standard"}
+
+    payload = _compose_session_start_payload(
+        store, assignment, rich_club, session_id="uat-watermark-budget",
+        profile_state=profile_state,
+    )
+    assert payload.source_watermark, (
+        "a store with real inserts must produce a non-empty source_watermark"
+    )
+
+    served = format_payload_as_markdown(payload)
+    assert served.startswith("<!-- iai-mcp:source_watermark="), (
+        f"watermark line must lead the rendered pack. served[:80]={served[:80]!r}"
+    )
+    assert _approx_tokens(served) <= 3000, (
+        f"served_tokens={_approx_tokens(served)} out of budget with watermark line"
+    )
+
+
+def test_cmd_session_start_healthy_marker_survives_hook_char_cap_boundary(monkeypatch, capsys):
+    """A payload sized just under the pre-existing 10000-char hook cap must
+    not push the HEALTHY marker (appended after the payload) over the cap --
+    the marker must always survive truncation, never be silently dropped.
+    """
+    from iai_mcp import cli as cli_mod
+    from iai_mcp.cli._capture import _AVAILABILITY_MARKER_HEALTHY
+
+    marker_suffix_len = len(f"\n\n{_AVAILABILITY_MARKER_HEALTHY}")
+    # Sized so payload alone stays under the 10000-char cap, but
+    # payload + marker crosses it -- exactly the boundary the pre-fix
+    # code silently dropped the marker on.
+    payload = "x" * (10000 - marker_suffix_len + 5)
+    assert len(payload) < 10000
+    assert len(payload) + marker_suffix_len > 10000
+    monkeypatch.setattr("iai_mcp.session.format_payload_as_markdown", lambda _result: payload)
+    monkeypatch.setattr(cli_mod, "_send_jsonrpc_request", lambda *a, **k: {"result": {}})
+
+    rc = cli_mod.cmd_session_start(argparse.Namespace(session_id="uat-boundary"))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "HEALTHY" in out
+    assert len(out) <= 10000

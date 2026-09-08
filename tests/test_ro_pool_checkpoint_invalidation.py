@@ -101,7 +101,7 @@ def _force_wal_checkpoint(store: MemoryStore) -> None:
         store.db._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
-def _reinforce_style_update(store: MemoryStore, rid: str) -> None:
+def _reinforce_style_update(store: MemoryStore, rid: str) -> str:
     """An in-place UPDATE of an EXISTING row -- mirrors what reinforce_record /
     boost_edges actually do (rewrite an already-resident page), as opposed to
     an INSERT (which only appends new pages beyond the header's cached
@@ -110,13 +110,20 @@ def _reinforce_style_update(store: MemoryStore, rid: str) -> None:
     generations; a page number beyond the RO snapshot's cached db_size is
     never walked at all (the header page pins db_size at open), so only an
     in-place rewrite of an EXISTING, already-checkpointed row can trigger it.
+
+    literal_surface is write-once through the canonical-source guard on this
+    connection -- the submitted value must be ciphertext-shaped (the same
+    legitimate ciphertext-swap every real key-rotation/redaction call
+    submits) to pass. Returns the written value for read-back assertion.
     """
+    marker = f"iai:enc:v1:reinforced-{uuid.uuid4()}"
     with store.db._conn_lock:
         store.db._conn.execute(
             "UPDATE records SET literal_surface = ? WHERE id = ?",
-            (f"reinforced-{uuid.uuid4()}", rid),
+            (marker, rid),
         )
         store.db._conn.commit()
+    return marker
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +154,7 @@ def test_borrow_self_heals_after_checkpoint_invalidation(tmp_path: Path) -> None
     # A reinforce/boost-STYLE in-place UPDATE (never calls mark_ro_pool_stale)
     # followed by a real WAL checkpoint genuinely invalidates the idle slot's
     # snapshot -- reproduces the exact gap.
-    _reinforce_style_update(store, rid)
+    written = _reinforce_style_update(store, rid)
     _force_wal_checkpoint(store)
 
     gen_before = pool._current_generation()
@@ -160,7 +167,7 @@ def test_borrow_self_heals_after_checkpoint_invalidation(tmp_path: Path) -> None
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
         ).fetchone()
     assert row is not None
-    assert row[0] is not None and row[0].startswith("reinforced-"), (
+    assert row[0] == written, (
         "the self-healed slot must serve the POST-checkpoint value, not a "
         "stale pre-checkpoint snapshot"
     )
@@ -175,7 +182,7 @@ def test_borrow_self_heals_after_checkpoint_invalidation(tmp_path: Path) -> None
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
         ).fetchone()
     assert row2 is not None
-    assert row2[0] is not None and row2[0].startswith("reinforced-")
+    assert row2[0] == written
 
     # The generation-refresh path (stale-generation branch) is untouched:
     # confirm the checkpoint alone did not bump the pool's own counter (that
@@ -312,7 +319,7 @@ def test_ro_conn_end_to_end_survives_checkpoint_invalidation(tmp_path: Path) -> 
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
         ).fetchone()
 
-    _reinforce_style_update(store, rid)
+    written = _reinforce_style_update(store, rid)
     _force_wal_checkpoint(store)
 
     # Two consecutive dispatches through the exact ro_conn() contextmanager
@@ -322,14 +329,14 @@ def test_ro_conn_end_to_end_survives_checkpoint_invalidation(tmp_path: Path) -> 
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
         ).fetchone()
     assert row is not None
-    assert row[0] is not None and row[0].startswith("reinforced-")
+    assert row[0] == written
 
     with store.db.ro_conn() as conn:
         row2 = conn.execute(
             "SELECT literal_surface FROM records WHERE id = ?", (rid,)
         ).fetchone()
     assert row2 is not None
-    assert row2[0] is not None and row2[0].startswith("reinforced-")
+    assert row2[0] == written
 
     store.close()
 
