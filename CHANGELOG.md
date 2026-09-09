@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-09-08
+
+### Fixed
+- The transcript sweeper no longer errors when two sweeps run concurrently on
+  the same session. `_write_sweep_state` now writes to a unique per-process
+  temp file, so running `transcript-sweep run` back to back no longer races on
+  a shared temp path and raises a spurious `FileNotFoundError` (surfaced as
+  `files_failed`). No data was lost — content is staged before the state write —
+  but the errors were alarming on a first run. (#165)
+
 ## [3.2.0] - 2026-09-08
 
 ### Added

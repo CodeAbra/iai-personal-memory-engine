@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -204,15 +205,23 @@ def _write_sweep_state(session_id: str, state: "_SweepState") -> None:
     state_dir = capture_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
     path = _sweep_state_path(session_id)
-    tmp_path = path.with_name(path.name + ".tmp")
+    # Unique per writer: two concurrent sweeps on the same session id must
+    # never share a tmp name, or the second os.replace loses the race and
+    # raises FileNotFoundError on the first one's already-consumed tmp file.
+    # Digits only (no dots/hex letters) so the name still matches the
+    # stale-tmp GC regex `\.tmp\d*$` in capture.py.
+    tmp_path = path.with_name(f"{path.name}.tmp{os.getpid()}{secrets.randbelow(1 << 64)}")
     payload = {
         "mtime_ns": state.mtime_ns,
         "size": state.size,
         "lines_swept": state.lines_swept,
         "pending_tools": list(state.pending_tools),
     }
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _should_sweep(path: Path, prior: "_SweepState | None", *, now: float) -> bool:

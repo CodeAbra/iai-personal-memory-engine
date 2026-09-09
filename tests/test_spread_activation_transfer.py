@@ -179,12 +179,12 @@ class TestTransferTerm:
         self, linked_setup, monkeypatch
     ):
         store, graph, assignment, *_ = linked_setup
+        monkeypatch.setattr("iai_mcp.pipeline._age_penalty", lambda created_at: 0.0)
         base = _recall(store, graph, assignment)
         monkeypatch.setenv("IAI_MCP_W_SPREAD_ACT", "0")
         off = _recall(store, graph, assignment)
         assert [h.record_id for h in base.hits] == [h.record_id for h in off.hits]
-        # The age penalty ticks with wall-clock between the two calls, so
-        # scores match only approximately.
+        # Recency term frozen so both recall calls compare at the same instant.
         for hb, ho in zip(base.hits, off.hits):
             assert ho.score == pytest.approx(hb.score, abs=1e-4)
 
@@ -192,6 +192,7 @@ class TestTransferTerm:
         self, linked_setup, monkeypatch
     ):
         store, graph, assignment, seed, linked, off = linked_setup
+        monkeypatch.setattr("iai_mcp.pipeline._age_penalty", lambda created_at: 0.0)
         base = _recall(store, graph, assignment)
         monkeypatch.setenv("IAI_MCP_W_SPREAD_ACT", "0.3")
         boosted = _recall(store, graph, assignment)
@@ -199,8 +200,7 @@ class TestTransferTerm:
         base_linked = _score_of(base, linked.id)
         boosted_linked = _score_of(boosted, linked.id)
         assert base_linked is not None and boosted_linked is not None
-        # Seed cosine 1.0, one hop: transfer = 0.3 * 1.0 * 0.6. The age
-        # penalty drifts a hair between calls, hence the loose tolerance.
+        # Seed cosine 1.0, one hop: transfer = 0.3 * 1.0 * 0.6.
         assert boosted_linked - base_linked == pytest.approx(0.18, abs=1e-4)
 
         for rid in (seed.id, off.id):

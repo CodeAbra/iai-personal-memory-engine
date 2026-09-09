@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import time
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -636,3 +637,62 @@ def test_sweep_state_suffix_excluded_from_time_based_gc():
     end_idx = source.index(")", idx)
     tuple_block = source[idx:end_idx]
     assert ".transcript-sweep" not in tuple_block
+
+
+def test_write_sweep_state_concurrent_writers_same_session_do_not_race(iai_home, monkeypatch):
+    import os
+    import re
+    import iai_mcp.transcript_sweep as mod
+
+    session_id = "concurrent-writer-session"
+    real_replace = os.replace
+    barrier = threading.Barrier(2)
+    tmp_names: "list[str]" = []
+    tmp_names_lock = threading.Lock()
+
+    def barrier_replace(src, dst):
+        # Both writers must have finished their own tmp-file write before
+        # either is allowed to replace -- this forces the exact interleaving
+        # a real race requires, deterministically, instead of hoping for it.
+        with tmp_names_lock:
+            tmp_names.append(Path(src).name)
+        barrier.wait(timeout=5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(mod.os, "replace", barrier_replace)
+
+    errors: "list[BaseException]" = []
+    errors_lock = threading.Lock()
+
+    def writer(lines_swept: int) -> None:
+        try:
+            mod._write_sweep_state(
+                session_id,
+                mod._SweepState(mtime_ns=lines_swept, size=lines_swept, lines_swept=lines_swept),
+            )
+        except BaseException as exc:  # noqa: BLE001 -- collected and asserted below
+            with errors_lock:
+                errors.append(exc)
+
+    t1 = threading.Thread(target=writer, args=(1,))
+    t2 = threading.Thread(target=writer, args=(2,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert not t1.is_alive() and not t2.is_alive(), "a writer thread never finished"
+    assert errors == [], f"concurrent writers on the same session id raised: {errors!r}"
+
+    state_path = mod._sweep_state_path(session_id)
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    assert set(raw) == {"mtime_ns", "size", "lines_swept", "pending_tools"}
+    assert raw["lines_swept"] in (1, 2)
+
+    # Regression guard: the stale-tmp GC in capture.py reaps orphans by
+    # matching `\.tmp\d*$` on the tmp basename. A tmp name that drifts from
+    # this shape (e.g. dots or hex letters) silently escapes that GC.
+    assert len(tmp_names) == 2
+    gc_pattern = re.compile(r"\.tmp\d*$")
+    for name in tmp_names:
+        assert gc_pattern.search(name), f"tmp name {name!r} would escape the stale-tmp GC"
