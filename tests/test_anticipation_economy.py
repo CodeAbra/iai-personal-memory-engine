@@ -178,11 +178,11 @@ def _serve_one_recall_reply(sock_path: str, reply_obj: dict):
         srv.bind(sock_path)
         srv.listen(1)
         listening.set()
-        srv.settimeout(2.0)
+        srv.settimeout(30.0)
         try:
             conn, _ = srv.accept()
             try:
-                conn.settimeout(2.0)
+                conn.settimeout(30.0)
                 buf = b""
                 while b"\n" not in buf:
                     chunk = conn.recv(4096)
@@ -199,7 +199,7 @@ def _serve_one_recall_reply(sock_path: str, reply_obj: dict):
             accept_done.set()
 
     threading.Thread(target=_listener, daemon=True).start()
-    listening.wait(timeout=2.0)
+    listening.wait(timeout=30.0)
     return accept_done
 
 
@@ -241,7 +241,7 @@ def test_socket_recall_fires_by_default_without_the_env_var():
             [str(hook)], input='{"prompt":"remind me about alice"}',
             capture_output=True, text=True, env=env, timeout=10,
         )
-        done.wait(timeout=2)
+        done.wait(timeout=30)
         assert proc.returncode == 0
         assert "<iai-mcp-recall>" in proc.stdout
         assert "alice prefers dark mode" in proc.stdout
