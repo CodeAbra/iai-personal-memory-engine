@@ -444,7 +444,7 @@ impl Connection {
         // `open_read_only` (both route through `from_store`), so the daemon-down
         // RO recall reader loads-not-rebuilds for free. The id-index rides the
         // same gate, so a warm boot serves `WHERE id = ?` with no build scan.
-        let (mut col_caches, mut id_caches, ordered_caches) =
+        let (mut col_caches, mut id_caches, mut ordered_caches) =
             load_col_indexes(&store, &meta, &catalog, &root_map);
         // A read-write connection maintains its indexes per committed write, so
         // it must own private postings: materialize the copy-on-write clone HERE,
@@ -456,6 +456,9 @@ impl Connection {
                 idx.unshare();
             }
             for idx in id_caches.values_mut() {
+                idx.unshare();
+            }
+            for idx in ordered_caches.values_mut() {
                 idx.unshare();
             }
         }
@@ -521,19 +524,40 @@ impl Connection {
                 .get(&table)
                 .map(|i| i.is_built())
                 .unwrap_or(false);
+            let ordered_built = self
+                .ordered_caches
+                .get(&table)
+                .map(|o| o.is_built())
+                .unwrap_or(false);
             let count_known = self.bare_count_cache.contains_key(&table);
-            if !col_built || !id_built || !count_known {
+            if !col_built || !id_built || !ordered_built || !count_known {
                 let Ok(generation) = self.meta.col_generation(&self.store, &table) else {
                     continue;
                 };
                 let key = (self.store.path().to_path_buf(), table.clone(), generation);
                 if let Ok(guard) = cache.lock() {
-                    if let Some((cidx, iidx, row_count)) = guard.get(&key) {
+                    if let Some((cidx, iidx, row_count, oidx)) = guard.get(&key) {
                         if !col_built && same_column_set(&cols, cidx.columns()) {
                             self.col_caches.insert(table.clone(), cidx.clone());
                         }
                         if !id_built && iidx.is_built() {
                             self.id_caches.insert(table.clone(), iidx.clone());
+                        }
+                        // Ordered adoption mirrors the col-side schema-identity
+                        // gate: an index built for a column no longer declared
+                        // as a non-partial index on this table must never be
+                        // adopted under the same generation key.
+                        if !ordered_built {
+                            if let Some(oidx) = oidx {
+                                let still_declared = self
+                                    .catalog
+                                    .indexed_columns(&table)
+                                    .into_iter()
+                                    .any(|(col, is_partial)| !is_partial && col == oidx.column());
+                                if oidx.is_built() && still_declared {
+                                    self.ordered_caches.insert(table.clone(), oidx.clone());
+                                }
+                            }
                         }
                         if let Some(count) = row_count {
                             // Structural pairing invariant, not a live-race
@@ -657,6 +681,9 @@ impl Connection {
             .cloned()
             .collect();
         for table in demanded {
+            // Warm republish bypasses the throttle: a built index stays
+            // current-to-generation via execute_insert/execute_update, so the
+            // throttle need only guard a cold ensure_built scan.
             // Publication is gated on COMMIT density, not on time since the
             // last publish: a reader adopts only at its exact generation, so
             // under a steady sparse write stream a last-publish throttle
@@ -666,7 +693,8 @@ impl Connection {
             // genuine burst (per-row bulk DML, commits within the interval)
             // suppresses, and its final state drains on the writer's next
             // statement.
-            if ro_index_commit_spacing_allows(self.store.path(), &table) {
+            let warm_republish = !self.read_model_needs_build(&table);
+            if warm_republish || ro_index_commit_spacing_allows(self.store.path(), &table) {
                 if self.ensure_read_model_built(&table).is_err() {
                     continue;
                 }
@@ -676,6 +704,47 @@ impl Connection {
                 record_publish_pending(self.store.path(), &table);
             }
         }
+    }
+
+    /// True when a subsequent `ensure_read_model_built(table)` call would
+    /// need to perform at least one corpus scan, rather than being a warm
+    /// no-op on components already built and incrementally maintained by the
+    /// per-row insert/update path. Checks exactly the components that call
+    /// builds: col (always demanded here), id (only when the table declares
+    /// an `id` column), and ordered (only when reader traffic has demanded a
+    /// column via `ro_ordered_demand_column`).
+    fn read_model_needs_build(&self, table: &str) -> bool {
+        let col_built = self
+            .col_caches
+            .get(table)
+            .map(|c| c.is_built())
+            .unwrap_or(false);
+        if !col_built {
+            return true;
+        }
+        if let Ok(col_names) = self.catalog.column_names(table) {
+            if col_names.iter().any(|c| c == "id") {
+                let id_built = self
+                    .id_caches
+                    .get(table)
+                    .map(|i| i.is_built())
+                    .unwrap_or(false);
+                if !id_built {
+                    return true;
+                }
+            }
+        }
+        if let Some(demanded_col) = ro_ordered_demand_column(self.store.path(), table) {
+            let ordered_built = self
+                .ordered_caches
+                .get(table)
+                .map(|o| o.column() == demanded_col && o.is_built())
+                .unwrap_or(false);
+            if !ordered_built {
+                return true;
+            }
+        }
+        false
     }
 
     /// Build the writer's col/id read models for `table` if not yet built
@@ -704,6 +773,30 @@ impl Connection {
         if col_names.iter().any(|c| c == "id") {
             let id_entry = self.id_caches.entry(table.to_string()).or_default();
             id_entry.ensure_built(&tree, &col_names)?;
+        }
+        // Build/rebuild the ORDERED component for whichever column real
+        // reader traffic actually demanded (`record_ro_ordered_demand`) — a
+        // demand-driven equivalent of `record_ro_index_demand`'s table-level
+        // signal, never a speculative guess (which would violate "a
+        // no-ORDER-BY query creates no ordered index at all"). Without this,
+        // the writer never has anything to publish for the ordered slot
+        // unless a query happened to run on the WRITER'S OWN connection —
+        // demand-driven warmup makes it build the SAME column real recall
+        // traffic queries, mirroring col/id's table-level warmup above.
+        if let Some(demanded_col) = ro_ordered_demand_column(self.store.path(), table) {
+            let entry = self
+                .ordered_caches
+                .entry(table.to_string())
+                .or_insert_with(|| OrderedColIndex::new(demanded_col.clone()));
+            if entry.column() != demanded_col {
+                *entry = OrderedColIndex::new(demanded_col);
+            }
+            entry.ensure_built(&tree, &col_names)?;
+        } else if let Some(ordered_entry) = self.ordered_caches.get_mut(table) {
+            // No recorded demand (e.g. TTL lapsed) but this connection
+            // already has a built entry from an earlier query — keep it
+            // built rather than let it silently go stale.
+            ordered_entry.ensure_built(&tree, &col_names)?;
         }
         Ok(())
     }
@@ -780,10 +873,24 @@ impl Connection {
     }
 
     fn maybe_publish_built_indexes(&self, table: &str) {
-        let Some(cidx) = self.col_caches.get(table) else {
-            return;
-        };
-        if !cidx.is_built() {
+        let cidx_built = self
+            .col_caches
+            .get(table)
+            .map(|c| c.is_built())
+            .unwrap_or(false);
+        let iidx_built = self
+            .id_caches
+            .get(table)
+            .map(|i| i.is_built())
+            .unwrap_or(false);
+        let oidx_built = self
+            .ordered_caches
+            .get(table)
+            .map(|o| o.is_built())
+            .unwrap_or(false);
+        // Component-wise: an id-only or ordered-only build must still publish
+        // its own component, never gated on col also being built.
+        if !cidx_built && !iidx_built && !oidx_built {
             return;
         }
         let Ok(generation) = self.meta.col_generation(&self.store, table) else {
@@ -819,24 +926,73 @@ impl Connection {
             table.to_string(),
             generation,
         );
+        // A component this connection did not build publishes as an empty
+        // placeholder (col — `same_column_set` will never match a real
+        // declared column list against an empty one, so it can never be
+        // mistakenly adopted) or a fresh unbuilt default (id) or `None`
+        // (ordered). Merge-or-keep below fills each slot back in from any
+        // existing same-generation entry rather than clobbering a component
+        // that entry already had built.
+        let new_cidx = self
+            .col_caches
+            .get(table)
+            .cloned()
+            .unwrap_or_else(|| ColIndex::new(Vec::new()));
+        let new_iidx = self.id_caches.get(table).cloned().unwrap_or_default();
+        let new_oidx = self.ordered_caches.get(table).cloned();
+
         let cache = built_index_cache();
         if let Ok(mut guard) = cache.lock() {
-            let iidx = self.id_caches.get(table).cloned().unwrap_or_default();
-            // A same-generation entry is replaced only by a MORE complete
-            // pair: a reader's lazy build publishes col-only (no id, no
-            // count), and leaving it untouched would shadow the writer's
-            // full publication at the same generation — adopters then serve
-            // id lookups by scan for the whole generation.
-            if let Some((_, existing_id, existing_count)) = guard.get(&key) {
-                let more_complete = (iidx.is_built() && !existing_id.is_built())
-                    || (row_count.is_some() && existing_count.is_none());
-                if !more_complete {
-                    return;
+            let existing = guard.get(&key).cloned();
+            let (merged_cidx, merged_iidx, merged_count, merged_oidx) = match &existing {
+                Some((ex_cidx, ex_iidx, ex_count, ex_oidx)) => {
+                    // Merge-or-keep: a slot only ever upgrades unbuilt→built —
+                    // a publication lacking a component NEVER clobbers an
+                    // already-built one at the SAME generation.
+                    let m_cidx = if new_cidx.is_built() || !ex_cidx.is_built() {
+                        new_cidx.clone()
+                    } else {
+                        ex_cidx.clone()
+                    };
+                    let m_iidx = if new_iidx.is_built() || !ex_iidx.is_built() {
+                        new_iidx.clone()
+                    } else {
+                        ex_iidx.clone()
+                    };
+                    let m_count = row_count.or(*ex_count);
+                    // Ordered slot holds one column: a differing column at the
+                    // same generation is a real change and must publish (a
+                    // kept mismatch would serve wrong-column results).
+                    let m_oidx = match (&new_oidx, ex_oidx) {
+                        (Some(n), _) if n.is_built() => Some(n.clone()),
+                        (_, Some(e)) if e.is_built() => Some(e.clone()),
+                        (Some(n), _) => Some(n.clone()),
+                        (None, existing_o) => existing_o.clone(),
+                    };
+                    (m_cidx, m_iidx, m_count, m_oidx)
                 }
-            } else if guard.len() >= BUILT_INDEX_CACHE_CAP {
+                None => (new_cidx.clone(), new_iidx.clone(), row_count, new_oidx.clone()),
+            };
+            let unchanged = existing
+                .as_ref()
+                .map(|(ec, ei, ecnt, eo)| {
+                    // Ordered identity includes the COLUMN, not just built-ness —
+                    // a different column publishing at the same generation is a
+                    // real change even when both are "built".
+                    ec.is_built() == merged_cidx.is_built()
+                        && ei.is_built() == merged_iidx.is_built()
+                        && ecnt.is_some() == merged_count.is_some()
+                        && eo.as_ref().map(|o| (o.is_built(), o.column()))
+                            == merged_oidx.as_ref().map(|o| (o.is_built(), o.column()))
+                })
+                .unwrap_or(false);
+            if unchanged {
+                return;
+            }
+            if existing.is_none() && guard.len() >= BUILT_INDEX_CACHE_CAP {
                 guard.clear();
             }
-            guard.insert(key, (cidx.clone(), iidx, row_count));
+            guard.insert(key, (merged_cidx, merged_iidx, merged_count, merged_oidx));
         }
     }
 
@@ -1404,6 +1560,13 @@ impl Connection {
                 };
                 let ordered_col =
                     self.catalog_ordered_index_column(&plan.table, order_col.or(minmax_col));
+                // Record which column real traffic asked for, so writer
+                // warmup (`ensure_read_model_built`) can build/maintain an
+                // ordered index proactively instead of only continuing one
+                // that already happens to exist.
+                if let Some(col) = &ordered_col {
+                    record_ro_ordered_demand(self.store.path(), &plan.table, col);
+                }
                 let id_ref = self.id_caches.entry(plan.table.clone()).or_default();
                 let col_ref = if col_cols.is_empty() {
                     None
@@ -1724,6 +1887,22 @@ impl Connection {
             self.ordered_caches.remove(&table);
             self.bare_count_cache.remove(&table);
             self.filtered_count_cache.retain(|(t, _), _| t != &table);
+            // A col-indexed table's write-generation MUST advance for this
+            // batch (meta.rs's own contract: "an executemany batch MUST
+            // advance the counter") or a reader's `refresh_read_view` sees an
+            // unchanged generation and RETAINS a pre-batch col/id-index cache
+            // that silently omits every row this batch inserted.
+            // `has_col_index` below is gated on
+            // `col_index.is_some()`, not on the index being BUILT, so a
+            // throwaway unbuilt placeholder flips the bump on while
+            // `insert_row` on an unbuilt index stays a documented no-op —
+            // this batch still pays zero incremental-maintenance cost per
+            // row, matching the up-front invalidation above.
+            let mut bump_only_col_index = if catalog_col_index_columns(&self.catalog, &table).is_empty() {
+                None
+            } else {
+                Some(ColIndex::new(Vec::new()))
+            };
             // See the single-row INSERT arm above: the single per-table conflict
             // object, so the map built for row 1's key-set(s) stays valid (and
             // O(1)) for every later row in the same batch.
@@ -1738,7 +1917,7 @@ impl Connection {
                     seq,
                     None,
                     Some(cidx),
-                    None,
+                    bump_only_col_index.as_mut(),
                     None,
                 )?
             };
@@ -2446,13 +2625,14 @@ const BUILT_INDEX_CACHE_CAP: usize = 32;
 /// incrementally-maintained pair matches the committed tree at the
 /// post-commit generation) — never mid-write, never inside a transaction, so
 /// an uncommitted state can never be cached.
+type BuiltIndexEntry = (ColIndex, IdIndex, Option<i64>, Option<OrderedColIndex>);
+
 static BUILT_INDEX_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>>,
+    std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), BuiltIndexEntry>>,
 > = std::sync::OnceLock::new();
 
-fn built_index_cache() -> &'static std::sync::Mutex<
-    HashMap<(std::path::PathBuf, String, i64), (ColIndex, IdIndex, Option<i64>)>,
-> {
+fn built_index_cache(
+) -> &'static std::sync::Mutex<HashMap<(std::path::PathBuf, String, i64), BuiltIndexEntry>> {
     BUILT_INDEX_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -2515,6 +2695,52 @@ fn ro_index_demand_active(path: &std::path::Path, table: &str) -> bool {
         }
     }
     false
+}
+
+/// `(store path, table)` → the ordered column a query most recently resolved
+/// via `catalog_ordered_index_column`, plus when. Mirrors `RO_INDEX_DEMAND`
+/// exactly, but carries the RESOLVED column: the ordered index is per-query
+/// (there is no single fixed "the" ordered column per table the way col/id
+/// index every declared column uniformly — a table can declare several
+/// non-partial single-column indexes, and the wrong pick would shadow the
+/// one a later query needs), so warmup needs to know WHICH column real
+/// traffic actually asked for before it can build one speculatively without
+/// guessing (which would violate "a no-ORDER-BY query creates no ordered
+/// index at all").
+static RO_ORDERED_DEMAND: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(std::path::PathBuf, String), (String, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+fn ro_ordered_demand(
+) -> &'static std::sync::Mutex<HashMap<(std::path::PathBuf, String), (String, std::time::Instant)>>
+{
+    RO_ORDERED_DEMAND.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn record_ro_ordered_demand(path: &std::path::Path, table: &str, column: &str) {
+    if let Ok(mut guard) = ro_ordered_demand().lock() {
+        let key = (path.to_path_buf(), table.to_string());
+        if !guard.contains_key(&key) && guard.len() >= RO_INDEX_DEMAND_CAP {
+            if let Some(oldest) = guard.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(key, (column.to_string(), std::time::Instant::now()));
+    }
+}
+
+/// The most recently demanded ordered column for `table`, or `None` when no
+/// query has asked within the TTL (same window as `ro_index_demand_ttl`).
+fn ro_ordered_demand_column(path: &std::path::Path, table: &str) -> Option<String> {
+    if let Ok(guard) = ro_ordered_demand().lock() {
+        if let Some((col, at)) = guard.get(&(path.to_path_buf(), table.to_string())) {
+            if at.elapsed() < ro_index_demand_ttl() {
+                return Some(col.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Minimum spacing between demand-driven publishes for one table. Every

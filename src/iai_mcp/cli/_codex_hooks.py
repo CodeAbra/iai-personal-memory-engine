@@ -17,12 +17,20 @@ import stat
 from importlib import resources as _res
 from pathlib import Path
 
+from iai_mcp.cli._atomic_write import _atomic_write_text
+
 _HOOK_SCRIPTS = (
     "iai-mcp-session-capture.sh",
     "iai-mcp-turn-capture.sh",
     "iai-mcp-session-recall.sh",
     "iai-mcp-per-turn-recall.sh",
 )
+
+# Deployed alongside the hook scripts, in lockstep, but never wired as an
+# event handler itself -- the per-turn-recall hook sys.path-inserts its own
+# directory and imports this by name; a stale or missing copy silently
+# drops the render step, not the whole accelerator.
+_RECALL_RENDER_HELPER = "_recall_render.py"
 
 _EVENT_WIRING = (
     # (event, marker script, timeout seconds, matcher or None)
@@ -45,22 +53,41 @@ def _codex_paths() -> "tuple[Path, Path]":
     return home / "hooks", home / "hooks.json"
 
 
-def _load_hooks_json(path: Path) -> dict:
+def _load_hooks_json(path: Path) -> "dict | None":
+    """None means the file exists but is unreadable/unparseable — callers
+    must refuse to rewrite it, or foreign entries would be silently lost."""
     if not path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        return None
+    return data if isinstance(data, dict) else None
 
 
-def _entry_has_marker(entry: dict, marker: str) -> bool:
+def _own_commands(hooks_dir: Path) -> "dict[str, str]":
+    return {name: f"bash {hooks_dir / name}" for name in _HOOK_SCRIPTS}
+
+
+def _entry_matches_exact(entry: dict, exact_command: str) -> bool:
     return any(
-        marker in (h.get("command") or "")
+        (h.get("command") or "") == exact_command
         for h in (entry.get("hooks") or [])
         if isinstance(h, dict)
     )
+
+
+def _entry_is_near_miss(entry: dict, own_commands: "dict[str, str]") -> bool:
+    exacts = set(own_commands.values())
+    for h in entry.get("hooks") or []:
+        if not isinstance(h, dict):
+            continue
+        cmd = h.get("command") or ""
+        if cmd in exacts:
+            continue
+        if any(basename in cmd for basename in own_commands):
+            return True
+    return False
 
 
 def install_codex_hooks() -> int:
@@ -79,19 +106,31 @@ def install_codex_hooks() -> int:
         dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         print(f"installed: {dst}")
 
+    render_src = templates / _RECALL_RENDER_HELPER
+    if render_src.exists():
+        render_dst = hooks_dir / _RECALL_RENDER_HELPER
+        render_dst.write_bytes(render_src.read_bytes())
+        print(f"installed: {render_dst}")
+    else:
+        print(f"WARN: recall render helper missing in package data: {render_src}")
+
     data = _load_hooks_json(hooks_json)
+    if data is None:
+        print(f"ERROR: cannot parse {hooks_json} — fix or remove it, then re-run")
+        return 1
     events = data.setdefault("hooks", {})
     changed = False
     for event, marker, timeout, matcher in _EVENT_WIRING:
         entries = events.setdefault(event, [])
-        if any(_entry_has_marker(e, marker) for e in entries if isinstance(e, dict)):
+        exact_command = f"bash {hooks_dir / marker}"
+        if any(_entry_matches_exact(e, exact_command) for e in entries if isinstance(e, dict)):
             print(f"hooks.json already wires {marker} on {event} — no change")
             continue
         entry: dict = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {hooks_dir / marker}",
+                    "command": exact_command,
                     "timeout": timeout,
                 }
             ]
@@ -104,7 +143,7 @@ def install_codex_hooks() -> int:
 
     if changed or not hooks_json.exists():
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
-        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _atomic_write_text(hooks_json, json.dumps(data, indent=2))
 
     print(
         "\nNote: Codex reads hooks.json at session start — restart Codex to "
@@ -117,7 +156,7 @@ def install_codex_hooks() -> int:
 def uninstall_codex_hooks() -> int:
     hooks_dir, hooks_json = _codex_paths()
 
-    for name in _HOOK_SCRIPTS:
+    for name in (*_HOOK_SCRIPTS, _RECALL_RENDER_HELPER):
         dst = hooks_dir / name
         if dst.exists():
             dst.unlink()
@@ -130,28 +169,56 @@ def uninstall_codex_hooks() -> int:
         return 0
 
     data = _load_hooks_json(hooks_json)
+    if data is None:
+        print(f"NOT patched: cannot parse {hooks_json} — remove our entries by hand")
+        return 1
+    own_commands = _own_commands(hooks_dir)
+    own_exacts = set(own_commands.values())
     events = data.get("hooks", {})
     changed = False
+    near_miss_events: "list[str]" = []
     for event in list(events):
         entries = events.get(event, [])
-        kept = [
-            e for e in entries
-            if not (
-                isinstance(e, dict)
-                and any(_entry_has_marker(e, m) for m in _HOOK_SCRIPTS)
-            )
-        ]
-        if len(kept) != len(entries):
+        kept = []
+        for e in entries:
+            if not isinstance(e, dict):
+                kept.append(e)
+                continue
+            if _entry_is_near_miss(e, own_commands):
+                near_miss_events.append(event)
+                kept.append(e)
+                continue
+            hooks = e.get("hooks") or []
+            remaining = [
+                h for h in hooks
+                if not (isinstance(h, dict) and (h.get("command") or "") in own_exacts)
+            ]
+            if len(remaining) == len(hooks):
+                kept.append(e)
+                continue
+            changed = True
+            has_foreign_group_data = bool(set(e) - {"hooks", "matcher"})
+            if remaining or has_foreign_group_data:
+                kept.append({**e, "hooks": remaining})
+        if kept != entries:
             if kept:
                 events[event] = kept
             else:
                 events.pop(event, None)
-            changed = True
             print(f"patched: {hooks_json} ({event} entry removed)")
     if changed:
-        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _atomic_write_text(hooks_json, json.dumps(data, indent=2))
     else:
         print(f"(no hook entry to remove) {hooks_json}")
+
+    if near_miss_events:
+        print(
+            f"NOT removed: {hooks_json} has entries under "
+            f"{sorted(set(near_miss_events))} that mention our hook scripts "
+            "but do not match exactly what this installer writes — remove "
+            "them by hand."
+        )
+        return 1
     return 0
 
 
@@ -170,11 +237,15 @@ def status_codex_hooks() -> int:
         )
 
     data = _load_hooks_json(hooks_json)
+    if data is None:
+        print(f"WARNING: cannot parse {hooks_json}")
+        data = {}
     events = data.get("hooks", {})
     all_wired = True
     for event, marker, _timeout, _matcher in _EVENT_WIRING:
+        exact_command = f"bash {hooks_dir / marker}"
         wired = any(
-            _entry_has_marker(e, marker)
+            _entry_matches_exact(e, exact_command)
             for e in events.get(event, [])
             if isinstance(e, dict)
         )
@@ -182,9 +253,13 @@ def status_codex_hooks() -> int:
         print(f"Codex hooks.json {event} ({marker}): {'WIRED' if wired else 'NOT WIRED'}")
 
     if all_installed and all_wired:
-        print("\nstatus: ACTIVE — Codex hooks installed and wired")
+        print(
+            "\nstatus: REGISTERED — our files and hooks.json entries are in "
+            "place; whether Codex actually runs them is a separate question "
+            "this local check does not answer."
+        )
         return 0
     print(
-        "\nstatus: INACTIVE — run: iai-mcp capture-hooks install --target codex"
+        "\nstatus: NOT REGISTERED — run: iai-mcp capture-hooks install --target codex"
     )
     return 1

@@ -90,6 +90,8 @@ def test_per_turn_hook_names_current_state_not_stale_cache_after_clear(tmp_path,
     # /clear mints a brand-new session id s2 -- no snapshot exists for it yet.
     assert not (root / ".working-tier.s2.cached.md").exists()
 
+    (root / ".session-clear-continuation.s2").write_text("", encoding="utf-8")
+
     out = _run_hook(root, '{"prompt": "hi", "session_id": "s2"}')
 
     assert "NEW phase" in out
@@ -150,6 +152,7 @@ def test_per_turn_hook_still_reconstructs_on_turn_two_after_real_record_captured
 
     # /clear mints a brand-new session id s2 -- turn 1 has no snapshot for it
     # yet, so the eager file alone must reconstruct.
+    (root / ".session-clear-continuation.s2").write_text("", encoding="utf-8")
     out1 = _run_hook(root, '{"prompt": "hi", "session_id": "s2"}')
     assert "NEW phase" in out1
     assert "NEW step" in out1

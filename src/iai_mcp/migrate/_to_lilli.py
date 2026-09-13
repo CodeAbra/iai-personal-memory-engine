@@ -44,6 +44,34 @@ _ALL_TABLES: tuple[str, ...] = (
 _EVENTS_TS_COLUMN = "ts"
 
 
+def normalize_prune_cutoff(value: str) -> str:
+    """Validate and normalize a ``--prune-telemetry-before`` cutoff.
+
+    Reuses the store's canonical UTC-ISO parser (the same one the events
+    read path compares against) so the write-side and compare-side notions
+    of a valid timestamp cannot drift apart, then renders the result back to
+    the stored space-separated shape so a lexicographic ``WHERE ts >= ?``
+    compare against the ``events.ts`` column is apples-to-apples.
+
+    Raises ``ValueError`` naming the accepted shape on anything the parser
+    cannot resolve to a datetime -- including a bare Unix-epoch integer
+    string, which is valid as a number but not as an ISO-8601 datetime. A
+    parse failure must never be silently treated as "keep everything" or
+    "keep nothing".
+    """
+    from iai_mcp.store._store import _normalize_ts_for_compare
+
+    try:
+        canonical = _normalize_ts_for_compare(value)
+    except ValueError as exc:
+        raise ValueError(
+            "--prune-telemetry-before must be an ISO-8601 UTC datetime "
+            "string (e.g. '2026-05-01T09:00:00+00:00') or the stored form "
+            f"(e.g. '2026-05-01 09:00:00.000000+00:00'); got {value!r}"
+        ) from exc
+    return canonical.replace("T", " ")
+
+
 @dataclass
 class MigrateReport:
     """Outcome of a verbatim migration."""
@@ -324,6 +352,9 @@ def migrate_sqlite_to_lilli(
     Returns a MigrateReport with per-table row counts, ``max_vec_label``, elapsed
     seconds, and peak RSS in MiB.
     """
+    if prune_telemetry_before is not None:
+        prune_telemetry_before = normalize_prune_cutoff(prune_telemetry_before)
+
     src_db = Path(src_db).resolve()
     dst_db = _dst_db_path(dst_root).resolve()
 

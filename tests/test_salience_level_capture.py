@@ -16,8 +16,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from iai_mcp.capture import DEDUP_COS_THRESHOLD, capture_turn
+from iai_mcp.salience_classify import classify_salience
 from iai_mcp.store import MemoryStore
-from iai_mcp.types import EMBED_DIM, MemoryRecord
+from iai_mcp.types import EMBED_DIM, SALIENCE_LEVEL_ENUM, MemoryRecord
 
 
 @pytest.fixture(autouse=True)
@@ -266,6 +267,128 @@ def test_near_dup_fold_never_lowers_salience_level(driver, store, monkeypatch):
         f"a lower incoming salience_level must never lower the stored value, "
         f"got {survivor.salience_level!r}"
     )
+
+
+def test_classify_salience_directive_alone_is_notable():
+    result = classify_salience(
+        directive=True, entity_tags=[], epistemic_status="unknown",
+    )
+    assert result == "notable"
+
+
+def test_classify_salience_fact_alone_is_notable():
+    result = classify_salience(
+        directive=False, entity_tags=[], epistemic_status="fact",
+    )
+    assert result == "notable"
+
+
+def test_classify_salience_entity_tags_alone_stays_unflagged():
+    result = classify_salience(
+        directive=False, entity_tags=["alice"], epistemic_status="unknown",
+    )
+    assert result == "unflagged"
+
+
+def test_classify_salience_no_signal_stays_unflagged():
+    result = classify_salience(
+        directive=False, entity_tags=[], epistemic_status="unknown",
+    )
+    assert result == "unflagged"
+
+
+@pytest.mark.parametrize(
+    ("directive", "entity_tags", "epistemic_status"),
+    [
+        (True, ["alice"], "fact"),
+        (True, [], "unknown"),
+        (False, [], "fact"),
+        (False, ["alice"], "unknown"),
+        (False, [], "unknown"),
+    ],
+)
+def test_classify_salience_never_returns_critical(directive, entity_tags, epistemic_status):
+    result = classify_salience(
+        directive=directive, entity_tags=entity_tags, epistemic_status=epistemic_status,
+    )
+    assert result in SALIENCE_LEVEL_ENUM
+    assert result != "critical"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_directive_text_marks_notable(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    result = capture_turn(
+        store=store, cue="c", text="alice's rollout freeze is a standing order",
+        directive=True, session_id="s1", role="user",
+    )
+
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    assert rec.salience_level == "notable"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_fact_text_marks_notable(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    result = capture_turn(
+        store=store, cue="c", text="it turns out the migration is already complete",
+        session_id="s1", role="user",
+    )
+
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    assert rec.epistemic_status == "fact"
+    assert rec.salience_level == "notable"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_entity_only_text_stays_unflagged(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    result = capture_turn(
+        store=store, cue="c", text="alice reviewed the quarterly numbers",
+        session_id="s1", role="user",
+    )
+
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    assert rec.salience_level == "unflagged"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_explicit_critical_not_overridden_by_composite(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    result = capture_turn(
+        store=store, cue="c", text="alice's rollout freeze is a standing order",
+        directive=True, salience_level="critical", session_id="s1", role="user",
+    )
+
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    assert rec.salience_level == "critical"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_explicit_notable_not_overridden_by_composite(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    result = capture_turn(
+        store=store, cue="c", text="alice attended the weekly standup meeting",
+        salience_level="notable", session_id="s1", role="user",
+    )
+
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    assert rec.salience_level == "notable"
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from iai_mcp.graph import MemoryGraph
@@ -49,3 +50,18 @@ def test_rich_club_custom_percent() -> None:
         g.add_edge(nodes[i], nodes[i + 1])
     rc = rich_club_nodes(g, percent=0.5)
     assert len(rc) == 5
+
+
+def test_rich_club_favors_recent_over_stale_at_near_equal_centrality() -> None:
+    g = MemoryGraph()
+    stale = uuid4()
+    fresh = uuid4()
+    other = uuid4()
+    for n in (stale, fresh, other):
+        g.add_node(n, community_id=None, embedding=[0.0] * 384)
+    now = datetime.now(timezone.utc)
+    g.set_node_payload(stale, {"created_at": (now - timedelta(days=15)).isoformat()})
+    g.set_node_payload(fresh, {"created_at": now.isoformat()})
+    centrality = {stale: 0.5, fresh: 0.5, other: 0.1}
+    rc = rich_club_nodes(g, percent=0.5, centrality=centrality)
+    assert rc[:2] == [fresh, stale]

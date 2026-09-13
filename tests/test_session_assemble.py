@@ -92,8 +92,8 @@ def test_minimal_payload_legacy_fields_empty(tmp_path):
         store, _empty_assignment(), [], session_id="abc12345",
         profile_state=state,
     )
-    assert payload.l0 == ""
-    assert payload.l1 == ""
+    assert payload.l0 != "", "minimal wake depth must still render an identity floor"
+    assert payload.l1 != "", "minimal wake depth must still render a bounded critical-facts floor"
     assert payload.l2 == []
     assert payload.rich_club == ""
 
@@ -172,7 +172,7 @@ def test_unknown_wake_depth_falls_back_to_minimal(tmp_path):
         store, _empty_assignment(), [], session_id="s1",
         profile_state=state,
     )
-    assert payload.l0 == ""
+    assert payload.l0 != "", "minimal wake depth must still render an identity floor"
     assert payload.l1 == ""
     assert payload.l2 == []
     assert payload.rich_club == ""

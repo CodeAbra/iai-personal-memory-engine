@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from iai_mcp.community import CommunityAssignment
@@ -173,6 +173,71 @@ def test_standard_payload_and_served_markdown_within_budget(tmp_path, monkeypatc
     assert served_tokens >= observed, (
         f"served markdown ({served_tokens} tok) should be >= the composed "
         f"sub-sum ({observed} tok) once scaffolding headers are added"
+    )
+
+
+def test_rich_club_admission_favors_recently_reinforced_with_warm_cache(tmp_path, monkeypatch):
+    # WARM cache: rich_club is passed straight in, as the compose caller
+    # would with a cached community-graph result -- rich_club_nodes is
+    # never invoked on this path, proving the reorder surfaces at the layer
+    # that actually runs on every real precache compose.
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"identity": {"name": "alice", "languages": "en", "role": "developer"}})
+    )
+    monkeypatch.setattr("iai_mcp.capture.read_pending_live_events", lambda *a, **k: [])
+
+    store = MemoryStore(path=tmp_path / "store")
+    _seed_l0_identity(store)
+    now = datetime.now(timezone.utc)
+
+    def _mk(rid: UUID, text: str, created_at: datetime) -> MemoryRecord:
+        return MemoryRecord(
+            id=rid,
+            tier="semantic",
+            literal_surface=text,
+            aaak_index="",
+            embedding=[0.1] * EMBED_DIM,
+            community_id=None,
+            centrality=0.5,
+            detail_level=5,
+            pinned=False,
+            stability=0.0,
+            difficulty=0.0,
+            last_reviewed=None,
+            never_decay=False,
+            never_merge=False,
+            provenance=[],
+            created_at=created_at,
+            updated_at=created_at,
+            tags=[],
+            language="en",
+        )
+
+    stale_id = uuid4()
+    store.insert(_mk(stale_id, "STALE-CENTRAL: structurally central but stale.", now - timedelta(days=90)))
+    fresh_id = uuid4()
+    store.insert(_mk(fresh_id, "FRESH-REINFORCED: recently reinforced.", now))
+
+    # Order the naive candidate list stale-first, as a centrality-only
+    # upstream selection would seat it -- the admission reorder must move
+    # the fresh record ahead despite its later list position.
+    rich_club = [stale_id, fresh_id]
+    assignment = _assignment_with_members([stale_id, fresh_id])
+
+    from iai_mcp.profile import default_state
+    profile_state = {**default_state(), "wake_depth": "standard"}
+
+    payload = _compose_session_start_payload(
+        store, assignment, rich_club, session_id="uat-decay-reorder",
+        profile_state=profile_state,
+    )
+
+    assert "FRESH-REINFORCED" in payload.rich_club
+    assert "STALE-CENTRAL" in payload.rich_club
+    assert payload.rich_club.index("FRESH-REINFORCED") < payload.rich_club.index("STALE-CENTRAL"), (
+        "recently-reinforced record must be admitted/ordered ahead of the "
+        "structurally-central-but-stale one"
     )
 
 

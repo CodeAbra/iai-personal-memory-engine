@@ -242,7 +242,9 @@ def _persist_entry(store: Any, entry: WorkingSetEntry, *, allow_downgrade: bool 
     try:
         from iai_mcp import session
 
-        session.write_continuity_cache(store, allow_downgrade=allow_downgrade)
+        session.write_continuity_cache(
+            store, allow_downgrade=allow_downgrade, session_id=entry.session_id,
+        )
     except Exception as exc:  # noqa: BLE001 -- continuity refresh must never fail a persist
         logger.debug("working_tier continuity cache refresh failed: %s", exc)
 
@@ -349,6 +351,7 @@ def open_task(goal: str, *, session_id: str = "-") -> WorkingSetEntry:
 
 def update_task(
     *,
+    goal: str | None = None,
     sub_goal: str | None = None,
     hypothesis: str | None = None,
     result: str | None = None,
@@ -360,18 +363,23 @@ def update_task(
     explicit_clear: bool = False,
 ) -> WorkingSetEntry | None:
     """Fold new structured state into the target task. Text is stored
-    verbatim (strip and WORKING_TIER_MAX_GOAL_CHARS bound for focus/
+    verbatim (strip and WORKING_TIER_MAX_GOAL_CHARS bound for goal/focus/
     next_action, never paraphrased). session_id routes the target entry
     through _select_entry_locked (None == today's global focal task), so a
     fold from one session can never land on another session's entry.
     When store is given, the folded entry's snapshot is persisted in the
     same call. explicit_clear signals a caller-initiated focus=""/
     next_action="" (not an incidental task-switch thin-park) and is the
-    ONLY case that authorizes the eager continuity file's downgrade path."""
+    ONLY case that authorizes the eager continuity file's downgrade path.
+    goal is a distinct, presence-gated re-anchor signal: an empty/whitespace
+    goal is never a clear (unlike focus/next_action's explicit_clear), so it
+    is gated on truthiness-after-strip rather than is-not-None."""
     with _lock:
         entry = _select_entry_locked(session_id)
         if entry is None:
             return None
+        if goal is not None and goal.strip():
+            entry.goal = goal.strip()[:WORKING_TIER_MAX_GOAL_CHARS]
         if sub_goal is not None:
             _bounded_append(
                 entry.open_subgoals, sub_goal.strip(),

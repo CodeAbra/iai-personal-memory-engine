@@ -492,6 +492,16 @@ impl RawConn {
         Ok(guard.id_index_ready(table))
     }
 
+    /// Whether the backing connection holds a built ordered index for `table`.
+    fn ordered_index_is_built(&self, table: &str) -> PyResult<bool> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return Err(ProgrammingError::new_err(CLOSED_CURSOR_ERR)),
+        };
+        let guard = lock(&conn);
+        Ok(guard.ordered_index_is_built(table))
+    }
+
     /// Leaf cells visited by this connection's store since the last reset.
     fn cells_visited_count(&self) -> PyResult<u64> {
         let conn = match self.conn.as_ref() {
@@ -835,6 +845,12 @@ impl Connection {
     fn id_index_ready(&self, table: &str) -> PyResult<bool> {
         let guard = lock(self.arc()?);
         Ok(guard.id_index_ready(table))
+    }
+
+    /// Whether this connection holds a built ordered index for `table`.
+    fn ordered_index_is_built(&self, table: &str) -> PyResult<bool> {
+        let guard = lock(self.arc()?);
+        Ok(guard.ordered_index_is_built(table))
     }
 
     /// True when an outer BEGIN is open and not yet committed/rolled back.

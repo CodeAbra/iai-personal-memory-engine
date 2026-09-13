@@ -69,6 +69,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -1148,3 +1149,142 @@ def test_concurrent_writer_invalidate_never_caches_stale(store):
     cache.invalidate("active")
     assert store.active_records_count() == 6
     assert cache.get("active") == 6
+
+
+# ===========================================================================
+# count_memo() per-thread scoping
+# ===========================================================================
+
+def test_count_memo_cross_thread_isolation(store):
+    """Two threads with concurrently-open count_memo() scopes on one store
+    must not share or tear each other's per-thread memo slot.
+
+    Thread A and thread B each open their own scope. A barrier holds both
+    threads until each has populated its own memo, then A's scope closes and
+    signals an event; B (still inside its own scope) then asserts its slot is
+    still the same non-None dict it captured before A closed.
+    """
+    _seed_corpus(store, n_active=2)
+
+    barrier = threading.Barrier(2)
+    a_closed = threading.Event()
+    errors: list[BaseException] = []
+    b_observation: list[tuple] = []
+
+    def run_a() -> None:
+        try:
+            with store.count_memo():
+                store.active_records_count()
+                barrier.wait(timeout=5)
+            a_closed.set()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+            a_closed.set()
+
+    def run_b() -> None:
+        try:
+            with store.count_memo():
+                store.active_records_count()
+                b_memo = getattr(store._count_memo_local, "memo", None)
+                barrier.wait(timeout=5)
+                a_closed.wait(timeout=5)
+                b_observation.append(
+                    (b_memo is not None, getattr(store._count_memo_local, "memo", None) is b_memo)
+                )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    ta = threading.Thread(target=run_a)
+    tb = threading.Thread(target=run_b)
+    ta.start()
+    tb.start()
+    ta.join(timeout=10)
+    tb.join(timeout=10)
+
+    assert not errors, f"a thread raised: {errors!r}"
+    assert b_observation == [(True, True)], (
+        "thread B's per-thread memo slot must be a non-None dict that stays the "
+        "same object after thread A's own scope has fully closed"
+    )
+
+
+def test_count_memo_nested_reuse_same_thread(store):
+    """A nested count_memo() scope on the same thread reuses the outer
+    per-thread memo dict (identity stable across the inner scope), the inner
+    scope's exit must not clear it, and a burst of counts under the memo
+    reaches the engine exactly once per key.
+
+    The identity assertions below are the load-bearing proof of nested reuse;
+    the engine-hit assertion is carried by the cross-read corpus-count cache
+    (which `_cache_key` checks before ever calling the count methods), not by
+    the memo itself, since the memo check lives inside the method the spy
+    wraps and cannot be distinguished from a plain repeated call.
+    """
+    _seed_corpus(store, n_active=3)
+    _force_empty_count_cache(store)
+
+    spy = _CountSpy(store)
+    try:
+        spy.reset()
+        with store.count_memo():
+            outer_memo = getattr(store._count_memo_local, "memo", None)
+            assert outer_memo is not None, (
+                "entering count_memo() must populate the per-thread memo slot"
+            )
+
+            runtime_graph_cache._cache_key(store)
+
+            with store.count_memo():
+                inner_memo = getattr(store._count_memo_local, "memo", None)
+                assert inner_memo is outer_memo, (
+                    "a nested count_memo() scope must reuse the outer per-thread memo dict"
+                )
+                runtime_graph_cache._cache_key(store)
+
+            after_inner_memo = getattr(store._count_memo_local, "memo", None)
+            assert after_inner_memo is outer_memo, (
+                "exiting a nested count_memo() scope must not clear the outer per-thread memo"
+            )
+            runtime_graph_cache._cache_key(store)
+
+        assert getattr(store._count_memo_local, "memo", None) is None, (
+            "exiting the outermost count_memo() scope must clear the per-thread memo"
+        )
+    finally:
+        spy.restore()
+
+    assert spy.calls_active == 1, (
+        f"the active COUNT must reach the engine exactly once across the whole "
+        f"nested scope, got {spy.calls_active}"
+    )
+    assert spy.calls_edges == 1, (
+        f"the edges COUNT must reach the engine exactly once across the whole "
+        f"nested scope, got {spy.calls_edges}"
+    )
+
+
+def test_count_memo_pooled_thread_reuse(store):
+    """A count_memo() scope on a worker thread reused across operations (a
+    single-worker thread pool) must start with an empty per-thread memo — the
+    per-thread finally clear scopes the memo to one operation, so nothing
+    leaks from a prior unrelated operation on the reused thread.
+    """
+    _seed_corpus(store, n_active=2)
+
+    def op_one() -> None:
+        with store.count_memo():
+            store.active_records_count()
+
+    def op_two() -> dict | None:
+        with store.count_memo():
+            memo = getattr(store._count_memo_local, "memo", None)
+            return None if memo is None else dict(memo)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(op_one).result(timeout=10)
+        second_op_memo = pool.submit(op_two).result(timeout=10)
+
+    assert second_op_memo == {}, (
+        f"a fresh count_memo() scope on a reused worker thread must start "
+        f"empty; got {second_op_memo}"
+    )

@@ -330,7 +330,7 @@ class MemoryStore:
         # operation. The scope is opened around a self-contained read sequence and
         # torn down on exit, so a memoized count can never outlive the operation
         # that opened it or be served to an unrelated caller.
-        self._count_memo: dict[str, int] | None = None
+        self._count_memo_local = threading.local()
         # Cross-read corpus-count cache: holds the three corpus COUNT values
         # (active/pending/edges) between writes so a read-only recall burst pays
         # one live SQL COUNT per count on the first call, then serves O(1) cached
@@ -443,19 +443,19 @@ class MemoryStore:
         every leaf page, so the redundancy dominates a warm boot. The scope makes
         those reads collapse to one per distinct count.
 
-        The memo is strictly operation-scoped: it is cleared on exit and nested
-        scopes reuse the outermost memo, so no count is ever cached across a write
-        or served to an unrelated read path.
+        The memo is strictly operation-scoped per thread: it is cleared on exit
+        and nested scopes on the same thread reuse the outermost memo, so no
+        count is ever cached across a write or served to an unrelated read path.
         """
-        if self._count_memo is not None:
+        if getattr(self._count_memo_local, "memo", None) is not None:
             # Already inside a scope — reuse the outer memo, do not reset it.
             yield
             return
-        self._count_memo = {}
+        self._count_memo_local.memo = {}
         try:
             yield
         finally:
-            self._count_memo = None
+            self._count_memo_local.memo = None
 
     def close(self) -> None:
         if self.db is None:
@@ -1663,7 +1663,7 @@ class MemoryStore:
         ``_conn_lock`` fallback) with no cache lock held, so the cache lock is
         never held together with a connection lock.
         """
-        memo = self._count_memo
+        memo: dict[str, int] | None = getattr(self._count_memo_local, "memo", None)
         if memo is not None and "active" in memo:
             return memo["active"]
         # Cross-read cache: check then, on a hit, skip the SQL COUNT.
@@ -1717,7 +1717,7 @@ class MemoryStore:
         live FILTERED COUNT; the unfiltered fallback in ``_cache_key`` is
         unreachable via this method.
         """
-        memo = self._count_memo
+        memo: dict[str, int] | None = getattr(self._count_memo_local, "memo", None)
         if memo is not None and "pending" in memo:
             return memo["pending"]
         try:
@@ -1755,7 +1755,7 @@ class MemoryStore:
         live count; the unfiltered fallback in ``_cache_key`` is unreachable
         via this method.
         """
-        memo = self._count_memo
+        memo: dict[str, int] | None = getattr(self._count_memo_local, "memo", None)
         if memo is not None and "edges" in memo:
             return memo["edges"]
         try:
@@ -1983,7 +1983,11 @@ class MemoryStore:
         "provenance_json",
         "created_at",
         "embedding_pending",
+        "salience_level",
     ]
+    """salience_level is a plaintext column (no decrypt cost) -- the
+    recent-thread composite reads it via _from_row; without it here the
+    field always defaults to "unflagged" regardless of the stored value."""
 
     # Bare-shape widening bound for the recent_user_turns candidate read:
     # the SQL below must stay a WHERE-less `ORDER BY created_at DESC LIMIT`

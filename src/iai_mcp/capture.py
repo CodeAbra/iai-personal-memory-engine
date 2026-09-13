@@ -908,6 +908,20 @@ def capture_turn(
         if provenance_extra:
             provenance_list.append(dict(provenance_extra))
 
+        # Fires only on a still-"unflagged" value -- an explicit caller mark
+        # (including "critical") is never second-guessed by the composite.
+        if salience_level == "unflagged":
+            try:
+                from iai_mcp.salience_classify import classify_salience
+                salience_level = classify_salience(
+                    directive=directive,
+                    entity_tags=_entity_tag_list,
+                    epistemic_status=epistemic_status,
+                )
+            except Exception as exc:  # noqa: BLE001 -- capture fail-safe
+                log.debug("salience_classify_failed: %s", exc)
+                salience_level = "unflagged"
+
         rec = MemoryRecord(
             id=uuid4(),
             tier=tier,

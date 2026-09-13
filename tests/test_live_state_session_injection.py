@@ -7,6 +7,7 @@ smuggling, empty when no focal task is live.
 from __future__ import annotations
 
 import inspect
+import json
 
 import pytest
 
@@ -16,6 +17,7 @@ from iai_mcp.session import (
     _compose_session_start_payload,
     format_payload_as_markdown,
     render_live_state_segment,
+    write_continuity_cache,
 )
 from iai_mcp.store import MemoryStore
 
@@ -105,3 +107,16 @@ def test_session_continuity_block_renders_distinct_from_standing_orders(tmp_path
     )
     assert "continuity block goal" in rendered
     assert "prove block ordering" in rendered
+
+
+def test_write_continuity_cache_stamps_session_id_sidecar(tmp_path):
+    store = MemoryStore(path=tmp_path)
+    try:
+        write_continuity_cache(store, session_id="sess-a")
+        state_path = tmp_path / ".session-continuity.state.json"
+        assert state_path.is_file(), "a truthy session_id must stamp the sidecar"
+        assert json.loads(state_path.read_text(encoding="utf-8")) == {
+            "session_id": "sess-a"
+        }
+    finally:
+        store.close()

@@ -235,6 +235,149 @@ def test_hook_silent_without_session_id(tmp_path):
     assert "<iai-mcp-working-tier>" not in out
 
 
+def test_hook_never_surfaces_another_sessions_goal_via_shared_continuity(tmp_path):
+    (tmp_path / ".session-continuity.cached.md").write_text(
+        "<iai-mcp-live-state>\ngoal: session B's private focal goal\n"
+        "</iai-mcp-live-state>\n<iai-mcp-agent-registry>\n</iai-mcp-agent-registry>\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".session-continuity.state.json").write_text(
+        '{"session_id": "sess-b"}', encoding="utf-8",
+    )
+
+    out = _run_hook(tmp_path, '{"prompt": "hi", "session_id": "sess-a"}')
+    assert "session B's private focal goal" not in out, (
+        "a mismatched sidecar session_id must suppress the shared live-state block"
+    )
+
+
+def test_hook_fails_open_and_renders_when_sidecar_absent(tmp_path):
+    (tmp_path / ".session-continuity.cached.md").write_text(
+        "<iai-mcp-live-state>\ngoal: shared goal with no sidecar on disk\n"
+        "</iai-mcp-live-state>\n<iai-mcp-agent-registry>\n</iai-mcp-agent-registry>\n",
+        encoding="utf-8",
+    )
+
+    out = _run_hook(tmp_path, '{"prompt": "hi", "session_id": "sess-a"}')
+    assert "shared goal with no sidecar on disk" in out, (
+        "absent sidecar is unknown, not mismatched -- must fail open and still render"
+    )
+
+
+def test_hook_never_double_fires_working_tier_and_live_state_fallback(tmp_path):
+    # emit_working_tier fires unconditionally on a fresh per-session
+    # snapshot (its own next_action content does not matter to it) and sets
+    # _WORKING_TIER_EMITTED. With next_action still "(none)" on the SAME
+    # per-session file, emit_live_state_fallback's own "(none)" short-circuit
+    # does not trip -- only the shared _WORKING_TIER_EMITTED gate can stop
+    # it from also serving the shared continuity cache's substantive
+    # same-session block underneath. Same-session sidecar so the
+    # session-scope guard fails open and never masks this gate.
+    (tmp_path / ".working-tier.sess-a.cached.md").write_text(
+        "# Working tier — active task\n"
+        "session: sess-a\n"
+        "goal: shared focal goal\n"
+        "next action: (none)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".session-continuity.cached.md").write_text(
+        "<iai-mcp-live-state>\ngoal: shared focal goal\n"
+        "focus: same-session substantive focus\n"
+        "</iai-mcp-live-state>\n<iai-mcp-agent-registry>\n</iai-mcp-agent-registry>\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".session-continuity.state.json").write_text(
+        '{"session_id": "sess-a"}', encoding="utf-8",
+    )
+
+    out = _run_hook(tmp_path, '{"prompt": "hi", "session_id": "sess-a"}')
+    assert "<iai-mcp-working-tier>" in out, "the working-tier block must still fire"
+    assert "<iai-mcp-live-state>" not in out, (
+        "emit_live_state_fallback must never also fire once emit_working_tier "
+        "already served this turn's live state"
+    )
+
+
+def test_unknown_session_write_clears_sidecar_via_real_producer_path(tmp_path):
+    # Exercises the REAL producer path (open_task/update_task), not a
+    # hand-written sidecar fixture -- entry.session_id defaults to "-" and
+    # is routinely stamped there whenever a capture omits session_id.
+    store = _FakeStoreRoot(tmp_path)
+
+    wt.open_task("session A goal", session_id="sess-a")
+    wt.update_task(
+        next_action="session A's substantive next action",
+        session_id="sess-a",
+        store=store,
+    )
+    state_path = tmp_path / ".session-continuity.state.json"
+    assert state_path.is_file()
+    assert "sess-a" in state_path.read_text(encoding="utf-8")
+
+    # A capture with no known session_id (the "-" sentinel) becomes the new
+    # global focal task and changes the shared cache body.
+    wt.open_task("unknown-session goal", session_id="-")
+    wt.update_task(
+        next_action="unknown-session's substantive next action",
+        session_id="-",
+        store=store,
+    )
+    assert not state_path.is_file(), (
+        "a body-changing write from the unknown-session sentinel must "
+        "actually remove the sidecar file, not merely produce a render "
+        "that happens to pass -- pin the mechanism, not just the symptom"
+    )
+
+    out = _run_hook(tmp_path, '{"prompt": "hi", "session_id": "sess-b-real"}')
+    assert "unknown-session's substantive next action" in out, (
+        "a body-changing write from the unknown-session sentinel must clear "
+        "the sidecar, not leave it pointing at the prior real owner -- a "
+        "genuinely unrelated session must still see the current live state"
+    )
+
+
+def test_agent_registry_write_with_no_session_id_preserves_other_sidecar(tmp_path):
+    # Mirrors the exact call shape used when an agent is spawned/completed:
+    # write_continuity_cache(store) with no session_id at all. Unlike the
+    # "-" sentinel above, an absent session_id is not an assertion of "no
+    # owner" -- it is the caller having no session opinion, and must never
+    # clobber an unrelated real session's still-accurate sidecar.
+    from iai_mcp import daemon_state, session
+
+    store = _FakeStoreRoot(tmp_path)
+
+    wt.open_task("session A goal", session_id="sess-a")
+    wt.update_task(
+        next_action="session A's substantive next action",
+        session_id="sess-a",
+        store=store,
+    )
+    state_path = tmp_path / ".session-continuity.state.json"
+    assert state_path.is_file()
+    assert "sess-a" in state_path.read_text(encoding="utf-8")
+
+    daemon_state.register_running_agent(
+        agent_id="agent-1",
+        role="tester",
+        expected_artifact="out.md",
+        agent_model="sonnet",
+    )
+    session.write_continuity_cache(store)
+
+    assert state_path.is_file(), (
+        "an agent-spawn write with no session_id must never delete another "
+        "session's sidecar -- it has no session opinion, not an unknown one"
+    )
+    assert "sess-a" in state_path.read_text(encoding="utf-8")
+
+    out = _run_hook(tmp_path, '{"prompt": "hi", "session_id": "sess-b-real"}')
+    assert "session A's substantive next action" not in out, (
+        "an unrelated real session must still be suppressed on a genuine "
+        "cross-session mismatch -- an agent-registry-only write must not "
+        "reopen the cross-session live-state leak"
+    )
+
+
 def test_hook_ignores_stale_per_session_snapshot(tmp_path):
     cache = tmp_path / ".working-tier.sess-old.cached.md"
     cache.write_text(

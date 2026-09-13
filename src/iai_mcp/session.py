@@ -79,10 +79,37 @@ RICH_CLUB_CLS_SUMMARY_CAP = 30
 _RICH_CLUB_DEEP_BUDGET_TOKENS = 2000
 TOTAL_CACHED_BUDGET = 2000
 DYNAMIC_TAIL_TOKENS = 1000
+SESSION_START_TOTAL_BUDGET_TOKENS = TOTAL_CACHED_BUDGET + DYNAMIC_TAIL_TOKENS
+# Eager floor for wake_depth=minimal: non-empty but well under the
+# standard branch's _l1_segment default of 10 -- minimal must never serve
+# less than identity + a small critical-facts sample, but must stay
+# cheaper than standard.
+MINIMAL_FLOOR_MAX_RECORDS = 3
 
 L0_RECORD_UUID = UUID("00000000-0000-0000-0000-000000000001")
 
 SESSION_START_CACHE_MAX_CHARS: int = 10_000
+
+# Marker vocabulary appended AFTER format_payload_as_markdown returns, by
+# every downstream serve site: cli/_capture.py::cmd_session_start appends
+# HEALTHY to a live-composed payload; the recall hook's stale_suffix
+# appends STALE to a served cache (hardcoded there in shell, guarded
+# against drift by a hook-parsing test). The reserve is sized to the
+# LARGER of the two so the trim below leaves headroom for whichever
+# suffix a caller ends up appending.
+SESSION_START_MARKER_HEALTHY = "[iai-mcp memory: HEALTHY]"
+SESSION_START_MARKER_STALE = "[iai-mcp memory: STALE]"
+SESSION_START_MARKER_RESERVE_BYTES = max(
+    len(f"\n\n{SESSION_START_MARKER_HEALTHY}".encode("utf-8")),
+    len(f"\n\n{SESSION_START_MARKER_STALE}".encode("utf-8")),
+)
+# Effective ceiling the priority trim targets, measured in UTF-8 BYTES --
+# not chars -- because the recall hook enforces its own cap via `head -c`,
+# a byte count; a char-only reserve would still let multi-byte punctuation
+# (em dash, ellipsis) push the byte length past that cap undetected.
+SESSION_START_EFFECTIVE_CHAR_CAP_BYTES = (
+    SESSION_START_CACHE_MAX_CHARS - SESSION_START_MARKER_RESERVE_BYTES
+)
 
 # Per-turn refresh delta contract: the renderer must fit inside this ceiling
 # instead of re-injecting the full session-start brief on every advance.
@@ -382,6 +409,18 @@ def _continuity_cache_path(store: Any) -> Path:
     return base / _CONTINUITY_CACHE_NAME
 
 
+def clear_continuation_marker_paths(base: "Path | str") -> list[Path]:
+    """Every per-session /clear-continuation marker under base, matching the
+    exact glob the SessionStart hook writes to
+    (".session-clear-continuation.<sid>") -- reused by the daemon's
+    boot-time invalidation sweep so the pattern is defined in exactly one
+    place."""
+    try:
+        return sorted(Path(base).glob(".session-clear-continuation.*"))
+    except OSError:
+        return []
+
+
 def _live_state_block_is_substantive(block: str) -> bool:
     return any(
         line.startswith("focus: ") or line.startswith("next action: ")
@@ -423,7 +462,9 @@ def _resanitize_preserved_live_state(block: str) -> str:
     return "\n".join(lines)
 
 
-def write_continuity_cache(store: Any, *, allow_downgrade: bool = False) -> None:
+def write_continuity_cache(
+    store: Any, *, allow_downgrade: bool = False, session_id: str | None = None,
+) -> None:
     """Write the ONE session-agnostic eager continuity file: a live-state
     block (phase/step, rendered fold-free) then an agent-registry block
     (pending agents), each independently sentinel-delimited. Mirrors the
@@ -438,6 +479,19 @@ def write_continuity_cache(store: Any, *, allow_downgrade: bool = False) -> None
     allow_downgrade=True bypasses this guard for an explicit close or an
     explicit caller-cleared focus/next_action, where an empty block IS the
     new ground truth.
+
+    When session_id is a real (non-"-") id, a sidecar records the last
+    writer's session so a reader from a different session can refuse this
+    shared file (fail open when either side is unknown) -- the sidecar is
+    stamped only on the path where the cache body actually changes, never
+    on the no-op refresh. "-" is this codebase's own sentinel for "no known
+    session id"; a body-changing write with that sentinel unlinks the
+    sidecar instead of stamping it, so a reader sees "absent -> unknown ->
+    fail open" rather than a stale prior owner's id attributed to content
+    that owner never wrote. session_id=None means the caller has no session
+    opinion at all (e.g. an agent-registry-only update) -- it must leave any
+    existing sidecar attribution untouched, never unlink it as a side effect
+    of a body change it didn't cause.
     """
     path = _continuity_cache_path(store)
     live_state = render_live_state_segment(fold_sensory=False)
@@ -486,6 +540,17 @@ def write_continuity_cache(store: Any, *, allow_downgrade: bool = False) -> None
     tmp.write_text(text, encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+    state_path = path.with_name(path.name.replace(".cached.md", ".state.json"))
+    if session_id and session_id != "-":
+        state_tmp = state_path.with_name(state_path.name + ".tmp")
+        state_tmp.write_text(json.dumps({"session_id": session_id}), encoding="utf-8")
+        os.chmod(state_tmp, 0o600)
+        os.replace(state_tmp, state_path)
+    elif session_id == "-":
+        state_path.unlink(missing_ok=True)
+    # session_id is None: caller has no session context to assert -- leave
+    # any existing sidecar attribution untouched.
 
 
 def _l2_segments(
@@ -550,6 +615,26 @@ def _rich_club_admission(
         by_uuid = store.get_batch(rich_club)
     except (OSError, RuntimeError, ValueError):
         return []
+
+    # Decay re-ranks WITHIN this pre-selected set only -- a node the caller
+    # never included can never be admitted here. Incoming list position is
+    # the only centrality proxy this layer has (raw scores are not passed
+    # through), so it's blended with staleness the same way richclub.py
+    # blends the raw centrality float.
+    from iai_mcp.pipeline import _age_penalty
+
+    club_size = len(rich_club)
+
+    def _decay_key(indexed: tuple[int, UUID]) -> float:
+        idx, uid = indexed
+        rec = by_uuid.get(uid)
+        decay = _age_penalty(rec.created_at) if rec is not None else 1.0
+        # Missing/fully-decayed nodes all collapse to key 0.0; Python's
+        # stable sort then keeps their ORIGINAL relative order even under
+        # reverse=True -- not reversed among themselves.
+        return (club_size - idx) * (1.0 - decay)
+
+    rich_club = [uid for _, uid in sorted(enumerate(rich_club), key=_decay_key, reverse=True)]
 
     now = now or datetime.now(timezone.utc)
     admitted: list[tuple[UUID, MemoryRecord, str, str, str]] = []
@@ -713,7 +798,21 @@ def _recent_thread_segment(
                 model=ev.get("model"),
             ))
 
-    candidates.sort(key=lambda r: r.created_at, reverse=True)
+    # Composite reuses the shared decay + salience helpers -- getattr is
+    # load-bearing here: candidates mix MemoryRecord and _PendingTurn, and
+    # _PendingTurn's __slots__ carries no salience_level.
+    from iai_mcp import rank_boost
+    from iai_mcp.pipeline import _age_penalty
+
+    def _composite_key(r: object) -> float:
+        freshness = 1.0 - _age_penalty(r.created_at)
+        multiplier = rank_boost.salience_multiplier(
+            salience_level=getattr(r, "salience_level", None),
+            salience_step=rank_boost.SALIENCE_BOOST_STEP_DEFAULT,
+        )
+        return freshness * multiplier
+
+    candidates.sort(key=_composite_key, reverse=True)
     now = datetime.now(timezone.utc)
     lines: list[str] = []
     for r in candidates:
@@ -918,6 +1017,8 @@ def _compose_session_start_payload(
     ) or ""
 
     if wake_depth == "minimal":
+        l0 = _l0_segment(store)
+        l1 = _l1_segment(store, max_records=MINIMAL_FLOOR_MAX_RECORDS)
         l0_rec = _fetch_record(store, L0_RECORD_UUID)
         identity_short = str(L0_RECORD_UUID)[:8] if l0_rec is not None else ""
         identity_pointer = f"<id:{identity_short}>" if identity_short else ""
@@ -929,10 +1030,14 @@ def _compose_session_start_payload(
         compact_handle = encode_compact_handle(
             identity_short, session_short, topic_label, pending
         )
-        cached = _approx_tokens(compact_handle)
+        cached = (
+            _approx_tokens(compact_handle)
+            + _approx_tokens(l0)
+            + _approx_tokens(l1)
+        )
         payload = SessionStartPayload(
-            l0="",
-            l1="",
+            l0=l0,
+            l1=l1,
             l2=[],
             rich_club="",
             total_cached_tokens=cached,
@@ -1039,25 +1144,82 @@ def assemble_session_start(
     return payload
 
 
-def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
-    if isinstance(payload, dict):
-        l0 = payload.get("l0") or ""
-        l1 = payload.get("l1") or ""
-        l2 = list(payload.get("l2") or [])
-        rich_club = payload.get("rich_club") or ""
-        recent_thread = payload.get("recent_thread") or ""
-        directives = payload.get("directives") or ""
-        live_state = payload.get("live_state") or ""
-        source_watermark = payload.get("source_watermark") or ""
-    else:
-        l0 = payload.l0
-        l1 = payload.l1
-        l2 = list(payload.l2)
-        rich_club = payload.rich_club
-        recent_thread = payload.recent_thread
-        directives = payload.directives
-        live_state = payload.live_state
-        source_watermark = payload.source_watermark
+def _cached_tier_tokens(l0: str, l1: str, l2: list[str], rich_club: str) -> int:
+    return (
+        _approx_tokens(l0)
+        + _approx_tokens(l1)
+        + sum(_approx_tokens(s) for s in l2)
+        + _approx_tokens(rich_club)
+    )
+
+
+def _token_budget_check(l0, l1, directives, live_state, source_watermark, wake_depth):
+    def check(l2: list[str], rich_club: str, recent_thread: str) -> bool:
+        if _cached_tier_tokens(l0, l1, l2, rich_club) > TOTAL_CACHED_BUDGET:
+            return True
+        text = _assemble_markdown(
+            l0, l1, l2, rich_club, recent_thread, directives, live_state,
+            source_watermark, wake_depth,
+        )
+        return _approx_tokens(text) > SESSION_START_TOTAL_BUDGET_TOKENS
+
+    return check
+
+
+def _char_budget_check(l0, l1, directives, live_state, source_watermark, wake_depth):
+    def check(l2: list[str], rich_club: str, recent_thread: str) -> bool:
+        text = _assemble_markdown(
+            l0, l1, l2, rich_club, recent_thread, directives, live_state,
+            source_watermark, wake_depth,
+        )
+        return len(text.encode("utf-8")) > SESSION_START_EFFECTIVE_CHAR_CAP_BYTES
+
+    return check
+
+
+def _trim_priority(
+    l2: list[str],
+    rich_club: str,
+    recent_thread: str,
+    *,
+    still_over,
+) -> tuple[list[str], str, str]:
+    # Priority order: rich-club -> L2 (whole tail segments) -> recent-thread.
+    # Directives/live-state are the last resort and are never touched here
+    # (render_directive_segment's no-self-truncation contract).
+    if rich_club:
+        rc_lines = rich_club.split("\n")
+        while rc_lines and still_over(l2, rich_club, recent_thread):
+            rc_lines.pop()
+            rich_club = "\n".join(rc_lines)
+        if not rc_lines:
+            rich_club = ""
+
+    while l2 and still_over(l2, rich_club, recent_thread):
+        l2.pop()
+
+    if recent_thread:
+        rt_lines = recent_thread.split("\n")
+        while rt_lines and still_over(l2, rich_club, recent_thread):
+            rt_lines.pop()
+            recent_thread = "\n".join(rt_lines)
+        if not rt_lines:
+            recent_thread = ""
+
+    return l2, rich_club, recent_thread
+
+
+def _assemble_markdown(
+    l0: str,
+    l1: str,
+    l2: list[str],
+    rich_club: str,
+    recent_thread: str,
+    directives: str,
+    live_state: str,
+    source_watermark: str,
+    wake_depth: str,
+) -> str:
     blocks: list[str] = []
     if directives:
         blocks.append(f"## Standing orders (always active)\n{directives}")
@@ -1097,12 +1259,73 @@ def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
             pass
     text = "\n\n".join(blocks)
     # Leading placement is load-bearing: every downstream truncation (daemon
-    # cache write, CLI hook cap, shell head -c) cuts from the end, so only a
-    # first-line marker survives all three. Rides real content only, per the
-    # update-notice precedent above.
-    if text and source_watermark:
-        text = f"<!-- iai-mcp:source_watermark={source_watermark} -->\n\n{text}"
+    # cache write, CLI hook cap, shell head -c) cuts from the end, so only
+    # fixed-position leading lines survive all three. Rides real content
+    # only, per the update-notice precedent above. source_watermark, when
+    # present, is always line 1; wake_depth follows immediately after so a
+    # hook can anchor a parse to each marker's own fixed line.
+    marker_lines: list[str] = []
+    if source_watermark:
+        marker_lines.append(f"<!-- iai-mcp:source_watermark={source_watermark} -->")
+    if wake_depth:
+        marker_lines.append(f"<!-- iai-mcp:wake_depth={wake_depth} -->")
+    if text and marker_lines:
+        text = "\n".join(marker_lines) + "\n\n" + text
     return text
+
+
+def format_payload_as_markdown(payload: "SessionStartPayload | dict") -> str:
+    if isinstance(payload, dict):
+        l0 = payload.get("l0") or ""
+        l1 = payload.get("l1") or ""
+        l2 = list(payload.get("l2") or [])
+        rich_club = payload.get("rich_club") or ""
+        recent_thread = payload.get("recent_thread") or ""
+        directives = payload.get("directives") or ""
+        live_state = payload.get("live_state") or ""
+        source_watermark = payload.get("source_watermark") or ""
+        wake_depth = payload.get("wake_depth") or ""
+    else:
+        l0 = payload.l0
+        l1 = payload.l1
+        l2 = list(payload.l2)
+        rich_club = payload.rich_club
+        recent_thread = payload.recent_thread
+        directives = payload.directives
+        live_state = payload.live_state
+        source_watermark = payload.source_watermark
+        wake_depth = payload.wake_depth
+
+    # Strict no-op below threshold: `still_over` is evaluated BEFORE any
+    # mutation, so a payload already under budget never enters the trim.
+    token_over = _token_budget_check(l0, l1, directives, live_state, source_watermark, wake_depth)
+    if token_over(l2, rich_club, recent_thread):
+        l2, rich_club, recent_thread = _trim_priority(l2, rich_club, recent_thread, still_over=token_over)
+        if token_over(l2, rich_club, recent_thread):
+            logger.warning(
+                "session_start_token_budget_exceeded_after_trim",
+                extra={"budget": SESSION_START_TOTAL_BUDGET_TOKENS},
+            )
+
+    # SESSION_START_CACHE_MAX_CHARS mirrors a confirmed hard external Claude
+    # Code SessionStart-hook output limit (10,000 chars). The same priority
+    # order bounds the payload to SESSION_START_EFFECTIVE_CHAR_CAP_BYTES --
+    # that ceiling already reserves the largest marker suffix a downstream
+    # caller appends (HEALTHY/STALE), so the naive tail-chops those callers
+    # apply on top (CLI hook cap, recall hook's `head -c`) never fire.
+    char_over = _char_budget_check(l0, l1, directives, live_state, source_watermark, wake_depth)
+    if char_over(l2, rich_club, recent_thread):
+        l2, rich_club, recent_thread = _trim_priority(l2, rich_club, recent_thread, still_over=char_over)
+        if char_over(l2, rich_club, recent_thread):
+            logger.warning(
+                "session_start_char_budget_exceeded_after_trim",
+                extra={"budget": SESSION_START_EFFECTIVE_CHAR_CAP_BYTES},
+            )
+
+    return _assemble_markdown(
+        l0, l1, l2, rich_club, recent_thread, directives, live_state,
+        source_watermark, wake_depth,
+    )
 
 
 def max_record_created_at(store: MemoryStore) -> str | None:

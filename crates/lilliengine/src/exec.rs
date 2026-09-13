@@ -2507,8 +2507,11 @@ type OrderedTag = (u8, SortKey);
 pub struct OrderedColIndex {
     /// The single column this index covers (e.g. `"ts"` for events).
     column: String,
-    /// `collation tag → row-keys (ascending scan order within bucket)`.
-    map: BTreeMap<OrderedTag, Vec<i64>>,
+    /// `collation tag → row-keys (ascending scan order within bucket)`. Arc-
+    /// wrapped so a same-generation clone shared across connections (built-
+    /// index-cache publish/adopt) is a refcount bump, not an O(corpus) copy;
+    /// per-row maintenance materializes via `Arc::make_mut` on first write.
+    map: std::sync::Arc<BTreeMap<OrderedTag, Vec<i64>>>,
     built: bool,
 }
 
@@ -2517,7 +2520,7 @@ impl OrderedColIndex {
     pub fn new(column: impl Into<String>) -> Self {
         OrderedColIndex {
             column: column.into(),
-            map: BTreeMap::new(),
+            map: std::sync::Arc::new(BTreeMap::new()),
             built: false,
         }
     }
@@ -2530,6 +2533,14 @@ impl OrderedColIndex {
     /// True once the one-time population scan has run.
     pub fn is_built(&self) -> bool {
         self.built
+    }
+
+    /// Force the copy-on-write materialization now, on a connection that will
+    /// own private postings (a read-write connection at open), so later
+    /// per-row maintenance never pays the deep copy on the write path.
+    /// Matches `ColIndex::unshare` / `IdIndex::unshare`.
+    pub fn unshare(&mut self) {
+        std::sync::Arc::make_mut(&mut self.map);
     }
 
     /// Populate the index with one column-selective streaming scan the first
@@ -2547,24 +2558,27 @@ impl OrderedColIndex {
         if self.built {
             return Ok(());
         }
-        self.map.clear();
         let Some(col_pos) = col_names.iter().position(|c| c == &self.column) else {
             // A column absent from the catalog can never be read by a query;
             // an empty built index keeps every walk a no-op.
+            self.map = std::sync::Arc::new(BTreeMap::new());
             self.built = true;
             return Ok(());
         };
         let mut needed: std::collections::HashSet<String> = std::collections::HashSet::new();
         needed.insert(self.column.clone());
         let mask = mask_from_names(col_names, &needed);
-        let map = &mut self.map;
+        // Build into a fresh local map (never mutate a possibly-shared `Arc`
+        // in place) so the finished result installs via one Arc swap.
+        let mut fresh: BTreeMap<OrderedTag, Vec<i64>> = BTreeMap::new();
         tree.scan_cells_with(|key, payload| {
             let vals = crate::rowcodec::decode_row_columns(&payload, &mask)?;
             let v = vals.get(col_pos).cloned().unwrap_or(Value::Null);
-            map.entry(order_key(&v)).or_default().push(key);
+            fresh.entry(order_key(&v)).or_default().push(key);
             Ok(())
         })
         .map_err(|e: EngineError| e)?;
+        self.map = std::sync::Arc::new(fresh);
         self.built = true;
         Ok(())
     }
@@ -2623,7 +2637,8 @@ impl OrderedColIndex {
             return;
         }
         let tag = order_key(&row.get_or_null(&self.column));
-        let bucket = self.map.entry(tag).or_default();
+        let map = std::sync::Arc::make_mut(&mut self.map);
+        let bucket = map.entry(tag).or_default();
         let pos = bucket.partition_point(|&k| k < key);
         if bucket.get(pos) != Some(&key) {
             bucket.insert(pos, key);
@@ -2641,10 +2656,11 @@ impl OrderedColIndex {
             return;
         }
         let tag = order_key(&row.get_or_null(&self.column));
-        if let Some(bucket) = self.map.get_mut(&tag) {
+        let map = std::sync::Arc::make_mut(&mut self.map);
+        if let Some(bucket) = map.get_mut(&tag) {
             bucket.retain(|&k| k != key);
             if bucket.is_empty() {
-                self.map.remove(&tag);
+                map.remove(&tag);
             }
         }
     }
@@ -2674,7 +2690,7 @@ impl OrderedColIndex {
 
     /// Invalidate the index so the next probe re-populates it from the tree.
     pub fn invalidate(&mut self) {
-        self.map.clear();
+        self.map = std::sync::Arc::new(BTreeMap::new());
         self.built = false;
     }
 }
@@ -3621,10 +3637,21 @@ pub fn execute_update(
         .as_ref()
         .map(|cidx| bound_set.iter().any(|(c, _)| cidx.indexes(c)))
         .unwrap_or(false);
+    // Whether any SET assignment touches the ORDERED index's column. Fenced
+    // independently of `touches_indexed_col`: the ordered column need not be
+    // col-indexed and a col-indexed UPDATE need not touch the ordered column —
+    // each index's maintenance is gated on its OWN column being touched, never
+    // an unconditional drop — an unconditional drop would force a full rebuild
+    // on any recurring UPDATE that never touches the ordered column.
+    let touches_ordered_col = ordered_index
+        .as_ref()
+        .map(|oidx| bound_set.iter().any(|(c, _)| c.eq_ignore_ascii_case(oidx.column())))
+        .unwrap_or(false);
     // Re-file ops gathered during the write loop: (pre-update row, post-update row,
     // key). Applied after the commit so a mid-loop store error leaves the index
     // untouched (the loop's `?` aborts before any re-file lands).
     let mut col_refile: Vec<(Row, Row, i64)> = Vec::new();
+    let mut ordered_refile: Vec<(Row, Row, i64)> = Vec::new();
     let guard = TxnGuard::begin(store, scope)?;
     for (key, row) in &to_update {
         let mut updated = row.clone();
@@ -3649,7 +3676,10 @@ pub fn execute_update(
         tree.insert(*key, &encode_row(&payload_vals))
             .map_err(store_err)?;
         if touches_indexed_col {
-            col_refile.push((row.clone(), updated, *key));
+            col_refile.push((row.clone(), updated.clone(), *key));
+        }
+        if touches_ordered_col {
+            ordered_refile.push((row.clone(), updated, *key));
         }
     }
     // The write-generation is the readers' exactness fence for their adopted
@@ -3673,12 +3703,18 @@ pub fn execute_update(
             cidx.insert_row(after, *key);
         }
     }
-    // Re-file the ordered index for every updated row: invalidate is cheapest and
-    // correct — an UPDATE may change the ordered column value, so drop the whole
-    // index and let the next read rebuild from the tree (same discipline as the
-    // conflict index, which also invalidates on any UPDATE).
+    // Re-file the ordered index for every updated row whose ordered column
+    // changed: drop the pre-update tag, add the post-update tag, at the same
+    // row-key (mirrors the col-index re-file above). An UPDATE that never
+    // touches the ordered column changes no ordered-index entry, so the index
+    // stays valid and needs no maintenance — an unconditional invalidate here
+    // would force a full rebuild on every UPDATE regardless of which column it
+    // touched, reproducing the plateau this index exists to avoid.
     if let Some(oidx) = ordered_index {
-        oidx.invalidate();
+        for (before, after, key) in &ordered_refile {
+            oidx.remove_row(before, *key);
+            oidx.insert_row(after, *key);
+        }
     }
 
     // An UPDATE may rewrite a conflict-key column, so any built conflict index is
@@ -3740,9 +3776,14 @@ pub fn execute_delete(
     };
     binder.finish()?;
 
-    // Whether the col-index (when supplied and built) needs per-row maintenance:
-    // capture the deleted rows so their indexed-column entries can be dropped.
+    // Whether the col-index / ordered-index (when supplied and built) needs
+    // per-row maintenance: capture the deleted rows so their indexed-column
+    // entries can be dropped. Gated on EITHER index being built — collecting
+    // only on `maintain_col` left the ordered index's own removal silently
+    // skipped whenever col was unbuilt but ordered was (a stale-retention gap
+    // distinct from, but the same shape as, the UPDATE gap this plan fixes).
     let maintain_col = col_index.as_ref().map(|cidx| cidx.built()).unwrap_or(false);
+    let maintain_ordered = ordered_index.as_ref().map(|o| o.is_built()).unwrap_or(false);
     // See `execute_insert`'s `has_col_index`: gates the write-generation bump to
     // tables that actually carry a col-index.
     let has_col_index = col_index.is_some();
@@ -3761,7 +3802,7 @@ pub fn execute_delete(
             if let Value::Text(id) = row.get_or_null("id") {
                 deleted_ids.push(id);
             }
-            if maintain_col {
+            if maintain_col || maintain_ordered {
                 deleted_rows.push((row, key));
             }
         }

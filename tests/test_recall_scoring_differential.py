@@ -949,9 +949,10 @@ def test_bucket_b_terms_measurably_change_score_and_rank(tmp_path, monkeypatch):
         f"boosted episodic={boosted[ep]:.6f} < semantic={boosted[se]:.6f} -- rank flipped"
     )
 
-    # T15 salience -- `salience_level` is not a SimpleRecordView field at
-    # all, so it is unreachable on the graph-hydrated hot path exactly like
-    # T10; the injection here is the same test-only getattr shadow.
+    # T15 salience -- both fixture records carry store-level
+    # salience_level="unflagged", so the getattr shadow below is the sole
+    # source of the "critical" value and thus the sole cause of any
+    # score/rank differential measured here.
     cue = fixture.probe_cue["T15_salience"]
     uf, cr = str(fixture.ids["t15_unflagged"]), str(fixture.ids["t15_critical"])
     base = recall(cue)
@@ -968,7 +969,7 @@ def test_bucket_b_terms_measurably_change_score_and_rank(tmp_path, monkeypatch):
     evidence["T15_salience"] = (
         f"baseline unflagged={base[uf]:.6f} > critical={base[cr]:.6f}; "
         f"injected unflagged={injected[uf]:.6f} < critical={injected[cr]:.6f} -- rank flipped "
-        "(salience_level unreachable via SimpleRecordView -- test-only injection, like T10)"
+        "(both records store unflagged; getattr shadow is the sole differentiator)"
     )
 
     # T16 temporal match -- twin pair (identical text -> perfect Bucket-A

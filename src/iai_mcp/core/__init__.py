@@ -1961,14 +1961,21 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
         )
         _next_action_raw = params.get("next_action")
         _focus_raw = params.get("focus")
+        _goal_raw = params.get("goal")
         _next_action_param = _next_action_raw if isinstance(_next_action_raw, str) else None
         _focus_param = _focus_raw if isinstance(_focus_raw, str) else None
-        if _next_action_param is not None or _focus_param is not None:
+        _goal_param = _goal_raw if isinstance(_goal_raw, str) else None
+        if (
+            _next_action_param is not None
+            or _focus_param is not None
+            or _goal_param is not None
+        ):
             from iai_mcp._continuity_update import continuity_update
 
             continuity_update(
                 next_action=_next_action_param,
                 focus=_focus_param,
+                goal=_goal_param,
                 session_id=params.get("session_id"),
                 store=store,
             )

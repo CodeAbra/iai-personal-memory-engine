@@ -79,6 +79,29 @@ def test_boot_sweep_deletes_working_tier_and_empties_continuity_live_state(
     )
 
 
+def test_boot_sweep_deletes_clear_continuation_markers(tmp_path, monkeypatch):
+    """The content-free /clear-continuation marker the SessionStart hook
+    stamps must not survive a boot indefinitely -- it has the same
+    unbounded-growth risk as the working-tier snapshot and is swept by the
+    same boot helper."""
+    _monkeypatch_env(monkeypatch, tmp_path)
+    store_root = tmp_path / "store"
+    store_root.mkdir(parents=True, exist_ok=True)
+    store = SimpleNamespace(root=store_root)
+
+    marker_one = store_root / ".session-clear-continuation.s1"
+    marker_two = store_root / ".session-clear-continuation.s2"
+    marker_one.write_text("", encoding="utf-8")
+    marker_two.write_text("", encoding="utf-8")
+
+    _rebuild_session_caches_on_boot(store)
+
+    assert not marker_one.exists(), (
+        "a /clear-continuation marker must not survive a boot indefinitely"
+    )
+    assert not marker_two.exists()
+
+
 def test_boot_sweep_agent_registry_block_still_renders(tmp_path, monkeypatch):
     """Targeted, not blunt: the agent-registry block (sourced independently
     from daemon_state.json) must survive the same boot sweep that empties

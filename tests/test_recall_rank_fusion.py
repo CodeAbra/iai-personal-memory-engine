@@ -12,7 +12,7 @@ import math
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from iai_mcp import core
+from iai_mcp import core, pipeline, rank_boost
 from iai_mcp.store import MemoryStore, flush_record_buffer
 from iai_mcp.types import EMBED_DIM, MemoryRecord
 from tests._helpers import stub_embedder_for_store
@@ -53,7 +53,14 @@ def _install_embedder(monkeypatch, mapping: dict[str, list[float]]) -> None:
     stub_embedder_for_store(monkeypatch, _MappedEmbedder(mapping))
 
 
-def _rec(text: str, emb: list[float], *, tier: str = "episodic", tags: list[str] | None = None) -> MemoryRecord:
+def _rec(
+    text: str,
+    emb: list[float],
+    *,
+    tier: str = "episodic",
+    tags: list[str] | None = None,
+    salience_level: str = "unflagged",
+) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
         id=uuid4(),
@@ -75,6 +82,7 @@ def _rec(text: str, emb: list[float], *, tier: str = "episodic", tags: list[str]
         updated_at=now,
         tags=tags or [],
         language="en",
+        salience_level=salience_level,
     )
 
 
@@ -168,6 +176,86 @@ def test_tier_boost_env_disables(tmp_path, monkeypatch):
     assert resp["hits"][0]["record_id"] == str(raw.id), (
         "with the boost disabled the closer record must win on cosine"
     )
+
+
+def test_semantic_lift_env_moves_score(tmp_path, monkeypatch):
+    """A semantic-tier record carrying a real salience mark gets a
+    different recall winner as IAI_MCP_SEMANTIC_LIFT moves, proven end to
+    end through pipeline's own env resolver, not a hardcoded param."""
+    raw_text = "a raw conversational turn about deployment gates"
+    knowledge_text = "the deployment gate requires a green suite"
+    _install_embedder(monkeypatch, {
+        raw_text: _unit(0), knowledge_text: _mix(0, 1, 0.68),
+    })
+    store = MemoryStore(path=tmp_path)
+    raw = _rec(raw_text, _unit(0))
+    knowledge = _rec(
+        knowledge_text, _mix(0, 1, 0.68), tier="semantic", salience_level="notable",
+    )
+    store.insert(raw)
+    store.insert(knowledge)
+    flush_record_buffer(store)
+
+    monkeypatch.setenv("IAI_MCP_SEMANTIC_LIFT", "0.0")
+    assert pipeline._semantic_lift() == 0.0
+    resp_off = _dispatch(store, "rank fusion semantic-lift probe", _unit(0))
+    assert resp_off["hits"][0]["record_id"] == str(raw.id), (
+        "at a zero lift the closer raw turn must still win: "
+        f"{[h['record_id'] for h in resp_off['hits']]}"
+    )
+
+    monkeypatch.setenv("IAI_MCP_SEMANTIC_LIFT", "2.0")
+    assert pipeline._semantic_lift() == 2.0
+    resp_on = _dispatch(store, "rank fusion semantic-lift probe", _unit(0))
+    assert resp_on["hits"][0]["record_id"] == str(knowledge.id), (
+        "raising the lift must move the salient semantic record ahead of "
+        f"the closer raw turn: {[h['record_id'] for h in resp_on['hits']]}"
+    )
+
+
+def test_semantic_lift_stacks_additively_with_relaxed_literal_preservation():
+    """A semantic-tier salient record with literal_preservation relaxed
+    hits both branches: the multiplier is tier_boost + semantic_lift, a
+    bounded deterministic sum, never a max() of the two -- a future change
+    to either constant must fail loudly here."""
+    tier_boost = rank_boost.TIER_KNOWLEDGE_BOOST_DEFAULT
+    semantic_lift = rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+    result = rank_boost.tier_multiplier(
+        tier="semantic",
+        tags=[],
+        tier_boost=tier_boost,
+        literal_preservation_strong=False,
+        salience_level="notable",
+        semantic_lift=semantic_lift,
+    )
+    assert result == tier_boost + semantic_lift
+
+
+def test_semantic_lift_malformed_env_falls_back_to_default(monkeypatch):
+    """A non-numeric or non-finite IAI_MCP_SEMANTIC_LIFT resolves to the
+    shipped default, and a negative-but-finite value is clamped to zero --
+    the value that reaches the ranking formula is always finite and
+    non-negative."""
+    monkeypatch.setenv("IAI_MCP_SEMANTIC_LIFT", "not-a-number")
+    assert pipeline._semantic_lift() == rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+
+    for non_finite in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("IAI_MCP_SEMANTIC_LIFT", non_finite)
+        lift = pipeline._semantic_lift()
+        assert lift == rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+        assert math.isfinite(lift)
+
+    monkeypatch.setenv("IAI_MCP_SEMANTIC_LIFT", "-3.0")
+    assert pipeline._semantic_lift() == 0.0
+
+    score = rank_boost.boosted_score(
+        0.5,
+        tier="semantic",
+        tags=[],
+        salience_level="notable",
+        semantic_lift=pipeline._semantic_lift(),
+    )
+    assert math.isfinite(score) and score >= 0.0
 
 
 def _seed_vocab_gap_world(store: MemoryStore, monkeypatch):

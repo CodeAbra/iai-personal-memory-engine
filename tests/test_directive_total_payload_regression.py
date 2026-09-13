@@ -28,7 +28,12 @@ from iai_mcp.directive_budget import (
     DIRECTIVE_MAX_COUNT,
     DIRECTIVE_LINE_CHAR_CAP,
 )
+from iai_mcp.cli._capture import _AVAILABILITY_MARKER_HEALTHY, _truncate_for_claude_code_hook
 from iai_mcp.session import (
+    SESSION_START_CACHE_MAX_CHARS,
+    SESSION_START_EFFECTIVE_CHAR_CAP_BYTES,
+    SESSION_START_MARKER_STALE,
+    SESSION_START_TOTAL_BUDGET_TOKENS as _SESSION_START_TOTAL_BUDGET_TOKENS,
     _approx_tokens,
     assemble_session_start,
     format_payload_as_markdown,
@@ -39,8 +44,7 @@ from iai_mcp.types import EMBED_DIM, MemoryRecord
 from iai_mcp.working_tier import WORKING_TIER_MAX_GOAL_CHARS
 
 _STANDARD = {"wake_depth": "standard"}
-
-_SESSION_START_TOTAL_BUDGET_TOKENS = 3000
+_DEEP = {"wake_depth": "deep"}
 
 _FILLER_WORDS = "alpha bravo charlie delta echo foxtrot golf hotel india juliet "
 
@@ -326,4 +330,126 @@ def test_full_directive_tier_and_live_state_joint_budget_no_truncation(tmp_path)
         f"joint payload {joint_total} + worst-case agent-registry block "
         f"{agent_registry_tokens} = {joint_total_with_agent_registry} exceeds the "
         f"{_SESSION_START_TOTAL_BUDGET_TOKENS}-token ceiling"
+    )
+
+
+def _seed_worst_case_store(store: MemoryStore) -> tuple[list[UUID], CommunityAssignment]:
+    """Deep-mode worst case: full L1 (10 pinned records), full L2 (7
+    communities), and a rich-club pool large enough to saturate the deep
+    2000-token cap -- large enough that the enforced per-block bounds sum
+    above the 3000-token session-start ceiling without a trim."""
+    _seed_l0_identity(store)
+
+    for i in range(10):
+        rec = _record(
+            f"Worst-case pinned fact #{i}: " + ("high detail content " * 6),
+            pinned=True, detail_level=5,
+        )
+        store.insert(rec)
+
+    assignment = CommunityAssignment()
+    for i in range(7):
+        cid = uuid4()
+        members: list[UUID] = []
+        for j in range(3):
+            rec = _record(
+                f"community {i} member {j}: " + ("representative worst-case content " * 4),
+                community_id=cid,
+            )
+            store.insert(rec)
+            members.append(rec.id)
+        assignment.top_communities.append(cid)
+        assignment.mid_regions[cid] = members
+        assignment.community_centroids[cid] = [0.0] * EMBED_DIM
+
+    rich_club_ids: list[UUID] = []
+    for i in range(120):
+        rec = _record(
+            f"rich-club worst-case memory entry {i}: " + ("saturating content " * 6)
+        )
+        store.insert(rec)
+        rich_club_ids.append(rec.id)
+
+    return rich_club_ids, assignment
+
+
+def test_worst_case_deep_payload_trimmed_to_budget_directives_survive(tmp_path):
+    """Worst case: max directives + full L1 + full L2 + a saturated deep
+    rich-club. The rendered ceiling holds and every directive survives
+    verbatim -- proves the priority-ordered trim never mid-cuts a directive
+    even under maximum pressure, and behaves identically for the dict-shape
+    production input."""
+    store = MemoryStore(path=tmp_path)
+    rich_club_ids, assignment = _seed_worst_case_store(store)
+
+    n_seed = DIRECTIVE_MAX_COUNT - 1
+    seeded_texts: list[str] = []
+    for i in range(n_seed):
+        text = _near_cap_text(f"worst{i:02d}")
+        result = capture_turn(
+            store=store, cue="c", text=text,
+            directive=True, session_id="s1", role="user",
+        )
+        assert result["status"] == "inserted", result
+        seeded_texts.append(text)
+
+    goal, focus, next_action = _near_cap_live_state_fields()
+    wt.open_task(goal, session_id="s1")
+    wt.update_task(focus=focus, next_action=next_action, session_id="s1")
+
+    payload = assemble_session_start(store, assignment, rich_club_ids, profile_state=_DEEP)
+    rendered = format_payload_as_markdown(payload)
+    total_tokens = _approx_tokens(rendered)
+
+    assert total_tokens <= _SESSION_START_TOTAL_BUDGET_TOKENS, (
+        f"worst-case payload {total_tokens} tokens exceeds the "
+        f"{_SESSION_START_TOTAL_BUDGET_TOKENS}-token ceiling -- the priority trim did not engage"
+    )
+    assert len(rendered) <= 10_000, (
+        f"worst-case payload {len(rendered)} chars exceeds the 10,000-char hook cap"
+    )
+
+    rendered_bytes = len(rendered.encode("utf-8"))
+    assert rendered_bytes <= SESSION_START_EFFECTIVE_CHAR_CAP_BYTES, (
+        f"worst-case payload {rendered_bytes} UTF-8 bytes exceeds the "
+        f"{SESSION_START_EFFECTIVE_CHAR_CAP_BYTES}-byte effective downstream serve cap -- "
+        "a payload this size would still get naive-tail-chopped by a caller's own marker budget"
+    )
+
+    # cli/_capture.py::cmd_session_start's own truncation must be a no-op on
+    # this already-bounded payload -- proves the CLI serve path never
+    # mid-line-garbles it.
+    cli_marker_suffix = f"\n\n{_AVAILABILITY_MARKER_HEALTHY}"
+    cli_payload_budget = SESSION_START_CACHE_MAX_CHARS - len(cli_marker_suffix)
+    assert _truncate_for_claude_code_hook(rendered, cap=cli_payload_budget) == rendered, (
+        "the CLI hook cap truncated an already-bounded payload -- mid-line cut"
+    )
+
+    # The recall hook's `head -c` cap enforces its cap on the cache FILE in
+    # bytes; proves it would also pass this payload through unmodified.
+    hook_stale_suffix_bytes = len(f"\n\n{SESSION_START_MARKER_STALE}".encode("utf-8"))
+    hook_cache_head_cap_bytes = SESSION_START_CACHE_MAX_CHARS - hook_stale_suffix_bytes
+    assert rendered_bytes <= hook_cache_head_cap_bytes, (
+        "the recall hook's head -c cap would truncate an already-bounded payload -- mid-line cut"
+    )
+
+    for text in seeded_texts:
+        expected = text.rstrip()
+        assert expected in rendered, (
+            f"directive {expected!r} missing from the rendered payload -- "
+            "the trim cut a directive instead of treating it as last resort"
+        )
+
+    for field in (goal.strip(), focus.strip(), next_action.strip()):
+        assert field in rendered, (
+            f"live-state field {field!r} missing from the rendered payload -- "
+            "the trim cut live-state instead of treating it as last resort"
+        )
+
+    from dataclasses import asdict
+
+    dict_payload = asdict(payload)
+    rendered_from_dict = format_payload_as_markdown(dict_payload)
+    assert rendered_from_dict == rendered, (
+        "dict-shape input must trim identically to the dataclass-shape input"
     )

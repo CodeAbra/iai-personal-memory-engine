@@ -8,7 +8,10 @@
 # CLI itself caps stdout at 10000 characters; this script relays the bytes
 # verbatim, except on a cache-hit where the served pack's embedded source
 # watermark is compared against the live store sidecar (pure file read, no
-# daemon call) and a STALE marker is appended on divergence.
+# daemon call) and a STALE marker is appended on divergence. A cache whose
+# embedded wake_depth marker provably trails the live tuned-depth sidecar is
+# never served as-is -- the hook falls through to the CLI, and only serves
+# the cache (with the STALE marker) if the CLI is unreachable.
 #
 # Fail-safe by design: every error path exits 0 with empty stdout so a
 # recall miss never blocks session start. Logs go to
@@ -35,6 +38,17 @@ except Exception:
 
 session_id=$(extract "session_id")
 source_evt=$(extract "source")
+
+# Content-free /clear-continuation marker for the per-turn hook's narrow
+# override. Sanitizer + store-root resolution MUST stay byte-identical to
+# the consumer's (iai-mcp-per-turn-recall.sh) -- hand-synced, no shared lib.
+marker_root="${IAI_MCP_STORE:-${IAI_MCP_ROOT:-$HOME/.iai-mcp}}"
+sid_safe=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9_-' | cut -c1-64)
+if [ "$source_evt" = "clear" ] && [ -n "$sid_safe" ]; then
+  mkdir -p "$marker_root" 2>/dev/null || true
+  : > "$marker_root/.session-clear-continuation.$sid_safe" 2>/dev/null || true
+  chmod 600 "$marker_root/.session-clear-continuation.$sid_safe" 2>/dev/null || true
+fi
 
 # Mirrors daemon_state.RUNNING_AGENT_TTL_HOURS (6h = 21600s); hardcoded,
 # never shelled out to python -- keep this value in sync by hand.
@@ -75,6 +89,7 @@ channel="settings"
 stale_marker="[iai-mcp memory: STALE]"
 stale_suffix=$(printf '\n\n%s' "$stale_marker")
 cache_head_cap=$((10000 - ${#stale_suffix}))
+unavailable_marker="[iai-mcp memory: UNAVAILABLE]"
 
 # Live store-advance sidecar: resolves under IAI_MCP_STORE when set (mirrors
 # doctor's check_jj_watermark_fence store-root resolution), falling back to
@@ -83,11 +98,16 @@ cache_head_cap=$((10000 - ${#stale_suffix}))
 store_root="${IAI_MCP_STORE:-$HOME/.iai-mcp}"
 live_watermark_path="$store_root/hippo/.max-created-at"
 
+# Live tuned wake_depth sidecar: daemon-global, refreshed every lifecycle
+# tick -- NOT store-scoped, mirrors cache_path's own $HOME-fixed location.
+wake_depth_sidecar_path="$HOME/.iai-mcp/.session-wake-depth"
+
 # Precache for the SessionStart hook:
 # read the daemon-written cache whenever it is non-empty (no age cap).
 # Each branch writes a contract log marker. Falls through to the live CLI path
 # on any miss.
 cache_path="$HOME/.iai-mcp/.session-start-payload.cached.md"
+stale_cache_fallback=""
 if [ -s "$cache_path" ]; then
   # Cross-platform mtime: try GNU stat, then BSD stat.
   cache_mtime=$(stat -c %Y "$cache_path" 2>/dev/null || stat -f %m "$cache_path" 2>/dev/null || echo 0)
@@ -112,16 +132,38 @@ if [ -s "$cache_path" ]; then
         live_prefix=$(printf '%s' "$live_wm" | cut -c1-13)
         [ "$embedded_prefix" != "$live_prefix" ] && is_stale=true
       fi
-      if [ "$is_stale" = true ]; then
-        printf '%s%s' "$cache_out" "$stale_suffix"
-      else
-        printf '%s' "$cache_out"
+      # Anchored to line 2 ONLY, same spoof-safety rationale as the
+      # source_watermark anchor above. Blocks (proven mismatch) only when
+      # BOTH sides are known and differ; any unknown fails open -- mirrors
+      # session_scope_blocks in the per-turn hook.
+      embedded_wd=$(printf '%s\n' "$cache_out" | sed -n '2{/^<!-- iai-mcp:wake_depth=.* -->$/{s/^<!-- iai-mcp:wake_depth=\(.*\) -->$/\1/p;};}')
+      live_wd=""
+      [ -f "$wake_depth_sidecar_path" ] && live_wd=$(cat "$wake_depth_sidecar_path" 2>/dev/null || true)
+      wake_depth_stale=false
+      if [ -n "$embedded_wd" ] && [ -n "$live_wd" ] && [ "$embedded_wd" != "$live_wd" ]; then
+        wake_depth_stale=true
       fi
-      emit_continuity_agent_block
-      echo "$ts cache-hit age=${age}s bytes=${#cache_out} stale=$is_stale channel=$channel" >> "$log" 2>/dev/null
-      exit 0
+      if [ "$wake_depth_stale" = true ]; then
+        # Proven wake_depth mismatch: never keep serving the pre-tuning
+        # pack -- fall through to the live CLI path below. Keep the cache
+        # plus the STALE suffix as the fallback in case the CLI is
+        # unreachable, so daemon-down never degrades below today's
+        # stale-but-present behavior.
+        stale_cache_fallback=$(printf '%s%s' "$cache_out" "$stale_suffix")
+        echo "$ts cache-hit age=${age}s bytes=${#cache_out} stale=$is_stale wake_depth_stale=true channel=$channel" >> "$log" 2>/dev/null
+      else
+        if [ "$is_stale" = true ]; then
+          printf '%s%s' "$cache_out" "$stale_suffix"
+        else
+          printf '%s' "$cache_out"
+        fi
+        emit_continuity_agent_block
+        echo "$ts cache-hit age=${age}s bytes=${#cache_out} stale=$is_stale wake_depth_stale=false channel=$channel" >> "$log" 2>/dev/null
+        exit 0
+      fi
+    else
+      echo "$ts cache-miss empty (file existed but read returned 0 bytes) channel=$channel" >> "$log" 2>/dev/null
     fi
-    echo "$ts cache-miss empty (file existed but read returned 0 bytes) channel=$channel" >> "$log" 2>/dev/null
   fi
 elif [ -e "$cache_path" ]; then
   echo "$ts cache-miss empty (zero-byte file) channel=$channel" >> "$log" 2>/dev/null
@@ -174,7 +216,16 @@ if [ -z "$iai_cli" ]; then
   done
 fi
 if [ -z "$iai_cli" ]; then
-  echo "$ts skipped: iai-mcp CLI not found channel=$channel" >> "$log" 2>/dev/null
+  if [ -n "$stale_cache_fallback" ]; then
+    # A wake_depth mismatch already forced this fall-through, but the CLI
+    # binary itself is unresolvable -- serve the cache plus STALE rather
+    # than zero content, same daemon-independence guard as the cli-rc path.
+    printf '%s' "$stale_cache_fallback"
+    emit_continuity_agent_block
+    echo "$ts skipped: iai-mcp CLI not found, served-stale-cache channel=$channel" >> "$log" 2>/dev/null
+  else
+    echo "$ts skipped: iai-mcp CLI not found channel=$channel" >> "$log" 2>/dev/null
+  fi
   exit 0
 fi
 
@@ -219,7 +270,13 @@ else
   rm -f "$tmp_out" 2>/dev/null || true
 fi
 
-if [ "$rc" -eq 0 ]; then
+if [ -n "$stale_cache_fallback" ] && { [ "$rc" -ne 0 ] || [ -z "$out" ] || [ "$out" = "$unavailable_marker" ]; }; then
+  # Guarded fall-through: the wake_depth mismatch demanded a live compose,
+  # but the CLI path is unreachable -- serve the cache plus STALE rather
+  # than zero content, preserving daemon-independence.
+  printf '%s' "$stale_cache_fallback"
+  echo "$ts wake-depth-fallthrough cli-unavailable served-stale-cache channel=$channel" >> "$log" 2>/dev/null
+elif [ "$rc" -eq 0 ]; then
   printf '%s' "$out"
 fi
 emit_continuity_agent_block

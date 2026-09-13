@@ -131,6 +131,12 @@ def test_last_good_structural_source_renders_visible_marker():
     assert "DEGRADED" in block
 
 
+def test_unhashable_source_degrades_to_unknown_marker_without_raising():
+    result = {"hits": [_hit("alice prefers dark mode")], "_source": ["cortex-fallback"]}
+    block = render_recall_block(result)
+    assert "DEGRADED (unknown)" in block
+
+
 def test_unrecognized_source_renders_visible_unknown_marker():
     result = {"hits": [_hit("alice prefers dark mode")], "_source": "some-future-signal"}
     block = render_recall_block(result)
@@ -148,6 +154,64 @@ def test_degraded_zero_hits_renders_marker_only_block():
 def test_healthy_zero_hits_still_renders_empty():
     assert render_recall_block({"hits": []}) == ""
     assert render_recall_block({"hits": [], "_structural_source": "overlay"}) == ""
+
+
+def test_hit_text_with_angle_brackets_is_escaped():
+    result = {"hits": [_hit("alice likes <script>alert(1)</script>")]}
+    block = render_recall_block(result)
+    assert "<script>" not in block
+    assert "&lt;script&gt;" in block
+
+
+def test_corrector_date_is_escaped_and_bounded():
+    result = {
+        "hits": [_hit("alice's team ships on sonnet")],
+        "anti_hits": [_hit("alice's team ships on opus", valid_to="2026-08-20T00:00:00+00:00")],
+    }
+    block = render_recall_block(result)
+    corrector_line = next(ln for ln in block.splitlines() if "supersedes" in ln)
+    assert corrector_line == "⚠ supersedes prior version dated 2026-08-20"
+
+
+def test_non_dict_hit_renders_nothing():
+    result = {"hits": [None, 42, "not a dict"]}
+    assert render_recall_block(result) == ""
+
+
+def test_non_list_hits_field_renders_nothing():
+    assert render_recall_block({"hits": "not a list"}) == ""
+
+
+def test_non_dict_result_renders_nothing():
+    assert render_recall_block(None) == ""
+    assert render_recall_block("not a dict") == ""
+    assert render_recall_block([1, 2, 3]) == ""
+
+
+def test_non_str_literal_surface_falls_back_or_drops():
+    result = {"hits": [{"record_id": "r1", "literal_surface": 12345, "valid_to": None}]}
+    assert render_recall_block(result) == ""
+
+
+def test_non_dict_anti_hit_top_renders_no_corrector():
+    result = {
+        "hits": [_hit("alice's current fact")],
+        "anti_hits": ["not a dict"],
+    }
+    block = render_recall_block(result)
+    assert "supersedes" not in block
+
+
+def test_non_list_anti_hits_field_renders_no_corrector():
+    result = {"hits": [_hit("alice's current fact")], "anti_hits": "not a list"}
+    block = render_recall_block(result)
+    assert "supersedes" not in block
+
+
+def test_non_utf8_encodable_text_drops_hit():
+    surrogate = "alice \ud800 broken"
+    result = {"hits": [_hit(surrogate)]}
+    assert render_recall_block(result) == ""
 
 
 def test_recall_render_module_has_no_daemon_import():

@@ -57,6 +57,11 @@ def _is_custom_store() -> bool:
 
 
 _AVAILABILITY_MARKER_UNAVAILABLE = "[iai-mcp memory: UNAVAILABLE]"
+# Kept as its own literal, not imported from iai_mcp.session, because that
+# module pulls in the numba/numpy-heavy community-detection chain at import
+# time -- unacceptable module-level cost for every CLI command that loads
+# this file. test_marker_vocabulary_matches_session_reserve_source guards
+# against drift instead.
 _AVAILABILITY_MARKER_HEALTHY = "[iai-mcp memory: HEALTHY]"
 
 
@@ -64,7 +69,10 @@ def cmd_session_start(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
 
     try:
-        from iai_mcp.session import format_payload_as_markdown
+        from iai_mcp.session import (
+            SESSION_START_CACHE_MAX_CHARS,
+            format_payload_as_markdown,
+        )
         session_id = getattr(args, "session_id", "-") or "-"
         resp = _cli._send_jsonrpc_request(
             "session_start_payload", {"session_id": session_id}
@@ -80,7 +88,7 @@ def cmd_session_start(args: argparse.Namespace) -> int:
         if not rendered:
             return 0
         marker_suffix = f"\n\n{_AVAILABILITY_MARKER_HEALTHY}"
-        payload_budget = 10000 - len(marker_suffix)
+        payload_budget = SESSION_START_CACHE_MAX_CHARS - len(marker_suffix)
         rendered = _truncate_for_claude_code_hook(rendered, cap=payload_budget)
         rendered = f"{rendered}{marker_suffix}"
         _cli.sys.stdout.write(rendered)

@@ -1,6 +1,6 @@
 [project]
 name = "iai-pme"
-version = "3.2.1"
+version = "3.2.2"
 description = "MCP server giving Claude persistent autistic-style memory + learning"
 authors = [{ name = "Areg Noya" }]
 requires-python = ">=3.11,<3.13"
@@ -67,6 +67,7 @@ migration = ["lancedb>=0.11.0,<1.0"]
 
 [project.scripts]
 iai-mcp-core = "iai_mcp.core:main"
+iai-mcp-server = "iai_mcp.mcp_server_entry:main"
 iai-mcp = "iai_mcp.cli:main"
 iai = "iai_mcp.iai_cli:main"
 

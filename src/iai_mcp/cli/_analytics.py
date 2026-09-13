@@ -274,7 +274,11 @@ def cmd_migrate_to_lilli(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from iai_mcp.crypto import CryptoKey
-    from iai_mcp.migrate import migrate_sqlite_to_lilli, verify_store_equality
+    from iai_mcp.migrate import (
+        migrate_sqlite_to_lilli,
+        normalize_prune_cutoff,
+        verify_store_equality,
+    )
 
     if bool(getattr(args, "swap", False)):
         return cmd_migrate_to_lilli_swap(args)
@@ -290,6 +294,16 @@ def cmd_migrate_to_lilli(args: argparse.Namespace) -> int:
     batch = int(getattr(args, "batch", 500))
     prune_before = getattr(args, "prune_telemetry_before", None)
     verbose = bool(getattr(args, "verbose", False))
+
+    # Fail loud on an unparseable cutoff before any migration work begins --
+    # rejecting it only inside migrate_sqlite_to_lilli would still let a
+    # long copy of earlier tables run first.
+    if prune_before is not None:
+        try:
+            prune_before = normalize_prune_cutoff(prune_before)
+        except ValueError as exc:
+            print(f"error: {exc}", file=_sys.stderr)
+            return 1
 
     src_root = Path(src).resolve().parent.parent
 

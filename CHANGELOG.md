@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.2] - 2026-09-13
+
+### Added
+- New `iai-mcp-server` console script launches the stdio MCP server directly
+  (`node <wrapper>` with a merged environment), giving any MCP host a single
+  portable command instead of a hand-written `node <path>` invocation.
+- `memory_capture` accepts an optional `goal` parameter that refreshes the live
+  session task's goal mid-session when the work has moved on from the goal the
+  task opened with. It is bounded and stored verbatim, never paraphrased.
+- New operator command `iai-mcp salience-backfill` backfills the salience mark
+  and entity coverage across the whole store. It is a dry run by default,
+  printing what would change; `--apply` performs the sweep and refreshes the
+  runtime graph cache so a rebooting daemon serves the updated marks.
+
+### Changed
+- Recall, the session-start pack, and the per-turn foresight pack are now
+  salience-aware: a knowledge or high-salience record outranks a
+  higher-cosine but uninformative "chatter" record instead of losing the slot
+  to raw phrasing similarity. The session-start "Most recent work" block sorts
+  by a salience-and-age composite rather than pure recency, and "Key memories"
+  blends a staleness decay into its ordering.
+- Capture now marks a record `notable` at write time when its text carries a
+  directive or a factual signal, and consolidated summaries minted at sleep
+  time carry entity tags and a `notable` mark so the entity-overlap ranking
+  term is populated for them.
+- `iai-mcp capture-hooks status --target codex` now reports
+  `REGISTERED`/`NOT REGISTERED` and no longer implies Codex will run the
+  registered hooks — it states only that this project's own files and
+  `hooks.json` entries are in place.
+
+### Fixed
+- Linux: idle sensing no longer permanently blocks deep-idle sleep on a
+  seatless (SSH/pts-only) session. The session filter previously dropped any
+  session with an empty `Seat=`; it now also accepts a seatless session that
+  is interactive by its TTY/idle hint. (#172)
+- `migrate-to-lilli --prune-telemetry-before` now validates and normalizes the
+  cutoff before comparing, instead of binding the raw string into the query
+  where an ISO cutoff sorted above every stored timestamp and silently kept
+  all telemetry. (#174)
+- Daemon boot memory: concurrent boot-time callers reconstructing the runtime
+  memory graph from the shed disk cache no longer each stream the full record
+  and edge set, which multiplied peak memory by the number of callers and
+  could drive an out-of-memory kill loop on a large migrated store. (#173)
+- Daemon CPU: the storage engine's ordered secondary index no longer forces a
+  full-corpus rebuild on every write that leaves the ordered column untouched
+  (for example a metadata-flag update), which had produced a sustained
+  per-tick CPU plateau while the daemon was awake. A burst of single-row
+  writes also no longer leaves a reader without a warm lookup index, and a
+  multi-column sorted-index publish race is closed. (#171)
+- The session-start payload is now actually enforced to its declared token
+  ceiling, leaves headroom for the availability marker each serve site
+  appends, and is composed from the store's real `wake_depth` instead of a
+  hardcoded value. When a wake-depth refresh cannot resolve the `iai-mcp`
+  binary it serves the already-composed payload instead of empty stdout.
+- The per-turn recall hook honors `IAI_DAEMON_SOCKET_PATH`, degrades to a
+  visible marker instead of raising when a recall result's source field is an
+  unhashable value, reconstructs the current task state after a real `/clear`
+  (with a freshness guard against a backward clock jump), and no longer lets a
+  second concurrent session read the first session's private live state.
+  Recall hits hydrated through the graph-cache path now render their real
+  `salience_level` instead of `unflagged`.
+- `iai-mcp capture-hooks install --target codex` deploys the recall-render
+  helper alongside the Codex hook scripts, and `uninstall` removes only its
+  own hook command from a shared entry instead of dropping a co-located
+  foreign hook.
+
+### Security
+- The per-turn recall hook's rendered block now HTML-escapes hit and corrector
+  text and bounds its length, so a stored memory can no longer open markup
+  inside the block. The live-recall socket accelerator verifies the daemon
+  socket and its parent directory are owned by the current user and not
+  group/other-writable, runs the whole exchange under a single wall-clock
+  deadline, and rejects a symlink planted at any of its cache or state paths;
+  the foresight-served ledger write is flock-protected, size-capped, and
+  symlink-rejecting.
+
 ## [3.2.1] - 2026-09-08
 
 ### Fixed

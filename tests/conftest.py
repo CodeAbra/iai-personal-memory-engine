@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -578,6 +580,158 @@ def hermetic_store(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("IAI_MCP_STORE", str(store_root))
     monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(dead_socket))
     yield store_root
+
+
+# ---------------------------------------------------------------------------
+# Shed-state fixture: a small, scale-independent lilli store whose
+# runtime-graph cache is forced to shed node_payload (use_cached_payload=False
+# in build_runtime_graph) via a low MAX_CACHE_BYTES cap -- the boot-time state
+# of a freshly-migrated store, before any daemon process has warmed an
+# in-memory bundle. Shared by the ranking-parity golden capture and its later
+# replay so both compare on the identical shed-path store.
+# ---------------------------------------------------------------------------
+
+SHED_STATE_N_RECORDS = 8
+SHED_STATE_N_EDGES = 10
+SHED_STATE_FROZEN_INSTANT = datetime(2024, 6, 1, tzinfo=timezone.utc)
+SHED_STATE_RECORD_CREATED_AT = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def shed_only_node_payload_cap(n_records: int) -> int:
+    """A MAX_CACHE_BYTES value that sheds only node_payload, never the whole
+    cache write, for any community count between 1 and n_records.
+
+    Derived from runtime_graph_cache's own per-entry size estimator: the gap
+    between the cache size with and without node_payload is a constant
+    (node_payload_cost) regardless of community count, so any cap between the
+    worst-case floor (all-communities-singleton, node_payload dropped) and
+    that floor plus node_payload_cost sheds node_payload only. Sitting the cap
+    at floor + node_payload_cost // 2 keeps it in that band for every
+    community count from 1 to n_records.
+    """
+    from iai_mcp import runtime_graph_cache as rgc
+
+    floor = (
+        rgc._BASE_SCAFFOLD_BYTES
+        + n_records * rgc._CENTRALITY_BYTES_PER_ENTRY
+        + n_records * 50  # node_to_community bytes/entry (assignment block)
+        + n_records * 16  # top_communities worst case (one entry/community)
+        + n_records * rgc._RICH_CLUB_BYTES_PER_ENTRY
+        + rgc._CENTROID_BYTES_PER_RECORD + 4
+        + rgc._MID_REGION_BYTES_PER_RECORD + 4
+    )
+    node_payload_cost = n_records * (
+        rgc._NODE_PAYLOAD_BYTES_PER_RECORD + rgc._JSON_DICT_ENTRY_OVERHEAD + 38
+    )
+    return int(floor + node_payload_cost // 2)
+
+
+def build_shed_state_store(root: Path, monkeypatch: pytest.MonkeyPatch):
+    """Build a small lilli store whose runtime-graph cache is warm-but-shed.
+
+    node_payload is empty on disk after the prewarm build but the compact
+    centrality survives (never shed), so a subsequent `build_runtime_graph`
+    call takes the lock-free no-rebuild branch and reconstructs by streaming
+    instead of a cache miss or an in-memory memo hit -- the in-process memo is
+    cleared here for exactly that reason.
+
+    Fully deterministic: fixed record UUIDs, fixed created_at (never
+    `datetime.now()`). Two independent calls to this function, even from
+    separate processes, produce byte-identical on-disk cache content.
+    """
+    from iai_mcp import runtime_graph_cache
+    from iai_mcp.retrieve import build_runtime_graph
+    from iai_mcp.store import MemoryStore
+    from iai_mcp.types import EMBED_DIM, MemoryRecord
+
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("IAI_MCP_STORE", str(root))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(root / "no-such.sock"))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    monkeypatch.setenv("LILLI_FSYNC_MODE", "fast")
+    # At this fixture's tiny scale a healthy RO pool would serve the boot
+    # COUNT from a borrowed connection distinct from db._conn, making the
+    # engine's cell-visit counters on db._conn misreport zero work regardless
+    # of corpus size. Force the writer-connection fallback so a counter probe
+    # against db._conn reflects the query actually run.
+    monkeypatch.setenv("IAI_MCP_RO_POOL_OFF", "1")
+    monkeypatch.setattr(
+        runtime_graph_cache,
+        "MAX_CACHE_BYTES",
+        shed_only_node_payload_cap(SHED_STATE_N_RECORDS),
+    )
+
+    store = MemoryStore(path=root)
+    records = []
+    for i in range(SHED_STATE_N_RECORDS):
+        vec = [0.0] * EMBED_DIM
+        vec[i % EMBED_DIM] = 1.0
+        rec = MemoryRecord(
+            id=uuid.UUID(int=i + 1),
+            tier="episodic",
+            literal_surface=f"shed state fixture record {i}",
+            aaak_index="",
+            embedding=vec,
+            community_id=None,
+            centrality=0.0,
+            detail_level=2,
+            pinned=False,
+            stability=0.5,
+            difficulty=0.0,
+            last_reviewed=None,
+            never_decay=False,
+            never_merge=False,
+            provenance=[],
+            created_at=SHED_STATE_RECORD_CREATED_AT,
+            updated_at=SHED_STATE_RECORD_CREATED_AT,
+            tags=[],
+            language="en",
+        )
+        store.insert(rec)
+        records.append(rec)
+
+    pairs = []
+    for i in range(SHED_STATE_N_EDGES):
+        src = records[i % SHED_STATE_N_RECORDS]
+        dst = records[(i * 3 + 1) % SHED_STATE_N_RECORDS]
+        if src.id != dst.id:
+            pairs.append((src.id, dst.id))
+    store.boost_edges(pairs, delta=0.5, edge_type="hebbian")
+
+    build_runtime_graph(store)
+    store._warm_graph_bundle = None
+    return store, records
+
+
+class _ShedStateFrozenClock(datetime):
+    """`datetime` subclass whose `now()` always returns the fixture's frozen
+    instant. Swapped into a module's global `datetime` name (not used
+    directly) so the AGE rank term is byte-reproducible run to run."""
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return SHED_STATE_FROZEN_INSTANT
+        return SHED_STATE_FROZEN_INSTANT.astimezone(tz)
+
+
+def freeze_recall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze `datetime.now()` in every recall-path module that reads it for
+    a rank-affecting computation, for the duration of the current test."""
+    import iai_mcp.pipeline as pipeline_mod
+    import iai_mcp.retrieve as retrieve_mod
+
+    monkeypatch.setattr(pipeline_mod, "datetime", _ShedStateFrozenClock)
+    monkeypatch.setattr(retrieve_mod, "datetime", _ShedStateFrozenClock)
+
+
+@pytest.fixture
+def shed_state_store(tmp_path, monkeypatch):
+    """Yields `(store, records)` for the shed-state fixture (see
+    `build_shed_state_store`). The store is closed at teardown."""
+    store, records = build_shed_state_store(tmp_path / "shed-state", monkeypatch)
+    yield store, records
+    store.close()
 
 
 @pytest.fixture

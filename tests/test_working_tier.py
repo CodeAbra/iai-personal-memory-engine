@@ -657,6 +657,44 @@ def test_update_task_bounds_next_action_and_focus_to_the_goal_char_cap():
     assert entry.focus == oversized[: wt.WORKING_TIER_MAX_GOAL_CHARS]
 
 
+def test_update_task_goal_refreshes_and_bounds_and_renders():
+    from iai_mcp import working_tier as wt
+    from iai_mcp.working_tier import _render_snapshot
+
+    wt.open_task("original stale goal")
+    entry = wt.update_task(goal="new goal")
+
+    assert entry is not None
+    assert entry.goal == "new goal"
+    assert "goal: new goal" in _render_snapshot(entry)
+
+    oversized = "x" * (wt.WORKING_TIER_MAX_GOAL_CHARS + 200)
+    entry2 = wt.update_task(goal=oversized)
+    assert entry2 is not None
+    assert entry2.goal == oversized[: wt.WORKING_TIER_MAX_GOAL_CHARS]
+    assert len(entry2.goal) == wt.WORKING_TIER_MAX_GOAL_CHARS
+
+
+def test_update_task_goal_empty_or_whitespace_is_a_noop():
+    from iai_mcp import working_tier as wt
+
+    wt.open_task("kept goal")
+
+    entry = wt.update_task(goal="")
+    assert entry is not None
+    assert entry.goal == "kept goal", "an empty goal must never clear the existing goal"
+
+    entry2 = wt.update_task(goal="   ")
+    assert entry2 is not None
+    assert entry2.goal == "kept goal", "a whitespace-only goal must be a no-op"
+
+
+def test_update_task_goal_with_no_open_task_returns_none():
+    from iai_mcp import working_tier as wt
+
+    assert wt.update_task(goal="a goal with no focal task") is None
+
+
 def test_render_snapshot_always_emits_prefixed_next_action_line():
     from iai_mcp.working_tier import WorkingSetEntry, _render_snapshot
 

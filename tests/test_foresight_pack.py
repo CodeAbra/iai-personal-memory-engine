@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from iai_mcp import foresight
+from iai_mcp import foresight, rank_boost
 from iai_mcp.capture import capture_turn, write_deferred_event
 from iai_mcp.store import MemoryStore, flush_record_buffer
 
@@ -82,8 +82,7 @@ def _turn(store, text, session):
 # dominated by the prompt's dominant register, missing a rare-token rule that
 # a short derived cue finds directly. The Russian literals below ARE the
 # value under test (a real drown case, not narrative prose) — non-English
-# fixture DATA, no automated public-scrub marker exists in this codebase
-# (see 248-01-SUMMARY.md); this comment is the exemption.
+# fixture DATA simulating a real user turn, kept verbatim as the drown target.
 DROWN_TARGET = "Прогони через хуманайзер каждый пост перед публикацией."
 DROWN_DERIVED_CUE = "хуианайзер"
 DROWN_LONG_PROMPT = (
@@ -120,8 +119,7 @@ DROWN_FILLER = [
     "The marathon route passes through five neighborhoods.",
 ]
 
-# Calibrated empirically against the real embedder this plan (see
-# 248-01-SUMMARY.md): cos(long_prompt, target) ~= 0.7634,
+# Calibrated empirically against the real embedder: cos(long_prompt, target) ~= 0.7634,
 # cos(derived_cue, target) ~= 0.8152. DROWN_FLOOR sits strictly between them;
 # DROWN_WINDOW is the locked IAI_MCP_FORESIGHT_CUE_WINDOW default (<=16).
 DROWN_FLOOR = 0.78
@@ -686,7 +684,7 @@ def test_calibration_floor_and_window_lock_drown_fixture(driver, tmp_path, monke
     )
 
 
-# --- SC-1: single-cue MISS is real, and the two xfail(strict) RED cases -----
+# --- Single-cue MISS is real, and the two xfail(strict) RED cases -----
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_sc1_single_cue_misses_drowned_target(driver, tmp_path, monkeypatch):
@@ -760,7 +758,7 @@ def test_sc1_default_reserve_surfaces_drowned_target(driver, tmp_path, monkeypat
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_full_pack_reserve_preserves_primary_order(driver, tmp_path, monkeypatch):
-    """The owner-locked SC-2 ordering reading: with every slot already filled
+    """The locked ordering reading: with every slot already filled
     by the primary cue, the reserved cue must land the drowned rule in the
     reserved slot WITHOUT reordering the primary's first max_items-1 hits."""
     _select_driver(driver, monkeypatch)
@@ -1803,4 +1801,309 @@ def test_six_item_pack_within_budget(driver, tmp_path, monkeypatch):
     assert _BUDGET_TAIL_CORRECTOR in body, (
         f"[{driver}] the assistant-tail lane's superseded corrector must "
         f"still surface within budget: {body!r}"
+    )
+
+
+# --- Knowledge-tier/salience boost: informativeness must outrank raw cosine -
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_knowledge_tier_beats_higher_cosine_chatter(driver, tmp_path, monkeypatch):
+    """A salient knowledge record must win a scarce slot over a higher-raw-
+    cosine chatter record. Pre-fix, foresight ranks by raw cosine alone
+    (store.query_similar / exact_top_k, no tier/salience term anywhere in
+    the path) so a register-matched but uninformative candidate always
+    wins; the ANN order and exact-authority confirm are pinned here so the
+    only variable under test is whether a boost reorders the window."""
+    _select_driver(driver, monkeypatch)
+    monkeypatch.setenv("IAI_MCP_FORESIGHT_MULTI_CUE_OFF", "1")
+    monkeypatch.setenv(foresight.FORESIGHT_MAX_ITEMS_ENV, "1")
+    store = MemoryStore(path=tmp_path)
+
+    chatter = _turn(store, "Ага, вижу, круто, погнали дальше как обычно.", "past-chatter")
+    knowledge = capture_turn(
+        store, cue="",
+        text="GPT-6 Astra release notes: coding-focused planning variant with extended context.",
+        tier="episodic", session_id="past-knowledge", role="user",
+        live_turn=False, salience_level="critical",
+    )
+    flush_record_buffer(store)
+
+    from uuid import UUID
+
+    chatter_id = UUID(chatter["record_id"])
+    knowledge_id = UUID(knowledge["record_id"])
+    chatter_rec = store.get(chatter_id)
+    knowledge_rec = store.get(knowledge_id)
+    assert chatter_rec is not None and knowledge_rec is not None
+
+    # Pinned ANN order and exact-confirm scores: chatter's raw cosine (0.90)
+    # outranks knowledge's (0.86) -- the register-match-beats-informativeness
+    # scenario the report diagnosed, made deterministic instead of relying
+    # on embedder calibration.
+    def _fake_query_similar(cue, *, k=10, **kwargs):
+        return [(chatter_rec, 0.90), (knowledge_rec, 0.86)]
+
+    def _fake_exact_top_k(vec, k=10, *, build_if_cold=True):
+        return [(chatter_id, 0.90), (knowledge_id, 0.86)]
+
+    monkeypatch.setattr(store, "query_similar", _fake_query_similar)
+    monkeypatch.setattr(store, "exact_top_k", _fake_exact_top_k)
+
+    report = foresight.refresh_pack(
+        store, cue_text="what's the situation right now",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-tier-vs-chatter",
+    )
+    assert report["packed"] == 1, report
+    body = foresight.pack_path(store, "today-tier-vs-chatter").read_text(encoding="utf-8")
+    assert "GPT-6 Astra" in body, (
+        f"[{driver}] the salient knowledge record must win the single slot "
+        f"over higher-raw-cosine chatter: {body}"
+    )
+    assert "погнали дальше" not in body, (
+        f"[{driver}] higher-cosine chatter must not evict salient knowledge: {body}"
+    )
+
+
+# --- Real literal_preservation + semantic-lift threading into _boost_sort --
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_boost_sort_threads_real_literal_preservation(driver, tmp_path, monkeypatch):
+    """foresight must score with the store's REAL literal_preservation value,
+    not a hardcoded strong default: with the knob relaxed to "medium" the
+    tier-boost branch must fire for an unflagged semantic-tier record the
+    same way it already fires in full recall (pipeline.py)."""
+    _select_driver(driver, monkeypatch)
+    monkeypatch.setenv("IAI_MCP_FORESIGHT_MULTI_CUE_OFF", "1")
+    monkeypatch.setenv(foresight.FORESIGHT_MAX_ITEMS_ENV, "1")
+    store = MemoryStore(path=tmp_path)
+
+    chatter = _turn(store, "Yeah, I see, cool, let's keep going as usual.", "past-chatter-lp")
+    semantic = capture_turn(
+        store, cue="",
+        text="Quarterly infrastructure migration plan: staged rollout across three regions.",
+        tier="semantic", session_id="past-semantic-lp", role="user",
+        live_turn=False,
+    )
+    flush_record_buffer(store)
+
+    from uuid import UUID
+
+    chatter_id = UUID(chatter["record_id"])
+    semantic_id = UUID(semantic["record_id"])
+    chatter_rec = store.get(chatter_id)
+    semantic_rec = store.get(semantic_id)
+    assert chatter_rec is not None and semantic_rec is not None
+    assert semantic_rec.tier == "semantic" and semantic_rec.salience_level == "unflagged", (
+        "fixture must isolate literal_preservation as the sole variable"
+    )
+
+    # Pinned scores: chatter's raw cosine (0.90) outranks the semantic
+    # record's (0.87) under a hardcoded-strong default; 0.87 scaled by the
+    # tier_boost the relaxed knob unlocks (1.05) exceeds 0.90, so a real
+    # "medium" reading must flip the served order.
+    def _fake_query_similar(cue, *, k=10, **kwargs):
+        return [(chatter_rec, 0.90), (semantic_rec, 0.87)]
+
+    def _fake_exact_top_k(vec, k=10, *, build_if_cold=True):
+        return [(chatter_id, 0.90), (semantic_id, 0.87)]
+
+    monkeypatch.setattr(store, "query_similar", _fake_query_similar)
+    monkeypatch.setattr(store, "exact_top_k", _fake_exact_top_k)
+
+    from iai_mcp import core
+
+    monkeypatch.setitem(core._profile_state, "literal_preservation", "medium")
+
+    report = foresight.refresh_pack(
+        store, cue_text="what's the current plan",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-lp-real",
+    )
+    assert report["packed"] == 1, report
+    body = foresight.pack_path(store, "today-lp-real").read_text(encoding="utf-8")
+    assert "infrastructure migration" in body, (
+        f"[{driver}] real literal_preservation='medium' must unlock the tier "
+        f"boost and reorder the semantic record ahead of higher-cosine "
+        f"chatter: {body}"
+    )
+    assert "keep going" not in body, (
+        f"[{driver}] higher-cosine chatter must not win once the real knob "
+        f"unlocks the semantic tier boost: {body}"
+    )
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_foresight_semantic_lift_env_moves_served_order(driver, tmp_path, monkeypatch):
+    """IAI_MCP_FORESIGHT_SEMANTIC_LIFT must move the served order for a
+    semantic-tier record carrying a real salience mark -- the additive term
+    is inert on the push surface until this dial is threaded through."""
+    _select_driver(driver, monkeypatch)
+    monkeypatch.setenv("IAI_MCP_FORESIGHT_MULTI_CUE_OFF", "1")
+    monkeypatch.setenv(foresight.FORESIGHT_MAX_ITEMS_ENV, "1")
+    store = MemoryStore(path=tmp_path)
+
+    chatter = _turn(store, "Yeah, I see, cool, let's keep going as usual.", "past-chatter-lift")
+    salient = capture_turn(
+        store, cue="",
+        text="Deployment runbook: rollback procedure for the payment service.",
+        tier="semantic", session_id="past-salient-lift", role="user",
+        live_turn=False, salience_level="notable",
+    )
+    flush_record_buffer(store)
+
+    from uuid import UUID
+
+    chatter_id = UUID(chatter["record_id"])
+    salient_id = UUID(salient["record_id"])
+    chatter_rec = store.get(chatter_id)
+    salient_rec = store.get(salient_id)
+    assert chatter_rec is not None and salient_rec is not None
+    assert salient_rec.tier == "semantic" and salient_rec.salience_level == "notable"
+
+    def _fake_query_similar(cue, *, k=10, **kwargs):
+        return [(chatter_rec, 0.90), (salient_rec, 0.60)]
+
+    def _fake_exact_top_k(vec, k=10, *, build_if_cold=True):
+        return [(chatter_id, 0.90), (salient_id, 0.60)]
+
+    monkeypatch.setattr(store, "query_similar", _fake_query_similar)
+    monkeypatch.setattr(store, "exact_top_k", _fake_exact_top_k)
+
+    monkeypatch.setenv(foresight.FORESIGHT_SEMANTIC_LIFT_ENV, "0")
+    report_low = foresight.refresh_pack(
+        store, cue_text="what happened",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-lift-low",
+    )
+    assert report_low["packed"] == 1, report_low
+    body_low = foresight.pack_path(store, "today-lift-low").read_text(encoding="utf-8")
+    assert "rollback procedure" not in body_low, (
+        f"[{driver}] semantic_lift=0 must not lift the salient record above "
+        f"higher-cosine chatter: {body_low}"
+    )
+
+    monkeypatch.setenv(foresight.FORESIGHT_SEMANTIC_LIFT_ENV, "1.0")
+    report_high = foresight.refresh_pack(
+        store, cue_text="what happened",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-lift-high",
+    )
+    assert report_high["packed"] == 1, report_high
+    body_high = foresight.pack_path(store, "today-lift-high").read_text(encoding="utf-8")
+    assert "rollback procedure" in body_high, (
+        f"[{driver}] a higher IAI_MCP_FORESIGHT_SEMANTIC_LIFT must move the "
+        f"salient semantic record ahead of higher-cosine chatter: {body_high}"
+    )
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_served_surface_knowledge_outranks_higher_cosine_chatter(driver, tmp_path, monkeypatch):
+    """Served-surface confirmation, not a rebuild: with a real salience
+    signal flowing, a semantic-tier knowledge record must reorder ahead of
+    a higher-cosine chatter record in the actual packed order, proving the
+    landed _boost_sort / _select_reserve_tokens wiring produces real
+    reordering on the surface the agent actually reads."""
+    _select_driver(driver, monkeypatch)
+    monkeypatch.setenv("IAI_MCP_FORESIGHT_MULTI_CUE_OFF", "1")
+    monkeypatch.setenv(foresight.FORESIGHT_MAX_ITEMS_ENV, "2")
+    store = MemoryStore(path=tmp_path)
+
+    chatter = _turn(store, "Yeah, I see, cool, let's keep going as usual.", "past-chatter-bury")
+    knowledge = capture_turn(
+        store, cue="",
+        text="Incident postmortem: root cause was a stale cache key on the billing service.",
+        tier="semantic", session_id="past-knowledge-bury", role="user",
+        live_turn=False, salience_level="notable",
+    )
+    flush_record_buffer(store)
+
+    from uuid import UUID
+
+    chatter_id = UUID(chatter["record_id"])
+    knowledge_id = UUID(knowledge["record_id"])
+    chatter_rec = store.get(chatter_id)
+    knowledge_rec = store.get(knowledge_id)
+    assert chatter_rec is not None and knowledge_rec is not None
+    assert knowledge_rec.tier == "semantic" and knowledge_rec.salience_level == "notable"
+
+    # Fixed real-embedding cosines from a measured order-bury case: the
+    # chatter record's raw cosine outranks the knowledge record's by a wide
+    # margin, so any reorder observed below comes from the value signal.
+    knowledge_cos = 0.6881893873214722
+    chatter_cos = 0.9819533824920654
+
+    # Pin the MARGIN, not just the served order: a future unrelated tuning
+    # of SEMANTIC_VALUE_LIFT_DEFAULT / SALIENCE_BOOST_STEP_DEFAULT could
+    # silently drop the shipped boost below the ratio this exact incident
+    # requires, with only the order assertion below to catch it (and only
+    # for this one measured cosine pair).
+    required_flip_ratio = chatter_cos / knowledge_cos
+    shipped_multiplier = rank_boost.tier_multiplier(
+        tier="semantic", tags=[], tier_boost=rank_boost.TIER_KNOWLEDGE_BOOST_DEFAULT,
+        literal_preservation_strong=True, salience_level="notable",
+        semantic_lift=rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT,
+    ) * rank_boost.salience_multiplier(
+        salience_level="notable", salience_step=rank_boost.SALIENCE_BOOST_STEP_DEFAULT,
+    )
+    assert shipped_multiplier > required_flip_ratio, (
+        f"shipped boost multiplier {shipped_multiplier:.4f} no longer clears "
+        f"the measured order-bury ratio {required_flip_ratio:.4f}"
+    )
+
+    def _fake_query_similar(cue, *, k=10, **kwargs):
+        return [(chatter_rec, chatter_cos), (knowledge_rec, knowledge_cos)]
+
+    def _fake_exact_top_k(vec, k=10, *, build_if_cold=True):
+        return [(chatter_id, chatter_cos), (knowledge_id, knowledge_cos)]
+
+    monkeypatch.setattr(store, "query_similar", _fake_query_similar)
+    monkeypatch.setattr(store, "exact_top_k", _fake_exact_top_k)
+
+    report = foresight.refresh_pack(
+        store, cue_text="what's the status",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-order-bury",
+    )
+    assert report["packed"] == 2, report
+    packed_ids = report["packed_ids"]
+    assert str(knowledge_id) in packed_ids and str(chatter_id) in packed_ids, packed_ids
+    assert packed_ids.index(str(knowledge_id)) < packed_ids.index(str(chatter_id)), (
+        f"[{driver}] the salient semantic record must be served ahead of "
+        f"the higher-cosine chatter record: {packed_ids!r}"
+    )
+
+
+def test_select_reserve_tokens_keeps_entity_anchor_over_more_distant_rare_token():
+    """Fix: the derived-cue token-selection step must keep the turn's own
+    entity-anchor token (its dominant topic) even when a rare/Cyrillic-
+    fallback token sits farther from the mean cue and would otherwise win
+    the ascending-most-distant sort alone."""
+    cue_vec = [1.0, 0.0]
+    close_entity_vec = [0.99, 0.01]  # near the mean -- old sort dropped it
+    near_rare_vec = [0.0, 1.0]  # cos 0.0 -- second most distant
+    far_rare_vec = [-0.5, 0.87]  # cos ~-0.5 -- most distant of the three
+    pairs = [
+        ("astra", close_entity_vec),
+        ("nearrare", near_rare_vec),
+        ("farrare", far_rare_vec),
+    ]
+    entity_pool = {"astra"}
+
+    kept = foresight._select_reserve_tokens(pairs, entity_pool, cue_vec, cue_cap=2)
+    kept_tokens = [tok for tok, _ in kept]
+    assert kept_tokens[0] == "astra", (
+        f"entity anchor must be kept first regardless of distance: {kept_tokens!r}"
+    )
+    assert "farrare" in kept_tokens, (
+        f"the single most-distant rare token must fill the remaining slot: {kept_tokens!r}"
+    )
+    assert "nearrare" not in kept_tokens, kept_tokens
+
+    # Fixture must be adversarial by construction: a pure ascending-most-
+    # distant sort over the WHOLE pool (the pre-fix behavior) drops "astra".
+    old_sort = sorted(pairs, key=lambda cv: foresight._cos(cv[1], cue_vec))
+    old_kept = [tok for tok, _ in old_sort[:2]]
+    assert "astra" not in old_kept, (
+        f"fixture is not adversarial -- old sort already kept astra: {old_kept!r}"
     )

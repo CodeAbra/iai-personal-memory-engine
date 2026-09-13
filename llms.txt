@@ -2,7 +2,7 @@
 
 > Local, MIT-licensed personal memory engine for MCP-compatible AI assistants. Captures every conversation turn verbatim (write-once), consolidates in the background, and injects a small relevant memory pack into the assistant at session start and per turn. No account, no API key, no telemetry.
 
-Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memory-engine. Current release: 3.1.0.
+Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memory-engine. Current release: 3.2.2.
 
 ## What it is
 
@@ -37,7 +37,7 @@ Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memor
 
 ## Hosts
 
-Claude Code (primary, ambient capture), Codex CLI, Cursor, Antigravity, Hermes (ambient capture), Claude Desktop, Gemini CLI and any other MCP-over-stdio client (tools only). Details: [README.md#compatibility](README.md#compatibility).
+Claude Code (primary, ambient capture), Codex CLI, Cursor, Antigravity, Hermes (ambient capture), OpenClaw (tools on request), Claude Desktop, Gemini CLI and any other MCP-over-stdio client (tools only). Details: [README.md#compatibility](README.md#compatibility).
 
 ## Install
 
@@ -47,7 +47,7 @@ Claude Code (primary, ambient capture), Codex CLI, Cursor, Antigravity, Hermes (
 
 ## MCP tools
 
-`memory_recall` (returns hits and anti-hits), `memory_temporal_recall`, `memory_recall_structural`, `memory_search`, `memory_capture`, `memory_contradict`, `memory_reinforce`, `memory_consolidate`, `profile_get_set`, plus introspection: `topology`, `schema_list`, `events_query`, `episodes_recent`, `curiosity_pending`.
+`memory_recall` (returns hits and anti-hits), `memory_temporal_recall`, `memory_recall_structural`, `memory_search`, `memory_capture`, `memory_contradict`, `memory_reinforce`, `memory_consolidate`, `claim_check` (memory-integrity verification), `profile_get_set`, plus introspection: `topology`, `schema_list`, `events_query`, `episodes_recent`, `curiosity_pending`.
 
 ## Docs
 

@@ -26,8 +26,11 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
+
+from iai_mcp import rank_boost
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,9 @@ FORESIGHT_OFF_ENV = "IAI_MCP_FORESIGHT_OFF"
 FORESIGHT_MIN_COS_ENV = "IAI_MCP_FORESIGHT_MIN_COS"
 FORESIGHT_MAX_ITEMS_ENV = "IAI_MCP_FORESIGHT_MAX_ITEMS"
 FORESIGHT_BUDGET_TOKENS_ENV = "IAI_MCP_FORESIGHT_BUDGET_TOKENS"
+
+FORESIGHT_TIER_BOOST_ENV = "IAI_MCP_FORESIGHT_TIER_BOOST"
+FORESIGHT_SALIENCE_BOOST_ENV = "IAI_MCP_FORESIGHT_SALIENCE_BOOST"
 
 FORESIGHT_GOAL_WEIGHT_ENV = "IAI_MCP_FORESIGHT_GOAL_WEIGHT"
 FORESIGHT_REPEAT_AFTER_ENV = "IAI_MCP_FORESIGHT_REPEAT_AFTER_SEC"
@@ -52,6 +58,21 @@ FORESIGHT_BUDGET_TOKENS_DEFAULT = 700
 FORESIGHT_GOAL_WEIGHT_DEFAULT = 0.25
 FORESIGHT_REPEAT_AFTER_DEFAULT = 10800.0
 """A served memory may be served again after this many seconds."""
+
+FORESIGHT_TIER_BOOST_DEFAULT = rank_boost.TIER_KNOWLEDGE_BOOST_DEFAULT
+FORESIGHT_SALIENCE_BOOST_DEFAULT = rank_boost.SALIENCE_BOOST_STEP_DEFAULT
+"""Knowledge-tier/salience rank boost, same arithmetic recall_for_response
+applies at final rank (rank_boost.py) -- foresight ranks by raw cosine alone
+otherwise, letting register-matched chatter beat topically-relevant
+knowledge. Reorders candidates ONLY: the confidence floor and the pack's
+displayed cos stay the raw/exact value, never the boosted one."""
+
+FORESIGHT_SEMANTIC_LIFT_ENV = "IAI_MCP_FORESIGHT_SEMANTIC_LIFT"
+FORESIGHT_SEMANTIC_LIFT_DEFAULT = rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+"""Additive lift for a semantic-tier record that also carries a real
+salience mark -- same arithmetic rank_boost.tier_multiplier applies at final
+rank, mirroring pipeline.py's own dial (IAI_MCP_SEMANTIC_LIFT). A NaN/inf
+env value falls back to the default rather than clamping to NaN."""
 
 FORESIGHT_CUE_RESERVE_DEFAULT = 1
 """Slots reserved for derived-cue hits out of FORESIGHT_MAX_ITEMS_DEFAULT.
@@ -470,9 +491,9 @@ def _exact_scores(store: Any, cue_vec: "list[float]", k: int) -> "dict[str, floa
         return {}
 
 
-def _derive_short_cues(
+def _derive_short_cues_ex(
     text: str, max_n: int = 3, *, store: Any = None,
-) -> "list[str]":
+) -> "tuple[list[str], set[str]]":
     """Deterministic, bounded, hybrid short-cue derivation from a long turn.
 
     Read-only: the entity_anchors.extract_entities() priority lane, an
@@ -481,25 +502,34 @@ def _derive_short_cues(
     fallback lane, longest-first with first-seen order on ties. Union order:
     entities, then Latin-by-IDF, then Cyrillic-by-length; capped at max_n, no
     duplicates, never the whole prompt, never raises.
+
+    Returns (tokens, entity_tokens) — entity_tokens is the subset of the
+    return value sourced from the priority entity-anchor lane, for callers
+    that must treat that lane differently from the rarity/fallback lanes
+    (the reserve-slot ranking step: an entity anchor is the turn's own
+    topic, not incidental register noise).
     """
     try:
         if not text or max_n <= 0:
-            return []
+            return [], set()
         from iai_mcp.entity_anchors import _CAP_DENYLIST, _SCAN_CAP, extract_entities
 
         scanned = text[:_SCAN_CAP]
         normalized_prompt = " ".join(scanned.split()).lower()
         ordered: list[str] = []
         seen: set[str] = set()
+        entity_tokens: set[str] = set()
 
-        def _add(tok: str) -> None:
+        def _add(tok: str, *, is_entity: bool = False) -> None:
             if len(ordered) >= max_n or tok in seen or tok == normalized_prompt:
                 return
             seen.add(tok)
             ordered.append(tok)
+            if is_entity:
+                entity_tokens.add(tok)
 
         for e in extract_entities(scanned, max_n=max_n):
-            _add(e)
+            _add(e, is_entity=True)
 
         if len(ordered) < max_n and store is not None:
             latin_seen: set[str] = set()
@@ -535,10 +565,18 @@ def _derive_short_cues(
             for tok in cyr_candidates:
                 _add(tok)
 
-        return ordered[:max_n]
+        return ordered[:max_n], entity_tokens
     except Exception as exc:  # noqa: BLE001 -- derivation is additive, never a dependency
         logger.debug("foresight cue derivation failed: %s", exc)
-        return []
+        return [], set()
+
+
+def _derive_short_cues(
+    text: str, max_n: int = 3, *, store: Any = None,
+) -> "list[str]":
+    """Token-only view of `_derive_short_cues_ex` — see its docstring."""
+    tokens, _entity_tokens = _derive_short_cues_ex(text, max_n, store=store)
+    return tokens
 
 
 def _cos(a: "list[float]", b: "list[float]") -> float:
@@ -558,6 +596,69 @@ def _embed_pool(embedder: Any, pool: "list[str]") -> "list[list[float]]":
     from iai_mcp.embed import embed_query  # noqa: PLC0415
 
     return [list(embed_query(embedder, tok)) for tok in pool]
+
+
+def _select_reserve_tokens(
+    pairs: "list[tuple[str, list[float]]]",
+    entity_pool: "set[str]",
+    cue_vec: "list[float]",
+    cue_cap: int,
+) -> "list[tuple[str, list[float]]]":
+    """Partition a derived-cue candidate pool (token, vec) into the entity-
+    anchor lane (entity_anchors.extract_entities' priority tokens — the
+    turn's own dominant topic, kept UNCONDITIONALLY regardless of distance
+    from the mean cue) and the IDF-rare/Cyrillic-fallback lane (kept most-
+    DISTANT-first: register-defining words there sit close to the mean and
+    are noise, not signal — do not flip that sort). A turn genuinely about
+    its entity often has that entity sit CLOSE to the mean precisely
+    because the turn is about it; applying the rare-lane's ascending sort
+    to it would drop the turn's own topic. Entity-first, cue_cap total."""
+    entity_pairs = [p for p in pairs if p[0] in entity_pool]
+    rare_ranked = sorted(
+        (p for p in pairs if p[0] not in entity_pool),
+        key=lambda cv: _cos(cv[1], cue_vec),
+    )
+    return (entity_pairs + rare_ranked)[:cue_cap]
+
+
+def _boost_sort(
+    candidates: "list[tuple[Any, float]]",
+    exact: "dict[str, float]",
+    *,
+    tier_boost: float,
+    salience_step: float,
+    semantic_lift: float,
+    literal_preservation_strong: bool,
+) -> "list[tuple[Any, float]]":
+    """Reorder (rec, cos) candidates by knowledge-tier/salience-boosted
+    score, mirroring pipeline.py's final-rank boost (rank_boost.py) — the
+    signal foresight's pure-cosine ranking otherwise never has, letting a
+    register-matched but uninformative candidate beat a topically relevant
+    knowledge/salient one. ORDER ONLY: the (rec, cos) tuples are unchanged,
+    so the confidence floor and the pack's displayed cos downstream stay
+    the raw/exact value — literal cosine, never the boosted number. Stable
+    sort: an all-unflagged candidate set (multiplier 1.0 throughout) sorts
+    byte-identically to today's raw-cosine order. semantic_lift and
+    literal_preservation_strong are required (no default) so a call site
+    that omits either fails loud instead of silently no-op'ing."""
+    if tier_boost == 1.0 and salience_step == 0.0 and semantic_lift == 0.0:
+        return candidates
+
+    def _key(item: "tuple[Any, float]") -> float:
+        rec, cos = item
+        eff_cos = exact.get(str(rec.id), cos) if exact else cos
+        return rank_boost.boosted_score(
+            eff_cos,
+            tier=getattr(rec, "tier", None),
+            tags=getattr(rec, "tags", None),
+            salience_level=getattr(rec, "salience_level", None),
+            tier_boost=tier_boost,
+            salience_step=salience_step,
+            semantic_lift=semantic_lift,
+            literal_preservation_strong=literal_preservation_strong,
+        )
+
+    return sorted(candidates, key=_key, reverse=True)
 
 
 def refresh_from_anchor(store: Any, embedder: Any) -> bool:
@@ -728,6 +829,26 @@ def refresh_pack(
         budget_chars = int(
             _f(FORESIGHT_BUDGET_TOKENS_ENV, FORESIGHT_BUDGET_TOKENS_DEFAULT) * 4
         )
+        tier_boost = _f(FORESIGHT_TIER_BOOST_ENV, FORESIGHT_TIER_BOOST_DEFAULT)
+        salience_step = _f(FORESIGHT_SALIENCE_BOOST_ENV, FORESIGHT_SALIENCE_BOOST_DEFAULT)
+        semantic_lift = _f(FORESIGHT_SEMANTIC_LIFT_ENV, FORESIGHT_SEMANTIC_LIFT_DEFAULT)
+        if not isfinite(semantic_lift):
+            semantic_lift = FORESIGHT_SEMANTIC_LIFT_DEFAULT
+        semantic_lift = max(0.0, semantic_lift)
+        # An unhydrated/missing profile keeps today's conservative "strong"
+        # behavior -- never silently enables the relaxed-knob tier-boost
+        # branch (fallback differs from pipeline.py's "medium" on purpose).
+        try:
+            from iai_mcp import core  # noqa: PLC0415 -- avoids a module-level cycle
+
+            lp_raw = (
+                core._profile_state.get("literal_preservation", "strong")
+                if core._profile_state else "strong"
+            )
+        except Exception as exc:  # noqa: BLE001 -- profile read is best-effort
+            logger.debug("foresight literal_preservation read failed: %s", exc)
+            lp_raw = "strong"
+        lp_strong = lp_raw == "strong"
         # Reserve-on-top: the assistant-tail slot is added to max_items, never
         # subtracted from it, so a reserve of 0 (off) leaves effective_max_items
         # == max_items for any max_items env value -- the primary lane's cap
@@ -765,6 +886,16 @@ def refresh_pack(
         # dropped. An abstaining (cold) authority leaves ANN scores standing.
         exact = _exact_scores(store, cue_vec, k=window)
         report["exact_authority"] = bool(exact)
+
+        # Knowledge-tier/salience boost reorders the window before packing:
+        # raw cosine alone lets register-matched chatter beat topically
+        # relevant knowledge (rank_boost.py mirrors recall_for_response's
+        # final-rank boost). The (rec, cos) tuples themselves are untouched
+        # — the confidence floor and the pack's displayed cos stay raw.
+        candidates = _boost_sort(
+            candidates, exact, tier_boost=tier_boost, salience_step=salience_step,
+            semantic_lift=semantic_lift, literal_preservation_strong=lp_strong,
+        )
 
         # A pending curiosity question rides the pack when the current turn
         # enters its topic — its length is reserved BEFORE item packing so a
@@ -809,9 +940,9 @@ def refresh_pack(
                 prefilter_cap = min(
                     FORESIGHT_CUE_PREFILTER_CEILING, max(cue_cap, cue_cap * 2),
                 )
-                pool = (
-                    _derive_short_cues(cue_text, prefilter_cap, store=store)
-                    if cue_cap > 0 else []
+                pool, entity_pool = (
+                    _derive_short_cues_ex(cue_text, prefilter_cap, store=store)
+                    if cue_cap > 0 else ([], set())
                 )
                 derived: "list[str]" = []
                 derived_vecs: "list[list[float]]" = []
@@ -825,13 +956,9 @@ def refresh_pack(
                         # One call site over the whole prefilter pool — the
                         # embedder does not batch internally (~N x one encode).
                         pool_vecs = _embed_pool(embedder, pool)
-                        # Ascending similarity to cue_vec: keep the most DISTANT
-                        # tokens. Register-defining words sit close to the mean
-                        # and are noise, not signal — do not flip this sort.
-                        ranked = sorted(
-                            zip(pool, pool_vecs), key=lambda cv: _cos(cv[1], cue_vec),
-                        )
-                        for tok, vec in ranked[:cue_cap]:
+                        for tok, vec in _select_reserve_tokens(
+                            list(zip(pool, pool_vecs)), entity_pool, cue_vec, cue_cap,
+                        ):
                             derived.append(tok)
                             derived_vecs.append(vec)
                 if derived:
@@ -876,8 +1003,10 @@ def refresh_pack(
                             # matches the drowned rule's cue.
                             merged[rid] = (rec, _cos(rec.embedding, cue_vec))
                     if merged and report["packed"] < max_items:
-                        ranked_merged = sorted(
-                            merged.values(), key=lambda rc: rc[1], reverse=True,
+                        ranked_merged = _boost_sort(
+                            list(merged.values()), {},
+                            tier_boost=tier_boost, salience_step=salience_step,
+                            semantic_lift=semantic_lift, literal_preservation_strong=lp_strong,
                         )
                         _, used_chars = _pack_candidates(
                             store, ranked_merged, {}, start=0,
@@ -977,6 +1106,11 @@ def refresh_pack(
                         )
                         a_candidates = store.query_similar(tail_vec, k=cue_window)
                         a_exact = _exact_scores(store, tail_vec, k=cue_window)
+                        a_candidates = _boost_sort(
+                            a_candidates, a_exact,
+                            tier_boost=tier_boost, salience_step=salience_step,
+                            semantic_lift=semantic_lift, literal_preservation_strong=lp_strong,
+                        )
                         tail_min_cos = _f(
                             FORESIGHT_ASSISTANT_TAIL_MIN_COS_ENV,
                             FORESIGHT_ASSISTANT_TAIL_MIN_COS_DEFAULT,

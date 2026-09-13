@@ -9,11 +9,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from math import log
+from math import isfinite, log
 from uuid import UUID
 
 import numpy as np
 
+from iai_mcp import rank_boost
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.embed import Embedder, _valid_cue_vec, embed_query
 from iai_mcp.events import TELEMETRY_EMBED_NATIVE_FAILURE, write_event
@@ -24,7 +25,13 @@ from iai_mcp.exceptions import (
 from iai_mcp.graph import MemoryGraph
 from iai_mcp.store import MemoryStore
 from iai_mcp.store._store import BOOST_EDGES_SMALL_BATCH
-from iai_mcp.types import EMBED_DIM, SALIENCE_LEVEL_RANK, MemoryHit, RecallResponse
+from iai_mcp.types import (
+    EMBED_DIM,
+    SALIENCE_LEVEL_ENUM,
+    SALIENCE_LEVEL_RANK,
+    MemoryHit,
+    RecallResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,7 @@ class SimpleRecordView:
     language: str = "en"
     community_id: "UUID | None" = None
     valence: float = 0.0
+    salience_level: "str | None" = None
 
 
 def _payload_created_at(raw: object) -> "datetime | None":
@@ -62,6 +70,23 @@ def _payload_created_at(raw: object) -> "datetime | None":
         except ValueError:
             pass
     return None
+
+
+def _salience_level_for_id(store: MemoryStore, rid: UUID) -> str:
+    """Single-record salience_level off the plaintext column -- the same
+    source `_bulk_salience_ranks` reads for the winners tuple, sized for a
+    one-off lookup instead of a full-table bulk scan."""
+    try:
+        with store.db.ro_conn() as conn:
+            row = conn.execute(
+                "SELECT salience_level FROM records WHERE id = ?", (str(rid),)
+            ).fetchone()
+    except Exception as exc:  # noqa: BLE001 -- lookup failure defaults to unflagged, never blocks the read
+        logger.debug("salience_level_lookup_failed rid=%s: %s", rid, exc)
+        return "unflagged"
+    if not row or row[0] not in SALIENCE_LEVEL_ENUM:
+        return "unflagged"
+    return str(row[0])
 
 
 def _read_record_payload(graph, rid: UUID, store: MemoryStore):
@@ -89,6 +114,7 @@ def _read_record_payload(graph, rid: UUID, store: MemoryStore):
                 created_at=_payload_created_at(node.get("created_at")),
                 stability=float(node.get("stability", 0.5) or 0.5),
                 valence=float(node.get("valence") or 0.0),
+                salience_level=_salience_level_for_id(store, rid),
             )
     try:
         return store.get(rid)
@@ -148,21 +174,16 @@ def _env_weight(name: str, default: float) -> float:
             pass
     return default
 
-TIER_KNOWLEDGE_BOOST_DEFAULT = 1.05
+TIER_KNOWLEDGE_BOOST_DEFAULT = rank_boost.TIER_KNOWLEDGE_BOOST_DEFAULT
 """Bounded soft multiplier for knowledge-grade sources at final rank — a
 nudge past equal-scored raw turns, never a filter; 1.0 disables. Both
-classes stand down for verbatim mode/intent. doc:* teach chunks boost
-regardless of profile (they ARE literal curated content); semantic
-summaries boost only when literal_preservation is not "strong" — that knob
-is precisely the raw-vs-summary preference and the strong default must
-keep outranking condensations."""
+classes stand down for verbatim mode/intent (pipeline-only gate; the pure
+arithmetic lives in rank_boost.py, shared with foresight.py)."""
 
-SALIENCE_BOOST_STEP_DEFAULT = 0.05
+SALIENCE_BOOST_STEP_DEFAULT = rank_boost.SALIENCE_BOOST_STEP_DEFAULT
 """Bounded additive-per-level rank step for a caller-declared salience
 level -- never a filter. Stands down for verbatim mode/intent, the same as
-the tier_boost family. Independent of any tier/doc-tag gate: it applies to
-a flagged record regardless of tier, because the flag is a general-purpose
-signal, not a knowledge-source marker. `IAI_MCP_SALIENCE_BOOST` overrides."""
+the tier_boost family. `IAI_MCP_SALIENCE_BOOST` overrides."""
 
 PROC_PRIME_SEED_CAP: int = 2
 """Own cap for the priming widening block -- never MULTI_SEED_CAP."""
@@ -440,10 +461,7 @@ def _aaak_overlap(cue_text: str, aaak_index: str) -> float:
 
 
 def _has_doc_tag(rec) -> bool:
-    return any(
-        isinstance(t, str) and t.startswith("doc:")
-        for t in (getattr(rec, "tags", None) or ())
-    )
+    return rank_boost.has_doc_tag(getattr(rec, "tags", None))
 
 
 def _tier_knowledge_boost() -> float:
@@ -453,6 +471,25 @@ def _tier_knowledge_boost() -> float:
         )
     except ValueError:
         return TIER_KNOWLEDGE_BOOST_DEFAULT
+
+
+def _semantic_lift() -> float:
+    raw = os.environ.get("IAI_MCP_SEMANTIC_LIFT", "")
+    if not raw:
+        return rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+    if not isfinite(value):
+        return rank_boost.SEMANTIC_VALUE_LIFT_DEFAULT
+    return max(0.0, value)
+
+
+_SALIENCE_RANK_TO_LEVEL: dict[int, str] = {v: k for k, v in SALIENCE_LEVEL_RANK.items()}
+"""Inverse of SALIENCE_LEVEL_RANK -- the Rust winners tuple carries the int
+rank the rank index was built with, not the string label tier_multiplier's
+gate expects."""
 
 
 def _age_penalty(created_at: "datetime | None") -> float:
@@ -1130,6 +1167,12 @@ def _recall_core(
                 # retry re-snapshots -- the second pass sees the
                 # post-mutation node set under the already-bumped version.
                 node_ids = list(graph.iter_nodes())
+            # One bulk plaintext-column scan for the whole rebuild -- the same
+            # source and shape `_bulk_salience_ranks` gives the winners tuple
+            # -- so every SimpleRecordView in this generation carries a real
+            # salience_level instead of resolving through a dead getattr.
+            from iai_mcp.store._rank_index import _bulk_salience_ranks
+            _salience_ranks = _bulk_salience_ranks(store)
             for rid in node_ids:
                 node = graph.get_payload(rid)
                 if "embedding" not in node or "surface" not in node:
@@ -1146,6 +1189,9 @@ def _recall_core(
                     created_at=_payload_created_at(node.get("created_at")),
                     stability=float(node.get("stability", 0.5) or 0.5),
                     valence=float(node.get("valence") or 0.0),
+                    salience_level=_SALIENCE_RANK_TO_LEVEL.get(
+                        _salience_ranks.get(str(rid), 0), "unflagged"
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001 -- retrieval hot-path fail-safe
             logger.debug("records_cache_graph_build_failed: %s", exc)
@@ -1589,6 +1635,7 @@ def _recall_core(
     _local_profile_gain: dict[UUID, dict] = {}
     tier_boost = _tier_knowledge_boost()
     salience_step = _salience_boost_step()
+    semantic_lift = _semantic_lift()
     proc_prime_boost = _env_weight("IAI_MCP_PROC_PRIME_BOOST", PROC_PRIME_BOOST_DEFAULT)
     w_spread_act = _env_weight("IAI_MCP_W_SPREAD_ACT", W_SPREAD_ACT)
     spread_act_decay = _env_weight("IAI_MCP_SPREAD_ACT_DECAY", SPREAD_ACT_DECAY)
@@ -1671,12 +1718,13 @@ def _recall_core(
 
         if result_damp < 1.0:
             # Mirrors the Python-path damp: degree/community/knowledge
-            # boosts already carry it (applied inside the Rust call), tier
-            # and salience are Bucket-B and carry it here, at the same
-            # insertion point the Python path uses.
+            # boosts already carry it (applied inside the Rust call), tier,
+            # salience and the semantic lift are Bucket-B and carry it here,
+            # at the same insertion point the Python path uses.
             flat_cosine_pool = True
             tier_boost = 1.0 + (tier_boost - 1.0) * result_damp
             salience_step = salience_step * result_damp
+            semantic_lift = semantic_lift * result_damp
 
         _reason_w_degree = effective_w_degree * result_damp
         _reason_w_cosine = effective_w_cosine
@@ -1739,29 +1787,29 @@ def _recall_core(
                             _partial_score, _pre_gain_base, _term_multiplier, gain_product,
                         )
                         reason += f" | xgain {gain_product:.3f}"
-            if (
-                tier_boost != 1.0
-                and mode != "verbatim"
-                and cue_intent != "historical_verbatim"
-                and (
-                    _has_doc_tag(rec)
-                    or (rec.tier == "semantic" and lp_value != "strong")
+            if mode != "verbatim" and cue_intent != "historical_verbatim":
+                # Both terms MUST read salience_level from the same source --
+                # rec.salience_level, the pool-cache field -- so they cannot
+                # disagree about the same candidate within one scoring pass.
+                _rec_salience_level = getattr(rec, "salience_level", None)
+                _xtier = rank_boost.tier_multiplier(
+                    tier=getattr(rec, "tier", None),
+                    tags=getattr(rec, "tags", None),
+                    tier_boost=tier_boost,
+                    literal_preservation_strong=(lp_value == "strong"),
+                    salience_level=_rec_salience_level,
+                    semantic_lift=semantic_lift,
                 )
-            ):
-                s *= tier_boost
-                reason += f" | xtier {tier_boost:g}"
-            _salience_rank = SALIENCE_LEVEL_RANK.get(
-                getattr(rec, "salience_level", "unflagged"), 0,
-            )
-            if (
-                _salience_rank > 0
-                and mode != "verbatim"
-                and cue_intent != "historical_verbatim"
-            ):
-                salience_multiplier = 1.0 + _salience_rank * salience_step
-                if salience_multiplier != 1.0:
-                    s *= salience_multiplier
-                    reason += f" | xsalience {salience_multiplier:g}"
+                if _xtier != 1.0:
+                    s *= _xtier
+                    reason += f" | xtier {_xtier:g}"
+                _xsalience = rank_boost.salience_multiplier(
+                    salience_level=_rec_salience_level,
+                    salience_step=salience_step,
+                )
+                if _xsalience != 1.0:
+                    s *= _xsalience
+                    reason += f" | xsalience {_xsalience:g}"
             if date_mentions:
                 from iai_mcp.temporal_cue import matches_mentions
                 if matches_mentions(rec.created_at, date_mentions):
@@ -1838,6 +1886,7 @@ def _recall_core(
         if flat_cosine_pool:
             tier_boost = 1.0 + (tier_boost - 1.0) * _damp
             salience_step = salience_step * _damp
+            semantic_lift = semantic_lift * _damp
 
         if _stage_profile_on:
             _stage_timings["reachable_count"] = float(reachable_indices.size)
@@ -1972,29 +2021,25 @@ def _recall_core(
                     _lex_add = _lex_fusion_w() / (1.0 + lex_rank[cid])
                     s += _lex_add
                     reason += f" + lex {_lex_add:.3f}"
-                if (
-                    tier_boost != 1.0
-                    and mode != "verbatim"
-                    and cue_intent != "historical_verbatim"
-                    and (
-                        _has_doc_tag(rec)
-                        or (rec.tier == "semantic" and lp_value != "strong")
+                if mode != "verbatim" and cue_intent != "historical_verbatim":
+                    _xtier = rank_boost.tier_multiplier(
+                        tier=getattr(rec, "tier", None),
+                        tags=getattr(rec, "tags", None),
+                        tier_boost=tier_boost,
+                        literal_preservation_strong=(lp_value == "strong"),
+                        salience_level=getattr(rec, "salience_level", None),
+                        semantic_lift=semantic_lift,
                     )
-                ):
-                    s *= tier_boost
-                    reason += f" | xtier {tier_boost:g}"
-                _salience_rank = SALIENCE_LEVEL_RANK.get(
-                    getattr(rec, "salience_level", "unflagged"), 0,
-                )
-                if (
-                    _salience_rank > 0
-                    and mode != "verbatim"
-                    and cue_intent != "historical_verbatim"
-                ):
-                    salience_multiplier = 1.0 + _salience_rank * salience_step
-                    if salience_multiplier != 1.0:
-                        s *= salience_multiplier
-                        reason += f" | xsalience {salience_multiplier:g}"
+                    if _xtier != 1.0:
+                        s *= _xtier
+                        reason += f" | xtier {_xtier:g}"
+                    _xsalience = rank_boost.salience_multiplier(
+                        salience_level=getattr(rec, "salience_level", None),
+                        salience_step=salience_step,
+                    )
+                    if _xsalience != 1.0:
+                        s *= _xsalience
+                        reason += f" | xsalience {_xsalience:g}"
                 if date_mentions:
                     from iai_mcp.temporal_cue import matches_mentions
                     if matches_mentions(rec.created_at, date_mentions):

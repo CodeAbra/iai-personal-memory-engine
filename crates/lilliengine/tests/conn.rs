@@ -1034,3 +1034,431 @@ fn pragma_index_list_from_catalog() {
     let mut cur = conn.execute("PRAGMA index_list(nosuch)", vec![]).unwrap();
     assert!(cur.fetchall().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Reused `col_generation` fence, component-wise publish, ordered-index
+// maintenance gated on the ordered column actually being touched.
+// ---------------------------------------------------------------------------
+
+const DDL_RECS_ORDERED: &str = "CREATE TABLE IF NOT EXISTS recs ( \
+    vec_label INTEGER PRIMARY KEY AUTOINCREMENT , id TEXT NOT NULL UNIQUE , \
+    pending INTEGER , created_at TEXT , payload TEXT )";
+
+fn open_recs_ordered() -> (tempfile::TempDir, Connection, String) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("recs.lilli").to_str().unwrap().to_string();
+    let mut conn = Connection::open(&path, 384).unwrap();
+    conn.execute(DDL_RECS_ORDERED, vec![]).unwrap();
+    conn.execute("CREATE INDEX idx_recs_pending ON recs (pending)", vec![])
+        .unwrap();
+    conn.execute("CREATE INDEX idx_recs_created_at ON recs (created_at)", vec![])
+        .unwrap();
+    (dir, conn, path)
+}
+
+fn seed_recs(conn: &mut Connection, n: usize) {
+    conn.execute("BEGIN", vec![]).unwrap();
+    for i in 0..n {
+        conn.execute(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?)",
+            vec![
+                t(&format!("id-{i:05}")),
+                Value::Int(1),
+                t(&format!("2026-01-{:02}T00:00:00", (i % 28) + 1)),
+                t(&format!("payload-{i}")),
+            ],
+        )
+        .unwrap();
+    }
+    conn.execute("COMMIT", vec![]).unwrap();
+}
+
+fn warm_ordered_and_id(conn: &mut Connection) {
+    // ORDER BY ... LIMIT is the sanctioned fast path that fixes a target
+    // ordered column via `catalog_ordered_index_column`; a bare probe never
+    // speculatively creates one.
+    conn.execute("SELECT id FROM recs ORDER BY created_at DESC LIMIT 5", vec![])
+        .unwrap();
+    conn.execute(
+        "SELECT id FROM recs WHERE id = ?",
+        vec![t("id-00000")],
+    )
+    .unwrap();
+    assert!(
+        conn.ordered_index_is_built("recs"),
+        "the ORDER BY probe must build the ordered index"
+    );
+}
+
+/// (i) Each commit route advances `col_generation`: single-row INSERT, a
+/// top-level executemany bulk INSERT, and ON CONFLICT DO UPDATE (`merge_insert`
+/// shape). Asserted indirectly via reader adoption at the post-commit
+/// generation — the airtight fence a mismatch would break.
+#[test]
+fn every_commit_route_advances_generation_and_reader_adopts() {
+    std::env::set_var("LILLI_INDEX_PUBLISH_MIN_INTERVAL_MS", "0");
+    let (_dir, mut writer, path) = open_recs_ordered();
+    seed_recs(&mut writer, 20);
+    warm_ordered_and_id(&mut writer);
+    // Publication is demand-driven: an initial reader open records demand for
+    // `recs` so the writer's later commits actually publish (mirrors
+    // writer_publish_adoption.rs's r1-miss-then-drop pattern).
+    drop(Connection::open_read_only(&path, 384).unwrap());
+
+    // Route 1: single-row INSERT (inside an explicit transaction, mirroring
+    // the production single-row commit route).
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?)",
+            vec![t("single-row"), Value::Int(1), t("2026-02-01T00:00:00"), t("p")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+    let r1 = Connection::open_read_only(&path, 384).unwrap();
+    assert!(
+        r1.id_index_ready("recs") || r1.col_index_ready("recs"),
+        "a reader opened after the single-row commit must adopt a published component"
+    );
+    drop(r1);
+
+    // Route 2: top-level executemany bulk INSERT, no open transaction — the
+    // reproduced P3 gap this plan closes.
+    let bulk_ids: Vec<Vec<Value>> = (0..30)
+        .map(|i| {
+            vec![
+                t(&format!("bulk-{i:05}")),
+                Value::Int(1),
+                t("2026-02-02T00:00:00"),
+                t("bp"),
+            ]
+        })
+        .collect();
+    writer
+        .executemany(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?)",
+            bulk_ids,
+        )
+        .unwrap();
+    let r2 = Connection::open_read_only(&path, 384).unwrap();
+    let mut r2 = r2;
+    let mut cur = r2
+        .execute("SELECT id FROM recs WHERE id = ?", vec![t("bulk-00000")])
+        .unwrap();
+    assert_eq!(
+        cur.fetchall().len(),
+        1,
+        "a bulk-executemany-inserted row must be visible to a reader opened after the batch \
+         (the generation must have advanced, or a pre-existing stale cache would omit it)"
+    );
+
+    // Route 3: ON CONFLICT DO UPDATE ("merge_insert" shape).
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (id) DO UPDATE SET pending = excluded.pending",
+            vec![t("single-row"), Value::Int(0), t("2026-02-01T00:00:00"), t("p")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+    let mut r3 = Connection::open_read_only(&path, 384).unwrap();
+    let mut cur = r3
+        .execute(
+            "SELECT pending FROM recs WHERE id = ?",
+            vec![t("single-row")],
+        )
+        .unwrap();
+    assert_eq!(
+        cur.fetchall()[0].get_index(0),
+        Some(&Value::Int(0)),
+        "the DO UPDATE's committed value must be visible under the new generation"
+    );
+}
+
+/// (ii) Component-wise publish: an id-only build publishes id even when col
+/// is unbuilt; a later col-only publish at the SAME generation must never
+/// clobber an already-published, already-built ordered component
+/// (the merge-or-keep invariant).
+#[test]
+fn component_wise_publish_never_clobbers_a_built_ordered_slot() {
+    std::env::set_var("LILLI_INDEX_PUBLISH_MIN_INTERVAL_MS", "0");
+    let (_dir, mut writer, path) = open_recs_ordered();
+    seed_recs(&mut writer, 15);
+    warm_ordered_and_id(&mut writer);
+    drop(Connection::open_read_only(&path, 384).unwrap());
+
+    // Commit publishes col + id + ordered together (all built on the writer).
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?)",
+            vec![t("cw-1"), Value::Int(1), t("2026-03-01T00:00:00"), t("p")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+
+    let r1 = Connection::open_read_only(&path, 384).unwrap();
+    assert!(
+        r1.ordered_index_is_built("recs"),
+        "a reader at this generation must adopt the writer's built ordered component"
+    );
+    drop(r1);
+
+    // An UPDATE that touches ONLY the col-indexed `pending` column (not
+    // `created_at`) must not drop the writer's own ordered cache (the T2
+    // fix), and its publish must not clobber the ordered slot already
+    // published at this same generation for a LATER reader that opens before
+    // any generation-moving write. Since `pending` IS col-indexed, this
+    // UPDATE itself advances the generation — so the fresh publish under the
+    // NEW generation must STILL carry ordered (proving merge-or-keep, since
+    // the ordered component was never rebuilt by this specific commit's
+    // per-row loop path, only carried over from the writer's still-built
+    // cache).
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "UPDATE recs SET pending = 0 WHERE id = ?",
+            vec![t("cw-1")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+
+    let r2 = Connection::open_read_only(&path, 384).unwrap();
+    assert!(
+        r2.ordered_index_is_built("recs"),
+        "a reader at the post-UPDATE generation must still adopt a built ordered component \
+         — a col-only (or id-only) publish must never clobber the ordered slot"
+    );
+}
+
+/// Two DIFFERENT columns built for the ordered slot at the SAME
+/// generation must both actually reach the published cache -- merge-or-keep
+/// must compare column identity, not just `is_built()`. Without the column
+/// check, "both built" reads as "unchanged" and the second publish never
+/// reaches the cache at all, so a reader refreshing to that generation pays
+/// a full rebuild for the second column even though the writer built and
+/// tried to publish it.
+#[test]
+fn ordered_merge_or_keep_compares_column_identity_not_just_built() {
+    std::env::set_var("LILLI_INDEX_PUBLISH_MIN_INTERVAL_MS", "0");
+    let (_dir, mut writer, path) = open_recs_ordered();
+    seed_recs(&mut writer, 20);
+
+    // First reader demands `created_at`; the writer's next commit builds and
+    // publishes it.
+    {
+        let mut r = Connection::open_read_only(&path, 384).unwrap();
+        r.execute("SELECT id FROM recs ORDER BY created_at DESC LIMIT 5", vec![])
+            .unwrap();
+    }
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+    let r1 = Connection::open_read_only(&path, 384).unwrap();
+    assert!(
+        r1.ordered_index_is_built("recs"),
+        "a reader at this generation must adopt the writer's published `created_at` ordered index"
+    );
+    drop(r1);
+
+    // Second reader demands a DIFFERENT declared ordered column (`pending`).
+    // The writer's next commit is an EMPTY transaction -- it touches no
+    // col-indexed column of `recs`, so `recs`'s col_generation does not move
+    // and the publish key stays IDENTICAL to the first publish above, while
+    // the writer's demand-driven warmup switches its local ordered_caches
+    // entry to `pending` and tries to publish it.
+    {
+        let mut r = Connection::open_read_only(&path, 384).unwrap();
+        r.execute("SELECT id FROM recs ORDER BY pending DESC LIMIT 5", vec![])
+            .unwrap();
+    }
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+
+    // A FRESH reader's first `pending`-ordered read must be served by
+    // adoption (near-zero cost), not a local rebuild -- proving the second
+    // column's publish actually reached the cache.
+    let mut r2 = Connection::open_read_only(&path, 384).unwrap();
+    r2.reset_cells_visited_count();
+    let mut cur = r2
+        .execute("SELECT id FROM recs ORDER BY pending DESC LIMIT 5", vec![])
+        .unwrap();
+    let rows = cur.fetchall();
+    let cells = r2.cells_visited_count();
+    assert_eq!(rows.len(), 5);
+    assert!(
+        cells <= 4,
+        "post-publish `pending`-ordered read cost {cells} cells -- the second column's \
+         publish at the same generation as `created_at`'s was silently dropped by \
+         merge-or-keep treating \"both built\" as \"unchanged\""
+    );
+}
+
+/// (iii) Bounded writer cost: publishing the ordered component after a
+/// single-row commit on a warmed store does not scan O(corpus) — the ordered
+/// map is shared by refcount (Arc/COW), not copied, and per-row maintenance
+/// touches only the changed row.
+#[test]
+fn ordered_publish_and_maintenance_stay_bounded_on_the_writer() {
+    let (_dir, mut writer, _path) = open_recs_ordered();
+    seed_recs(&mut writer, 500);
+    warm_ordered_and_id(&mut writer);
+
+    writer.reset_cells_visited_count();
+    writer.reset_full_scan_count();
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?)",
+            vec![t("bounded-1"), Value::Int(1), t("2026-04-01T00:00:00"), t("p")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+    assert_eq!(
+        writer.full_scan_count(),
+        0,
+        "a single-row INSERT on a warmed store must not trigger a whole-tree rescan \
+         while publishing/maintaining the ordered component"
+    );
+
+    // An UPDATE that touches the ordered column re-files ONE row, not the
+    // whole index.
+    writer.reset_cells_visited_count();
+    writer.reset_full_scan_count();
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "UPDATE recs SET created_at = ? WHERE id = ?",
+            vec![t("2099-01-01T00:00:00"), t("bounded-1")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+    assert_eq!(
+        writer.full_scan_count(),
+        0,
+        "an UPDATE resolved via the id fast path must not full-scan even when it \
+         touches the ordered column"
+    );
+}
+
+/// COMPLETENESS TWIN (correctness, distinct from cost): a row committed
+/// immediately before a refresh is returned by the post-refresh id AND
+/// ordered reads, for BOTH the single-row and the executemany-bulk UPDATE
+/// route that mirrors a real embedding-pending-flag write.
+#[test]
+fn completeness_twin_single_row_and_bulk_update_after_refresh() {
+    std::env::set_var("LILLI_INDEX_PUBLISH_MIN_INTERVAL_MS", "0");
+    let (_dir, mut writer, path) = open_recs_ordered();
+    seed_recs(&mut writer, 200);
+    warm_ordered_and_id(&mut writer);
+
+    let mut ro = Connection::open_read_only(&path, 384).unwrap();
+    ro.execute("SELECT id FROM recs ORDER BY created_at DESC LIMIT 5", vec![])
+        .unwrap();
+    ro.execute("SELECT id FROM recs WHERE id = ?", vec![t("id-00000")])
+        .unwrap();
+
+    // Single-row route: an UPDATE that does NOT touch the ordered column.
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "UPDATE recs SET pending = 0 WHERE id = ?",
+            vec![t("id-00001")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+    let advanced = ro.refresh_read_view().unwrap();
+    assert!(advanced, "the pager snapshot must advance after a committed write");
+    let mut cur = ro
+        .execute("SELECT pending FROM recs WHERE id = ?", vec![t("id-00001")])
+        .unwrap();
+    assert_eq!(
+        cur.fetchall()[0].get_index(0),
+        Some(&Value::Int(0)),
+        "the single-row UPDATE's committed value must be visible post-refresh"
+    );
+    let mut cur = ro
+        .execute("SELECT id FROM recs ORDER BY created_at DESC LIMIT 5", vec![])
+        .unwrap();
+    assert_eq!(cur.fetchall().len(), 5, "ordered read must still return rows post-refresh");
+
+    // Bulk route: an executemany UPDATE mirroring reembed_pending_rows.
+    let bulk_updates: Vec<Vec<Value>> = (2..12).map(|i| vec![Value::Int(0), t(&format!("id-{i:05}"))]).collect();
+    writer
+        .executemany("UPDATE recs SET pending = ? WHERE id = ?", bulk_updates)
+        .unwrap();
+    let advanced = ro.refresh_read_view().unwrap();
+    assert!(advanced, "the pager snapshot must advance after the bulk commit");
+    let mut cur = ro
+        .execute(
+            "SELECT pending FROM recs WHERE id = ?",
+            vec![t("id-00005")],
+        )
+        .unwrap();
+    assert_eq!(
+        cur.fetchall()[0].get_index(0),
+        Some(&Value::Int(0)),
+        "a row committed via the executemany-bulk UPDATE route must be visible post-refresh \
+         (the completeness twin the plan's threat model requires)"
+    );
+}
+
+/// Schema-identity de-adopt: an ordered index built for a column that is no
+/// longer a declared non-partial index on the table must never be adopted —
+/// mirrors the col-side `same_column_set` gate.
+#[test]
+fn ordered_index_not_adopted_after_its_declared_index_is_dropped() {
+    std::env::set_var("LILLI_INDEX_PUBLISH_MIN_INTERVAL_MS", "0");
+    let (_dir, mut writer, path) = open_recs_ordered();
+    seed_recs(&mut writer, 10);
+    warm_ordered_and_id(&mut writer);
+    drop(Connection::open_read_only(&path, 384).unwrap());
+
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO recs (id, pending, created_at, payload) VALUES (?, ?, ?, ?)",
+            vec![t("si-1"), Value::Int(1), t("2026-05-01T00:00:00"), t("p")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+
+    let r1 = Connection::open_read_only(&path, 384).unwrap();
+    assert!(r1.ordered_index_is_built("recs"));
+    drop(r1);
+
+    // DROP INDEX is unsupported by this SQL subset, and ALTER TABLE DROP
+    // COLUMN does not retract the CREATE INDEX declaration it leaves behind
+    // (a pre-existing engine limitation, not introduced by this plan) — so
+    // neither reaches the schema-identity discriminator. DROP + recreate the
+    // table under the SAME name WITHOUT the ordered column's declared index
+    // is the reachable equivalent: the catalog's per-table index-column set
+    // is rebuilt from scratch, genuinely no longer declaring `created_at`.
+    writer.execute("DROP TABLE recs", vec![]).unwrap();
+    writer
+        .execute(
+            "CREATE TABLE recs ( vec_label INTEGER PRIMARY KEY AUTOINCREMENT , \
+             id TEXT NOT NULL UNIQUE , pending INTEGER , payload TEXT )",
+            vec![],
+        )
+        .unwrap();
+    writer
+        .execute("CREATE INDEX idx_recs_pending ON recs (pending)", vec![])
+        .unwrap();
+    writer.execute("BEGIN", vec![]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO recs (id, pending, payload) VALUES (?, ?, ?)",
+            vec![t("si-2"), Value::Int(1), t("p")],
+        )
+        .unwrap();
+    writer.execute("COMMIT", vec![]).unwrap();
+
+    let r2 = Connection::open_read_only(&path, 384).unwrap();
+    assert!(
+        !r2.ordered_index_is_built("recs"),
+        "a schema change that no longer declares the ordered column as a \
+         non-partial index must de-adopt any published ordered component \
+         built for that column"
+    );
+}

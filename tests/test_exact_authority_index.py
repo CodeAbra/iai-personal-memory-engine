@@ -13,6 +13,7 @@ from __future__ import annotations
 import struct
 import sys
 import threading
+import warnings
 
 import numpy as np
 import pytest
@@ -571,6 +572,73 @@ def test_partial_nonfinite_cue_keeps_finite_direction():
     coerced_cue[:15] = 0.0
     expected = _brute_force_top_k(rows, coerced_cue, 10)
     assert [i for i, _ in got] == [i for i, _ in expected]
+
+
+# ---------------------------------------------------------------------------
+# Residual RuntimeWarning reproduction attempt (matmul at top_k's `active @
+# cue_unit`) — escalating order per the diagnosis protocol: (1) a
+# near-zero-but-nonzero-norm row through top_k directly, (2) the same row
+# through a fresh build immediately followed by a query, mirroring the
+# rebuild-then-query shape of the pending-embed-pass chain. Neither attempt
+# is expected to raise given prior probing; this suite records the outcome
+# as evidence rather than assuming it.
+# ---------------------------------------------------------------------------
+
+
+def _first_float32_value_with_nonzero_norm(dim: int) -> float:
+    """Smallest-magnitude single-component value whose float32 L2 norm over
+    a `dim`-length vector is nonzero (everything smaller underflows to an
+    exact-zero norm during squaring)."""
+    for exponent in range(-46, -9):
+        candidate = 10.0**exponent
+        vec = np.zeros(dim, dtype=np.float32)
+        vec[0] = candidate
+        if float(np.linalg.norm(vec)) != 0.0:
+            return candidate
+    raise AssertionError("no nonzero-norm value found in the probed exponent range")
+
+
+def test_near_zero_nonzero_norm_row_matmul_reproduction_attempt():
+    """Attempt 1: a row whose norm is nonzero but many orders of magnitude
+    below a well-formed unit vector's norm — a plausible on-disk degenerate
+    embedding — queried directly via top_k with RuntimeWarning promoted to
+    an error. Records whether the matmul (or the normalization feeding it)
+    raises; a pass here means NOT-REPRODUCED for this construction."""
+    tiny = _first_float32_value_with_nonzero_norm(EMBED_DIM)
+    degenerate = np.zeros(EMBED_DIM, dtype=np.float32)
+    degenerate[0] = tiny
+    assert float(np.linalg.norm(degenerate)) != 0.0, "row must clear the exact-zero-norm guard"
+
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    idx.build([("degenerate-id", _vec_to_blob(degenerate))])
+
+    cue = _random_cue(seed=90)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        got = idx.top_k(cue, 1)  # must not raise on this construction
+    assert got is not None
+    assert np.isfinite(got[0][1])
+
+
+def test_rebuild_then_query_matmul_reproduction_attempt():
+    """Attempt 2: mirrors the pending-embed-pass shape (a build immediately
+    followed by a query in the same call, exercising whatever FP state a
+    prior op in this thread may have left) using the same degenerate row.
+    Records whether the matmul raises under that ordering; a pass here means
+    NOT-REPRODUCED for this construction too."""
+    tiny = _first_float32_value_with_nonzero_norm(EMBED_DIM)
+    degenerate = np.zeros(EMBED_DIM, dtype=np.float32)
+    degenerate[0] = tiny
+    clean_rows = _random_rows(20, seed=91)
+
+    idx = ExactCosineIndex(embed_dim=EMBED_DIM)
+    cue = _random_cue(seed=92)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        idx.build(clean_rows + [("degenerate-id", _vec_to_blob(degenerate))])
+        got = idx.top_k(cue, len(clean_rows) + 1)  # must not raise on this construction
+    assert got is not None
+    assert all(np.isfinite(score) for _, score in got)
 
 
 def test_healthy_normalization_bit_identical():

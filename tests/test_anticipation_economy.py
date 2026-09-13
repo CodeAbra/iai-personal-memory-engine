@@ -231,6 +231,11 @@ def test_socket_recall_fires_by_default_without_the_env_var():
         env["IAI_MCP_STORE"] = str(root)
         env.pop("IAI_MCP_ROOT", None)
         env.pop("IAI_MCP_PER_TURN_SOCKET_ACCEL", None)  # unset -> exercise the durable default
+        # Override the autouse conftest fixture's hermetic socket path with
+        # this test's own ephemeral socket -- the hook prefers
+        # IAI_DAEMON_SOCKET_PATH when set, so leaving the fixture's value in
+        # place would point the hook at a socket nothing is listening on.
+        env["IAI_DAEMON_SOCKET_PATH"] = sock_path
         # Generous client-side socket budget so a contended CI host's listener
         # scheduling latency can't race the hook's own timeout.
         env["IAI_MCP_RECALL_SOCKET_TIMEOUT"] = "10"

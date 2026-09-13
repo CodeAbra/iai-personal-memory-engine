@@ -21,8 +21,12 @@ These tests run ONLY when LILLI_STORAGE_DRIVER=lilli is set.
 
 from __future__ import annotations
 
+import json
 import os
+import random
+import resource
 import struct
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -30,6 +34,10 @@ from pathlib import Path
 
 import pytest
 
+from conftest import (
+    freeze_recall_clock,
+    shed_only_node_payload_cap,
+)
 from iai_mcp.hippo._db import DEFAULT_STORAGE_DRIVER
 
 # ---------------------------------------------------------------------------
@@ -466,4 +474,504 @@ def test_warm_build_runtime_graph_is_cache_hit(lilli_boot_store) -> None:
         f"reconstruction), not run a cold full rebuild (~60-80 s). Check the "
         f"cache-freshness drift gate: the graph stream must exclude tombstoned "
         f"records so payload_record_count matches active_records_count."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Concurrent-boot memory-blowup diagnosis harness (measure-first, no source
+# change)
+#
+# The daemon OOM-loops after a lilli migration because a freshly-migrated
+# store starts warm-but-shed: its runtime-graph cache exceeds MAX_CACHE_BYTES
+# and node_payload is shed, so every early-boot caller of build_runtime_graph
+# converges on the lock-free "no rebuild needed" branch (retrieve.py, the
+# `if not _runtime_graph_rebuild_needed(store):` branch) and independently
+# streams the full record set and the entire edges table with zero
+# concurrency control.
+#
+# Two dimensions are measured, both parameter-driven so the executor's
+# reduced-scale smoke and a full-scale profile exercise the SAME code path:
+#   dim 1 -- does active_records_count() itself scale with edge count at a
+#            fixed record count, or is the cost independent of the edges
+#            table entirely?
+#   dim 2 -- does peak RSS multiply with concurrent build_runtime_graph()
+#            callers at a fixed edge count?
+#
+# No `src/` file is modified by this harness.
+# ---------------------------------------------------------------------------
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_int_list(name: str, default: str) -> list[int]:
+    raw = os.environ.get(name, default)
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+
+_DIM1_RECORD_COUNT = _env_int("IAI_MCP_BOOT_PERF_DIM1_RECORDS", 40)
+_DIM1_EDGE_COUNTS = _env_int_list("IAI_MCP_BOOT_PERF_DIM1_EDGE_COUNTS", "60,600")
+
+_DIM2_RECORD_COUNT = _env_int("IAI_MCP_BOOT_PERF_DIM2_RECORDS", 40)
+_DIM2_EDGE_COUNT = _env_int("IAI_MCP_BOOT_PERF_DIM2_EDGES", 200)
+_DIM2_CALLER_COUNTS = _env_int_list("IAI_MCP_BOOT_PERF_DIM2_CALLERS", "1,4")
+
+
+def _set_lilli_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    monkeypatch.setenv("IAI_MCP_STORE", str(root))
+    monkeypatch.setenv("IAI_DAEMON_SOCKET_PATH", str(root / "no-such.sock"))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    monkeypatch.setenv("LILLI_FSYNC_MODE", "fast")
+    # At small record counts a healthy RO pool serves the boot COUNT from a
+    # borrowed connection distinct from db._conn, so the engine's cell-visit
+    # counters read on db._conn would misreport zero work regardless of
+    # corpus size. Force the writer-connection fallback so a counter probe
+    # against db._conn reflects the query actually run.
+    monkeypatch.setenv("IAI_MCP_RO_POOL_OFF", "1")
+
+
+def _populate_edges_for(db, n_edges: int, n_records: int) -> None:
+    """Like `_populate_edges`, but src/dst are drawn from `n_records` instead
+    of the module-fixed `_N_RECORDS` -- this harness parametrizes over
+    smaller reduced-scale record counts than the 30k-record module fixture.
+
+    Draws genuinely-distinct, non-self-loop (src, dst, edge_type) triples via
+    seeded rejection sampling. A closed-form modular formula can have a period
+    shorter than the requested count against the edges table's
+    (src, dst, edge_type) primary key, so `INSERT OR IGNORE` silently drops
+    every repeat past one period and the row count never reaches n_edges --
+    seeding + a seen-set makes distinctness a guarantee, not a coincidence of
+    n_records' factors.
+    """
+    from iai_mcp.hippo import _txn
+
+    available = n_records * (n_records - 1) * 2
+    if n_edges > available:
+        raise ValueError(
+            f"requested {n_edges} distinct edges exceeds the available "
+            f"non-self-loop triple space {available} at n_records={n_records}"
+        )
+
+    rng = random.Random(1337)
+    edge_types = ("hebbian", "contradicts")
+    seen: set[tuple[int, int, str]] = set()
+    rows = []
+    while len(rows) < n_edges:
+        src_idx = rng.randint(1, n_records)
+        dst_idx = rng.randint(1, n_records)
+        if src_idx == dst_idx:
+            continue
+        edge_type = edge_types[rng.randint(0, 1)]
+        triple = (src_idx, dst_idx, edge_type)
+        if triple in seen:
+            continue
+        seen.add(triple)
+        src = str(uuid.UUID(int=src_idx))
+        dst = str(uuid.UUID(int=dst_idx))
+        weight = round(0.5 + (len(rows) % 10) * 0.05, 3)
+        rows.append((src, dst, edge_type, weight))
+
+    sql = (
+        "INSERT OR IGNORE INTO edges (src, dst, edge_type, weight) "
+        "VALUES (?, ?, ?, ?)"
+    )
+    with db._conn_lock:
+        with _txn(db._conn):
+            db._conn.executemany(sql, rows)
+
+
+def _build_dim_shed_state_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, n_records: int, n_edges: int,
+):
+    """A parametrized warm-but-shed lilli store for the dimension-1/2 harness.
+
+    Independent of the conftest `shed_state_store` fixture used by the
+    ranking golden (that one is fixed-size for byte-reproducibility); this
+    builder is scale-parametrized so the orchestrator's full-scale run and
+    the executor's reduced-scale smoke share the same wiring.
+    """
+    from iai_mcp import runtime_graph_cache
+    from iai_mcp.retrieve import build_runtime_graph
+    from iai_mcp.store import MemoryStore
+
+    store_root = tmp_path / ".iai-mcp"
+    store_root.mkdir(parents=True, exist_ok=True)
+    _set_lilli_env(monkeypatch, store_root)
+    monkeypatch.setattr(
+        runtime_graph_cache, "MAX_CACHE_BYTES", shed_only_node_payload_cap(n_records),
+    )
+
+    store = MemoryStore(path=store_root)
+    _populate_records(store.db, n_records)
+    _populate_edges_for(store.db, n_edges, n_records)
+
+    build_runtime_graph(store)
+    store._warm_graph_bundle = None
+    return store
+
+
+@pytest.mark.parametrize("edge_count", _DIM1_EDGE_COUNTS)
+def test_dim1_active_records_count_cells_shed_payload(tmp_path, monkeypatch, edge_count) -> None:
+    """Dimension 1 (Open Question 2): does active_records_count()'s cost
+    scale with edge count while the record count is held fixed?
+
+    Confirms the harness reaches the lock-free no-rebuild branch on a
+    warm-but-shed store, then measures the COUNT's cell-visit cost on a
+    separate FRESH (cold) store with the same record/edge counts: a prior
+    full-corpus scan (as the warm-but-shed store's prewarm build performs)
+    leaves this tiny corpus fully page-cache warm, and a warm read visits
+    zero new cells regardless of edge count -- an accurate but uninformative
+    reading for isolating the COUNT's intrinsic per-call cost.
+    """
+    from iai_mcp.retrieve import _runtime_graph_rebuild_needed
+
+    lock_free_store = _build_dim_shed_state_store(
+        tmp_path / "lockfree", monkeypatch, _DIM1_RECORD_COUNT, edge_count,
+    )
+    assert _runtime_graph_rebuild_needed(lock_free_store) is False, (
+        "shed-state store must land on the lock-free no-rebuild branch"
+    )
+    lock_free_store.close()
+
+    cold_root = tmp_path / "cold" / ".iai-mcp"
+    cold_root.mkdir(parents=True, exist_ok=True)
+    _set_lilli_env(monkeypatch, cold_root)
+
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=cold_root)
+    _populate_records(store.db, _DIM1_RECORD_COUNT)
+    _populate_edges_for(store.db, edge_count, _DIM1_RECORD_COUNT)
+
+    lconn = _get_lilli_conn(store.db)
+    if lconn is None:
+        pytest.skip("full_scan_count/cells_visited_count not available on this connection type")
+
+    store._corpus_count_cache.invalidate("active")
+    lconn.reset_full_scan_count()
+    lconn.reset_cells_visited_count()
+    count = store.active_records_count()
+    full_scans = lconn.full_scan_count()
+    cells_visited = lconn.cells_visited_count()
+    store.close()
+
+    assert count > 0, "active_records_count() must return a positive number"
+    assert count < _DIM1_RECORD_COUNT, "the fixture tombstones a third of rows"
+    assert full_scans is not None
+    # Non-empty: a filtered COUNT decodes at least one leaf cell per active
+    # record on a cold connection. A value stuck at 0 would mean the counter
+    # is being read off the wrong connection (see IAI_MCP_RO_POOL_OFF above),
+    # not that the count is genuinely free.
+    assert cells_visited > 0, (
+        f"cells_visited_count was {cells_visited} at edge_count={edge_count} "
+        f"records={_DIM1_RECORD_COUNT} -- expected > 0 on a cold connection"
+    )
+
+
+@pytest.mark.parametrize("caller_count", _DIM2_CALLER_COUNTS)
+def test_dim2_concurrent_build_runtime_graph_peak_rss_shed_payload(
+    tmp_path, monkeypatch, caller_count,
+) -> None:
+    """Dimension 2: does peak RSS multiply with concurrent
+    build_runtime_graph() callers at a fixed edge count, through the
+    lock-free "no rebuild needed" branch (zero concurrency control)?
+
+    ru_maxrss is a process-lifetime, monotonically-rising peak (see
+    test_hippo_memory_footprint.py's docstring for why it never falls); at
+    this reduced scale the test does not assert cross-level scaling -- it
+    confirms the wiring reaches the lock-free branch under real concurrent
+    load (real threads + a barrier, no sleep-based timing) and records a
+    peak-RSS number per caller count. The orchestrator's full-scale run
+    applies the decision rule to these numbers.
+    """
+    from iai_mcp.retrieve import _runtime_graph_rebuild_needed, build_runtime_graph
+
+    store = _build_dim_shed_state_store(
+        tmp_path, monkeypatch, _DIM2_RECORD_COUNT, _DIM2_EDGE_COUNT,
+    )
+    assert _runtime_graph_rebuild_needed(store) is False, (
+        "shed-state store must land on the lock-free no-rebuild branch"
+    )
+
+    barrier = threading.Barrier(caller_count)
+    results: list = [None] * caller_count
+    errors: list = []
+
+    def _call(i: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            results[i] = build_runtime_graph(store)
+        except Exception as exc:  # noqa: BLE001 -- surfaced via errors, not swallowed
+            errors.append((i, exc))
+
+    threads = [threading.Thread(target=_call, args=(i,)) for i in range(caller_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    store.close()
+
+    assert not errors, f"concurrent build_runtime_graph callers raised: {errors}"
+    assert all(r is not None for r in results), "every concurrent caller must return a bundle"
+
+    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    assert peak_rss > 0, f"peak RSS reading unavailable at caller_count={caller_count}"
+
+
+@pytest.mark.parametrize("caller_count", [1, 4])
+def test_dim2_materialization_count_deterministic_regression_fence(
+    tmp_path, monkeypatch, caller_count,
+) -> None:
+    """Deterministic regression fence: concurrent build_runtime_graph()
+    callers on the corrected real-edge-count dim-2 fixture drive the
+    expensive shed-branch reconstruct EXACTLY ONCE per herd, regardless of
+    caller count -- the non-flaky counter-based form of "peak RSS does not
+    multiply" (a counter, not an ru_maxrss ratio: same-process ru_maxrss is a
+    monotonic lifetime peak, and a hard cross-caller ratio is machine/load
+    sensitive -- the orchestrator-led peak-RSS ladder, run out-of-process per
+    caller count with RLIMIT_AS, is the RSS evidence artifact, not this fence).
+
+    Differs from the single-flight test file's shed-branch pair by also
+    proving the fixture exercises the real O(edges) path: it asserts the
+    edges table holds the exact requested distinct count before driving the
+    herd.
+    """
+    from iai_mcp import retrieve
+    from iai_mcp.retrieve import _runtime_graph_rebuild_needed, build_runtime_graph
+
+    n_records = 40
+    n_edges = 2000  # < 40*39*2 = 3120 available distinct triples
+
+    store = _build_dim_shed_state_store(tmp_path, monkeypatch, n_records, n_edges)
+
+    with store.db._conn_lock:
+        row = store.db._conn.execute("SELECT COUNT(*) FROM edges").fetchone()
+    assert int(row[0]) == n_edges, (
+        "fixture edges table must hold the exact requested distinct count"
+    )
+
+    assert _runtime_graph_rebuild_needed(store) is False, (
+        "shed-state store must land on the lock-free no-rebuild branch"
+    )
+
+    materialize_count = {"n": 0}
+    count_lock = threading.Lock()
+    real_impl = retrieve._build_runtime_graph_impl
+
+    def _counting_impl(store_arg):
+        with count_lock:
+            materialize_count["n"] += 1
+        return real_impl(store_arg)
+
+    monkeypatch.setattr(retrieve, "_build_runtime_graph_impl", _counting_impl)
+
+    barrier = threading.Barrier(caller_count)
+    results: list = [None] * caller_count
+    errors: list = []
+
+    def _call(i: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            results[i] = build_runtime_graph(store)
+        except Exception as exc:  # noqa: BLE001 -- surfaced via errors, not swallowed
+            errors.append((i, exc))
+
+    threads = [threading.Thread(target=_call, args=(i,)) for i in range(caller_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    store.close()
+
+    assert all(not t.is_alive() for t in threads), "a build worker hung"
+    assert not errors, f"concurrent build_runtime_graph callers raised: {errors}"
+    assert all(r is not None for r in results), "every concurrent caller must return a bundle"
+
+    assert materialize_count["n"] == 1, (
+        f"expected exactly one expensive materialize under {caller_count} "
+        f"concurrent callers, got {materialize_count['n']}"
+    )
+
+
+def test_populate_edges_for_emits_genuinely_distinct_edges(tmp_path, monkeypatch) -> None:
+    """`_populate_edges_for` must land exactly the requested number of
+    distinct edge rows, not a modular-period-bounded subset.
+
+    A requested count well above n_records (but under the available
+    non-self-loop triple space) forces this fence to fail loudly if the
+    generator regresses to a periodic pattern -- the exact defect that made
+    every prior fence built on this fixture silently measure a near-constant
+    ~n_records-sized edges table regardless of the requested count.
+    """
+    n_records = 40
+    n_edges = 2000  # < 40*39*2 = 3120 available distinct triples
+    store_root = tmp_path / ".iai-mcp"
+    store_root.mkdir(parents=True, exist_ok=True)
+    _set_lilli_env(monkeypatch, store_root)
+
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=store_root)
+    _populate_records(store.db, n_records)
+    _populate_edges_for(store.db, n_edges, n_records)
+
+    db = store.db
+    with db._conn_lock:
+        row = db._conn.execute("SELECT COUNT(*) FROM edges").fetchone()
+    store.close()
+
+    count = int(row[0]) if row else 0
+    assert count == n_edges, (
+        f"expected {n_edges} genuinely-distinct edges, got {count} -- the "
+        "generator under-populated the edges table"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pre-fix ranking golden, captured on the shed path
+#
+# The golden fences the branch a future concurrency/memory-hardening fix
+# would modify -- not the use_cached_payload=True branch, which stays
+# untouched by that fix and would make a golden there byte-identical by
+# construction regardless of what changed. Captured with NO source change, so
+# it is genuinely pre-fix; a later parity replay runs recall on the SAME shed
+# fixture (tests/conftest.py `shed_state_store`) and compares its post-fix
+# ranked output against this golden.
+# ---------------------------------------------------------------------------
+
+_RANKING_GOLDEN_PATH = Path(__file__).resolve().parent / "data" / "ranking_parity_golden.json"
+
+
+class _GoldenFakeEmbedder:
+    """Deterministic fixed-vector embedder for the golden capture: the cue
+    embedding is a one-hot vector matching one fixture record exactly, so the
+    ranked output is non-degenerate."""
+
+    def __init__(self, vec: list[float]) -> None:
+        self._vec = vec
+
+    def embed(self, text: str) -> list[float]:
+        return list(self._vec)
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [list(self._vec) for _ in texts]
+
+
+def _canonical_ranked_hits(hits) -> list[dict]:
+    """Project a ranked hit list to what the parity fence is about: record
+    identity and score, in served order.
+
+    `community_id` is excluded: it is a fresh random UUID per
+    community-detection run (community.py mints `flat_uuid = uuid4()`) and
+    carries no ranking signal, so including it would make the golden diverge
+    on every independent build without reflecting an actual ranking change.
+    """
+    return [
+        {"record_id": str(h.record_id), "score": round(float(h.score), 6)}
+        for h in hits
+    ]
+
+
+def test_ranking_golden_shed_payload_reproducible(shed_state_store, monkeypatch) -> None:
+    """Pre-fix ranking golden captured on the shed-state fixture.
+
+    Frozen clock makes the AGE rank term deterministic; the shared
+    `shed_state_store` fixture (tests/conftest.py) is what a later parity
+    replay reuses for its fence. A deterministic re-run check confirms the
+    golden is stable before it is compared/written.
+    """
+    from iai_mcp import runtime_graph_cache
+    from iai_mcp.pipeline import recall_for_benchmark
+    from iai_mcp.retrieve import _runtime_graph_rebuild_needed, build_runtime_graph
+    from iai_mcp.types import EMBED_DIM
+
+    store, records = shed_state_store
+    assert _runtime_graph_rebuild_needed(store) is False, (
+        "shed_state_store fixture must land on the lock-free no-rebuild branch"
+    )
+    cached = runtime_graph_cache.try_load(store)
+    assert cached is not None, "shed_state_store fixture must have a saved cache"
+    _assignment, _rich_club, node_payload, _max_degree, _extra = cached
+    assert len(node_payload) == 0, "shed_state_store fixture must have shed node_payload"
+
+    freeze_recall_clock(monkeypatch)
+
+    graph, assignment, rich_club = build_runtime_graph(store)
+
+    cue_vec = [0.0] * EMBED_DIM
+    cue_vec[0] = 1.0
+    embedder = _GoldenFakeEmbedder(cue_vec)
+
+    def _recall():
+        resp = recall_for_benchmark(
+            store=store, graph=graph, assignment=assignment, rich_club=rich_club,
+            embedder=embedder, cue="shed state fixture cue",
+            session_id="ranking-golden", k_hits=len(records),
+        )
+        return _canonical_ranked_hits(resp.hits)
+
+    computed = _recall()
+    assert computed == _recall(), (
+        "re-running recall_for_benchmark on the same shed-path graph must be "
+        "byte-identical (deterministic re-run check)"
+    )
+
+    if not _RANKING_GOLDEN_PATH.exists():
+        _RANKING_GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _RANKING_GOLDEN_PATH.write_text(
+            json.dumps(computed, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        return
+
+    golden = json.loads(_RANKING_GOLDEN_PATH.read_text(encoding="utf-8"))
+    assert computed == golden, (
+        "ranked recall output on the shed-state fixture diverged from the "
+        "committed pre-fix golden -- this is the parity fence a later fix "
+        "must not perturb"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Filtered-COUNT scan-resistance fence on the shed-state fixture
+#
+# active_records_count() is the exact filtered COUNT the daemon boot's drift
+# gate issues on the shed lock-free branch. This pins the already-landed
+# scan-resistant read path against a future regression that reintroduces a
+# full payload-copying scan for this query.
+# ---------------------------------------------------------------------------
+
+def test_active_records_count_scan_resistant_on_shed_state(shed_state_store) -> None:
+    """Filtered active_records_count() must not trigger a full scan on the
+    shed-state fixture.
+
+    The fixture forces IAI_MCP_RO_POOL_OFF=1 so the counter read on db._conn
+    reflects the query actually run -- with a healthy RO pool the COUNT is
+    served from a borrowed connection distinct from db._conn, which would
+    read the counter as zero regardless of whether a scan occurred.
+    """
+    store, _records = shed_state_store
+    db = store.db
+    lconn = _get_lilli_conn(db)
+
+    if lconn is None:
+        pytest.skip("full_scan_count not available on this connection type")
+
+    lconn.reset_full_scan_count()
+    count = store.active_records_count()
+    scans = lconn.full_scan_count()
+
+    assert count > 0, "active_records_count() must return a positive number"
+    assert scans == 0, (
+        f"filtered active_records_count() triggered {scans} full scan(s) on "
+        f"the shed-state fixture -- expected 0. A key-only page walk must "
+        f"serve this COUNT without materialising row payloads."
     )

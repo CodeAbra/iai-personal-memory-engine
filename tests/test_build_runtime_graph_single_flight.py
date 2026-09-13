@@ -1,12 +1,14 @@
-"""Single-flight guard around the runtime-graph cache-miss rebuild.
+"""Single-flight guard around the runtime-graph rebuild.
 
 The runtime-graph build has many call sites that fire concurrently at daemon
 boot. When the cache is stale or absent, an unguarded build lets every caller
 run the full rebuild at once — streaming the whole corpus and spawning a child
 for community detection plus centrality on the same graph. The observed effect
-was a fleet of redundant spawn children grinding identical work.
+was a fleet of redundant spawn children grinding identical work. The same lock
+also gates the shed lock-free branch's expensive full-stream sub-path (a
+concurrent multiplier of the record + edges-table stream, not a child spawn).
 
-Two guarantees are pinned here:
+Four guarantees are pinned here:
 
   1. Under a stale/absent cache and concurrent callers, the heavy rebuild runs
      exactly once; the remaining callers reuse the freshly-saved cache. All
@@ -14,6 +16,13 @@ Two guarantees are pinned here:
 
   2. A warm cache hit does not block on the single-flight lock: a caller that
      needs no rebuild proceeds while another thread holds the lock mid-rebuild.
+
+  3. Under a warm-but-shed cache (node_payload dropped) and concurrent
+     callers, the expensive full-stream reconstruct runs exactly once.
+
+  4. A genuinely-cheap small-corpus shed caller (node_payload not shed) does
+     not block on the extended lock while a peer holds it for an unrelated
+     rebuild.
 """
 from __future__ import annotations
 
@@ -329,3 +338,176 @@ def test_child_crash_fallback_still_works_under_single_flight(
     )
     assert assignment is not None
     assert graph.node_count() == 14
+
+
+def test_concurrent_shed_expensive_rebuilds_exactly_once(
+    store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+):
+    """Four threads call the build concurrently on a warm-but-shed cache (the
+    O(edges) full-stream sub-path); the expensive reconstruct runs exactly
+    once and every caller returns an equivalent populated graph."""
+    from conftest import shed_only_node_payload_cap
+
+    n_records = 18
+    monkeypatch.setattr(
+        runtime_graph_cache, "MAX_CACHE_BYTES", shed_only_node_payload_cap(n_records),
+    )
+    _seed_store_connected(store, n=n_records, seed_base=1100)
+
+    # Prewarm: one build saves a disk cache with node_payload shed but
+    # centrality intact, then clear the in-process memo so the next call
+    # takes the shed lock-free branch's expensive sub-path.
+    retrieve.build_runtime_graph(store)
+    store._warm_graph_bundle = None
+    assert retrieve._runtime_graph_rebuild_needed(store) is False, (
+        "prewarmed store must land on the shed lock-free branch"
+    )
+    assert retrieve._shed_reconstruct_is_expensive(store) is True, (
+        "prewarmed store's node_payload must be shed (the expensive sub-path)"
+    )
+
+    materialize_count = {"n": 0}
+    concurrent_entrants = {"n": 0, "peak": 0}
+    count_lock = threading.Lock()
+
+    real_impl = retrieve._build_runtime_graph_impl
+
+    def _counting_impl(store_arg):
+        with count_lock:
+            materialize_count["n"] += 1
+            concurrent_entrants["n"] += 1
+            concurrent_entrants["peak"] = max(
+                concurrent_entrants["peak"], concurrent_entrants["n"]
+            )
+        try:
+            return real_impl(store_arg)
+        finally:
+            with count_lock:
+                concurrent_entrants["n"] -= 1
+
+    monkeypatch.setattr(retrieve, "_build_runtime_graph_impl", _counting_impl)
+
+    n_threads = 4
+    barrier = threading.Barrier(n_threads)
+    results: list = [None] * n_threads
+    errors: list = [None] * n_threads
+
+    def _worker(idx: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            results[idx] = retrieve.build_runtime_graph(store)
+        except Exception as exc:  # noqa: BLE001 -- surface in the assertion
+            errors[idx] = exc
+
+    threads = [
+        threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert all(not t.is_alive() for t in threads), "a build worker hung"
+    assert errors == [None] * n_threads, f"build workers raised: {errors}"
+
+    # The core regression: the expensive reconstruct ran exactly once across
+    # the herd, and never with more than one entrant at a time.
+    assert materialize_count["n"] == 1, (
+        f"expected exactly one expensive materialize under {n_threads} "
+        f"concurrent shed-is-expensive callers, got {materialize_count['n']}"
+    )
+    assert concurrent_entrants["peak"] <= 1, (
+        f"max-concurrent-entrants was {concurrent_entrants['peak']}, expected <= 1"
+    )
+
+    node_sets = []
+    assignments = []
+    for idx, res in enumerate(results):
+        assert res is not None, f"worker {idx} returned no result"
+        graph, assignment, _rich_club = res
+        assert graph.node_count() == n_records
+        assert assignment is not None
+        node_sets.append(_node_ids(graph))
+        assignments.append(assignment)
+
+    base_nodes = node_sets[0]
+    for idx, nodes in enumerate(node_sets[1:], start=1):
+        assert nodes == base_nodes, (
+            f"worker {idx} built a different node set than worker 0"
+        )
+
+    base_assign = assignments[0]
+    base_map = base_assign.node_to_community
+    nodes_sorted = sorted(base_map)
+    for idx, assign in enumerate(assignments[1:], start=1):
+        other_map = assign.node_to_community
+        assert set(other_map) == set(base_map), (
+            f"worker {idx} assignment covers a different node set"
+        )
+        for a, b in zip(nodes_sorted, nodes_sorted[1:]):
+            same_base = base_map[a] == base_map[b]
+            same_other = other_map[a] == other_map[b]
+            assert same_base == same_other, (
+                f"worker {idx} partition disagrees with worker 0 on a pair"
+            )
+
+
+def test_small_corpus_shed_caller_not_blocked_behind_lock_holder(
+    store: MemoryStore,
+):
+    """A genuinely-cheap small-corpus shed caller (use_cached_payload=True) is
+    not gated behind the extended lock — proven by completing while a peer
+    holds _RUNTIME_GRAPH_REBUILD_LOCK for an unrelated rebuild."""
+    _seed_store_connected(store, n=10, seed_base=1200)
+
+    retrieve.build_runtime_graph(store)
+    store._warm_graph_bundle = None
+    assert retrieve._runtime_graph_rebuild_needed(store) is False, (
+        "prewarmed store must land on the shed lock-free branch"
+    )
+    assert retrieve._shed_reconstruct_is_expensive(store) is False, (
+        "a small, un-shed corpus must take the genuinely-cheap sub-path"
+    )
+
+    holder_acquired = threading.Event()
+    release_holder = threading.Event()
+
+    def _hold_lock() -> None:
+        with retrieve._RUNTIME_GRAPH_REBUILD_LOCK:
+            holder_acquired.set()
+            release_holder.wait(timeout=30)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    assert holder_acquired.wait(timeout=10), "holder failed to take the lock"
+
+    caller_done = threading.Event()
+    caller_result: list = [None]
+    caller_error: list = [None]
+
+    def _caller() -> None:
+        try:
+            caller_result[0] = retrieve.build_runtime_graph(store)
+        except Exception as exc:  # noqa: BLE001 -- surface in the assertion
+            caller_error[0] = exc
+        finally:
+            caller_done.set()
+
+    caller = threading.Thread(target=_caller)
+    caller.start()
+
+    # The small-corpus build must finish while the lock is still held by the
+    # holder — it must never wait for _RUNTIME_GRAPH_REBUILD_LOCK.
+    completed_while_locked = caller_done.wait(timeout=15)
+    release_holder.set()
+    holder.join(timeout=10)
+    caller.join(timeout=10)
+
+    assert completed_while_locked, (
+        "small-corpus shed caller blocked on the extended lock while a peer "
+        "held it for an unrelated rebuild"
+    )
+    assert caller_error[0] is None, f"small-corpus caller raised: {caller_error[0]}"
+    graph, assignment, _rc = caller_result[0]
+    assert graph.node_count() == 10
+    assert assignment is not None

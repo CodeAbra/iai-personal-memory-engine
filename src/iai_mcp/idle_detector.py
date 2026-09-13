@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +29,10 @@ _HID_IDLE_RE = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
 _PMSET_SLEEP_MARKERS = ("System Sleep", "Display is turned off")
 
 _PMSET_DEFAULT_WINDOW_MIN = 5
+
+#: Half the significance window (_PMSET_DEFAULT_WINDOW_MIN) so a cached
+#: negative can never outlive the event it would have detected.
+_PMSET_CACHE_TTL_SEC = 150.0
 
 _HID_IDLE_THRESHOLD_SEC = 30 * 60
 
@@ -75,6 +80,10 @@ class IdleStatus:
 
 class IdleDetector:
 
+    def __init__(self, pmset_cache_ttl_sec: float = _PMSET_CACHE_TTL_SEC) -> None:
+        self._pmset_cache_ttl_sec = pmset_cache_ttl_sec
+        self._pmset_cache_value = False
+        self._pmset_cache_fetched_at: float | None = None
 
     def hid_idle_time_sec(self) -> int | None:
         stdout = _run_captured(
@@ -98,11 +107,21 @@ class IdleDetector:
     def pmset_recent_sleep(
         self, window_min: int = _PMSET_DEFAULT_WINDOW_MIN
     ) -> bool:
-        stdout = _run_captured([_PMSET_BIN, "-g", "log"], _PMSET_TIMEOUT_SEC)
-        if stdout is None:
-            return False
+        now = time.monotonic()
+        if (
+            self._pmset_cache_fetched_at is not None
+            and now - self._pmset_cache_fetched_at < self._pmset_cache_ttl_sec
+        ):
+            return self._pmset_cache_value
 
-        return self._scan_pmset_lines(stdout, window_min)
+        stdout = _run_captured([_PMSET_BIN, "-g", "log"], _PMSET_TIMEOUT_SEC)
+        result = (
+            False if stdout is None else self._scan_pmset_lines(stdout, window_min)
+        )
+
+        self._pmset_cache_value = result
+        self._pmset_cache_fetched_at = now
+        return result
 
     @staticmethod
     def _scan_pmset_lines(stdout: str, window_min: int) -> bool:
@@ -166,9 +185,21 @@ class IdleDetector:
                 _session_id, uid, _user, seat, path = entry
             except (ValueError, TypeError):
                 continue
-            if uid == target_uid and seat:
+            if uid != target_uid:
+                continue
+            # `seat` short-circuits the fallback: a seat-attached session
+            # never triggers an extra property lookup.
+            if seat or self._logind_seatless_is_interactive(path):
                 paths.append(path)
         return paths
+
+    def _logind_seatless_is_interactive(self, session_path: str) -> bool:
+        # Which property Linux actually populates for a seatless session is
+        # unverified here (no busctl on this dev box) -- accept either.
+        tty = self._logind_get_property(session_path, "TTY")
+        if isinstance(tty, str) and tty:
+            return True
+        return self._logind_get_property(session_path, "Type") == "tty"
 
     def _logind_get_property(self, session_path: str, prop: str) -> object | None:
         payload = self._busctl_json(

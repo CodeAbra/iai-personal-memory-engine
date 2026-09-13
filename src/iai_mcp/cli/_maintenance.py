@@ -892,6 +892,57 @@ def cmd_entity_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_salience_backfill(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate._salience_backfill import backfill_salience
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    store = MemoryStore(path=store_path)
+    summary = backfill_salience(store, apply=apply, store_path=store_path)
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp salience-backfill [{mode_str}]")
+    print(f"  records scanned:            {summary.get('records_scanned', 0)}")
+    print(f"  salience would-promote:     {summary.get('salience_would_promote', 0)}")
+    print(f"  salience promoted:          {summary.get('salience_promoted', 0)}")
+    print(f"  salience distribution now:  {summary.get('salience_distribution_current', {})}")
+    print(f"  salience distribution after:{summary.get('salience_distribution_resulting', {})}")
+    rate_label = "current" if mode_str == "dry-run" else "resulting"
+    print(f"  AAAK non-empty rate ({rate_label}): {summary.get('aaak_nonempty_rate', 0.0):.3f}")
+    print(f"  entity tag rate ({rate_label}):     {summary.get('entity_tag_rate', 0.0):.3f}")
+    entity_summary = summary.get("entity_backfill") or {}
+    print(f"  entity/AAAK records to anchor: {entity_summary.get('records_to_anchor', 0)}")
+    print(f"  entity/AAAK records written:   {entity_summary.get('records_written', 0)}")
+    if summary.get("snapshot_dir"):
+        print(f"  snapshot directory:         {summary['snapshot_dir']}")
+    if mode_str == "dry-run" and (
+        summary.get("salience_would_promote", 0) > 0
+        or entity_summary.get("records_to_anchor", 0) > 0
+    ):
+        print()
+        print("  Run with --apply to execute.")
+    errors = list(summary.get("errors") or []) + list(entity_summary.get("errors") or [])
+    if errors:
+        print(f"error: {len(errors)} record(s) failed:", file=_cli.sys.stderr)
+        for line in errors[:10]:
+            print(f"  {line}", file=_cli.sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_edge_backfill(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     from iai_mcp.migrate import backfill_consolidated_edges

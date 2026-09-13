@@ -731,9 +731,13 @@ def build_bucket_b_evidence_fixture(
         "Alice replaced the smoke detector batteries in the hallway last night.",
         salience_level="unflagged",
     )
+    # Store-level salience_level stays "unflagged" for BOTH records here --
+    # the "critical" value is applied only via the test's getattr shadow, so
+    # the shadow injection is the sole source of the score/rank differential
+    # being measured, not a pre-existing store value.
     r_t15_critical = _rec(
         "The hallway smoke detector got new batteries from Alice recently.",
-        salience_level="critical",
+        salience_level="unflagged",
     )
     records += [r_t15_unflagged, r_t15_critical]
     ids["t15_unflagged"] = r_t15_unflagged.id

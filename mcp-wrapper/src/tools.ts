@@ -284,6 +284,14 @@ export const toolSchemas: Record<ToolName, ToolSchema> = {
             "Folded verbatim onto this session's own working-tier entry after " +
             "the capture completes, alongside next_action.",
         },
+        goal: {
+          type: "string",
+          description:
+            "Optional refreshed goal for the live session task, when it has " +
+            "moved on from the goal the task opened with. Folded verbatim " +
+            "onto this session's own working-tier entry after the capture " +
+            "completes. Empty or whitespace-only is a no-op, never a clear.",
+        },
         agent_id: {
           type: "string",
           description:

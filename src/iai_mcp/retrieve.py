@@ -1135,6 +1135,28 @@ def _replay_runtime_edge(graph, row: dict) -> None:
     )
 
 
+def _shed_reconstruct_is_expensive(store: MemoryStore) -> bool:
+    """True when the lock-free shed branch is about to take the expensive
+    full-stream sub-path (`use_cached_payload` would be False inside
+    `_build_runtime_graph_impl`).
+
+    Mirrors that function's own `use_cached_payload` gate exactly (disk-cache
+    read + the shared `_within_drift_tolerance` check, no O(edges) work) so
+    the single-flight decision below cannot diverge from the branch it guards.
+    """
+    from iai_mcp import runtime_graph_cache
+
+    cached = runtime_graph_cache.try_load(store)
+    if cached is None:
+        return True
+    _, _, cached_node_payload, _, _ = cached
+    if not cached_node_payload:
+        return True
+    return not _within_drift_tolerance(
+        len(cached_node_payload), store.active_records_count()
+    )
+
+
 def build_runtime_graph(store: MemoryStore):
     # Memoize the corpus COUNT(*) probes for the duration of this one build. The
     # cache-key derivation, the drift gate, and the impl each ask for the active
@@ -1167,10 +1189,19 @@ def build_runtime_graph(store: MemoryStore):
                 _refresh_graph_bundle_async(store)
                 return memo[0]
 
-        # Common path: a warm cache that needs no rebuild reconstructs the graph
-        # without spawning any child — run it lock-free so warm recall never
-        # blocks on a peer's rebuild.
+        # Cheap small-corpus reconstruct stays lock-free (warm recall must not
+        # block on a peer's rebuild). The shed-expensive sub-path MUST take the
+        # SAME _RUNTIME_GRAPH_REBUILD_LOCK as the cache-miss branch, or
+        # concurrent callers stop collapsing to one materialization.
         if not _runtime_graph_rebuild_needed(store):
+            if _shed_reconstruct_is_expensive(store):
+                with _RUNTIME_GRAPH_REBUILD_LOCK:
+                    warm = _warm_graph_bundle_if_valid(store)
+                    if warm is not None:
+                        return warm
+                    bundle = _build_runtime_graph_impl(store)
+                    _memoize_graph_bundle(store, bundle)
+                    return bundle
             bundle = _build_runtime_graph_impl(store)
             _memoize_graph_bundle(store, bundle)
             return bundle

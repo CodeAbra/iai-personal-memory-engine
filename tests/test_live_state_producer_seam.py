@@ -216,6 +216,75 @@ def test_omitted_session_id_forward_targets_the_dash_entry_capture_turn_opened(
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_goal_only_capture_refreshes_the_served_goal(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    seed = dispatch(
+        store, "memory_capture",
+        {
+            "text": "investigate the recall latency regression on the dispatch path",
+            "cue": "c",
+            "session_id": "sess-goal",
+            "role": "user",
+        },
+    )
+    assert seed["status"] == "inserted", seed
+
+    result = dispatch(
+        store, "memory_capture",
+        {
+            "text": "a follow-up turn carrying only a refreshed goal",
+            "cue": "c",
+            "session_id": "sess-goal",
+            "role": "user",
+            "goal": "refreshed goal",
+        },
+    )
+    assert result["status"] == "inserted", result
+
+    entry = wt.read_task(session_id="sess-goal")
+    assert entry is not None
+    assert entry.goal == "refreshed goal"
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_focus_only_capture_leaves_the_goal_unchanged(driver, store, monkeypatch):
+    _select_driver(driver, monkeypatch)
+
+    seed = dispatch(
+        store, "memory_capture",
+        {
+            "text": "seed the focal task with its opening goal",
+            "cue": "c",
+            "session_id": "sess-goal-stable",
+            "role": "user",
+        },
+    )
+    assert seed["status"] == "inserted", seed
+    seeded_entry = wt.read_task(session_id="sess-goal-stable")
+    assert seeded_entry is not None
+    original_goal = seeded_entry.goal
+
+    result = dispatch(
+        store, "memory_capture",
+        {
+            "text": "an ordinary focus/next_action-only follow-up turn",
+            "cue": "c",
+            "session_id": "sess-goal-stable",
+            "role": "user",
+            "next_action": "x",
+        },
+    )
+    assert result["status"] == "inserted", result
+
+    entry = wt.read_task(session_id="sess-goal-stable")
+    assert entry is not None
+    assert entry.goal == original_goal, (
+        "an ordinary focus/next_action-only capture must never redrift the goal"
+    )
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_memory_contradict_never_forwards_to_update_task(driver, store, monkeypatch):
     """memory_contradict never forwards next_action/focus to update_task --
     the existing fence on contradict() stays untouched. A client sending

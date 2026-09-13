@@ -271,6 +271,7 @@ from ._maintenance import (
     cmd_edge_backfill,
     cmd_entity_backfill,
     cmd_idem_dedup,
+    cmd_salience_backfill,
     cmd_schema_cleanup,
     cmd_maintenance_compact_hippo,
     cmd_maintenance_compact_records,
@@ -498,8 +499,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="prune_telemetry_before",
         default=None,
         help=(
-            "skip events older than this UTC datetime string (telemetry only; "
-            "off by default -- lossless, every event copied)."
+            "skip events strictly older than this UTC datetime cutoff "
+            "(telemetry only). Accepts an ISO-8601 string (e.g. "
+            "2026-05-01T09:00:00+00:00) or the stored space-separated form "
+            "(e.g. 2026-05-01 09:00:00.000000+00:00); a value that does not "
+            "parse is rejected before migration runs. Off by default -- "
+            "lossless, every event copied."
         ),
     )
     mtl.add_argument(
@@ -1180,6 +1185,44 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     enb.set_defaults(func=cmd_entity_backfill)
+
+    slb = sub.add_parser(
+        "salience-backfill",
+        help=(
+            "backfill the value signal across the entire store: the "
+            "capture-time salience composite for ordinary rows and the "
+            "cluster-size rule for existing knowledge summaries, plus the "
+            "entity/AAAK sweep. Default mode is --dry-run; --apply "
+            "snapshots the store dir first. Idempotent."
+        ),
+    )
+    slb_mode = slb.add_mutually_exclusive_group()
+    slb_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "(default) report would-change counts plus the resulting "
+            "salience / AAAK coverage / tag-rate numbers, without "
+            "mutating the store"
+        ),
+    )
+    slb_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="snapshot the store dir + write the salience and entity/AAAK changes",
+    )
+    slb.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    slb.set_defaults(func=cmd_salience_backfill)
 
     mtn = sub.add_parser(
         "maintenance",

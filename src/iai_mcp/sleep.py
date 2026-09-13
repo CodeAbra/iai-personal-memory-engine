@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -14,6 +15,8 @@ from iai_mcp.events import write_event
 from iai_mcp.guard import BudgetLedger, RateLimitLedger, should_call_llm
 from iai_mcp.store import EDGES_TABLE, MemoryStore, _uuid_literal
 from iai_mcp.types import MemoryRecord
+
+log = logging.getLogger(__name__)
 
 
 class SleepMode(str, Enum):
@@ -422,6 +425,17 @@ def _create_semantic_summary(
         tags=["semantic", "cls_summary"],
         language=language,
     )
+    # Must extend tags before generate_aaak_index below -- the AAAK entity
+    # field is read from record.tags at generation time.
+    try:
+        from iai_mcp.entity_anchors import entity_tags
+        extracted_entity_tags = entity_tags(summary_text)
+    except Exception as exc:  # noqa: BLE001 -- mint fail-safe, mirrors capture.py
+        log.debug("mint_entity_anchor_extraction_failed: %s", exc)
+        extracted_entity_tags = []
+    summary.tags.extend(extracted_entity_tags)
+    if len(cluster) >= CLUSTER_MIN_SIZE:
+        summary.salience_level = "notable"
     enforce_language_tagged(summary)
     summary.aaak_index = generate_aaak_index(summary)
     store.insert(summary)
@@ -429,6 +443,26 @@ def _create_semantic_summary(
     # insert may dedup-fold the summary into an existing near-identical
     # record, rewriting summary.id to the survivor — edges must bind to the
     # id that actually lives in the table, never the pre-insert uuid.
+    if summary.id != summary_id:
+        # Raise-only, union-only -- never a lowering write on fold.
+        store.raise_salience_level_if_higher(summary.id, summary.salience_level)
+        tags_changed = store.add_tags(summary.id, extracted_entity_tags)
+        if tags_changed:
+            survivor = store.get(summary.id)
+            if survivor is not None:
+                # aaak.py's 16-entity cap keeps the first 16 tags in list
+                # order; add_tags appends new ones at the end, so the just-
+                # unioned entities must be moved ahead of the survivor's
+                # pre-existing entity tags here or the cap can drop them.
+                new_entity_tags = [
+                    t for t in extracted_entity_tags if t.startswith("entity:")
+                ]
+                if new_entity_tags:
+                    survivor.tags = new_entity_tags + [
+                        t for t in survivor.tags if t not in new_entity_tags
+                    ]
+                store.set_aaak_index(summary.id, generate_aaak_index(survivor))
+
     pairs = [(summary.id, source.id) for source in cluster]
     if pairs:
         store.boost_edges(

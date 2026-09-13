@@ -28,6 +28,7 @@ import pytest
 from iai_mcp.migrate import (
     migrate_sqlite_to_lilli,
     MigrateReport,
+    normalize_prune_cutoff,
     verify_store_equality,
 )
 
@@ -194,6 +195,55 @@ def _table_count_src(src_db: str, table: str) -> int:
         return int(c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     finally:
         c.close()
+
+
+def _set_event_timestamps(
+    src_db: str, ts_values: list[str], *, kind: str = "probe_event"
+) -> None:
+    """Overwrite the events.ts column with explicit, ordered values.
+
+    Scoped to a single ``kind`` -- record inserts emit their own incidental
+    telemetry events (e.g. pattern-separation passes) alongside the
+    explicit ``probe_event`` rows a test writes, and those incidental rows
+    must be left untouched so the test controls exactly the rows it means
+    to. Lets a test control the exact on-disk shape (stored space-separated,
+    ISO T/Z, ...) and day-span of the prune predicate's compare target.
+    """
+    conn = sqlite3.connect(src_db)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM events WHERE kind = ? ORDER BY id", (kind,)
+        ).fetchall()
+        assert len(rows) == len(ts_values), (
+            f"expected {len(ts_values)} {kind!r} event rows, found {len(rows)}"
+        )
+        for (row_id,), ts in zip(rows, ts_values):
+            conn.execute("UPDATE events SET ts = ? WHERE id = ?", (ts, row_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _read_event_ts_values(src_db: str, *, kind: str = "probe_event") -> list[str]:
+    conn = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT ts FROM events WHERE kind = ? ORDER BY id", (kind,)
+        ).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
+# Five events spanning five distinct UTC days, stored in the exact shape the
+# real write path produces (space separator, microseconds, "+00:00" offset).
+_PRUNE_STORED_TS = [
+    "2026-05-01 09:00:00.100000+00:00",
+    "2026-05-02 09:00:00.200000+00:00",
+    "2026-05-03 09:00:00.300000+00:00",
+    "2026-05-04 09:00:00.400000+00:00",
+    "2026-05-05 09:00:00.500000+00:00",
+]
 
 
 @pytest.fixture
@@ -462,3 +512,246 @@ def test_cli_already_native_source_exits_1_with_clear_message(
     assert "Traceback (most recent call last)" not in captured.out
     assert "sqlite3.DatabaseError" not in captured.err
     assert not dst_root.exists()
+
+
+# --- normalize_prune_cutoff: unit-level (no store I/O) ------------------
+
+
+def test_normalize_prune_cutoff_stored_shape_passthrough():
+    cutoff = "2026-05-03 09:00:00.300000+00:00"
+    assert normalize_prune_cutoff(cutoff) == cutoff
+
+
+def test_normalize_prune_cutoff_iso_t_z_normalizes_to_stored_shape():
+    assert (
+        normalize_prune_cutoff("2026-05-03T09:00:00.300000Z")
+        == "2026-05-03 09:00:00.300000+00:00"
+    )
+    assert (
+        normalize_prune_cutoff("2026-05-03T09:00:00.300000+00:00")
+        == "2026-05-03 09:00:00.300000+00:00"
+    )
+
+
+def test_normalize_prune_cutoff_rejects_epoch_string():
+    from datetime import datetime, timezone as _tz
+
+    epoch = str(int(datetime(2026, 5, 3, 9, 0, 0, tzinfo=_tz.utc).timestamp()))
+    with pytest.raises(ValueError, match="prune-telemetry-before"):
+        normalize_prune_cutoff(epoch)
+
+
+def test_normalize_prune_cutoff_rejects_garbage():
+    with pytest.raises(ValueError, match="prune-telemetry-before"):
+        normalize_prune_cutoff("not-a-timestamp")
+
+
+# --- prune predicate correctness: through migrate_sqlite_to_lilli -------
+
+
+def test_prune_stored_shape_cutoff_drops_older_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=5
+    )
+    _set_event_timestamps(src_db, _PRUNE_STORED_TS)
+    total_before = _table_count_src(src_db, "events")
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    report = migrate_sqlite_to_lilli(
+        src_db, dst_root, batch=10,
+        prune_telemetry_before="2026-05-03 09:00:00.300000+00:00",
+    )
+    # Equal-instant is kept ("strictly older" is pruned): probe rows 3,4,5
+    # survive (rows 1,2 dropped); every other (incidental, "now"-stamped)
+    # event row is newer than the 2026-05 cutoff and is always kept too.
+    assert report.rows_copied["events"] == total_before - 2
+
+
+def test_prune_iso_cutoff_drops_same_rows_as_stored_shape_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=5
+    )
+    _set_event_timestamps(src_db, _PRUNE_STORED_TS)
+    total_before = _table_count_src(src_db, "events")
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    report = migrate_sqlite_to_lilli(
+        src_db, dst_root, batch=10,
+        prune_telemetry_before="2026-05-03T09:00:00.300000Z",
+    )
+    assert report.rows_copied["events"] == total_before - 2
+
+
+def test_prune_accepts_verbatim_stored_ts_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Copying a real stored ts value verbatim as the cutoff is accepted,
+    not spuriously rejected, and prunes exactly the same rows."""
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=5
+    )
+    _set_event_timestamps(src_db, _PRUNE_STORED_TS)
+    stored_values = _read_event_ts_values(src_db)
+    total_before = _table_count_src(src_db, "events")
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    report = migrate_sqlite_to_lilli(
+        src_db, dst_root, batch=10,
+        prune_telemetry_before=stored_values[2],
+    )
+    assert report.rows_copied["events"] == total_before - 2
+
+
+def test_prune_unparseable_cutoff_raises_and_writes_no_dest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An epoch-shaped or garbage cutoff hard-rejects instead of silently
+    keeping every row -- and no partial destination store is left behind."""
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=5
+    )
+    _set_event_timestamps(src_db, _PRUNE_STORED_TS)
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    with pytest.raises(ValueError, match="prune-telemetry-before"):
+        migrate_sqlite_to_lilli(
+            src_db, dst_root, batch=10, prune_telemetry_before="1777021200",
+        )
+    assert not dst_root.exists()
+
+    with pytest.raises(ValueError, match="prune-telemetry-before"):
+        migrate_sqlite_to_lilli(
+            src_db, dst_root, batch=10, prune_telemetry_before="garbage",
+        )
+    assert not dst_root.exists()
+
+
+def test_prune_default_none_stays_lossless(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=5
+    )
+    _set_event_timestamps(src_db, _PRUNE_STORED_TS)
+    total_before = _table_count_src(src_db, "events")
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    report = migrate_sqlite_to_lilli(src_db, dst_root, batch=10)
+    assert report.rows_copied["events"] == total_before
+
+
+# --- CLI wiring: fail loud before any migration work --------------------
+
+
+def test_cli_prune_cutoff_unparseable_exits_1_before_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """An unparseable --prune-telemetry-before value is rejected before any
+    migration work begins -- no partial destination store is left behind."""
+    from iai_mcp.cli import _build_parser
+    from iai_mcp.cli._analytics import cmd_migrate_to_lilli
+
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=3
+    )
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    parser = _build_parser()
+    ns = parser.parse_args(
+        [
+            "migrate-to-lilli",
+            "--src", src_db,
+            "--dst", str(dst_root),
+            "--prune-telemetry-before", "1777021200",
+        ]
+    )
+    rc = cmd_migrate_to_lilli(ns)
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "prune-telemetry-before" in captured.err
+    assert "Traceback (most recent call last)" not in captured.err
+    assert not dst_root.exists()
+
+
+def test_cli_prune_cutoff_valid_value_prunes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """A valid cutoff proceeds past CLI validation and the migrator prunes
+    the correct rows. The post-migrate verify step compares the dest
+    against the UNPRUNED source and is expected to report a count mismatch
+    on events in this scenario -- that pre-existing verify/prune
+    interaction is out of this fix's scope; what this test asserts is that
+    validation did not block a valid cutoff and the copy itself pruned
+    correctly."""
+    from iai_mcp.cli import _build_parser
+    from iai_mcp.cli._analytics import cmd_migrate_to_lilli
+
+    src_root = tmp_path / "src"
+    dst_root = tmp_path / "dst"
+    src_root.mkdir()
+    src_db = _build_source_store(
+        src_root, monkeypatch=monkeypatch, n_records=5, n_events=5
+    )
+    _set_event_timestamps(src_db, _PRUNE_STORED_TS)
+    total_before = _table_count_src(src_db, "events")
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(src_root))
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "stdlib")
+
+    parser = _build_parser()
+    ns = parser.parse_args(
+        [
+            "migrate-to-lilli",
+            "--src", src_db,
+            "--dst", str(dst_root),
+            "--prune-telemetry-before", "2026-05-03 09:00:00.300000+00:00",
+        ]
+    )
+    rc = cmd_migrate_to_lilli(ns)
+    captured = capsys.readouterr()
+
+    assert "error: --prune-telemetry-before" not in captured.err
+    assert dst_root.exists()
+    assert f"events={total_before - 2}" in captured.out
+
+    monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    monkeypatch.setenv("IAI_MCP_STORE", str(dst_root))
+    assert (
+        _table_count_lilli(dst_root, "events", monkeypatch=monkeypatch)
+        == total_before - 2
+    )

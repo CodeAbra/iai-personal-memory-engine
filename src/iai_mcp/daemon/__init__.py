@@ -83,6 +83,11 @@ S4_FIRST_ITER_GRACE_SEC: float = float(
 SESSION_START_CACHE_PATH = Path.home() / ".iai-mcp" / ".session-start-payload.cached.md"
 from iai_mcp.session import SESSION_START_CACHE_MAX_CHARS  # noqa: E402 -- placed after PATH constant for readability
 
+#: Live tuned wake_depth, refreshed every lifecycle tick -- $HOME-fixed like
+#: SESSION_START_CACHE_PATH, not store-scoped. Read by the SessionStart hook
+#: to detect a cache whose embedded wake_depth trails the current tuning.
+WAKE_DEPTH_SIDECAR_PATH = Path.home() / ".iai-mcp" / ".session-wake-depth"
+
 INTERRUPT_RECENT_ACTIVITY_WINDOW_SEC: float = 30.0
 
 #: Cooldown after a failed sleep-pipeline run before the next attempt. Each
@@ -1203,11 +1208,19 @@ def _write_session_start_cache(store, *, cache_path: Path | None = None) -> None
         log.debug("directive cache precache write failed", exc_info=True)
 
     try:
+        from iai_mcp import core as _profile_core
         from iai_mcp import retrieve
         from iai_mcp.session import (
             _compose_session_start_payload,
             format_payload_as_markdown,
         )
+
+        _profile_core.ensure_profile_hydrated(store)
+        # dict(...) copy is load-bearing: prevents this call from mutating
+        # the daemon's shared profile singleton through this reference.
+        profile_state = dict(_profile_core._profile_state)
+        if profile_state.get("wake_depth") not in ("minimal", "standard", "deep"):
+            profile_state["wake_depth"] = "minimal"
 
         _graph, assignment, rc = retrieve.build_runtime_graph(store)
         payload = _compose_session_start_payload(
@@ -1215,7 +1228,7 @@ def _write_session_start_cache(store, *, cache_path: Path | None = None) -> None
             assignment,
             rc,
             session_id="precache",
-            profile_state={"wake_depth": "standard"},
+            profile_state=profile_state,
         )
         rendered = format_payload_as_markdown(payload)
         if not rendered:
@@ -1253,6 +1266,40 @@ def _write_session_start_cache(store, *, cache_path: Path | None = None) -> None
             )
         except Exception:  # noqa: BLE001 -- event write inside boundary guard
             log.debug("failed to write session_start_cache_write_failed event")
+
+
+def _write_wake_depth_sidecar(store, *, sidecar_path: Path | None = None) -> None:
+    # Cheap per-tick refresh, independent of the rate-limited cache rebuild:
+    # a depth change between cache refreshes must be observable to the hook.
+    if sidecar_path is None:
+        sidecar_path = WAKE_DEPTH_SIDECAR_PATH
+    try:
+        from iai_mcp import core as _profile_core
+
+        _profile_core.ensure_profile_hydrated(store)
+        wake_depth = _profile_core._profile_state.get("wake_depth")
+        if wake_depth not in ("minimal", "standard", "deep"):
+            wake_depth = "minimal"
+
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = sidecar_path.with_suffix(
+            f"{sidecar_path.suffix}.tmp{os.getpid()}.{threading.get_ident()}"
+        )
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(wake_depth)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, sidecar_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+    except Exception as exc:  # noqa: BLE001 -- sidecar write MUST NOT crash the tick
+        log.debug("wake depth sidecar write failed: %s", exc, exc_info=True)
 
 
 async def _tick_body(
@@ -1800,14 +1847,14 @@ def _log_store_format(store: object) -> None:
 
 
 def _rebuild_session_caches_on_boot(store: object) -> None:
-    """Boot-time invalidation of the two per-session staleness surfaces:
-    deletes stale .working-tier.<sid>.cached.md files and forces the
-    continuity live-state block empty via
-    write_continuity_cache(allow_downgrade=True), bypassing its default
-    preserve-guard (that guard is for /clear reconstruction, not this
-    path). The agent-registry block is independently recomputed from
-    daemon_state.json, unaffected. Fail-soft per file: a cache-cleanup
-    error must never abort boot.
+    """Boot-time invalidation of the per-session staleness surfaces:
+    deletes stale .working-tier.<sid>.cached.md and
+    .session-clear-continuation.<sid> files, and forces the continuity
+    live-state block empty via write_continuity_cache(allow_downgrade=True),
+    bypassing its default preserve-guard (that guard is for /clear
+    reconstruction, not this path). The agent-registry block is
+    independently recomputed from daemon_state.json, unaffected. Fail-soft
+    per file: a cache-cleanup error must never abort boot.
     """
     try:
         from iai_mcp import working_tier
@@ -1837,6 +1884,22 @@ def _rebuild_session_caches_on_boot(store: object) -> None:
                     )
     except Exception as exc:  # noqa: BLE001 -- boot must never fail on cache cleanup
         log.debug("boot working-tier sweep failed: %s", exc)
+
+    try:
+        from iai_mcp import session
+
+        root = getattr(store, "root", None)
+        if root is not None:
+            for path in session.clear_continuation_marker_paths(root):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.debug(
+                        "boot clear-continuation sweep: unlink failed for %s: %s",
+                        path, exc,
+                    )
+    except Exception as exc:  # noqa: BLE001 -- boot must never fail on cache cleanup
+        log.debug("boot clear-continuation sweep failed: %s", exc)
 
     try:
         from iai_mcp import session
@@ -2747,6 +2810,14 @@ async def main() -> int:
                         exc_info=True,
                     )
 
+                try:
+                    await asyncio.to_thread(_write_wake_depth_sidecar, store)
+                except Exception:  # noqa: BLE001 -- sidecar refresh MUST NOT crash lifecycle_tick
+                    log.debug(
+                        "lifecycle_tick wake depth sidecar refresh failed",
+                        exc_info=True,
+                    )
+
                 # Notify-only version probe, throttled tick-side to every 6h
                 # (refresh_cache adds its own 24h TTL on the actual fetch).
                 # wait_for bounds the tick's exposure: urlopen's timeout does
@@ -3557,6 +3628,8 @@ __all__ = [
     "_is_inside_window",
     "_update_pending_digest",
     "_write_session_start_cache",
+    "WAKE_DEPTH_SIDECAR_PATH",
+    "_write_wake_depth_sidecar",
     "_tick_body",
     "_scheduler_tick",
     "_s4_offline_loop",

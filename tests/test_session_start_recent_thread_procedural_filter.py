@@ -5,13 +5,14 @@ segment nor the per-turn `render_session_delta`.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from iai_mcp.community import CommunityAssignment
 from iai_mcp.core import _seed_l0_identity
 from iai_mcp.session import (
     _compose_session_start_payload,
+    _recent_thread_segment,
     format_payload_as_markdown,
     render_session_delta,
 )
@@ -22,8 +23,14 @@ PROC_SENTINEL = "PROC-SENTINEL-2f9c1a-must-never-render"
 CONTROL_SENTINEL = "CONTROL-SENTINEL-8b31de-recent-work-entry"
 
 
-def _mk_record(tier: str, text: str):
-    now = datetime.now(timezone.utc)
+def _mk_record(
+    tier: str,
+    text: str,
+    *,
+    salience_level: str = "unflagged",
+    created_at: "datetime | None" = None,
+):
+    now = created_at or datetime.now(timezone.utc)
     rid = uuid4()
     rec = MemoryRecord(
         id=rid,
@@ -45,6 +52,7 @@ def _mk_record(tier: str, text: str):
         updated_at=now,
         tags=["role:user"],
         language="en",
+        salience_level=salience_level,
     )
     return rec, rid
 
@@ -122,3 +130,69 @@ def test_procedural_chunk_absent_from_render_session_delta(tmp_path, monkeypatch
     assert PROC_SENTINEL not in delta, (
         "procedural chunk leaked into render_session_delta"
     )
+
+
+def _isolated_store(tmp_path, monkeypatch, subdir: str) -> MemoryStore:
+    root = tmp_path / subdir
+    root.mkdir()
+    monkeypatch.setenv("IAI_MCP_STORE", str(root))
+    (root / "config.json").write_text(
+        json.dumps({"identity": {"name": "alice", "languages": "en", "role": "developer"}})
+    )
+    store = MemoryStore(path=root / "store")
+    _seed_l0_identity(store)
+    return store
+
+
+def test_recent_thread_salience_composite_outranks_pure_recency(tmp_path, monkeypatch):
+    store = _isolated_store(tmp_path, monkeypatch, "salience")
+    now = datetime.now(timezone.utc)
+
+    older_critical, _ = _mk_record(
+        "semantic",
+        "OLDER-CRITICAL-SENTINEL: flagged turn.",
+        salience_level="critical",
+        created_at=now - timedelta(minutes=10),
+    )
+    store.insert(older_critical)
+    newer_unflagged, _ = _mk_record(
+        "semantic",
+        "NEWER-UNFLAGGED-SENTINEL: plain turn.",
+        created_at=now,
+    )
+    store.insert(newer_unflagged)
+
+    segment = _recent_thread_segment(store, max_records=5)
+    assert "OLDER-CRITICAL-SENTINEL" in segment
+    assert "NEWER-UNFLAGGED-SENTINEL" in segment
+    assert segment.index("OLDER-CRITICAL-SENTINEL") < segment.index("NEWER-UNFLAGGED-SENTINEL"), (
+        "a flagged-but-slightly-older turn must outrank a newer unflagged one"
+    )
+
+
+def test_recent_thread_pending_turn_scored_without_salience_slot(tmp_path, monkeypatch):
+    store = _isolated_store(tmp_path, monkeypatch, "pending")
+    now = datetime.now(timezone.utc)
+
+    control_rec, _ = _mk_record(
+        "semantic", f"{CONTROL_SENTINEL}: normal recent work.", created_at=now,
+    )
+    store.insert(control_rec)
+
+    # _PendingTurn (built internally from this event dict) has no
+    # salience_level slot -- the composite scorer must getattr-default it
+    # to "unflagged" rather than raise AttributeError.
+    segment = _recent_thread_segment(
+        store,
+        max_records=5,
+        pending_live_events=[{
+            "role": "user",
+            "session_id": "live-session",
+            "source_uuid": None,
+            "ts_iso": now.isoformat(),
+            "ts": now,
+            "text": "PENDING-SENTINEL: live turn not yet indexed.",
+        }],
+    )
+    assert "PENDING-SENTINEL" in segment
+    assert CONTROL_SENTINEL in segment

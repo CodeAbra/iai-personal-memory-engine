@@ -112,6 +112,88 @@ def test_pmset_recent_sleep_returns_false_when_pmset_missing() -> None:
     assert result is False
 
 
+def test_pmset_recent_sleep_caches_result_within_ttl() -> None:
+    log = _pmset_log_stdout([
+        (_now_pmset_ts(offset_min=2), "System Sleep"),
+    ])
+    with patch(
+        "iai_mcp.idle_detector._run_captured", return_value=log
+    ) as run_mock:
+        detector = IdleDetector(pmset_cache_ttl_sec=60.0)
+        first = detector.pmset_recent_sleep(window_min=5)
+        second = detector.pmset_recent_sleep(window_min=5)
+    assert first is True
+    assert second is True
+    assert run_mock.call_count == 1
+
+
+def test_pmset_recent_sleep_refetches_after_ttl_expiry() -> None:
+    stale_log = _pmset_log_stdout([
+        (_now_pmset_ts(offset_min=60), "System Sleep"),
+    ])
+    fresh_log = _pmset_log_stdout([
+        (_now_pmset_ts(offset_min=1), "System Sleep"),
+    ])
+    clock = {"t": 1000.0}
+
+    def fake_monotonic() -> float:
+        return clock["t"]
+
+    with patch(
+        "iai_mcp.idle_detector._run_captured",
+        side_effect=[stale_log, fresh_log],
+    ) as run_mock, patch(
+        "iai_mcp.idle_detector.time.monotonic", side_effect=fake_monotonic
+    ):
+        detector = IdleDetector(pmset_cache_ttl_sec=10.0)
+        first = detector.pmset_recent_sleep(window_min=5)
+        clock["t"] += 20.0
+        second = detector.pmset_recent_sleep(window_min=5)
+    assert first is False
+    assert second is True
+    assert run_mock.call_count == 2
+
+
+def test_pmset_recent_sleep_cache_is_per_instance() -> None:
+    log_true = _pmset_log_stdout([
+        (_now_pmset_ts(offset_min=1), "System Sleep"),
+    ])
+    with patch(
+        "iai_mcp.idle_detector._run_captured", return_value=log_true
+    ):
+        detector_a = IdleDetector(pmset_cache_ttl_sec=60.0)
+        result_a = detector_a.pmset_recent_sleep(window_min=5)
+
+    with patch(
+        "iai_mcp.idle_detector._run_captured", return_value=""
+    ) as run_mock_b:
+        detector_b = IdleDetector(pmset_cache_ttl_sec=60.0)
+        result_b = detector_b.pmset_recent_sleep(window_min=5)
+
+    assert result_a is True
+    assert result_b is False
+    assert run_mock_b.call_count == 1
+
+
+def test_sleep_eligible_pmset_path_reflects_cached_recent_sleep() -> None:
+    fake_ioreg = _completed_process(
+        stdout=_ioreg_stdout(idle_ns=10 * 1_000_000_000)
+    )
+    log = _pmset_log_stdout([
+        (_now_pmset_ts(offset_min=2), "System Sleep"),
+    ])
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Darwin"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run", return_value=fake_ioreg
+    ), patch(
+        "iai_mcp.idle_detector._run_captured", return_value=log
+    ):
+        detector = IdleDetector(pmset_cache_ttl_sec=60.0)
+        result = detector.sleep_eligible(heartbeat_idle_30min=False)
+    assert result is True
+
+
 def test_pmset_recent_sleep_survives_invalid_utf8_in_log() -> None:
     log = _pmset_log_stdout([
         (_now_pmset_ts(offset_min=2), "System Sleep"),
@@ -263,10 +345,11 @@ def test_logind_session_paths_picks_own_uid_seat_session() -> None:
     assert result == ["/org/freedesktop/login1/session/c2"]
 
 
-def test_logind_session_paths_skips_other_uids_and_headless_sessions() -> None:
-    # Another user's graphical session and our own headless (no-seat) SSH
-    # session must both be skipped in favor of our own seat-attached one.
-    fake = _completed_process(
+def test_logind_session_paths_skips_other_uid_and_seatless_session_without_signal() -> None:
+    # Another user's graphical session and our own seatless (no-seat) session
+    # with neither a non-empty TTY nor Type=="tty" must both stay excluded,
+    # in favor of our own seat-attached session.
+    fake_sessions = _completed_process(
         stdout=_busctl_list_sessions_json(
             [
                 (
@@ -281,9 +364,105 @@ def test_logind_session_paths_skips_other_uids_and_headless_sessions() -> None:
             ]
         )
     )
-    with patch("iai_mcp.idle_detector.subprocess.run", return_value=fake):
+    fake_tty_empty = _completed_process(stdout=_busctl_property_json("s", ""))
+    fake_type_not_tty = _completed_process(stdout=_busctl_property_json("s", "x11"))
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty_empty, fake_type_not_tty],
+    ):
         result = IdleDetector()._logind_session_paths()
     assert result == ["/org/freedesktop/login1/session/c2"]
+
+
+def test_logind_session_paths_includes_seatless_session_with_nonempty_tty() -> None:
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3")]
+        )
+    )
+    fake_tty = _completed_process(stdout=_busctl_property_json("s", "pts/0"))
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty],
+    ) as run_mock:
+        result = IdleDetector()._logind_session_paths()
+    assert result == ["/org/freedesktop/login1/session/c3"]
+    # Non-empty TTY short-circuits before any Type lookup.
+    assert run_mock.call_count == 2
+
+
+def test_logind_session_paths_includes_seatless_session_with_type_tty() -> None:
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3")]
+        )
+    )
+    fake_tty_empty = _completed_process(stdout=_busctl_property_json("s", ""))
+    fake_type_tty = _completed_process(stdout=_busctl_property_json("s", "tty"))
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty_empty, fake_type_tty],
+    ) as run_mock:
+        result = IdleDetector()._logind_session_paths()
+    assert result == ["/org/freedesktop/login1/session/c3"]
+    assert run_mock.call_count == 3
+
+
+def test_logind_session_paths_excludes_seatless_session_with_neither_signal() -> None:
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3")]
+        )
+    )
+    fake_tty_empty = _completed_process(stdout=_busctl_property_json("s", ""))
+    fake_type_not_tty = _completed_process(
+        stdout=_busctl_property_json("s", "unspecified")
+    )
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty_empty, fake_type_not_tty],
+    ):
+        result = IdleDetector()._logind_session_paths()
+    assert result == []
+
+
+def test_logind_session_paths_seat_attached_fires_no_extra_property_calls() -> None:
+    # Regression: the seatless TTY/Type fallback must never trigger a
+    # property lookup for a seat-attached entry, even when a seatless entry
+    # in the same batch does trigger one.
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [
+                (
+                    "c2", _OWN_UID, "testuser",
+                    "seat0", "/org/freedesktop/login1/session/c2",
+                ),
+                ("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3"),
+            ]
+        )
+    )
+    fake_tty = _completed_process(stdout=_busctl_property_json("s", "pts/0"))
+    fake_type = _completed_process(stdout=_busctl_property_json("s", "tty"))
+    with patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty, fake_type],
+    ) as run_mock:
+        result = IdleDetector()._logind_session_paths()
+
+    assert result == [
+        "/org/freedesktop/login1/session/c2",
+        "/org/freedesktop/login1/session/c3",
+    ]
+    property_calls = [
+        call.args[0] for call in run_mock.call_args_list if "get-property" in call.args[0]
+    ]
+    for cmd in property_calls:
+        assert "/org/freedesktop/login1/session/c2" not in cmd, (
+            "seat-attached session must never trigger a property lookup"
+        )
+    assert any(
+        "/org/freedesktop/login1/session/c3" in cmd for cmd in property_calls
+    ), "seatless session must trigger a property lookup"
 
 
 def test_logind_session_paths_returns_all_matching_seats() -> None:
@@ -457,6 +636,76 @@ def test_os_idle_time_sec_dispatches_to_hid_on_darwin() -> None:
         idle_sec, source = IdleDetector().os_idle_time_sec()
     assert idle_sec == 100
     assert source == "HIDIdleTime"
+
+
+def test_os_idle_time_sec_returns_real_value_for_seatless_tty_session() -> None:
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3")]
+        )
+    )
+    fake_tty = _completed_process(stdout=_busctl_property_json("s", "pts/0"))
+    idle_since_usec = int(
+        (datetime.now(timezone.utc) - timedelta(seconds=900)).timestamp() * 1_000_000
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", True))
+    fake_since = _completed_process(stdout=_busctl_property_json("t", idle_since_usec))
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty, fake_hint, fake_since],
+    ):
+        idle_sec, source = IdleDetector().os_idle_time_sec()
+    assert idle_sec is not None
+    assert 895 <= idle_sec <= 905
+    assert source == "logind"
+
+
+def test_os_idle_time_sec_returns_real_value_for_seatless_type_tty_session() -> None:
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3")]
+        )
+    )
+    fake_tty_empty = _completed_process(stdout=_busctl_property_json("s", ""))
+    fake_type_tty = _completed_process(stdout=_busctl_property_json("s", "tty"))
+    idle_since_usec = int(
+        (datetime.now(timezone.utc) - timedelta(seconds=300)).timestamp() * 1_000_000
+    )
+    fake_hint = _completed_process(stdout=_busctl_property_json("b", True))
+    fake_since = _completed_process(stdout=_busctl_property_json("t", idle_since_usec))
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty_empty, fake_type_tty, fake_hint, fake_since],
+    ):
+        idle_sec, source = IdleDetector().os_idle_time_sec()
+    assert idle_sec is not None
+    assert 295 <= idle_sec <= 305
+    assert source == "logind"
+
+
+def test_os_idle_time_sec_none_for_seatless_session_without_signal() -> None:
+    fake_sessions = _completed_process(
+        stdout=_busctl_list_sessions_json(
+            [("c3", _OWN_UID, "testuser", "", "/org/freedesktop/login1/session/c3")]
+        )
+    )
+    fake_tty_empty = _completed_process(stdout=_busctl_property_json("s", ""))
+    fake_type_not_tty = _completed_process(
+        stdout=_busctl_property_json("s", "unspecified")
+    )
+    with patch(
+        "iai_mcp.idle_detector.platform.system", return_value="Linux"
+    ), patch(
+        "iai_mcp.idle_detector.subprocess.run",
+        side_effect=[fake_sessions, fake_tty_empty, fake_type_not_tty],
+    ):
+        idle_sec, source = IdleDetector().os_idle_time_sec()
+    assert idle_sec is None
+    assert source is None
 
 
 def test_os_idle_time_sec_none_on_unsupported_platform() -> None:

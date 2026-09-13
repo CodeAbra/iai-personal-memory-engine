@@ -172,6 +172,7 @@ from iai_mcp.migrate._to_lilli_verify import (  # noqa: E402
 from iai_mcp.migrate._to_lilli import (  # noqa: E402
     migrate_sqlite_to_lilli,
     MigrateReport,
+    normalize_prune_cutoff,
 )
 from iai_mcp.migrate._to_lilli_swap import (  # noqa: E402
     swap_migrated_store,
@@ -208,6 +209,7 @@ __all__ = [
     "VerifyReport",
     "migrate_sqlite_to_lilli",
     "MigrateReport",
+    "normalize_prune_cutoff",
     "swap_migrated_store",
     "refuse_if_marker_present",
     "migrate_role_column",

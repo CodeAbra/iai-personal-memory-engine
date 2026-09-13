@@ -58,13 +58,16 @@ def test_both_submodules_share_one_so() -> None:
     from iai_mcp_native import graph as _graph
     import iai_mcp_native
 
+    # Scoped to this package's own binaries: pkg_dir is a shared flat
+    # directory that may also hold other native extensions from separate
+    # subsystems this invariant must not be conflated with.
     pkg_dir = Path(iai_mcp_native.__file__).parent
     binaries = [
         f for f in os.listdir(pkg_dir)
-        if f.endswith((".so", ".dylib"))
+        if f.startswith("iai_mcp_native") and f.endswith((".so", ".dylib"))
     ]
     assert len(binaries) == 1, (
-        f"expected exactly one extension binary in {pkg_dir}, got {binaries}"
+        f"expected exactly one iai_mcp_native extension binary in {pkg_dir}, got {binaries}"
     )
 
     assert id(_embed) == id(iai_mcp_native.embed) == id(sys.modules["iai_mcp_native.embed"])
