@@ -32,9 +32,13 @@ def test_daemon_boot_window_signal_breadcrumb(monkeypatch, tmp_path):
     _install_boot_signal_trace()
 
     registered_sigs = {sig for sig, _handler in registered}
-    assert registered_sigs == {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+    # SIGHUP exists only on POSIX; Windows registers the other two.
+    expected = {signal.SIGTERM, signal.SIGINT}
+    if hasattr(signal, "SIGHUP"):
+        expected.add(signal.SIGHUP)
+    assert registered_sigs == expected
     handlers = {handler for _sig, handler in registered}
-    assert len(handlers) == 1, "all three signals must map to the same handler"
+    assert len(handlers) == 1, "every signal must map to the same handler"
     trace = registered[0][1]
 
     # Guard: a failed monkeypatch would otherwise write the breadcrumb to
@@ -80,6 +84,7 @@ def test_daemon_boot_window_signal_breadcrumb(monkeypatch, tmp_path):
     assert kill_calls == [(os.getpid(), signal.SIGTERM)]
 
     # ordering: the SIG_DFL restore was recorded before the kill call.
+    # (one registration per available signal, plus the restore)
     state_at_kill = signal_state_at_kill[0]
-    assert len(state_at_kill) == 4
+    assert len(state_at_kill) == len(expected) + 1
     assert state_at_kill[-1] == (signal.SIGTERM, signal.SIG_DFL)

@@ -210,12 +210,30 @@ def _render_systemd_unit() -> str:
     return text
 
 
+def _windows_task_user_id() -> str:
+    r"""DOMAIN\user for the account registering the task.
+
+    The template pins both the logon trigger and the principal to this
+    account. Without an explicit <UserId>, Task Scheduler reads the
+    trigger as "at logon of ANY user" -- a machine-wide registration
+    that requires elevation, so schtasks /Create fails with
+    "Access is denied" from the normal unelevated shell the installer
+    runs in.
+    """
+    import getpass
+    import os as _os
+    user = _os.environ.get("USERNAME") or getpass.getuser()
+    domain = _os.environ.get("USERDOMAIN")
+    return f"{domain}\\{user}" if domain else user
+
+
 def _render_windows_task_xml() -> str:
     from iai_mcp import cli as _cli
     tmpl = _res.files("iai_mcp") / "_deploy" / "windows" / "iai-mcp-daemon.xml"
     text = tmpl.read_text(encoding="utf-8")
     text = text.replace("{START_CMD}", str(_cli.WINDOWS_START_CMD))
     text = text.replace("{WORK_DIR}", str(Path.home() / ".iai-mcp"))
+    text = text.replace("{USER_ID}", _windows_task_user_id())
     return text
 
 
