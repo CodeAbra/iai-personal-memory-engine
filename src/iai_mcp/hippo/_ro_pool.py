@@ -103,6 +103,52 @@ def _pool_off() -> bool:
     return os.environ.get("IAI_MCP_RO_POOL_OFF", "").strip() in ("1", "true", "TRUE", "yes")
 
 
+#: Default per-slot page-cache bound, in KiB (negative-KiB `PRAGMA cache_size`
+#: semantics). 16 MiB per slot bounds the pool's total page-cache ceiling at
+#: RO_POOL_SIZE * 16 MiB = 128 MiB rather than leaving eight unbounded caches
+#: resident for the daemon's life. Measured on a 12k-record / 48 MB store: a
+#: full-store scan retains +368 MB unbounded vs +6 MB at this bound, with
+#: identical row counts. Override with IAI_MCP_RO_POOL_CACHE_KIB; 0 restores
+#: the previous unbounded behaviour.
+RO_POOL_CACHE_KIB_DEFAULT = 16384
+
+
+def _slot_cache_kib() -> int:
+    """Per-slot page-cache bound in KiB; <=0 means unbounded."""
+    raw = os.environ.get("IAI_MCP_RO_POOL_CACHE_KIB")
+    if raw is None:
+        return RO_POOL_CACHE_KIB_DEFAULT
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return RO_POOL_CACHE_KIB_DEFAULT
+    return val
+
+
+def _bound_slot_page_cache(conn: Any) -> None:
+    """Bound a freshly opened read-only slot's engine page cache.
+
+    ``HippoDB.__init__`` issues ``PRAGMA cache_size=-65536`` on its writer
+    connection, but this pool does not go through it: ``get_lilli_raw_conn``
+    opens a dedicated lock-free handle, so every slot was constructed with the
+    pager's ``_max_cached_pages`` unset (None = unbounded). LilliBrain's Pager
+    holds a dict of whole pages as ``bytearray``, and because that retention is
+    engine-side rather than a Python cycle, ``gc.collect()`` cannot reclaim it
+    (measured: 0.0 MiB reclaimed across 108 relief records). The engine's own
+    ``PRAGMA cache_size`` handler calls ``Pager.set_max_cached_pages`` with
+    LRU eviction, so this uses the sanctioned mechanism rather than a new one.
+
+    Best-effort: a bound failure must never prevent the slot from opening.
+    """
+    kib = _slot_cache_kib()
+    if kib <= 0:
+        return
+    try:
+        conn.execute(f"PRAGMA cache_size=-{kib}")
+    except Exception:  # noqa: BLE001 -- bound is advisory, never fatal
+        _log.debug("RoConnPool: page-cache bound failed for slot")
+
+
 class _Slot:
     """One pool slot: a lazily-opened RO connection plus its open generation."""
 
@@ -163,6 +209,7 @@ class RoConnPool:
             raise RuntimeError(
                 f"RoConnPool: no lilli engine connection available for {self._path!r}"
             )
+        _bound_slot_page_cache(conn)
         return conn
 
     def _close_slot_conn(self, conn: Any) -> None:
