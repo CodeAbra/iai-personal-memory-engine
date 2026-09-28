@@ -684,6 +684,16 @@ def check_o_subscription_credentials() -> CheckResult:
 
     result = verify_credentials_subscription()
     if result.get("ok"):
+        if result.get("source") == "oauth_token_env":
+            return CheckResult(
+                name="(o) Claude subscription credentials",
+                passed=True,
+                detail=(
+                    "OAuth token from `CLAUDE_CODE_OAUTH_TOKEN` is configured; "
+                    "Claude CLI validates it at call time."
+                ),
+                status="PASS",
+            )
         sub_type = result.get("subscription_type") or result.get("billing_type") or "unknown"
         return CheckResult(
             name="(o) Claude subscription credentials",
@@ -699,7 +709,8 @@ def check_o_subscription_credentials() -> CheckResult:
         detail=(
             f"reason={reason}; daemon will fall back to local Tier-0 "
             "consolidation (no LLM critic, no nightly insight). Run "
-            "`claude /login` to restore subscription path."
+            "`claude /login` or export `CLAUDE_CODE_OAUTH_TOKEN` from "
+            "`claude setup-token` to restore the subscription path."
         ),
         status="WARN",
     )

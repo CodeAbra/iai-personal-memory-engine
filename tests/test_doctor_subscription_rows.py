@@ -46,11 +46,31 @@ def test_check_o_warn_when_credentials_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         claude_cli, "CREDENTIALS_PATH", tmp_path / "missing.json",
     )
+    monkeypatch.setattr(claude_cli, "_read_keychain_credentials", lambda: None)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
     result = check_o_subscription_credentials()
     assert result.status == "WARN"
     assert result.passed is True
     assert "credentials_file_missing" in result.detail
+
+
+def test_check_o_pass_when_oauth_token_env_configured(tmp_path, monkeypatch):
+    from iai_mcp import claude_cli
+    from iai_mcp.doctor import check_o_subscription_credentials
+
+    monkeypatch.setattr(
+        claude_cli, "CREDENTIALS_PATH", tmp_path / "missing.json",
+    )
+    monkeypatch.setattr(claude_cli, "_read_keychain_credentials", lambda: None)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-EXAMPLE")
+
+    result = check_o_subscription_credentials()
+    assert result.status == "PASS"
+    assert result.passed is True
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in result.detail
+    assert "Claude CLI validates it at call time" in result.detail
+    assert "inference scope" not in result.detail
 
 
 def test_check_o_warn_when_credentials_expired_and_no_refresh_token(

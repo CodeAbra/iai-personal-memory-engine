@@ -13,6 +13,7 @@ from iai_mcp.daemon_state import load_state, update_state
 _ANTHR = "ANTHR" + "OPIC_" + "API_" + "KEY"
 _CLAUDE_KEY = "CLAUDE_" + "API_" + "KEY"
 _CLAUDE_CODE_KEY = "CLAUDE_" + "CODE_" + "API_" + "KEY"
+_CLAUDE_CODE_OAUTH_TOKEN = "CLAUDE_" + "CODE_" + "OAUTH_" + "TOKEN"
 ENV_DENY_LIST: tuple[str, ...] = (_ANTHR, _CLAUDE_KEY, _CLAUDE_CODE_KEY)
 
 CLAUDE_TIMEOUT_SEC: float = 120.0
@@ -77,6 +78,8 @@ def verify_credentials_subscription() -> dict:
         # macOS keeps credentials in the Keychain, not the JSON file.
         data = _read_keychain_credentials()
     if data is None:
+        if os.environ.get(_CLAUDE_CODE_OAUTH_TOKEN, "").strip():
+            return {"ok": True, "source": "oauth_token_env"}
         return {"ok": False, "reason": "credentials_file_missing"}
 
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None

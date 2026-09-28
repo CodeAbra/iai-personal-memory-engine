@@ -23,6 +23,7 @@ def _stub_keychain_credentials(monkeypatch):
     from iai_mcp import claude_cli
     monkeypatch.setattr(claude_cli, "_read_keychain_credentials", lambda: None)
     monkeypatch.delenv("IAI_MCP_CLAUDE_BARE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
 
 @pytest.fixture
@@ -249,6 +250,54 @@ def test_credentials_gate(tmp_path, monkeypatch):
     r2 = verify_credentials_subscription()
     assert r2["ok"] is True
     assert r2["billing_type"] == "stripe_subscription"
+
+
+def test_credentials_gate_accepts_oauth_token_env(tmp_path, monkeypatch):
+    from iai_mcp import claude_cli
+    from iai_mcp.claude_cli import verify_credentials_subscription
+
+    monkeypatch.setattr(
+        claude_cli, "CREDENTIALS_PATH", tmp_path / "missing.json",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-EXAMPLE")
+
+    assert verify_credentials_subscription() == {
+        "ok": True,
+        "source": "oauth_token_env",
+    }
+
+
+def test_credentials_gate_rejects_blank_oauth_token_env(tmp_path, monkeypatch):
+    from iai_mcp import claude_cli
+    from iai_mcp.claude_cli import verify_credentials_subscription
+
+    monkeypatch.setattr(
+        claude_cli, "CREDENTIALS_PATH", tmp_path / "missing.json",
+    )
+    for value in ("", "   "):
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", value)
+        assert verify_credentials_subscription() == {
+            "ok": False,
+            "reason": "credentials_file_missing",
+        }
+
+
+def test_credentials_file_takes_precedence_over_oauth_token_env(
+    tmp_path, monkeypatch,
+):
+    from iai_mcp import claude_cli
+    from iai_mcp.claude_cli import verify_credentials_subscription
+
+    creds = tmp_path / ".credentials.json"
+    creds.write_text(json.dumps(_new_schema_creds(sub_type="community")))
+    monkeypatch.setattr(claude_cli, "CREDENTIALS_PATH", creds)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-EXAMPLE")
+
+    assert verify_credentials_subscription() == {
+        "ok": False,
+        "reason": "not_subscription",
+        "subscription_type": "community",
+    }
 
 
 def _new_schema_creds(sub_type: str = "max", scopes=None, expires_at_ms=None):
@@ -521,6 +570,12 @@ def test_bare_login_failure_retries_without_bare(
     --settings on the retry."""
     from iai_mcp.claude_cli import invoke_claude_once
 
+    oauth_token = "sk-ant-oat01-EXAMPLE"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", oauth_token)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-hostile-1")
+    monkeypatch.setenv("CLAUDE_API_KEY", "sk-hostile-2")
+    monkeypatch.setenv("CLAUDE_CODE_API_KEY", "sk-hostile-3")
+
     login_error = json.dumps({
         "is_error": True,
         "result": "Not logged in · Please run /login",
@@ -537,7 +592,7 @@ def test_bare_login_failure_retries_without_bare(
     calls: list = []
 
     async def fake_spawn(*args, **kwargs):
-        calls.append(args)
+        calls.append((args, kwargs))
         return procs[len(calls) - 1]
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
@@ -547,10 +602,17 @@ def test_bare_login_failure_retries_without_bare(
     assert result["ok"] is True
     assert result["bare_fallback_used"] is True
     assert len(calls) == 2
-    assert "--bare" in calls[0]
-    assert "--bare" not in calls[1]
-    assert "--settings" in calls[1]
-    settings = json.loads(calls[1][calls[1].index("--settings") + 1])
+    for _, kwargs in calls:
+        env = kwargs["env"]
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == oauth_token
+        for key in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "CLAUDE_CODE_API_KEY"):
+            assert key not in env
+    first_args, _ = calls[0]
+    retry_args, _ = calls[1]
+    assert "--bare" in first_args
+    assert "--bare" not in retry_args
+    assert "--settings" in retry_args
+    settings = json.loads(retry_args[retry_args.index("--settings") + 1])
     assert settings == {"disableAllHooks": True}
 
 
