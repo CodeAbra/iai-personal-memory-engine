@@ -51,6 +51,17 @@ def test_rem_runs_when_never_ran(tmp_path, monkeypatch):
     assert calls and calls[0]["claude"] is True
 
 
+def test_disable_claude_gates_the_insight_call(tmp_path, monkeypatch):
+    from iai_mcp.daemon import _maybe_run_rem
+
+    store = MemoryStore(path=tmp_path)
+    calls: list = []
+    _patch_rem(monkeypatch, calls)
+
+    assert asyncio.run(_maybe_run_rem(store, {"claude_enabled": False})) is not None
+    assert calls and calls[0]["claude"] is False
+
+
 def test_rem_spaced_by_interval(tmp_path, monkeypatch):
     from iai_mcp.daemon import _maybe_run_rem
     from iai_mcp.events import write_event

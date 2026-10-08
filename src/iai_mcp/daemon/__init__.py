@@ -1174,7 +1174,8 @@ async def _maybe_run_rem(store, ds: dict) -> "dict | None":
     """One REM pass after a clean pipeline cycle. The claude insight call is
     subscription- and daily-budget-gated inside generate_overnight_insight;
     this gate only spaces routine cycles so REM keeps a nightly rhythm while
-    a fresh force-rem always runs it. IAI_MCP_REM_DISABLED=1 disables."""
+    a fresh force-rem always runs it. `daemon configure disable-claude` gates
+    the insight call; IAI_MCP_REM_DISABLED=1 disables the pass entirely."""
     if os.environ.get("IAI_MCP_REM_DISABLED") == "1":
         return None
     if not _recent_force_rem_honored(ds):
@@ -1182,7 +1183,8 @@ async def _maybe_run_rem(store, ds: dict) -> "dict | None":
         if age is not None and age < REM_MIN_INTERVAL_SEC:
             return None
     result = await run_rem_cycle(
-        store, 1, 1, "rem", is_last=True, claude_enabled=True,
+        store, 1, 1, "rem", is_last=True,
+        claude_enabled=bool(ds.get("claude_enabled", True)),
     )
     try:
         from iai_mcp.daemon_state import update_state as _update_ds
