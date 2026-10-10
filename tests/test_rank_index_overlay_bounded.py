@@ -68,10 +68,10 @@ def test_overlay_bounded_across_post_write_recalls(tmp_path, monkeypatch):
     _seed_store(store, n=10, seed=1)
     graph, assignment, rich_club = build_runtime_graph(store)
 
-    handle = rank_index_for(store, graph)
+    handle = rank_index_for(store)
     # Force the first build (mirrors a real recall's snapshot() call) before
     # any writes -- feed()/maybe_fold() are no-ops before the index exists.
-    handle.snapshot(graph)
+    handle.snapshot()
 
     cue_vec = _unit_vec(2)
     overlay_samples: list[int] = []
@@ -79,7 +79,7 @@ def test_overlay_bounded_across_post_write_recalls(tmp_path, monkeypatch):
     for i in range(n_cycles):
         rec = _make(text=f"post-build write {i}", vec=_unit_vec(100 + i))
         store.insert(rec)
-        handle.snapshot(graph)
+        handle.snapshot()
         recall_for_response(
             store=store, graph=graph, assignment=assignment, rich_club=rich_club,
             embedder=None, cue="overlay bound probe", session_id="overlay-bounded",
@@ -113,8 +113,8 @@ def test_fold_never_runs_on_recall_read_path(tmp_path, monkeypatch):
     _seed_store(store, n=10, seed=3)
     graph, assignment, rich_club = build_runtime_graph(store)
 
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph)
+    handle = rank_index_for(store)
+    handle.snapshot()
 
     original_fold = handle.fold
     fold_calls: list[int] = []
@@ -132,7 +132,7 @@ def test_fold_never_runs_on_recall_read_path(tmp_path, monkeypatch):
     # read path does, without paying a full recall_for_response per cycle.
     for i in range(_FOLD_THRESHOLD * 3):
         store.insert(_make(text=f"pre-recall write {i}", vec=_unit_vec(200 + i)))
-        handle.snapshot(graph)
+        handle.snapshot()
 
     assert fold_calls, (
         "the write-path fold trigger never fired across the pre-recall "
@@ -148,7 +148,7 @@ def test_fold_never_runs_on_recall_read_path(tmp_path, monkeypatch):
         # between, so this window exercises the actual drain mechanism,
         # not just recall_for_response's own code path (which never calls
         # snapshot() itself when invoked directly, as this harness does).
-        handle.snapshot(graph)
+        handle.snapshot()
         recall_for_response(
             store=store, graph=graph, assignment=assignment, rich_club=rich_club,
             embedder=None, cue="fold-off-recall-path probe", session_id="fold-guard",

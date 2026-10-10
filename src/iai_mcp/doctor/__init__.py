@@ -423,6 +423,7 @@ def run_diagnosis(*, fetch_update: bool = True) -> list[CheckResult]:
         check_aa_capture_state_hygiene(),
         check_ee_deferred_capture_backlog_at_rest(),
         check_kk_stop_hook_failures(),
+        check_ll_salience_auto_migration(),
         check_y_rss_24h_plateau(),
         check_bb_nightly_insight_mint(),
         check_cc_background_liveness(),
@@ -1193,6 +1194,7 @@ from iai_mcp.doctor._storage_checks import (
     check_ii_embed_identity,
     check_jj_watermark_fence,
     check_kk_stop_hook_failures,
+    check_ll_salience_auto_migration,
     check_p_anthropic_sdk_absent,
     check_r_hippo_hnsw_loadable,
     check_s_hippo_schema_version,
@@ -1252,4 +1254,5 @@ __all__ = [
     "check_cc_background_liveness",
     "check_jj_watermark_fence",
     "check_kk_stop_hook_failures",
+    "check_ll_salience_auto_migration",
 ]

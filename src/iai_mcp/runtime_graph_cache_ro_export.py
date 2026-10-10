@@ -96,8 +96,14 @@ def read_transaction(conn: Any):
 def iter_records_chunks(
     conn: Any,
     chunk_size: int = DEFAULT_RECORDS_CHUNK_SIZE,
-) -> Iterator[list[tuple[str, bytes]]]:
-    """Yield lists of `(id_str, embedding_blob_bytes)` of length <= chunk_size.
+) -> Iterator[list[tuple[str, bytes, str]]]:
+    """Yield lists of `(id_str, embedding_blob_bytes, created_at_str)` of
+    length <= chunk_size.
+
+    `created_at` travels alongside the embedding so a consumer that ranks by
+    recency (the rich-club age-decay term) sees the same per-node signal the
+    in-parent build path already carries -- an empty string when the column
+    is NULL, matching the in-parent path's own `str(x or "")` normalization.
 
     Keyset cursor on the integer `vec_label` primary key. The predicate
     `tombstoned_at IS NULL AND COALESCE(embedding_pending, 0) = 0` matches
@@ -107,7 +113,7 @@ def iter_records_chunks(
     """
     cursor = -1
     sql = (
-        "SELECT vec_label, id, embedding FROM records"
+        "SELECT vec_label, id, embedding, created_at FROM records"
         " WHERE tombstoned_at IS NULL"
         " AND COALESCE(embedding_pending, 0) = 0"
         " AND vec_label > ?"
@@ -118,9 +124,13 @@ def iter_records_chunks(
         rows = conn.execute(sql, (cursor, chunk_size)).fetchall()
         if not rows:
             return
-        chunk: list[tuple[str, bytes]] = []
+        chunk: list[tuple[str, bytes, str]] = []
         for row in rows:
-            chunk.append((str(row["id"]), bytes(row["embedding"])))
+            chunk.append((
+                str(row["id"]),
+                bytes(row["embedding"]),
+                str(row["created_at"] or ""),
+            ))
             cursor = int(row["vec_label"])
         yield chunk
         if len(rows) < chunk_size:

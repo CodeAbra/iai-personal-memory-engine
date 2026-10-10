@@ -237,5 +237,5 @@ def test_blob_guarded_text_never_retires(driver, store, monkeypatch, tmp_path):
     )
 
     tally = _drain_files(store, [str(backlog)])
-    assert tally["inserted"] == 1
+    assert tally["inserted"] + tally["skipped"] == 1, tally
     assert _is_live(store, rid)

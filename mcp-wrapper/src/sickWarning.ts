@@ -10,7 +10,7 @@ export async function probeDaemonDoctor(
   const cli = process.env.IAI_MCP_CLI ?? "iai-mcp";
   const args = ["doctor"];
   return new Promise<number | null>((resolve) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "ignore", "ignore"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "ignore", "ignore"], windowsHide: true };
     let proc: ReturnType<typeof spawn>;
     try {
       proc = spawnFn(cli, args, opts);

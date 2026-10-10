@@ -16,6 +16,9 @@ import stat
 from importlib import resources as _res
 from pathlib import Path
 
+from iai_mcp.cli._atomic_write import _atomic_write_text
+from iai_mcp.cli._hook_quoting import quote_posix, quote_powershell
+
 _GROUP = "iai-pme"
 
 _IS_WIN = platform.system() == "Windows"
@@ -23,6 +26,7 @@ _EXT = ".ps1" if _IS_WIN else ".sh"
 _CMD_PREFIX = (
     "powershell.exe -ExecutionPolicy Bypass -NoProfile -File " if _IS_WIN else "bash "
 )
+_quote = quote_powershell if _IS_WIN else quote_posix
 
 # POSIX installs the Antigravity pair PLUS the Claude-Code trio they
 # delegate to; the PowerShell pair is self-contained and Windows instead
@@ -71,6 +75,28 @@ def _load_hooks_json(path: Path) -> "dict | None":
     return data if isinstance(data, dict) else None
 
 
+def _entry_matches_exact(entry: dict, exact_command: str) -> bool:
+    return any(
+        (h.get("command") or "") == exact_command
+        for h in (entry.get("hooks") or [])
+        if isinstance(h, dict)
+    )
+
+
+def _find_hook_with_marker(entries: list, marker: str) -> "dict | None":
+    """Return the first hook dict whose command contains marker, or None.
+
+    Substring match on the script filename -- the same shape as the
+    capture-hooks install path -- so a stale command is found (and can be
+    healed) instead of exact-matched away.
+    """
+    for entry in entries:
+        for h in (entry.get("hooks") or []):
+            if isinstance(h, dict) and marker in (h.get("command") or ""):
+                return h
+    return None
+
+
 def install_antigravity_hooks() -> int:
     hooks_dir, hooks_json = _antigravity_paths()
 
@@ -100,14 +126,15 @@ def install_antigravity_hooks() -> int:
     changed = False
     for event, marker, timeout in _EVENT_WIRING:
         entries = group.setdefault(event, [])
-        if any(
-            marker in (h.get("command") or "")
-            for e in entries
-            if isinstance(e, dict)
-            for h in (e.get("hooks") or [])
-            if isinstance(h, dict)
-        ):
-            print(f"hooks.json already wires {marker} on {event} — no change")
+        exact_command = f"{_CMD_PREFIX}{_quote(str(hooks_dir / marker))}"
+        existing = _find_hook_with_marker(entries, marker)
+        if existing is not None:
+            if existing.get("command") != exact_command:
+                existing["command"] = exact_command
+                changed = True
+                print(f"patched: {hooks_json} ({event}: {marker} command healed)")
+            else:
+                print(f"hooks.json already wires {marker} on {event} — no change")
             continue
         entries.append({
             "hooks": [{
@@ -132,31 +159,38 @@ def install_antigravity_hooks() -> int:
             # a scheduled scanner that does not exist.
             print(f"ERROR: scanner script missing after install: {scan_script}")
             return 1
-        if scan_script.exists():
-            import subprocess
-            try:
-                tmpl = (
-                    _res.files("iai_mcp") / "_deploy" / "windows"
-                    / "iai-mcp-antigravity-scan.xml"
-                )
-                text = tmpl.read_text(encoding="utf-8")
-                text = text.replace("{SCAN_SCRIPT}", str(scan_script))
+        import subprocess
 
-                xml_out = Path.home() / ".iai-mcp" / "iai-mcp-antigravity-scan.task.xml"
-                xml_out.parent.mkdir(parents=True, exist_ok=True)
-                xml_out.write_text(text, encoding="utf-16")
+        tmpl = (
+            _res.files("iai_mcp") / "_deploy" / "windows"
+            / "iai-mcp-antigravity-scan.xml"
+        )
+        from iai_mcp.cli._daemon import _scope_logon_trigger_to_user
 
-                subprocess.run(
-                    ["schtasks", "/Create", "/TN", "IaiMcpAntigravityAutoScan",
-                     "/XML", str(xml_out), "/F"],
-                    check=True, stdout=subprocess.DEVNULL,
-                )
-                print(
-                    "status: ACTIVE — Antigravity GUI auto-scanner scheduled in "
-                    "Windows Task Scheduler (runs every 30m)."
-                )
-            except Exception as e:  # noqa: BLE001 -- scheduler absence must not fail install
-                print(f"WARNING: failed to create scheduled task: {e}")
+        text = tmpl.read_text(encoding="utf-8")
+        text = text.replace("{SCAN_SCRIPT}", str(scan_script))
+        # Deliberately NOT caught below: a resolution failure here must
+        # raise uncaught (mirrors the daemon install path), before xml_out
+        # is written or schtasks runs — a prior unscoped task must never be
+        # left registered under an easily-ignored WARNING+rc=0.
+        text = _scope_logon_trigger_to_user(text)
+
+        xml_out = Path.home() / ".iai-mcp" / "iai-mcp-antigravity-scan.task.xml"
+        xml_out.parent.mkdir(parents=True, exist_ok=True)
+        xml_out.write_text(text, encoding="utf-16")
+
+        try:
+            subprocess.run(
+                ["schtasks", "/Create", "/TN", "IaiMcpAntigravityAutoScan",
+                 "/XML", str(xml_out), "/F"],
+                check=True, stdout=subprocess.DEVNULL,
+            )
+            print(
+                "status: ACTIVE — Antigravity GUI auto-scanner scheduled in "
+                "Windows Task Scheduler (runs every 30m)."
+            )
+        except Exception as e:  # noqa: BLE001 -- scheduler absence must not fail install
+            print(f"WARNING: failed to create scheduled task: {e}")
 
     print(
         "\nNote: verified against the Antigravity CLI (`agy`) and the "
@@ -229,6 +263,7 @@ def status_antigravity_hooks() -> int:
     group = data.get(_GROUP, {})
     all_wired = isinstance(group, dict) and bool(group.get("enabled"))
     for event, marker, _timeout in _EVENT_WIRING:
+        exact_command = f"{_CMD_PREFIX}{_quote(str(hooks_dir / marker))}"
         wired = isinstance(group, dict) and any(
             marker in (h.get("command") or "")
             for e in group.get(event, [])

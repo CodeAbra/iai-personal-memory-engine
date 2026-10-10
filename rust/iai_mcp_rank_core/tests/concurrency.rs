@@ -133,6 +133,8 @@ fn build_index(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let salience_level = vec![0u8; N_RECORDS];
     let centrality = vec![0.0f32; N_RECORDS];
     let pending = vec![false; N_RECORDS];
+    let valence = vec![0.0f32; N_RECORDS];
+    let language = vec!["en".to_string(); N_RECORDS];
 
     let matrix = numpy::ndarray::Array2::from_shape_vec((N_RECORDS, DIM), vectors_flat)
         .expect("N_RECORDS * DIM matches the flat vector length by construction");
@@ -155,6 +157,8 @@ fn build_index(py: Python<'_>) -> PyResult<Py<PyAny>> {
         salience_level.into_pyobject(py)?.into_any().unbind(),
         centrality.into_pyobject(py)?.into_any().unbind(),
         pending.into_pyobject(py)?.into_any().unbind(),
+        valence.into_pyobject(py)?.into_any().unbind(),
+        language.into_pyobject(py)?.into_any().unbind(),
     ];
     let args_tuple = PyTuple::new(py, args)?;
     let obj = cls.call1(&args_tuple)?;

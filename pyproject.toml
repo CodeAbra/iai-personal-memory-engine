@@ -48,6 +48,7 @@ dev = [
   "pytest-xdist>=3.5",
   "reportlab>=4.0",  # builds a 1-page PDF fixture on demand inside the ingestion test suite; never imported at runtime by the production package.
   "defusedxml>=0.7",  # hardened XML parse of the Windows scheduled-task fixtures in the daemon-install and fdlimit test suites; never imported at runtime by the production package.
+  "PyYAML>=6.0",  # parses .github/workflows/ci.yml in the CI-shape guard test; never imported at runtime by the production package.
   "ruff>=0.5.0",
   # networkx is the σ-baseline oracle in tests/fixtures/sigma_baseline.json
   # (the locked SHA-pinned fixture was generated via networkx 3.3); it also
@@ -70,6 +71,7 @@ iai-mcp-core = "iai_mcp.core:main"
 iai-mcp-server = "iai_mcp.mcp_server_entry:main"
 iai-mcp = "iai_mcp.cli:main"
 iai = "iai_mcp.iai_cli:main"
+iai-tools = "iai_mcp.tools_cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "setuptools-rust>=1.10"]

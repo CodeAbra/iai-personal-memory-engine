@@ -223,6 +223,17 @@ setup(
             # to the dev profile, and an unoptimized engine must never be the
             # binary a daemon actually loads.
             debug=False,
-        )
+        ),
+        # Independent compile unit: brain-independent code-index engine, its
+        # own cdylib, its own #[pymodule] -- never linked against
+        # iai_mcp_native's Cargo package.
+        RustExtension(
+            "iai_mcp_tools_core",
+            path="rust/iai_mcp_tools_core/Cargo.toml",
+            binding=Binding.PyO3,
+            features=["extension-module"],
+            args=["--no-default-features"],
+            debug=False,
+        ),
     ],
 )

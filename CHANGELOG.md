@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `iai-tools`: a separate, brain-free code index, session-event store, and
+  command executor, shipped as its own `iai-tools` console script, an
+  `iai-mcp tools` subcommand, and an `iai-tools` MCP server. It indexes code
+  by whole file, symbol, cross-reference, Python AST, exact literal, and
+  vector lanes; runs commands through a resident executor daemon with bounded
+  output; and offers bounded `git-log`/`git-blame`/`git-diff` queries. On
+  Windows the executor binds a TCP-loopback transport behind a mandatory
+  per-user auth token.
+- New operator command `iai-mcp prune-snapshots` removes the pre-write
+  snapshot directories that migration commands leave behind after `--apply`.
+- New operator command `iai-mcp template-pollution-sweep` tombstones internal
+  prompt/template records by explicit id. Dry run by default; `--apply`
+  snapshots the store first.
+- The nightly sleep cycle runs the one-time salience/entity backfill
+  automatically on stores that predate capture-time salience, and
+  `iai-mcp doctor` reports its status.
+- The per-turn memory pack admits one salience- or directive-tagged record per
+  turn by existence rather than raw cosine, and serves it ahead of
+  conversational matches.
+- A synthetic recall-quality benchmark (`bench/recall_quality_fixture.py`,
+  `bench/recall_quality_verdict.py`) measures recall misses by cause against
+  a dev/holdout split, with an A/A null-arm check (#85).
+
+### Changed
+- Read-only engine connections bound their page cache to 8 MiB by default
+  (`IAI_MCP_RO_CONN_CACHE_SIZE_KIB`), and the read pool is clamped to a
+  256 MiB aggregate ceiling across `IAI_MCP_RO_CONN_CACHE_SIZE_KIB` and
+  `IAI_MCP_RO_POOL_SIZE`. A long-running daemon no longer grows without bound
+  on a large store (#173).
+- The working-tier goal re-anchors when a session's topic shifts and stays
+  shifted, instead of staying fixed at the first message.
+- Ambient capture folds a near-duplicate paraphrase of an existing record into
+  that record instead of inserting a new row, and rejects structural machine
+  noise (harness templates, host-injected markup) at capture time.
+- `iai capture --directive` requires text that begins with the
+  `standing directive:` marker.
+
+### Fixed
+- Windows: the daemon no longer crashes at boot on the missing hangup signal
+  or on Unix-socket introspection ahead of its Windows branch, and every
+  deployed hook script resolves `python3` from `PATH` instead of a hardcoded
+  `/usr/bin/python3` (#113).
+- Windows: `iai-mcp crypto status` no longer crashes on the missing
+  effective-uid call (#109).
+- Windows: the daemon and Antigravity scheduled tasks are scoped to the
+  installing user's SID instead of any local logon; an unresolvable SID fails
+  the install loudly, and `--target all` isolates that failure to the one host.
+  Existing Windows installs re-run `iai-mcp daemon-install` (and the
+  Antigravity hook installer) to pick up the scoping (#109).
+- Windows: `capture-hooks install` quotes the `bash` interpreter path, so a
+  path under "Program Files" no longer breaks every hook command, and the
+  Antigravity installer quotes its hook script path; re-running install heals
+  an already-broken entry in place (#118, #121).
+- `iai-mcp cowork status` on a platform with no supported scheduler prints the
+  same honest message as the installer instead of suggesting a command that
+  will decline (#119).
+- The runtime graph cache no longer builds a full-corpus embedding copy before
+  deciding it exceeds its size cap, and daemon boot routes community detection
+  and centrality through the memory-bounded child path (#173).
+- The Rust recall scoring path applies the valence multiplier that the Python
+  path already applied, and a record served twice in one session keeps its
+  real valence and salience.
+- Recall no longer serves machine-traffic noise records, and the
+  recall-success signal is computed from the records actually served.
+- The per-turn ambient capture hook no longer aborts on every invocation
+  because of a quote inside its embedded noise filter.
+- `iai-mcp salience-backfill --apply` no longer marks a store that was born
+  with native salience as migrated.
+- The directive cache follows the store's own root instead of always writing
+  under the home directory.
+- Stdlib-driver read-only scan connections open with a read-only URI, so the
+  file layer refuses a write.
+
+### Security
+- Bumped `rustls` to 0.23.45 (RUSTSEC-2026-0285) and `rustls-webpki` to
+  0.103.15.
+
 ## [3.2.3] - 2026-09-13
 
 ### Changed

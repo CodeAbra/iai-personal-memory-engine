@@ -1,15 +1,12 @@
 """Store-identity-keyed adapter over the Rust rank-feature index.
 
-Builds `iai_mcp_native.rank.RankIndex` lazily from resident graph data on
+Builds `iai_mcp_native.rank.RankIndex` lazily from the store's own corpus on
 first use. The handle is stored as an attribute of the `MemoryStore`
 instance itself, never a module-level cache, so two stores in one process
-never share state. `graph._pool_content_version` is only meaningful within
-one `MemoryGraph` instance -- a handle rebuilds from scratch whenever the
-caller hands it a different graph object rather than comparing generations
-across instances that never shared a counter. A caller that wants a
-persistent index across many calls (rather than a rebuild every call) must
-hand this adapter the SAME graph instance every time -- one persistent,
-store-attached graph, mutated in place, never a fresh object per call.
+never share state. Generation is owned by this handle (`self._generation`,
+reconciled to `max(local, engine)` on every `snapshot()`) -- there is no
+graph-identity lineage token; `feed()` marks the handle dirty and the next
+`snapshot()` requests one generation past whatever was last published.
 
 Bulk read accessors only: no per-candidate method exists on this surface.
 """
@@ -18,7 +15,7 @@ from __future__ import annotations
 
 import os
 import threading
-import weakref
+from collections import OrderedDict
 from uuid import UUID
 
 import numpy as np
@@ -26,16 +23,87 @@ import numpy as np
 from iai_mcp.types import SALIENCE_LEVEL_RANK
 
 _HANDLE_ATTR = "_rank_index_handle"
+_RESIDENT_CAP_ENV = "IAI_MCP_RESIDENT_CANDIDATE_CAP"
+_RESIDENT_CAP_DEFAULT = 4096
+
+
+class _ResidentFields:
+    """Non-vector fields of one hydrated candidate, cached for the
+    decrypt-skip residency path. No `embedding` (sourced fresh from
+    `published_view()` per hit) and no `structure_hv` (~10 KB HDC payload,
+    `directive`, or `provenance` -- none has a read site on this path)."""
+
+    __slots__ = (
+        "literal_surface", "aaak_index", "created_at", "stability", "tier",
+        "tags", "language", "community_id", "centrality", "valence",
+        "salience_level",
+    )
+
+    def __init__(self, view) -> None:
+        self.literal_surface = getattr(view, "literal_surface", "") or ""
+        self.aaak_index = getattr(view, "aaak_index", "") or ""
+        self.created_at = getattr(view, "created_at", None)
+        self.stability = float(getattr(view, "stability", 0.5) or 0.5)
+        self.tier = getattr(view, "tier", None) or "episodic"
+        self.tags = list(getattr(view, "tags", []) or [])
+        self.language = getattr(view, "language", None) or "en"
+        self.community_id = getattr(view, "community_id", None)
+        self.centrality = float(getattr(view, "centrality", 0.0) or 0.0)
+        self.valence = float(getattr(view, "valence", 0.0) or 0.0)
+        self.salience_level = getattr(view, "salience_level", None) or "unflagged"
+
+
+class _ResidentCandidates:
+    """Bounded id-keyed LRU of `_ResidentFields` -- the decrypt-skip
+    residency cache replacing the unbounded per-store builder graph.
+    Capacity from `IAI_MCP_RESIDENT_CANDIDATE_CAP` (default 4096; 0
+    disables the cache). Thread-safe for the daemon's `asyncio.to_thread`
+    fan-out."""
+
+    def __init__(self, capacity: "int | None" = None) -> None:
+        if capacity is None:
+            try:
+                capacity = int(
+                    os.environ.get(_RESIDENT_CAP_ENV, "") or _RESIDENT_CAP_DEFAULT
+                )
+            except ValueError:
+                capacity = _RESIDENT_CAP_DEFAULT
+        self._capacity = max(0, capacity)
+        self._entries: "OrderedDict[UUID, _ResidentFields]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, rid: UUID) -> "_ResidentFields | None":
+        with self._lock:
+            fields = self._entries.get(rid)
+            if fields is not None:
+                self._entries.move_to_end(rid)
+            return fields
+
+    def put(self, view) -> None:
+        if self._capacity <= 0:
+            return
+        rid = view.id
+        with self._lock:
+            self._entries[rid] = _ResidentFields(view)
+            self._entries.move_to_end(rid)
+            while len(self._entries) > self._capacity:
+                self._entries.popitem(last=False)
+
+    def evict(self, rid: UUID) -> None:
+        with self._lock:
+            self._entries.pop(rid, None)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
 
 
 def _bulk_pending_records(store) -> list:
     """`MemoryRecord`s for every non-tombstoned `embedding_pending=1` row --
-    the same corpus slice today's `LexicalIndex` build includes (store.py's
-    lexical-search build query) but the residency-source graph excludes
-    (`retrieve.build_runtime_graph`/`_rank_builder_graph_for` both filter
-    pending rows out at the SQL level). Fetched via the same
-    `get_batch`-decrypt path `LexicalIndex` uses, so surfaces are never
-    empty for a genuinely-captured pending row."""
+    the same corpus slice today's `LexicalIndex` build includes but
+    `retrieve.build_runtime_graph`'s active-only scan excludes at the SQL
+    level. Fetched via the same `get_batch`-decrypt path `LexicalIndex`
+    uses, so surfaces are never empty for a genuinely-captured pending row."""
     from uuid import UUID as _UUID
 
     ids: list = []
@@ -87,11 +155,16 @@ class _RankIndexHandle:
     def __init__(self, store) -> None:
         self._store = store
         self._index = None
-        self._graph_ref: "weakref.ReferenceType | None" = None
-        # Guards the stale-check + rebuild sequence in snapshot() -- without
-        # it, two threads racing a graph-identity change both build and the
-        # loser's build (plus any feed() ops landed on it) is silently
-        # discarded.
+        # Last-published generation and dirty flag -- the sole lineage
+        # state for this handle. `feed()` sets dirty; `snapshot()`
+        # reconciles to `max(self._generation, engine.generation())` and
+        # requests one past that when dirty, then clears it.
+        self._generation = 0
+        self._dirty = False
+        # Guards the build-once sequence in snapshot()/score()/
+        # published_view() -- without it, two threads racing a first build
+        # both build and the loser's build (plus any feed() ops landed on
+        # it) is silently discarded.
         self._lock = threading.RLock()
         # Transitional per-generation export memo: caches the last bulk
         # (matrix/degree/postings) export keyed by (generation, tokens), so
@@ -99,25 +172,29 @@ class _RankIndexHandle:
         # cached artifacts instead of re-running the export. Reset on
         # every rebuild -- a fresh `_index` invalidates any prior export.
         self._export_memo: "tuple[tuple[int, tuple[str, ...]], tuple] | None" = None
+        # Memo for published_view(), keyed on the Rust engine's own
+        # generation() -- NOT on any per-call graph's _pool_content_version,
+        # which resets per ephemeral MemoryGraph instance and would give
+        # zero cross-call reuse. Reset on every rebuild alongside
+        # _export_memo.
+        self._pool_view_memo: "tuple[int, tuple[np.ndarray, dict[int, int]]] | None" = None
+        # Memo for hit_view_source(), same generation-keyed scheme as
+        # _pool_view_memo. Reset on every rebuild alongside it.
+        self._hit_view_memo: "tuple[int, tuple[np.ndarray, dict[int, int], dict]] | None" = None
+        self._resident = _ResidentCandidates()
 
-    def _stale_for(self, store, graph) -> bool:
+    @property
+    def resident(self) -> _ResidentCandidates:
+        """The bounded decrypt-skip residency cache for this store."""
+        return self._resident
+
+    def _needs_build(self) -> bool:
         """A full Python-side rebuild is required only the first time this
-        handle sees a (store, graph) pairing. Content growth on an
-        already-bound graph is NEVER treated as staleness here -- it is
-        drained through the Rust engine's own generation-tagged
-        double-buffer inside snapshot(), never by re-running this rebuild.
-        The graph reference stays a lineage anchor, not a content check:
-        two distinct graph instances can independently reach the same
-        _pool_content_version value, and a generation-only compare could
-        not tell them apart -- it would risk serving one lineage's
-        committed index as though it were current for a different one.
-        """
-        if self._index is None:
-            return True
-        if store is not self._store:
-            return True
-        ref = self._graph_ref
-        return ref is None or ref() is not graph
+        handle is used. Content growth thereafter is NEVER treated as
+        staleness here -- it is drained through the Rust engine's own
+        generation-tagged double-buffer inside snapshot(), never by
+        re-running this rebuild."""
+        return self._index is None
 
     def feed(
         self, op: str, record, edges: "list[tuple[int, float, str]] | None" = None,
@@ -129,33 +206,48 @@ class _RankIndexHandle:
         already has it at hand (e.g. a write-time hook that just wrote the
         edge) -- never fetched here, so a caller with no edge data on hand
         (the common hydrate-time upsert) simply omits it rather than paying
-        a per-candidate incident-edges lookup on the recall path."""
-        if self._index is None:
-            return
-        if op == "delete":
-            self._index.feed("delete", record.id.int)
-            return
-        vector = np.asarray(list(record.embedding or []), dtype=np.float32)
-        self._index.feed(
-            "upsert",
-            record.id.int,
-            vector=vector,
-            edges=list(edges) if edges else None,
-            surface=str(getattr(record, "literal_surface", "") or ""),
-            aaak_index=str(getattr(record, "aaak_index", "") or ""),
-            created_at=(
-                record.created_at.isoformat()
-                if getattr(record, "created_at", None) else ""
-            ),
-            stability=float(getattr(record, "stability", 0.5) or 0.5),
-            tier=str(getattr(record, "tier", "") or ""),
-            tags=list(getattr(record, "tags", []) or []),
-            salience_level=SALIENCE_LEVEL_RANK.get(
-                getattr(record, "salience_level", "unflagged"), 0
-            ),
-            centrality=float(getattr(record, "centrality", 0.0) or 0.0),
-            pending=bool(getattr(record, "embedding_pending", 0)),
-        )
+        a per-candidate incident-edges lookup on the recall path.
+
+        The `_dirty` set and the underlying engine `feed()`/`delete()` call
+        run under `self._lock`, the SAME lock `snapshot()` holds for its
+        entire dirty-read/generation-request/dirty-clear sequence -- a
+        `feed()` call therefore either completes in full before a
+        concurrent `snapshot()` starts (so its write is queued before that
+        snapshot's drain) or starts only after that snapshot has fully
+        published, never interleaved. Without this, `self._dirty = True`
+        landing between a `snapshot()`'s Rust `snapshot()` call and its own
+        `self._dirty = False` would clear the dirty SIGNAL without that
+        write ever having been the one the in-flight snapshot drained."""
+        with self._lock:
+            if self._index is None:
+                return
+            self._dirty = True
+            if op == "delete":
+                self._index.feed("delete", record.id.int)
+                return
+            vector = np.asarray(list(record.embedding or []), dtype=np.float32)
+            self._index.feed(
+                "upsert",
+                record.id.int,
+                vector=vector,
+                edges=list(edges) if edges else None,
+                surface=str(getattr(record, "literal_surface", "") or ""),
+                aaak_index=str(getattr(record, "aaak_index", "") or ""),
+                created_at=(
+                    record.created_at.isoformat()
+                    if getattr(record, "created_at", None) else ""
+                ),
+                stability=float(getattr(record, "stability", 0.5) or 0.5),
+                tier=str(getattr(record, "tier", "") or ""),
+                tags=list(getattr(record, "tags", []) or []),
+                salience_level=SALIENCE_LEVEL_RANK.get(
+                    getattr(record, "salience_level", "unflagged"), 0
+                ),
+                centrality=float(getattr(record, "centrality", 0.0) or 0.0),
+                pending=bool(getattr(record, "embedding_pending", 0)),
+                valence=float(getattr(record, "valence", 0.0) or 0.0),
+                language=str(getattr(record, "language", "en") or "en"),
+            )
 
     def overlay_len(self) -> int:
         """Count of ids the bounded delta overlay currently carries a
@@ -194,11 +286,15 @@ class _RankIndexHandle:
         self.fold()
         return True
 
-    def snapshot(self, graph, tokens: "list[str] | None" = None):
-        """Bulk zero-copy views at `graph._pool_content_version`. Rebuilds
-        from scratch when `graph` is not the object this handle was last
-        built against; otherwise defers to the Rust struct's own
-        generation-tagged double-buffer to drain any queued `feed()` ops.
+    def snapshot(self, tokens: "list[str] | None" = None):
+        """Bulk zero-copy views at this handle's own generation. Builds on
+        first use; otherwise reconciles `self._generation` to
+        `max(self._generation, engine.generation())` first (a durable guard
+        against any path that advances the engine generation outside this
+        method -- `fold()` is proven not to, but the reconcile costs one int
+        compare), then requests one generation past that when dirty, else a
+        pure read at the reconciled generation. Defers to the Rust struct's
+        own generation-tagged double-buffer to drain any queued `feed()` ops.
 
         The returned export tuple is memoized at this adapter layer, keyed
         by (generation, tokens): a repeated ask at an unchanged generation
@@ -208,19 +304,42 @@ class _RankIndexHandle:
         way -- this memo only decides whether that call happens at all.
         """
         with self._lock:
-            if self._stale_for(self._store, graph):
-                self._build(graph)
-        generation = int(getattr(graph, "_pool_content_version", 0))
-        token_key = tuple(tokens or [])
-        memo = self._export_memo
-        if memo is not None and memo[0] == (generation, token_key):
+            if self._needs_build():
+                self._build()
+            base = max(self._generation, int(self._index.generation()))
+            requested = base + 1 if self._dirty else base
+            token_key = tuple(tokens or [])
+            memo = self._export_memo
+            if memo is not None and memo[0] == (requested, token_key):
+                return memo[1]
+            exported = self._index.snapshot(requested, list(token_key))
+            # Key off the Rust engine's actually-published generation
+            # (exported[0]), not the requested one -- a racing caller can
+            # win a later generation than it asked for (see
+            # DoubleBuffer::snapshot).
+            self._generation = exported[0]
+            self._dirty = False
+            self._export_memo = ((exported[0], token_key), exported)
+            return exported
+
+    def published_view(self) -> "tuple[np.ndarray, dict[int, int]]":
+        """Memoized on the engine's own `generation()` -- one memoized bulk
+        export per engine generation, reused across every caller in that
+        window."""
+        if self._index is None:
+            with self._lock:
+                if self._index is None:
+                    self._build()
+        index = self._index
+        generation = int(index.generation())
+        memo = self._pool_view_memo
+        if memo is not None and memo[0] == generation:
             return memo[1]
-        exported = self._index.snapshot(generation, list(token_key))
-        # Key off the Rust engine's actually-published generation
-        # (exported[0]), not the requested one -- a racing caller can win a
-        # later generation than it asked for (see DoubleBuffer::snapshot).
-        self._export_memo = ((exported[0], token_key), exported)
-        return exported
+        ids, matrix = index.vectors()
+        slot_map = {int(rid): i for i, rid in enumerate(ids)}
+        view = (matrix, slot_map)
+        self._pool_view_memo = (generation, view)
+        return view
 
     def salience_levels(self) -> dict:
         """Bulk id(int)->rank map off the currently active buffer. Call
@@ -228,6 +347,42 @@ class _RankIndexHandle:
         if self._index is None:
             return {}
         return self._index.salience_levels()
+
+    def pending_flags(self) -> dict:
+        """Bulk id(int)->pending-flag map off the currently active buffer,
+        the same `buf.current()` `vectors()`/`published_view()` reads --
+        a caller resolving a resident-cache hit against `published_view()`'s
+        matrix must route an id whose flag is `True` to a miss rather than
+        trust its slot: that row is `_build()`'s fabricated
+        `np.zeros(dim)` fill for a genuinely `embedding_pending` record,
+        never a real embedding."""
+        if self._index is None:
+            return {}
+        return self._index.pending()
+
+    def hit_view_source(self) -> "tuple[np.ndarray, dict[int, int], dict]":
+        """Bulk (matrix, slot_map, pending) triple from a single
+        `self._lock` acquisition covering both `vectors()` and `pending()`
+        -- the same lock `snapshot()` holds for its buffer swap, so the
+        pair is always read from one committed buffer, unlike calling
+        `published_view()` and `pending_flags()` separately. Memoized on
+        the engine's own `generation()`."""
+        if self._index is None:
+            with self._lock:
+                if self._index is None:
+                    self._build()
+        with self._lock:
+            index = self._index
+            generation = int(index.generation())
+            memo = self._hit_view_memo
+            if memo is not None and memo[0] == generation:
+                return memo[1]
+            ids, matrix = index.vectors()
+            pending = index.pending()
+            slot_map = {int(rid): i for i, rid in enumerate(ids)}
+            triple = (matrix, slot_map, pending)
+            self._hit_view_memo = (generation, triple)
+            return triple
 
     def adjacency_by_type(self) -> dict:
         """Bulk id(int) -> {edge_type: count} map off the currently active
@@ -239,7 +394,6 @@ class _RankIndexHandle:
 
     def score(  # noqa: PLR0913 -- mirrors the FFI params contract 1:1, no grouping shortens the boundary
         self,
-        graph,
         pool_ids: "list[UUID]",
         cosine: np.ndarray,
         cosine_top_indices: np.ndarray,
@@ -271,31 +425,21 @@ class _RankIndexHandle:
         k_margin: int,
     ):
         """One hybrid fused-score call. Builds only when never built
-        (`self._index is None`) -- NEVER on a graph-identity mismatch alone:
-        the live path holds two distinct long-lived graph objects that both
-        key this same store-attached handle (Layer-1's per-call builder
-        graph in core/__init__.py, and `_recall_core`'s own persistent
-        graph), each with its OWN independently-incrementing
-        `_pool_content_version` counter -- draining with one graph's
-        counter after the other already published a higher one trips the
-        Rust engine's generation-regression guard and degrades the whole
-        recall to the fallback path (verified live: `GenerationRegression`
-        -> `recall_pipeline_fallback`). `_build()` reads the corpus from
-        the store, not from graph payload, so which graph object triggers
-        the first build does not affect correctness.
+        (`self._index is None`); the handle-owned generation removes the
+        graph-identity generation-regression hazard entirely -- there is no
+        second lineage counter to desync against. `_build()` reads the
+        corpus from the store, not from any graph payload.
         Draining a WARM index for a post-write delta stays the caller's
-        responsibility, exactly as documented before this change: call
-        `snapshot(graph)` on the SAME graph object every time for a given
-        caller before `score()` this same recall. `pool_ids` and the four
-        index arrays plus the two T11/T12 flag arrays cross exactly as the
-        caller already built them (zero-copy numpy for the array params);
-        only the bounded per-call
+        responsibility: call `snapshot()` before `score()` this same recall.
+        `pool_ids` and the four index arrays plus the two T11/T12 flag
+        arrays cross exactly as the caller already built them (zero-copy
+        numpy for the array params); only the bounded per-call
         dicts (spread provenance / community membership / community scores)
         are re-keyed to plain ints here, never a per-candidate structure."""
         if self._index is None:
             with self._lock:
                 if self._index is None:
-                    self._build(graph)
+                    self._build()
         return self._index.score(
             [rid.int for rid in pool_ids],
             cosine,
@@ -331,26 +475,43 @@ class _RankIndexHandle:
             k_margin,
         )
 
-    def _build(self, graph) -> None:
+    def _build(self) -> None:
         """Sources the WHOLE corpus (records + edges + surface text) directly
         from the store, mirroring `retrieve.build_runtime_graph`'s own
-        whole-corpus scan -- never the per-call builder graph, which after
-        this change carries no adjacency at all and exists purely as a
-        residency tracker for the hydrate-time decrypt-skip. The decrypted
-        `literal_surface` plaintext held here IS a new whole-corpus resident
-        copy -- `LexicalIndex` tokenizes and discards the raw string, keeping
-        only token postings, so this index adds its own resident plaintext
-        for the per-slot AAAK/lex-rank text lookups the Rust scorer needs."""
+        whole-corpus scan. `literal_surface` plaintext is reused BY
+        REFERENCE from a resident, freshness-checked full-corpus graph when
+        one is available (no second decrypt); only a bundle-absent row pays
+        its own `_decrypt_for_record` call. `LexicalIndex` tokenizes and
+        discards the raw string, keeping only token postings, so this index
+        still needs the plaintext at build time for the per-slot AAAK/
+        lex-rank text lookups the Rust scorer performs."""
         dim = int(getattr(self._store, "embed_dim", 384))
-        # Version read BEFORE the bulk data scan: if a concurrent write
-        # lands in between, the data can be fresher than the stamped
+        # Stamp from this handle's own last-published generation (0 on a
+        # fresh handle), read BEFORE the bulk data scan: if a concurrent
+        # write lands in between, the data can be fresher than the stamped
         # generation -- a later stale snapshot then simply replays an
         # already-applied upsert (upsert_record is insert-or-replace, so
         # idempotent). Stamping ahead of the data instead would let a
         # future matching-generation snapshot take the pure-read branch and
         # never drain a write that never actually made it into this build.
-        generation = int(getattr(graph, "_pool_content_version", 0))
+        generation = self._generation
         salience_ranks = _bulk_salience_ranks(self._store)
+
+        # A resident, freshness-checked full-corpus graph already holds a
+        # boot-decrypted `surface` per node (kept live by the write-time
+        # graph_sync_hook) -- reusing that reference instead of decrypting
+        # again is what removes this build's second whole-corpus decrypt
+        # pass. Node-presence in this map already implies a successful
+        # decrypt (a boot-time decrypt failure excludes the node entirely),
+        # so no independent re-verification is needed for a resident id.
+        _warm_node_payload: "dict[str, dict] | None" = None
+        try:
+            from iai_mcp import retrieve as _retrieve
+            _warm_bundle = _retrieve._warm_graph_bundle_if_valid(self._store)
+            if _warm_bundle is not None:
+                _warm_node_payload = getattr(_warm_bundle[0], "_node_payload", None)
+        except Exception:  # noqa: BLE001 -- a failed warm-bundle probe must fall back to per-row decrypt, never block the build
+            _warm_node_payload = None
 
         ids: list[int] = []
         id_strs: set[str] = set()
@@ -364,10 +525,13 @@ class _RankIndexHandle:
         salience_level: list[int] = []
         centrality: list[float] = []
         pending: list[bool] = []
+        valence: list[float] = []
+        language: list[str] = []
 
         stream_cols = [
             "id", "embedding", "literal_surface", "tier", "centrality",
             "tags_json", "language", "aaak_index", "created_at", "stability",
+            "valence",
         ]
         active_where = "tombstoned_at IS NULL AND COALESCE(embedding_pending, 0) = 0"
         for row in self._store.iter_record_columns(
@@ -387,13 +551,20 @@ class _RankIndexHandle:
                 # whole build -- skip it, keep the rest of the corpus
                 # index-findable.
                 continue
-            literal_raw = row.get("literal_surface") or ""
-            try:
-                from iai_mcp.crypto import is_encrypted
-                if is_encrypted(literal_raw):
-                    literal_raw = self._store._decrypt_for_record(node_id, literal_raw)
-            except Exception:  # noqa: BLE001 -- InvalidTag/OSError/ValueError/RuntimeError; one bad row must not kill the build
-                continue
+            warm_payload = (
+                _warm_node_payload.get(str(node_id))
+                if _warm_node_payload is not None else None
+            )
+            if warm_payload is not None and "surface" in warm_payload:
+                literal_raw = warm_payload["surface"]
+            else:
+                literal_raw = row.get("literal_surface") or ""
+                try:
+                    from iai_mcp.crypto import is_encrypted
+                    if is_encrypted(literal_raw):
+                        literal_raw = self._store._decrypt_for_record(node_id, literal_raw)
+                except Exception:  # noqa: BLE001 -- InvalidTag/OSError/ValueError/RuntimeError; one bad row must not kill the build
+                    continue
             tags_raw = row.get("tags_json") or "[]"
             try:
                 import json as _json
@@ -415,6 +586,8 @@ class _RankIndexHandle:
             salience_level.append(salience_ranks.get(str(node_id), 0))
             centrality.append(float(row.get("centrality") or 0.0))
             pending.append(False)
+            valence.append(float(row.get("valence") or 0.0))
+            language.append(str(row.get("language") or "en"))
 
         # Pending rows never reach the active-records scan above (excluded
         # by the same WHERE `build_runtime_graph` uses). Fed here as a
@@ -448,6 +621,8 @@ class _RankIndexHandle:
             salience_level.append(salience_ranks.get(str(record.id), 0))
             centrality.append(float(getattr(record, "centrality", 0.0) or 0.0))
             pending.append(True)
+            valence.append(float(getattr(record, "valence", 0.0) or 0.0))
+            language.append(str(getattr(record, "language", "en") or "en"))
 
         # Whole-corpus edges, streamed the same way `build_runtime_graph`
         # streams them (batched row dicts over a read-only snapshot, never
@@ -488,13 +663,20 @@ class _RankIndexHandle:
         self._index = _rank_native.RankIndex(
             dim, generation, ids, matrix, edges, surfaces, aaak_index,
             created_at, stability, tier, tags, salience_level, centrality,
-            pending,
+            pending, valence, language,
         )
-        self._graph_ref = weakref.ref(graph)
         self._export_memo = None
+        self._pool_view_memo = None
+        self._hit_view_memo = None
+
+    @property
+    def generation(self) -> int:
+        """Last-published generation. Read-only -- advances only through
+        `snapshot()`."""
+        return self._generation
 
 
-def rank_index_for(store, graph) -> _RankIndexHandle:
+def rank_index_for(store) -> _RankIndexHandle:
     """Store-identity-keyed handle: an attribute of `store` itself, never a
     module-level cache -- two stores in one process never share a handle."""
     handle = getattr(store, _HANDLE_ATTR, None)

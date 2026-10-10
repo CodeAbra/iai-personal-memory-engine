@@ -193,8 +193,8 @@ def test_memory_recall_dispatch_never_calls_build_runtime_graph_residency_source
     live `memory_recall` dispatch branch -- `retrieve.build_runtime_graph`
     is called only by the `topology` and `session_start_payload` branches,
     never by `memory_recall`. Residency for the live recall path therefore
-    comes from a dedicated, store-resident builder graph, never the
-    corpus-wide warm bundle."""
+    comes from the handle's bounded resident-candidate cache, never a
+    second `MemoryGraph` or the corpus-wide warm bundle."""
     import inspect
     from iai_mcp import core as _core
 
@@ -205,11 +205,12 @@ def test_memory_recall_dispatch_never_calls_build_runtime_graph_residency_source
     assert "build_runtime_graph" not in memory_recall_branch, (
         "the live memory_recall path must never source its candidate graph "
         "from retrieve.build_runtime_graph -- that graph is not on this "
-        "path; residency here comes from the dedicated store-resident "
-        "builder graph instead"
+        "path; residency here comes from the resident-candidate cache "
+        "instead"
     )
     # The construction this residency source relies on must still be present.
-    assert "_rank_builder_graph_for" in src
+    assert "_resident_feed" in src
+    assert "_resident_split" in memory_recall_branch
     assert "rank_index_for" in memory_recall_branch
 
 
@@ -224,9 +225,9 @@ def test_persistent_index_survives_second_recall(_store: MemoryStore, monkeypatc
     build_calls = {"n": 0}
     orig_build = _RankIndexHandle._build
 
-    def _counting_build(self, graph):
+    def _counting_build(self):
         build_calls["n"] += 1
-        return orig_build(self, graph)
+        return orig_build(self)
 
     monkeypatch.setattr(_RankIndexHandle, "_build", _counting_build)
 
@@ -245,11 +246,9 @@ def test_persistent_index_survives_second_recall(_store: MemoryStore, monkeypatc
     assert handle is not None
     assert handle._index is not None
 
-    graph1 = getattr(_store, "_rank_builder_graph", None)
-    assert graph1 is not None, "the store must carry one persistent builder graph"
-    assert ids["hop_target"] in {UUID(str(_l)) for _l in graph1._adj}, (
+    assert handle.resident.get(ids["hop_target"]) is not None, (
         "the hop-only candidate discovered on call 1 must be resident in "
-        "the builder graph feeding the index"
+        "the handle's resident-candidate cache"
     )
 
 

@@ -102,6 +102,16 @@ def _sweeper_unit_paths(home: Path) -> dict:
     return {"kind": None}
 
 
+# Shared with cmd_cowork_status so a no-scheduler platform never gets
+# routed into a command that declines for the same reason.
+_NO_SCHEDULER_MESSAGE = (
+    "no supported background scheduler on this platform "
+    "(need launchd on macOS or a systemd user session on Linux) -- "
+    "the memory system's own overnight consolidation still sweeps "
+    "new conversations in, just not continuously through the day."
+)
+
+
 def _sweeper_unit_targets(paths: dict) -> dict:
     """Every on-disk file `paths` describes, keyed by role -- the set
     install writes and uninstall removes, so the two can never drift."""
@@ -619,13 +629,7 @@ def cmd_cowork_install(args: argparse.Namespace) -> int:
     home = Path.home()
     paths = _sweeper_unit_paths(home)
     if paths["kind"] is None:
-        print(
-            "ERROR: no supported background scheduler on this platform "
-            "(need launchd on macOS or a systemd user session on Linux) -- "
-            "the memory system's own overnight consolidation still sweeps "
-            "new conversations in, just not continuously through the day.",
-            file=_cli.sys.stderr,
-        )
+        print("ERROR: " + _NO_SCHEDULER_MESSAGE, file=_cli.sys.stderr)
         return 1
 
     targets = _sweeper_unit_targets(paths)
@@ -858,7 +862,10 @@ def cmd_cowork_status(args: argparse.Namespace) -> int:
             "yet -- run a local Cowork session, then check again"
         )
     elif state.tier == TIER_NOT_INSTALLED:
-        print("next: run: iai-mcp cowork install")
+        if _sweeper_unit_paths(home)["kind"] is None:
+            print(f"note: {_NO_SCHEDULER_MESSAGE}")
+        else:
+            print("next: run: iai-mcp cowork install")
 
     print(
         "note: exit status reflects only the agent-session tier above; "

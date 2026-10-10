@@ -361,15 +361,18 @@ function defaultSpawnKickstart(): () => Promise<void> {
   };
 }
 
-function defaultSpawnDoctorAuto(): () => Promise<void> {
+export function defaultSpawnDoctorAuto(
+  spawnFn?: typeof import("node:child_process").spawn,
+): () => Promise<void> {
   return async () => {
-    const { spawn } = await import("node:child_process");
+    const fn = spawnFn ?? (await import("node:child_process")).spawn;
     // Fire-and-forget: the reflex must never hold the MCP session open or
     // surface heal noise into it. `iai-mcp` resolves from PATH; a missing
     // binary is swallowed by the caller's catch.
-    const child = spawn("iai-mcp", ["doctor", "--auto"], {
+    const child = fn("iai-mcp", ["doctor", "--auto"], {
       detached: true,
       stdio: "ignore",
+      windowsHide: true,
     });
     child.on("error", () => {
     });

@@ -768,6 +768,13 @@ def _reset_module_singletons() -> None:
     except Exception:  # noqa: BLE001 -- not yet installed in some test envs
         pass
 
+    try:
+        from iai_mcp import working_tier as _wt
+    except Exception:  # noqa: BLE001 -- not yet installed in some test envs
+        pass
+    else:
+        _wt._reset()
+
 
 def _nx_graph_to_memory_graph(nx_g):
     from uuid import uuid4

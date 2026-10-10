@@ -7,6 +7,7 @@
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <UserId>{USER_SID}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>

@@ -9,7 +9,7 @@ here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 [ -n "$here" ] || exit 0
 core="$here/iai-mcp-session-capture.sh"
 [ -f "$core" ] || exit 0
-translated=$(printf '%s' "$input" | /usr/bin/python3 -c '
+translated=$(printf '%s' "$input" | python3 -c '
 import json, os, sys
 try:
     payload = json.loads(sys.stdin.read() or "{}")

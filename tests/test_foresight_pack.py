@@ -1935,9 +1935,14 @@ def test_boost_sort_threads_real_literal_preservation(driver, tmp_path, monkeypa
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])
 def test_foresight_semantic_lift_env_moves_served_order(driver, tmp_path, monkeypatch):
-    """IAI_MCP_FORESIGHT_SEMANTIC_LIFT must move the served order for a
-    semantic-tier record carrying a real salience mark -- the additive term
-    is inert on the push surface until this dial is threaded through."""
+    """IAI_MCP_FORESIGHT_SEMANTIC_LIFT governs served order only within the
+    primary cosine lane. The existence-based reserve lane admits a
+    salience-tagged semantic record ahead of higher-cosine chatter
+    regardless of this dial -- it discovers candidates by a fixed WHERE
+    predicate, never by cosine, so semantic_lift has nothing to compete
+    against there. With the reserve lane disabled, the same record competes
+    in the primary lane on cosine alone, and semantic_lift decides whether
+    it can out-rank higher-cosine chatter."""
     _select_driver(driver, monkeypatch)
     monkeypatch.setenv("IAI_MCP_FORESIGHT_MULTI_CUE_OFF", "1")
     monkeypatch.setenv(foresight.FORESIGHT_MAX_ITEMS_ENV, "1")
@@ -1970,30 +1975,76 @@ def test_foresight_semantic_lift_env_moves_served_order(driver, tmp_path, monkey
     monkeypatch.setattr(store, "query_similar", _fake_query_similar)
     monkeypatch.setattr(store, "exact_top_k", _fake_exact_top_k)
 
+    # Reserve lane ON (default): existence-based admission wins the sole
+    # slot regardless of semantic_lift -- both arms serve the salient record.
     monkeypatch.setenv(foresight.FORESIGHT_SEMANTIC_LIFT_ENV, "0")
-    report_low = foresight.refresh_pack(
+    report_reserve_low = foresight.refresh_pack(
         store, cue_text="what happened",
         cue_embedding=list(chatter_rec.embedding),
-        session_id="today-lift-low",
+        session_id="today-lift-reserve-low",
     )
-    assert report_low["packed"] == 1, report_low
-    body_low = foresight.pack_path(store, "today-lift-low").read_text(encoding="utf-8")
-    assert "rollback procedure" not in body_low, (
-        f"[{driver}] semantic_lift=0 must not lift the salient record above "
-        f"higher-cosine chatter: {body_low}"
+    assert report_reserve_low["packed"] == 1, report_reserve_low
+    body_reserve_low = foresight.pack_path(
+        store, "today-lift-reserve-low",
+    ).read_text(encoding="utf-8")
+    assert "rollback procedure" in body_reserve_low, (
+        f"[{driver}] the reserve lane must admit the salience-tagged record "
+        f"ahead of higher-cosine chatter even with semantic_lift=0: "
+        f"{body_reserve_low}"
     )
 
     monkeypatch.setenv(foresight.FORESIGHT_SEMANTIC_LIFT_ENV, "1.0")
-    report_high = foresight.refresh_pack(
+    report_reserve_high = foresight.refresh_pack(
         store, cue_text="what happened",
         cue_embedding=list(chatter_rec.embedding),
-        session_id="today-lift-high",
+        session_id="today-lift-reserve-high",
     )
-    assert report_high["packed"] == 1, report_high
-    body_high = foresight.pack_path(store, "today-lift-high").read_text(encoding="utf-8")
-    assert "rollback procedure" in body_high, (
-        f"[{driver}] a higher IAI_MCP_FORESIGHT_SEMANTIC_LIFT must move the "
-        f"salient semantic record ahead of higher-cosine chatter: {body_high}"
+    assert report_reserve_high["packed"] == 1, report_reserve_high
+    body_reserve_high = foresight.pack_path(
+        store, "today-lift-reserve-high",
+    ).read_text(encoding="utf-8")
+    assert "rollback procedure" in body_reserve_high, (
+        f"[{driver}] reserve-lane admission must be unaffected by "
+        f"semantic_lift=1.0 too -- same outcome as the lift=0 arm: "
+        f"{body_reserve_high}"
+    )
+
+    # Reserve lane OFF: the salient record now competes purely on cosine in
+    # the primary lane, so semantic_lift governs whether it out-ranks
+    # higher-cosine chatter there.
+    monkeypatch.setenv(foresight.FORESIGHT_RESERVE_LANE_OFF_ENV, "1")
+
+    monkeypatch.setenv(foresight.FORESIGHT_SEMANTIC_LIFT_ENV, "0")
+    report_primary_low = foresight.refresh_pack(
+        store, cue_text="what happened",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-lift-primary-low",
+    )
+    assert report_primary_low["packed"] == 1, report_primary_low
+    body_primary_low = foresight.pack_path(
+        store, "today-lift-primary-low",
+    ).read_text(encoding="utf-8")
+    assert "rollback procedure" not in body_primary_low, (
+        f"[{driver}] with the reserve lane off, semantic_lift=0 must not "
+        f"lift the salient record above higher-cosine chatter in the "
+        f"primary lane: {body_primary_low}"
+    )
+
+    monkeypatch.setenv(foresight.FORESIGHT_SEMANTIC_LIFT_ENV, "1.0")
+    report_primary_high = foresight.refresh_pack(
+        store, cue_text="what happened",
+        cue_embedding=list(chatter_rec.embedding),
+        session_id="today-lift-primary-high",
+    )
+    assert report_primary_high["packed"] == 1, report_primary_high
+    body_primary_high = foresight.pack_path(
+        store, "today-lift-primary-high",
+    ).read_text(encoding="utf-8")
+    assert "rollback procedure" in body_primary_high, (
+        f"[{driver}] with the reserve lane off, a higher "
+        f"IAI_MCP_FORESIGHT_SEMANTIC_LIFT must move the salient record "
+        f"ahead of higher-cosine chatter within the primary lane: "
+        f"{body_primary_high}"
     )
 
 

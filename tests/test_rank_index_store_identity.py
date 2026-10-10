@@ -86,8 +86,8 @@ def test_two_stores_get_two_distinct_handles(tmp_path: Path):
     graph_a, _assignment_a, _rc_a = retrieve.build_runtime_graph(store_a)
     graph_b, _assignment_b, _rc_b = retrieve.build_runtime_graph(store_b)
 
-    handle_a = rank_index_for(store_a, graph_a)
-    handle_b = rank_index_for(store_b, graph_b)
+    handle_a = rank_index_for(store_a)
+    handle_b = rank_index_for(store_b)
 
     assert handle_a is not handle_b, "two stores must never share a rank-index handle"
     assert getattr(store_a, _HANDLE_ATTR) is handle_a, (
@@ -95,7 +95,7 @@ def test_two_stores_get_two_distinct_handles(tmp_path: Path):
         "never a module-level cache keyed some other way"
     )
     assert getattr(store_b, _HANDLE_ATTR) is handle_b
-    assert rank_index_for(store_a, graph_a) is handle_a, "repeat calls for the same store must reuse the handle"
+    assert rank_index_for(store_a) is handle_a, "repeat calls for the same store must reuse the handle"
 
 
 def test_each_handle_serves_only_its_own_store_bulk_accessors(tmp_path: Path):
@@ -110,11 +110,11 @@ def test_each_handle_serves_only_its_own_store_bulk_accessors(tmp_path: Path):
     graph_a, _assignment_a, _rc_a = retrieve.build_runtime_graph(store_a)
     graph_b, _assignment_b, _rc_b = retrieve.build_runtime_graph(store_b)
 
-    handle_a = rank_index_for(store_a, graph_a)
-    handle_b = rank_index_for(store_b, graph_b)
+    handle_a = rank_index_for(store_a)
+    handle_b = rank_index_for(store_b)
 
-    _gen_a, ids_a, _vec_a, _degree_a, _postings_a = handle_a.snapshot(graph_a, [])
-    _gen_b, ids_b, _vec_b, _degree_b, _postings_b = handle_b.snapshot(graph_b, [])
+    _gen_a, ids_a, _vec_a, _degree_a, _postings_a = handle_a.snapshot([])
+    _gen_b, ids_b, _vec_b, _degree_b, _postings_b = handle_b.snapshot([])
 
     assert rec_a.id.int in ids_a and rec_a.id.int not in ids_b
     assert rec_b.id.int in ids_b and rec_b.id.int not in ids_a
@@ -138,16 +138,16 @@ def test_incremental_write_to_one_store_never_touches_the_other(tmp_path: Path):
     graph_a, _assignment_a, _rc_a = retrieve.build_runtime_graph(store_a)
     graph_b, _assignment_b, _rc_b = retrieve.build_runtime_graph(store_b)
 
-    handle_a = rank_index_for(store_a, graph_a)
-    handle_b = rank_index_for(store_b, graph_b)
-    handle_a.snapshot(graph_a, [])
-    handle_b.snapshot(graph_b, [])
+    handle_a = rank_index_for(store_a)
+    handle_b = rank_index_for(store_b)
+    handle_a.snapshot([])
+    handle_b.snapshot([])
 
     rec_b2 = _make_record(store_b, "beta-second-write", 0.33)
     store_b.insert(rec_b2)
 
-    _gen_a, ids_a, *_rest_a = handle_a.snapshot(graph_a, [])
-    _gen_b, ids_b, *_rest_b = handle_b.snapshot(graph_b, [])
+    _gen_a, ids_a, *_rest_a = handle_a.snapshot([])
+    _gen_b, ids_b, *_rest_b = handle_b.snapshot([])
 
     assert rec_b2.id.int in ids_b
     assert rec_b2.id.int not in ids_a, (

@@ -98,6 +98,91 @@ class TestInstaller:
         uninstall_codex_hooks()
         assert status_codex_hooks() == 1
 
+    def test_uninstall_preserves_foreign_entry_containing_basename_substring(
+        self, codex_home
+    ):
+        codex_home.mkdir(parents=True)
+        foreign_cmd = "bash /opt/other-tool/wrap-iai-mcp-session-capture.sh-relay.sh"
+        (codex_home / "hooks.json").write_text(json.dumps({
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": foreign_cmd}]}]
+            }
+        }))
+        install_codex_hooks()
+        # Uninstall cannot tell this foreign wrapper from a hand-edited own
+        # entry by content alone, so it takes the safe branch: kept, not
+        # silently deleted. The invariant under test is survival, not rc.
+        uninstall_codex_hooks()
+        data = json.loads((codex_home / "hooks.json").read_text())
+        cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
+        assert foreign_cmd in cmds
+
+    def test_uninstall_removes_own_byte_identical_entry(self, codex_home):
+        install_codex_hooks()
+        exact = f"bash {codex_home / 'hooks' / 'iai-mcp-session-capture.sh'}"
+        data = json.loads((codex_home / "hooks.json").read_text())
+        cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
+        assert exact in cmds
+        assert uninstall_codex_hooks() == 0
+        data2 = json.loads((codex_home / "hooks.json").read_text())
+        assert "Stop" not in data2["hooks"]
+
+    def test_uninstall_refuses_own_near_miss_and_reports(self, codex_home, capsys):
+        install_codex_hooks()
+        data = json.loads((codex_home / "hooks.json").read_text())
+        stop_hook = data["hooks"]["Stop"][0]["hooks"][0]
+        near_miss_cmd = stop_hook["command"] + " --extra-flag"
+        stop_hook["command"] = near_miss_cmd
+        (codex_home / "hooks.json").write_text(json.dumps(data))
+
+        rc = uninstall_codex_hooks()
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "remove" in out.lower()
+
+        data2 = json.loads((codex_home / "hooks.json").read_text())
+        cmds = [h["command"] for e in data2["hooks"]["Stop"] for h in e["hooks"]]
+        assert near_miss_cmd in cmds, "near-miss entry must be kept, not deleted"
+
+    def test_install_skip_check_is_exact_only(self, codex_home):
+        codex_home.mkdir(parents=True)
+        near_miss_cmd = (
+            f"bash {codex_home / 'hooks' / 'iai-mcp-session-capture.sh'} --wrong-flag"
+        )
+        (codex_home / "hooks.json").write_text(json.dumps({
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": near_miss_cmd}]}]
+            }
+        }))
+        install_codex_hooks()
+        data = json.loads((codex_home / "hooks.json").read_text())
+        cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
+        exact = f"bash {codex_home / 'hooks' / 'iai-mcp-session-capture.sh'}"
+        assert exact in cmds, "a near-miss entry must not block adding the correct one"
+        assert near_miss_cmd in cmds, "install must not remove the pre-existing entry"
+
+    def test_install_refuses_to_touch_unparseable_hooks_json(
+        self, codex_home, capsys
+    ):
+        codex_home.mkdir(parents=True)
+        (codex_home / "hooks.json").write_text("{not json")
+        rc = install_codex_hooks()
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "cannot parse" in out.lower()
+        assert (codex_home / "hooks.json").read_text() == "{not json"
+
+    def test_uninstall_refuses_to_touch_unparseable_hooks_json(
+        self, codex_home, capsys
+    ):
+        codex_home.mkdir(parents=True)
+        (codex_home / "hooks.json").write_text("{not json")
+        rc = uninstall_codex_hooks()
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "cannot parse" in out.lower()
+        assert (codex_home / "hooks.json").read_text() == "{not json"
+
 
 def _rollout_line(role: str, text: str, kind: str = "input_text") -> str:
     return json.dumps({

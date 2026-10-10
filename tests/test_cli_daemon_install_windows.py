@@ -5,7 +5,10 @@ cannot express. All platform-neutral: rendering and command wiring are
 exercised with schtasks mocked, so the suite runs anywhere."""
 from __future__ import annotations
 
+import os
+
 import defusedxml.ElementTree as ET
+import pytest
 
 
 def test_windows_task_xml_renders_and_parses(monkeypatch):
@@ -26,6 +29,94 @@ def test_windows_task_xml_renders_and_parses(monkeypatch):
     assert limit is not None and limit.text == "PT0S", (
         "a long-lived daemon must not be killed by the default 3-day limit"
     )
+
+    # Real test host is non-Windows: no <UserId> element, no leftover token.
+    user_id = root.find(f"{ns}Triggers/{ns}LogonTrigger/{ns}UserId")
+    assert user_id is None
+    assert "{USER_SID}" not in rendered
+
+
+class _NTNamespacedOS:
+    """Proxies the real os module but reports os.name == 'nt'.
+
+    A blanket monkeypatch of the real os module's .name attribute breaks
+    pathlib (WindowsPath cannot instantiate on a non-Windows interpreter);
+    this proxy is swapped in only as _daemon.py's own module-level `os`
+    binding, leaving pathlib's own os reference untouched.
+    """
+
+    name = "nt"
+
+    def __getattr__(self, item):
+        return getattr(os, item)
+
+
+def test_windows_task_xml_scopes_logon_trigger_to_user_sid(monkeypatch):
+    from iai_mcp import cli
+    from iai_mcp.cli import _daemon
+
+    monkeypatch.setattr(_daemon, "os", _NTNamespacedOS())
+
+    class _Result:
+        stdout = '"DOMAIN\\alice","S-1-5-21-111-222-333-1001"\r\n'
+        returncode = 0
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Result())
+
+    rendered = cli._render_windows_task_xml()
+    root = ET.fromstring(rendered)
+    ns = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
+    user_id = root.find(f"{ns}Triggers/{ns}LogonTrigger/{ns}UserId")
+    assert user_id is not None and user_id.text == "S-1-5-21-111-222-333-1001"
+    assert "{USER_SID}" not in rendered
+
+
+def test_windows_sid_resolution_failure_raises(monkeypatch):
+    from iai_mcp import cli
+    from iai_mcp.cli import _daemon
+
+    monkeypatch.setattr(_daemon, "os", _NTNamespacedOS())
+
+    def _boom(*a, **k):
+        raise OSError("whoami not found on PATH")
+
+    monkeypatch.setattr(cli.subprocess, "run", _boom)
+
+    with pytest.raises(RuntimeError):
+        cli._render_windows_task_xml()
+
+
+def test_windows_sid_resolution_rejects_malformed_shape(monkeypatch):
+    from iai_mcp import cli
+    from iai_mcp.cli import _daemon
+
+    monkeypatch.setattr(_daemon, "os", _NTNamespacedOS())
+
+    class _Result:
+        # No comma-separated SID field: a locale/banner mismatch, not a
+        # whoami failure. Non-emptiness alone would accept this as a SID.
+        stdout = "some unexpected banner line\r\n"
+        returncode = 0
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Result())
+
+    with pytest.raises(RuntimeError):
+        cli._render_windows_task_xml()
+
+
+def test_windows_sid_resolution_wraps_decode_failure(monkeypatch):
+    from iai_mcp import cli
+    from iai_mcp.cli import _daemon
+
+    monkeypatch.setattr(_daemon, "os", _NTNamespacedOS())
+
+    def _boom(*a, **k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(cli.subprocess, "run", _boom)
+
+    with pytest.raises(RuntimeError):
+        cli._render_windows_task_xml()
 
 
 def test_windows_start_cmd_wraps_the_daemon(monkeypatch):

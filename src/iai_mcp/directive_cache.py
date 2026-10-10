@@ -23,9 +23,20 @@ def write_directives_cache(store, *, cache_path: Path | None = None) -> None:
     # monkeypatches the module-level DIRECTIVES_CACHE_PATH constant (tests)
     # must actually redirect the write; a bound default would freeze the
     # value present at import time and ignore the patch.
-    if cache_path is None:
-        cache_path = DIRECTIVES_CACHE_PATH
     try:
+        if cache_path is None:
+            # store.root-derived first (mirrors directive_ops.retire_directive) --
+            # a bare call must never fall through to the operator's real home
+            # cache when the store is rooted elsewhere; DIRECTIVES_CACHE_PATH is
+            # only the fallback when no store root is resolvable. Coerced
+            # through Path() (mirrors working_tier._cache_path) so a
+            # duck-typed non-Path .root cannot raise outside this guard.
+            store_root = getattr(store, "root", None)
+            cache_path = (
+                Path(store_root) / ".directives.cached.md"
+                if store_root is not None
+                else DIRECTIVES_CACHE_PATH
+            )
         from iai_mcp.session import render_directive_segment
         from iai_mcp.store import flush_record_buffer
 

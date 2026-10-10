@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -210,13 +211,55 @@ def _render_systemd_unit() -> str:
     return text
 
 
+_SID_RE = re.compile(r"^S-1-\d+(-\d+)+$")
+
+
+def _current_windows_user_sid() -> str:
+    """Resolves the installing user's SID for <LogonTrigger>/<UserId> scoping.
+
+    Off Windows this returns "" (caller omits <UserId> entirely). On
+    Windows a resolution failure raises -- an unscoped or mis-scoped
+    logon trigger is worse than a failed install. The resolved value's
+    shape is checked (not just non-emptiness): a malformed whoami output
+    (locale mismatch, banner line, truncated read) must not be accepted
+    as a SID.
+    """
+    if os.name != "nt":
+        return ""
+    from iai_mcp import cli as _cli
+    try:
+        result = _cli.subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            check=True, capture_output=True, text=True,
+        )
+        sid = result.stdout.strip().split(",")[-1].strip().strip('"')
+    except (OSError, _cli.subprocess.CalledProcessError, UnicodeDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot resolve current user SID via whoami: {exc}"
+        ) from exc
+    if not sid or not _SID_RE.match(sid):
+        raise RuntimeError(
+            f"whoami returned an unexpected value, not a SID: {sid!r}"
+        )
+    return sid
+
+
+def _scope_logon_trigger_to_user(text: str) -> str:
+    """Fills the {USER_SID} placeholder, or drops the whole element when
+    no SID is available (non-Windows) -- never an empty <UserId>."""
+    sid = _current_windows_user_sid()
+    if sid:
+        return text.replace("{USER_SID}", sid)
+    return text.replace("\n      <UserId>{USER_SID}</UserId>", "")
+
+
 def _render_windows_task_xml() -> str:
     from iai_mcp import cli as _cli
     tmpl = _res.files("iai_mcp") / "_deploy" / "windows" / "iai-mcp-daemon.xml"
     text = tmpl.read_text(encoding="utf-8")
     text = text.replace("{START_CMD}", str(_cli.WINDOWS_START_CMD))
     text = text.replace("{WORK_DIR}", str(Path.home() / ".iai-mcp"))
-    return text
+    return _scope_logon_trigger_to_user(text)
 
 
 def _render_windows_start_cmd() -> str:

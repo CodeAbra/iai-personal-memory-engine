@@ -504,6 +504,10 @@ def _age_penalty(created_at: "datetime | None") -> float:
     return min(1.0, days / AGE_HALF_LIFE_DAYS)
 
 
+def _rank_now() -> int:
+    return int(time.time())
+
+
 def _community_gate(
     cue_emb: list[float],
     assignment: CommunityAssignment,
@@ -1680,8 +1684,7 @@ def _recall_core(
             RUST_SCORER_K_MARGIN if not primed_ids
             else max(RUST_SCORER_K_MARGIN, int(flag_reachable_indices.size))
         )
-        winners, coverage, result_damp = rank_index_for(store, graph).score(
-            graph,
+        winners, coverage, result_damp = rank_index_for(store).score(
             pool_ids,
             shared_cos,
             cosine_top_indices,
@@ -1692,7 +1695,7 @@ def _recall_core(
             _t12_flags,
             mode == "verbatim",
             cue,
-            int(time.time()),
+            _rank_now(),
             effective_w_degree,
             effective_w_cosine,
             graph.RANKING_DEGREE_EXCLUDED,

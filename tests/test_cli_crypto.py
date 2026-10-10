@@ -36,6 +36,32 @@ def test_cli_crypto_status_shows_file_backend(tmp_path, monkeypatch, capsys):
     )
 
 
+def test_cli_crypto_status_omits_uid_field_without_geteuid(
+    tmp_path, monkeypatch, capsys
+):
+    import argparse
+
+    monkeypatch.setenv("IAI_MCP_STORE", str(tmp_path))
+    monkeypatch.delenv("IAI_MCP_CRYPTO_PASSPHRASE", raising=False)
+    monkeypatch.delattr(os, "geteuid", raising=False)
+
+    key_path = tmp_path / ".crypto.key"
+    key_path.write_bytes(secrets.token_bytes(32))
+    os.chmod(key_path, 0o600)
+
+    from iai_mcp.cli import cmd_crypto_status
+
+    args = argparse.Namespace(user_id="default")
+    exit_code = cmd_crypto_status(args)
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    parsed = json.loads(out)
+    assert "uid_matches_process" not in parsed, (
+        "no effective-uid concept without os.geteuid; field must be omitted"
+    )
+    assert parsed["present"] is True
+
+
 def test_cli_crypto_rotate_regenerates_key(tmp_path, monkeypatch, capsys):
     import argparse
 

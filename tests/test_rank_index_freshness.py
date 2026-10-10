@@ -81,12 +81,12 @@ def test_adapter_two_store_isolation(tmp_path: Path):
     graph_a, _assignment_a, _rc_a = retrieve.build_runtime_graph(store_a)
     graph_b, _assignment_b, _rc_b = retrieve.build_runtime_graph(store_b)
 
-    handle_a = rank_index_for(store_a, graph_a)
-    handle_b = rank_index_for(store_b, graph_b)
+    handle_a = rank_index_for(store_a)
+    handle_b = rank_index_for(store_b)
     assert handle_a is not handle_b, "two stores must never share a rank-index handle"
 
-    _gen_a, ids_a, *_rest_a = handle_a.snapshot(graph_a, [])
-    _gen_b, ids_b, *_rest_b = handle_b.snapshot(graph_b, [])
+    _gen_a, ids_a, *_rest_a = handle_a.snapshot([])
+    _gen_b, ids_b, *_rest_b = handle_b.snapshot([])
     assert rec_a.id.int in ids_a
     assert rec_a.id.int not in ids_b
     assert rec_b.id.int in ids_b
@@ -98,10 +98,10 @@ def test_adapter_lazy_build_exposes_bulk_accessors_only(store: MemoryStore):
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
 
-    handle = rank_index_for(store, graph)
-    generation, ids, vectors, degree_map, postings = handle.snapshot(graph, ["hello"])
+    handle = rank_index_for(store)
+    generation, ids, vectors, degree_map, postings = handle.snapshot(["hello"])
 
-    assert generation == graph._pool_content_version
+    assert generation == handle.generation
     assert rec.id.int in ids
     assert vectors.shape == (len(ids), store.embed_dim)
     assert isinstance(degree_map, dict)
@@ -121,8 +121,8 @@ def test_backfill_salience_from_plaintext_column_for_preexisting_corpus(
     # whether the write-time hook now sends it going forward.
     graph._node_payload[str(rec.id)].pop("salience_level", None)
 
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    handle.snapshot([])
     levels = handle.salience_levels()
     assert levels[rec.id.int] == SALIENCE_LEVEL_RANK["critical"]
 
@@ -147,6 +147,7 @@ def test_hook_payload_carries_full_bucket_a_field_set(store: MemoryStore):
     for key in (
         "aaak_index", "created_at", "stability", "surface",
         "tier", "tags", "salience_level", "centrality",
+        "language", "valence",
     ):
         assert key in payload, f"Bucket-A field {key!r} missing from hook payload"
 
@@ -157,8 +158,8 @@ def test_hook_wires_rank_index_feed_with_salience_level_parity(store: MemoryStor
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
 
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    handle.snapshot([])
     assert handle.salience_levels().get(rec.id.int) == SALIENCE_LEVEL_RANK["notable"]
 
     # A record inserted AFTER the index already exists must be fed
@@ -167,9 +168,9 @@ def test_hook_wires_rank_index_feed_with_salience_level_parity(store: MemoryStor
     rec2.salience_level = "critical"
     store.insert(rec2)
 
-    handle2 = rank_index_for(store, graph)
-    assert handle2 is handle, "the handle must be reused for the same store+graph"
-    gen2, ids2, *_rest2 = handle2.snapshot(graph, [])
+    handle2 = rank_index_for(store)
+    assert handle2 is handle, "the handle must be reused for the same store"
+    gen2, ids2, *_rest2 = handle2.snapshot([])
     assert rec2.id.int in ids2
     assert handle2.salience_levels().get(rec2.id.int) == SALIENCE_LEVEL_RANK["critical"]
 
@@ -178,12 +179,12 @@ def test_hook_feed_delete_removes_from_rank_index(store: MemoryStore):
     rec = _make_record(store, "will-be-deleted", 0.2)
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
-    _gen1, ids1, *_rest1 = handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    _gen1, ids1, *_rest1 = handle.snapshot([])
     assert rec.id.int in ids1
 
     store.delete(rec.id)
-    _gen2, ids2, *_rest2 = handle.snapshot(graph, [])
+    _gen2, ids2, *_rest2 = handle.snapshot([])
     assert rec.id.int not in ids2
 
 
@@ -193,15 +194,15 @@ def test_snapshot_pure_read_when_generation_matches_no_extra_write(
     rec = _make_record(store, "steady", 0.3)
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
-    gen1, ids1, *_rest1 = handle.snapshot(graph, [])
-    gen1b, ids1b, *_rest1b = handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    gen1, ids1, *_rest1 = handle.snapshot([])
+    gen1b, ids1b, *_rest1b = handle.snapshot([])
     assert gen1 == gen1b
     assert list(ids1) == list(ids1b)
 
     rec2 = _make_record(store, "adds-one", 0.6)
     store.insert(rec2)
-    gen2, ids2, *_rest2 = handle.snapshot(graph, [])
+    gen2, ids2, *_rest2 = handle.snapshot([])
     assert gen2 > gen1
     assert rec2.id.int in ids2
 
@@ -216,8 +217,8 @@ def test_salience_raise_bumps_generation_and_updates_resident_payload(
     rec = _make_record(store, "raise-me", 0.3)
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    handle.snapshot([])
 
     gen_before = graph._pool_content_version
     changed = store.raise_salience_level_if_higher(rec.id, "critical")
@@ -231,7 +232,7 @@ def test_salience_raise_bumps_generation_and_updates_resident_payload(
         == SALIENCE_LEVEL_RANK["critical"]
     )
 
-    handle.snapshot(graph, [])
+    handle.snapshot([])
     assert handle.salience_levels().get(rec.id.int) == SALIENCE_LEVEL_RANK["critical"]
 
 
@@ -271,14 +272,14 @@ def test_hook_feed_delete_between_snapshots_is_benign(store: MemoryStore):
     seed = _make_record(store, "seed", 0.1)
     store.insert(seed)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    handle.snapshot([])
 
     rec = _make_record(store, "insert-then-delete", 0.3)
     store.insert(rec)
     store.delete(rec.id)
 
-    _gen, ids, *_rest = handle.snapshot(graph, [])
+    _gen, ids, *_rest = handle.snapshot([])
     assert rec.id.int not in ids
 
 
@@ -286,8 +287,8 @@ def test_hook_feed_delete_of_never_inserted_id_is_benign(store: MemoryStore):
     seed = _make_record(store, "seed2", 0.15)
     store.insert(seed)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph, [])
+    handle = rank_index_for(store)
+    handle.snapshot([])
 
     class _DeleteShim:
         def __init__(self, rid):
@@ -302,6 +303,6 @@ def test_hook_feed_delete_of_never_inserted_id_is_benign(store: MemoryStore):
     seed3 = _make_record(store, "advance-generation", 0.25)
     store.insert(seed3)
 
-    _gen, ids, *_rest = handle.snapshot(graph, [])
+    _gen, ids, *_rest = handle.snapshot([])
     assert phantom_id.int not in ids
     assert seed3.id.int in ids

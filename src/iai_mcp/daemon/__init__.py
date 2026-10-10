@@ -1800,7 +1800,11 @@ def _install_boot_signal_trace() -> None:
         except Exception:  # noqa: BLE001 -- re-raise is best-effort
             os._exit(128 + int(signum))
 
-    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    # SIGHUP is absent on some platforms; resolve it lazily so the tuple
+    # literal itself never raises before the per-iteration guard runs.
+    for _sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None)):
+        if _sig is None:
+            continue
         try:
             signal.signal(_sig, _trace)
         except (AttributeError, ValueError, OSError):
@@ -2445,9 +2449,14 @@ async def main() -> int:
                 for _ in range(20):
                     with _retrieve_preload.background_store_work("boot_preload") as _gate_ok:
                         if _gate_ok:
-                            # Delta-only when the cached payload allows it;
-                            # falls back to the full rebuild internally.
-                            _retrieve_preload.build_runtime_graph_incremental(store)
+                            # Route through the memory-disciplined DB->child
+                            # streaming rebuild (never a full in-parent graph),
+                            # then reconstruct in this same thread so the
+                            # persisted centrality + payload_record_count make
+                            # the reconstruct child-free and store._warm_graph_bundle
+                            # is populated before preload_ready fires.
+                            _rgc_mod._rebuild_and_save_rgc(store)
+                            _retrieve_preload.build_runtime_graph(store)
                             return
                     _time.sleep(15)
                 log.warning(

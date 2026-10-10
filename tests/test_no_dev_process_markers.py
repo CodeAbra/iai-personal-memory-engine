@@ -17,7 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from tests._hygiene_guard_support import own_detector_ranges
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Named separately (not just tupled inline) so a hit can be tagged as
+# "matched via this exact regex" -- PRODUCT_VALUE_FIXTURES must only ever
+# offset hits from this one pattern, never any other marker class.
+PLANNING_DIR_MARKER = re.compile(r"\.planning/")
 
 MARKERS = (
     # No word-boundary anchors on the left/right of phase/wave/constitutional:
@@ -28,7 +35,7 @@ MARKERS = (
     re.compile(r"wave[ _-]?\d", re.I),
     re.compile(r"\bD-\d{2}\b"),
     re.compile(r"constitutional", re.I),
-    re.compile(r"\.planning/"),
+    PLANNING_DIR_MARKER,
     re.compile(r"\b(?:CONTEXT|ROADMAP|STATE)\.md\b"),
     re.compile(r"Co-Authored-By", re.I),
     re.compile(r"#\s*@internal\b"),
@@ -69,6 +76,29 @@ RECORDS = {
     "FABLE_FINDINGS.json",
 }
 
+# Files elsewhere in the tree that are themselves pattern detectors for a
+# different concern (the tools-index AST/xref-lane guards' own
+# forbidden-marker literals) and legitimately need their own
+# `re.compile(...)` definition, plus its banner, exempted from this scan.
+# Add a path here only when a new file needs the same exemption.
+SELF_REFERENTIAL_DETECTOR_FILES = frozenset({
+    "tests/test_tools_ast_lane.py",
+    "tests/test_tools_goto_def_find_refs.py",
+    "tests/test_tools_literal_scan.py",
+    "tests/test_tools_xref_reverse_query.py",
+})
+
+# Product-value fixtures: `.planning/` here is a runtime data-model value
+# under test (the code-index dot-dir allowlist), not narrative -- exact
+# per-file counts, checked in test_no_new_dev_process_markers alongside
+# KNOWN. This allowance offsets ONLY hits from PLANNING_DIR_MARKER (see
+# _hits) -- a different marker class in the same file is never absorbed by
+# it. Never grown to cover a genuine narrative marker.
+PRODUCT_VALUE_FIXTURES: dict[str, int] = {
+    "tests/test_study_teach.py": 4,
+    "tests/test_tools_cli_brain_free.py": 1,
+}
+
 # Outstanding cleanup, counted exactly. Lower a number when you clean a file;
 # never raise one, and never add a line.
 KNOWN: dict[str, int] = {
@@ -101,31 +131,49 @@ def _tracked_files() -> list[str]:
     ]
 
 
-def _hits(path: str) -> list[str]:
+def _hits(path: str) -> list[tuple[str, bool]]:
+    """Return (hit text, is_planning_dir_marker) pairs for one file."""
     try:
         text = (REPO_ROOT / path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    found = []
+    exempt = own_detector_ranges(text) if path in SELF_REFERENTIAL_DETECTOR_FILES else set()
+    found: list[tuple[str, bool]] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
+        if lineno in exempt:
+            continue
         for rx in MARKERS:
             if rx.search(line):
-                found.append(f"{path}:{lineno}: {line.strip()[:100]}")
+                found.append((f"{path}:{lineno}: {line.strip()[:100]}", rx is PLANNING_DIR_MARKER))
                 break
     return found
 
 
+def _planning_hit_count(hits: list[tuple[str, bool]]) -> int:
+    return sum(1 for _, is_planning in hits if is_planning)
+
+
 @pytest.fixture(scope="module")
-def scan() -> dict[str, list[str]]:
+def scan() -> dict[str, list[tuple[str, bool]]]:
     return {p: h for p in _tracked_files() if (h := _hits(p))}
 
 
-def test_no_new_dev_process_markers(scan: dict[str, list[str]]) -> None:
+def test_no_new_dev_process_markers(scan: dict[str, list[tuple[str, bool]]]) -> None:
     unexpected = []
     for path, hits in sorted(scan.items()):
-        allowed = KNOWN.get(path, 0)
-        if len(hits) > allowed:
-            unexpected.extend(hits[allowed:] if allowed else hits)
+        fixture_budget = PRODUCT_VALUE_FIXTURES.get(path, 0)
+        # PRODUCT_VALUE_FIXTURES may only offset PLANNING_DIR_MARKER hits --
+        # a marker of a different class in the same file always surfaces.
+        remaining: list[str] = []
+        spent = 0
+        for text, is_planning in hits:
+            if is_planning and spent < fixture_budget:
+                spent += 1
+                continue
+            remaining.append(text)
+        known_allowed = KNOWN.get(path, 0)
+        if len(remaining) > known_allowed:
+            unexpected.extend(remaining[known_allowed:] if known_allowed else remaining)
     assert not unexpected, (
         "development-process markers in shipped text — rewrite them functionally "
         "or drop them (planning codes, internal doc names and collaboration "
@@ -134,14 +182,19 @@ def test_no_new_dev_process_markers(scan: dict[str, list[str]]) -> None:
     )
 
 
-def test_known_list_only_shrinks(scan: dict[str, list[str]]) -> None:
+def test_known_list_only_shrinks(scan: dict[str, list[tuple[str, bool]]]) -> None:
     stale = {
         path: (allowed, len(scan.get(path, [])))
         for path, allowed in KNOWN.items()
         if len(scan.get(path, [])) < allowed
     }
+    stale.update({
+        path: (allowed, _planning_hit_count(scan.get(path, [])))
+        for path, allowed in PRODUCT_VALUE_FIXTURES.items()
+        if _planning_hit_count(scan.get(path, [])) < allowed
+    })
     assert not stale, (
-        "these files are cleaner than KNOWN claims — lower the numbers so the "
-        "ratchet keeps holding (path: recorded -> actual): "
+        "these files are cleaner than KNOWN/PRODUCT_VALUE_FIXTURES claims — lower "
+        "the numbers so the ratchet keeps holding (path: recorded -> actual): "
         + ", ".join(f"{p}: {a} -> {n}" for p, (a, n) in sorted(stale.items()))
     )

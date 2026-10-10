@@ -111,7 +111,8 @@ def _no_flock_recency_rows_from_store(
             conn = _eng
         else:
             conn = _sqlite_stdlib.connect(
-                str(db_path),
+                f"file:{db_path}?mode=ro",
+                uri=True,
                 check_same_thread=False,
                 isolation_level=None,
             )

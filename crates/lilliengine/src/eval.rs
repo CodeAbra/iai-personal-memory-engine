@@ -14,49 +14,127 @@
 //! `EvalVal::Bool(Some(true))`.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use lillibrain::Value;
 
-/// A row of decoded cells keyed by column name, preserving column order.
-///
-/// Column order is preserved so `SELECT *` and positional access reproduce the
-/// schema's declaration order; name lookup backs the expression evaluator.
-#[derive(Debug, Clone, Default)]
-pub struct Row {
-    cells: Vec<(String, Value)>,
+/// A row's shared column-name layout: a dense name list plus a name->slot
+/// index, built once per scan and shared via `Arc` across every row it names.
+#[derive(Debug, Default)]
+pub struct RowSchema {
+    names: Vec<String>,
     index: HashMap<String, usize>,
 }
 
-impl Row {
-    /// An empty row.
-    pub fn new() -> Self {
-        Row::default()
-    }
-
-    /// Build a row from `(name, value)` pairs in column order.
-    pub fn from_pairs(pairs: Vec<(String, Value)>) -> Self {
-        let mut row = Row::default();
-        for (name, value) in pairs {
-            row.set(name, value);
+impl RowSchema {
+    /// Build a schema from column names in order. A duplicate name keeps its
+    /// first slot (later occurrences map to that same slot).
+    pub fn new(names: impl IntoIterator<Item = String>) -> Self {
+        let mut schema = RowSchema {
+            names: Vec::new(),
+            index: HashMap::new(),
+        };
+        for name in names {
+            if !schema.index.contains_key(&name) {
+                schema.index.insert(name.clone(), schema.names.len());
+                schema.names.push(name);
+            }
         }
-        row
+        schema
     }
 
-    /// Set `name` to `value`, appending it when new or replacing it in place.
+    /// The number of distinct declared slots.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// True when the schema declares no slots.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+/// The shared, ownerless empty schema every `Row::new()` points at.
+fn empty_schema() -> Arc<RowSchema> {
+    static EMPTY: OnceLock<Arc<RowSchema>> = OnceLock::new();
+    EMPTY.get_or_init(|| Arc::new(RowSchema::default())).clone()
+}
+
+/// A row of decoded cells; `values[i]` is the value for `schema`'s i-th name,
+/// `extras` holds any name `schema` didn't declare.
+#[derive(Debug, Clone)]
+pub struct Row {
+    schema: Arc<RowSchema>,
+    values: Vec<Value>,
+    extras: Vec<(String, Value)>,
+}
+
+impl Row {
+    /// An empty, ownerless row (get_or_null(anything) == NULL).
+    pub fn new() -> Self {
+        Row {
+            schema: empty_schema(),
+            values: Vec::new(),
+            extras: Vec::new(),
+        }
+    }
+
+    /// Build a row directly from a shared schema and its slot values (already
+    /// in schema order). Used by the engine's per-row decode loop so the
+    /// column-name schema is cloned (as an `Arc`) rather than rebuilt per row.
+    pub fn from_schema(schema: Arc<RowSchema>, values: Vec<Value>) -> Self {
+        Row {
+            schema,
+            values,
+            extras: Vec::new(),
+        }
+    }
+
+    /// Build a row from `(name, value)` pairs in column order. A duplicate
+    /// name keeps its first slot; its value is the LAST pair naming it
+    /// (matching `set`'s overwrite-in-place semantics applied in order).
+    pub fn from_pairs(pairs: Vec<(String, Value)>) -> Self {
+        let mut names: Vec<String> = Vec::with_capacity(pairs.len());
+        let mut values: Vec<Value> = Vec::with_capacity(pairs.len());
+        let mut index: HashMap<String, usize> = HashMap::with_capacity(pairs.len());
+        for (name, value) in pairs {
+            match index.get(&name) {
+                Some(&i) => values[i] = value,
+                None => {
+                    index.insert(name.clone(), names.len());
+                    names.push(name);
+                    values.push(value);
+                }
+            }
+        }
+        Row {
+            schema: Arc::new(RowSchema { names, index }),
+            values,
+            extras: Vec::new(),
+        }
+    }
+
+    /// Set `name` to `value`: a declared schema slot is replaced in place;
+    /// otherwise the extras list is appended to (or overwritten in place when
+    /// already present there).
     pub fn set(&mut self, name: impl Into<String>, value: Value) {
         let name = name.into();
-        match self.index.get(&name) {
-            Some(&i) => self.cells[i].1 = value,
-            None => {
-                self.index.insert(name.clone(), self.cells.len());
-                self.cells.push((name, value));
-            }
+        if let Some(&i) = self.schema.index.get(&name) {
+            self.values[i] = value;
+        } else if let Some(slot) = self.extras.iter_mut().find(|(n, _)| *n == name) {
+            slot.1 = value;
+        } else {
+            self.extras.push((name, value));
         }
     }
 
     /// The value for `name`, or `None` when the column is absent from the row.
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.index.get(name).map(|&i| &self.cells[i].1)
+        if let Some(&i) = self.schema.index.get(name) {
+            Some(&self.values[i])
+        } else {
+            self.extras.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        }
     }
 
     /// The value for `name`, treating an absent column as SQL NULL.
@@ -66,12 +144,7 @@ impl Row {
 
     /// True when the row carries a column called `name`.
     pub fn contains(&self, name: &str) -> bool {
-        self.index.contains_key(name)
-    }
-
-    /// The `(name, value)` pairs in column order.
-    pub fn pairs(&self) -> &[(String, Value)] {
-        &self.cells
+        self.schema.index.contains_key(name) || self.extras.iter().any(|(n, _)| n == name)
     }
 }
 

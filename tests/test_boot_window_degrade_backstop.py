@@ -82,6 +82,14 @@ def test_degraded_recall_returns_fast_despite_concurrent_slow_construction(
     store = MemoryStore(path=tmp_path)
     _seed_records(store, n=20)
 
+    # Seeding itself warms the shared embedder singleton as a side effect
+    # (MemoryStore.insert -> working_tier.update_from_record ->
+    # _goal_embedding -> embedder_for_store, unbounded). Reset it here, after
+    # seeding but before the lock-holding thread starts, so the bounded
+    # acquire below genuinely contends for the lock instead of hitting the
+    # already-warm fast path and never touching it at all.
+    _embed_mod._reset_embedder_singleton()
+
     hold_sec = 1.2
     lock_held = threading.Event()
     may_release = threading.Event()

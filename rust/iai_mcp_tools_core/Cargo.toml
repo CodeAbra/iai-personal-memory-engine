@@ -1,0 +1,40 @@
+[package]
+name    = "iai_mcp_tools_core"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name       = "iai_mcp_tools_core"
+crate-type = ["cdylib", "rlib"]    # cdylib ships its own wheel module; rlib for `cargo test`
+
+[[bin]]
+name = "iai_tools_run"
+path = "src/bin/iai_tools_run.rs"
+
+[[bin]]
+name = "iai_tools_execd"
+path = "src/bin/iai_tools_execd.rs"
+
+[[bin]]
+name = "iai_tools_session"
+path = "src/bin/iai_tools_session.rs"
+
+[features]
+default          = []
+extension-module = ["dep:pyo3", "pyo3/extension-module"]   # opt-in; activated by setuptools-rust ONLY
+
+[dependencies]
+pyo3        = { workspace = true, optional = true }
+crc32fast   = "1.4"
+parking_lot = "0.12.5"
+thiserror   = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

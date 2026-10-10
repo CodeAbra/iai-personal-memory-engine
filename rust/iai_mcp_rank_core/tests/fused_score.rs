@@ -54,6 +54,8 @@ fn build_inner(rows: Vec<Row>) -> Inner {
     let salience_level: Vec<u8> = vec![0u8; n];
     let centrality: Vec<f32> = vec![0.0f32; n];
     let pending: Vec<bool> = vec![false; n];
+    let valence: Vec<f32> = vec![0.0f32; n];
+    let language: Vec<String> = vec!["en".to_string(); n];
     for r in &rows {
         edge_map.insert(
             r.id,
@@ -76,6 +78,8 @@ fn build_inner(rows: Vec<Row>) -> Inner {
         salience_level,
         centrality,
         pending,
+        valence,
+        language,
     )
     .expect("fixture build must not fail")
 }
@@ -482,6 +486,8 @@ fn post_write_recall_scores_current_degree_and_postings_not_committed_stale() {
         salience_level: 0,
         centrality: 0.0,
         pending: false,
+        valence: 0.0,
+        language: String::new(),
     })
     .expect("feed must succeed");
     let updated = buf.snapshot(2).expect("stale-generation apply");

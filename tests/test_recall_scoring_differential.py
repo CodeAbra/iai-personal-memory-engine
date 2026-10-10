@@ -1145,13 +1145,13 @@ def test_post_write_delta_overlay_differential(tmp_path, monkeypatch):
         "tier": new_rec.tier, "tags": [], "language": "en", "aaak_index": "",
         "created_at": new_rec.created_at.isoformat(), "stability": 0.5, "centrality": 0.0,
     })
-    _rank_handle = rank_index_for(store, graph)
+    _rank_handle = rank_index_for(store)
     _rank_handle.feed("upsert", new_rec)
     # Draining a warm index for a post-write delta is the documented caller
     # responsibility (`_rank_index.py::score`'s own docstring) -- `feed()`
     # alone only queues the op; `snapshot()` is what applies it into the
     # generation-tagged buffer `score()` reads.
-    _rank_handle.snapshot(graph)
+    _rank_handle.snapshot()
 
     post_write_cue = CueSpec(text=post_write_text, band="post-write-delta", mode="concept")
     expected = reference_producer(post_write_cue.text, post_write_cue.mode, None, _TOP_K)

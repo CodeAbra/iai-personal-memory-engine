@@ -34,7 +34,7 @@ extract() {
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$input" | jq -r ".${key} // empty" 2>/dev/null
   else
-    printf '%s' "$input" | /usr/bin/python3 -c "
+    printf '%s' "$input" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)

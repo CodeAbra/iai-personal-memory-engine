@@ -268,9 +268,11 @@ from ._analytics import (
 from ._maintenance import (
     cmd_blob_quarantine,
     cmd_directive_sweep,
+    cmd_template_pollution_sweep,
     cmd_edge_backfill,
     cmd_entity_backfill,
     cmd_idem_dedup,
+    cmd_prune_snapshots,
     cmd_salience_backfill,
     cmd_schema_cleanup,
     cmd_maintenance_compact_hippo,
@@ -1045,6 +1047,45 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     idm.set_defaults(func=cmd_idem_dedup)
 
+    pns = sub.add_parser(
+        "prune-snapshots",
+        help=(
+            "prune stale pre-write snapshots created by migration commands, "
+            "keeping the newest N, and sweep orphaned aux directories left "
+            "by a superseded storage layout. Default mode is --dry-run; "
+            "--apply removes them. Idempotent."
+        ),
+    )
+    pns_mode = pns.add_mutually_exclusive_group()
+    pns_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) list what would be removed without mutating the store",
+    )
+    pns_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="remove the pruned snapshots and orphan directories",
+    )
+    pns.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    pns.add_argument(
+        "--keep",
+        type=int,
+        default=3,
+        help="number of newest snapshots to keep (clamped to at least 1)",
+    )
+    pns.set_defaults(func=cmd_prune_snapshots)
+
     blq = sub.add_parser(
         "blob-quarantine",
         help=(
@@ -1110,6 +1151,51 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     dsw.set_defaults(func=cmd_directive_sweep)
+
+    tps = sub.add_parser(
+        "template-pollution-sweep",
+        help=(
+            "tombstone internal-prompt/template-pollution records, plus any "
+            "--explicit-id-listed leak record. Default mode is --dry-run; "
+            "--apply snapshots the store dir first, sweeps orphan edges "
+            "store-wide (not scoped to the tombstoned rows -- the same "
+            "routine the nightly cycle runs), and rebuilds the ANN index "
+            "synchronously. Idempotent."
+        ),
+    )
+    tps_mode = tps.add_mutually_exclusive_group()
+    tps_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="(default) count the pollution records without mutating the store",
+    )
+    tps_mode.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="snapshot the store dir + tombstone the targets",
+    )
+    tps.add_argument(
+        "--explicit-id",
+        dest="explicit_id",
+        action="append",
+        default=None,
+        help=(
+            "record id to tombstone regardless of the content predicate "
+            "(repeatable)"
+        ),
+    )
+    tps.add_argument(
+        "--store-path",
+        dest="store_path",
+        default=None,
+        help=(
+            "IAI root directory (defaults to ~/.iai-mcp; Hippo data "
+            "lives at <store-path>/hippo)"
+        ),
+    )
+    tps.set_defaults(func=cmd_template_pollution_sweep)
 
     ebf = sub.add_parser(
         "edge-backfill",
@@ -1536,6 +1622,415 @@ def _build_parser() -> argparse.ArgumentParser:
              "lock as the real guard",
     )
     dd.set_defaults(func=cmd_deferred_drain)
+
+    tl = sub.add_parser(
+        "tools",
+        help=(
+            "code index, session store, and executor: index/embed-index/search/"
+            "search-symbol/search-xref/search-vector/search-fused/session-search/"
+            "stats/command-insight/run/fetch/batch-run -- a separate store under "
+            "~/.iai-mcp/tools/. This "
+            "alias still pays the Hippo/lilli import cost paid by every "
+            "`iai-mcp` invocation; for the genuinely brain-free path use "
+            "the standalone `iai-tools` console script or MCP server."
+        ),
+    )
+    tools_sub = tl.add_subparsers(dest="tools_cmd", required=True)
+
+    tl_index = tools_sub.add_parser(
+        "index",
+        help="walk a directory and build one code-index segment from it, or index one "
+        "resolved dependency package with --ecosystem/--package/--project-dir",
+    )
+    tl_index.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="directory to index (mutually exclusive with --ecosystem/--package/--project-dir)",
+    )
+    tl_index.add_argument(
+        "--ecosystem",
+        default=None,
+        help="dependency ecosystem, e.g. python (requires --package and --project-dir)",
+    )
+    tl_index.add_argument(
+        "--package",
+        default=None,
+        help="dependency package name (requires --ecosystem and --project-dir)",
+    )
+    tl_index.add_argument(
+        "--project-dir",
+        default=None,
+        dest="project_dir",
+        help="project directory whose environment resolves the package "
+        "(requires --ecosystem and --package)",
+    )
+
+    def _cmd_tools_index_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_index
+        return cmd_tools_index(args)
+
+    tl_index.set_defaults(func=_cmd_tools_index_lazy)
+
+    tl_embed_index = tools_sub.add_parser(
+        "embed-index",
+        help=(
+            "discover files under a directory and submit the embed worker to the "
+            "executor daemon as a detached background run, returning a run_id "
+            "immediately; --foreground runs it synchronously instead"
+        ),
+    )
+    tl_embed_index.add_argument("path", help="directory to embed-index")
+    tl_embed_index.add_argument(
+        "--foreground",
+        action="store_true",
+        help="run the embed worker synchronously via the executor daemon instead of detaching it",
+    )
+
+    def _cmd_tools_embed_index_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_embed_index
+        return cmd_tools_embed_index(args)
+
+    tl_embed_index.set_defaults(func=_cmd_tools_embed_index_lazy)
+
+    tl_search = tools_sub.add_parser(
+        "search",
+        help="query the code-index store, ranked by whole-file BM25",
+    )
+    tl_search.add_argument("query", help="search query")
+    tl_search.add_argument(
+        "--k", type=int, default=10, help="max ranked hits (default 10)"
+    )
+    tl_search.add_argument(
+        "--store",
+        choices=["code", "output", "dependency"],
+        default="code",
+        help="store to query: 'code' (default, source-code index), 'output' (indexed "
+        "command output), or 'dependency' (one indexed package, requires "
+        "--ecosystem/--package)",
+    )
+    tl_search.add_argument(
+        "--ecosystem",
+        default=None,
+        help="dependency ecosystem for --store dependency, e.g. python",
+    )
+    tl_search.add_argument(
+        "--package",
+        default=None,
+        help="dependency package name for --store dependency",
+    )
+
+    def _cmd_tools_search_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_search
+        return cmd_tools_search(args)
+
+    tl_search.set_defaults(func=_cmd_tools_search_lazy)
+
+    tl_search_symbol = tools_sub.add_parser(
+        "search-symbol",
+        help="query the symbol-index store by exact identifier name, ranked Def above Unknown",
+    )
+    tl_search_symbol.add_argument("query", help="identifier to search for")
+    tl_search_symbol.add_argument(
+        "--k", type=int, default=10, help="max ranked hits (default 10)"
+    )
+
+    def _cmd_tools_search_symbol_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_search_symbol
+        return cmd_tools_search_symbol(args)
+
+    tl_search_symbol.set_defaults(func=_cmd_tools_search_symbol_lazy)
+
+    tl_search_xref = tools_sub.add_parser(
+        "search-xref",
+        help="query the cross-file reference index, injecting referenced-definition files after the base ranking without evicting any base hit",
+    )
+    tl_search_xref.add_argument("query", help="search query")
+    tl_search_xref.add_argument(
+        "--k",
+        type=int,
+        default=10,
+        help="ranked base hits (default 10); more rows are returned when files are injected",
+    )
+
+    def _cmd_tools_search_xref_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_search_xref
+        return cmd_tools_search_xref(args)
+
+    tl_search_xref.set_defaults(func=_cmd_tools_search_xref_lazy)
+
+    tl_search_vector = tools_sub.add_parser(
+        "search-vector",
+        help="embed the query via a detached worker subprocess, then query the exact-cosine vector store",
+    )
+    tl_search_vector.add_argument("query", help="search query")
+    tl_search_vector.add_argument(
+        "--k", type=int, default=10, help="max ranked hits (default 10)"
+    )
+
+    def _cmd_tools_search_vector_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_search_vector
+        return cmd_tools_search_vector(args)
+
+    tl_search_vector.set_defaults(func=_cmd_tools_search_vector_lazy)
+
+    tl_search_fused = tools_sub.add_parser(
+        "search-fused",
+        help="RRF-fuse (K=60) the whole-file/symbol/xref-derived lanes, adding a gated semantic lane only when the base top result is weak",
+    )
+    tl_search_fused.add_argument("query", help="search query")
+    tl_search_fused.add_argument(
+        "--k", type=int, default=10, help="max ranked hits (default 10)"
+    )
+    tl_search_fused.add_argument(
+        "--weak-threshold",
+        type=float,
+        default=None,
+        dest="weak_threshold",
+        help="override the gate's default weak-base-signal threshold",
+    )
+
+    def _cmd_tools_search_fused_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_search_fused
+        return cmd_tools_search_fused(args)
+
+    tl_search_fused.set_defaults(func=_cmd_tools_search_fused_lazy)
+
+    tl_run = tools_sub.add_parser(
+        "run",
+        help="run a command via the executor daemon (spawn+capture, lazy-spawns the daemon)",
+    )
+    tl_run.add_argument(
+        "--timeout", type=float, default=None, help="seconds before the daemon times out the run"
+    )
+    tl_run.add_argument(
+        "--background",
+        action="store_true",
+        help="return immediately; the daemon keeps running the command and owns its state",
+    )
+    tl_run.add_argument(
+        "--auto-index",
+        action="store_true",
+        dest="auto_index",
+        help="opt-in: index this run's captured output for later search (never default-on); "
+        "secret-shaped output is refused, not indexed; skipped (index_error set) when "
+        "--background is also set",
+    )
+    tl_run.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON object (run_id/state/stdout/stderr, plus indexed/refused when "
+        "--auto-index is set) instead of the plain-text trailing-marker format",
+    )
+    tl_run.add_argument("command", help="program to run")
+    tl_run.add_argument("args", nargs=argparse.REMAINDER, help="arguments to the program")
+
+    def _cmd_tools_run_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_run
+        return cmd_tools_run(args)
+
+    tl_run.set_defaults(func=_cmd_tools_run_lazy)
+
+    tl_fetch = tools_sub.add_parser(
+        "fetch",
+        help="re-serve a prior run's next bounded output window without re-running it",
+    )
+    tl_fetch.add_argument("run_id", help="run id returned by a prior `run`")
+    tl_fetch.add_argument(
+        "--bound", type=int, default=None, help="max bytes to re-serve in this window (default 64KiB)"
+    )
+    tl_fetch.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON object instead of the plain-text trailing-marker format",
+    )
+
+    def _cmd_tools_fetch_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_fetch
+        return cmd_tools_fetch(args)
+
+    tl_fetch.set_defaults(func=_cmd_tools_fetch_lazy)
+
+    tl_batch = tools_sub.add_parser(
+        "batch-run",
+        help="run a list of shell-quoted commands under the daemon's batch concurrency semantics",
+    )
+    tl_batch.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="1 = one shared timeout budget run in sequence; 2-8 = each command gets its own timeout, run in parallel",
+    )
+    tl_batch.add_argument(
+        "--timeout-ms", type=int, default=None, dest="timeout_ms",
+        help="total shared budget at concurrency=1, per-command timeout at concurrency 2-8",
+    )
+    tl_batch.add_argument(
+        "commands", nargs="*", default=[],
+        help="each argument is one shell-quoted command, e.g. 'echo hi'; omit when using --commands-json",
+    )
+    tl_batch.add_argument(
+        "--commands-json",
+        default=None,
+        help="JSON array of {command, args} objects, run without shell tokenization; "
+        "mutually exclusive with positional commands",
+    )
+    tl_batch.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON array aligned 1:1 with the input commands, instead of plain text",
+    )
+
+    def _cmd_tools_batch_run_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_batch_run
+        return cmd_tools_batch_run(args)
+
+    tl_batch.set_defaults(func=_cmd_tools_batch_run_lazy)
+
+    tl_git_log = tools_sub.add_parser(
+        "git-log",
+        help="bounded git-log query scoped by a date window, revision range, or path filter",
+    )
+    tl_git_log.add_argument(
+        "--since", default=None, help="lower date bound (git's --since syntax)"
+    )
+    tl_git_log.add_argument(
+        "--until", default=None, help="upper date bound (git's --until syntax)"
+    )
+    tl_git_log.add_argument(
+        "--author", default=None, help="author filter (git's --author syntax)"
+    )
+    tl_git_log.add_argument("--path", default=None, help="limit to commits touching this path")
+    tl_git_log.add_argument(
+        "--repo",
+        default=None,
+        help="path to the git repository (default: the executor daemon's "
+        "working directory, which may not match your shell -- pass --repo "
+        "for a reliable target)",
+    )
+    tl_git_log.add_argument(
+        "rev_range", nargs="?", default=None, help="revision or revision range"
+    )
+    tl_git_log.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON object (run_id/state/stdout/stderr/truncated/elided_bytes) "
+        "instead of the plain-text trailing-marker format",
+    )
+
+    def _cmd_tools_git_log_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_git_log
+        return cmd_tools_git_log(args)
+
+    tl_git_log.set_defaults(func=_cmd_tools_git_log_lazy)
+
+    tl_git_blame = tools_sub.add_parser(
+        "git-blame",
+        help="bounded git-blame query for a file, optionally scoped to a line range",
+    )
+    tl_git_blame.add_argument(
+        "--start-line", type=int, default=None, dest="start_line",
+        help="1-based inclusive start line of an optional line range",
+    )
+    tl_git_blame.add_argument(
+        "--end-line", type=int, default=None, dest="end_line",
+        help="1-based inclusive end line of an optional line range",
+    )
+    tl_git_blame.add_argument(
+        "--repo",
+        default=None,
+        help="path to the git repository (default: the executor daemon's "
+        "working directory, which may not match your shell -- pass --repo "
+        "for a reliable target)",
+    )
+    tl_git_blame.add_argument("file", nargs="?", default=None, help="file to blame")
+    tl_git_blame.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON object (run_id/state/stdout/stderr/truncated/elided_bytes) "
+        "instead of the plain-text trailing-marker format",
+    )
+
+    def _cmd_tools_git_blame_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_git_blame
+        return cmd_tools_git_blame(args)
+
+    tl_git_blame.set_defaults(func=_cmd_tools_git_blame_lazy)
+
+    tl_git_diff = tools_sub.add_parser(
+        "git-diff",
+        help="bounded git-diff query between two revisions, or scoped by a path filter",
+    )
+    tl_git_diff.add_argument("--path", default=None, help="limit the diff to this path")
+    tl_git_diff.add_argument(
+        "--repo",
+        default=None,
+        help="path to the git repository (default: the executor daemon's "
+        "working directory, which may not match your shell -- pass --repo "
+        "for a reliable target)",
+    )
+    tl_git_diff.add_argument(
+        "rev_a", nargs="?", default=None, help="a revision range, or the first of two revisions"
+    )
+    tl_git_diff.add_argument("rev_b", nargs="?", default=None, help="the second of two revisions")
+    tl_git_diff.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON object (run_id/state/stdout/stderr/truncated/elided_bytes) "
+        "instead of the plain-text trailing-marker format",
+    )
+
+    def _cmd_tools_git_diff_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_git_diff
+        return cmd_tools_git_diff(args)
+
+    tl_git_diff.set_defaults(func=_cmd_tools_git_diff_lazy)
+
+    tl_session_search = tools_sub.add_parser(
+        "session-search",
+        help="query one session's captured events, scoped by the session-id validation choke point",
+    )
+    tl_session_search.add_argument("session_id", help="session id to query")
+    tl_session_search.add_argument(
+        "--substring", default=None, help="case-insensitive substring filter on event data"
+    )
+    tl_session_search.add_argument(
+        "--category", default=None, help="exact category filter"
+    )
+    tl_session_search.add_argument(
+        "--since", default=None, help="RFC3339 lower bound (inclusive) on event timestamp"
+    )
+    tl_session_search.add_argument(
+        "--until", default=None, help="RFC3339 upper bound (inclusive) on event timestamp"
+    )
+
+    def _cmd_tools_session_search_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_session_search
+        return cmd_tools_session_search(args)
+
+    tl_session_search.set_defaults(func=_cmd_tools_session_search_lazy)
+
+    tl_stats = tools_sub.add_parser(
+        "stats",
+        help="aggregate code-index segment, session, and executor run counts from the on-disk stores",
+    )
+
+    def _cmd_tools_stats_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_stats
+        return cmd_tools_stats(args)
+
+    tl_stats.set_defaults(func=_cmd_tools_stats_lazy)
+
+    tl_command_insight = tools_sub.add_parser(
+        "command-insight",
+        help="actionable report over accumulated run history: failing commands and the most recent failure",
+    )
+
+    def _cmd_tools_command_insight_lazy(args: argparse.Namespace) -> int:
+        from iai_mcp.cli._tools import cmd_tools_command_insight
+        return cmd_tools_command_insight(args)
+
+    tl_command_insight.set_defaults(func=_cmd_tools_command_insight_lazy)
 
     return parser
 

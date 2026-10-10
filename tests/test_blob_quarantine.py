@@ -18,12 +18,16 @@ def _passphrase(monkeypatch: pytest.MonkeyPatch):
 
 
 def _capture(store, text, sid):
+    from unittest.mock import patch
+
     from iai_mcp.capture import capture_turn
 
-    return UUID(capture_turn(
-        store, cue="", text=text, tier="episodic",
-        session_id=sid, role="user", live_turn=True,
-    )["record_id"])
+    with patch("iai_mcp.capture._is_noise", return_value=False):
+        result = capture_turn(
+            store, cue="", text=text, tier="episodic",
+            session_id=sid, role="user", live_turn=True,
+        )
+    return UUID(result["record_id"])
 
 
 def test_quarantine_tombstones_blobs_and_spares_memories(tmp_path):

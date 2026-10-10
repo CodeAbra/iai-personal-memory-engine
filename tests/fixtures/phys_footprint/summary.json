@@ -1,0 +1,26 @@
+[
+  {
+    "ok": true,
+    "n": 3000,
+    "first_recall_delta_bytes": 68878336,
+    "first_recall_peak_total_rss": 472023040,
+    "boot_sequence_delta_bytes": 320503808,
+    "first_recall_wall_ms": 351.54866613447666
+  },
+  {
+    "ok": true,
+    "n": 8000,
+    "first_recall_delta_bytes": 117817344,
+    "first_recall_peak_total_rss": 619167744,
+    "boot_sequence_delta_bytes": 407830528,
+    "first_recall_wall_ms": 766.841541044414
+  },
+  {
+    "ok": true,
+    "n": 15000,
+    "first_recall_delta_bytes": 191184896,
+    "first_recall_peak_total_rss": 690683904,
+    "boot_sequence_delta_bytes": 441958400,
+    "first_recall_wall_ms": 1483.3226250484586
+  }
+]

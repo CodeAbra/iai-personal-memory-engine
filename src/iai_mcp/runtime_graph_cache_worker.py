@@ -54,7 +54,13 @@ def _worker_entry(conn) -> None:
 
     Recognized message kinds:
       - `("abort", None)` — clean early exit (no compute, no result stream).
-      - `("nodes", [(id_str, embedding_blob), ...])` — accumulate node tuples.
+      - `("nodes", [(id_str, embedding_blob), ...])` or
+        `("nodes", [(id_str, embedding_blob, created_at_str), ...])` —
+        accumulate node tuples; the optional third element carries the
+        record's `created_at` so the rich-club recency-decay term (see
+        `richclub.rich_club_nodes`) reads the same signal the in-parent
+        build path already carries. A 2-tuple entry defaults to `""`
+        (no-op decay), matching a node with no `created_at` payload.
       - `("nodes_end", None)` — sentinel; no action.
       - `("edges", [(src_str, dst_str, weight), ...])` — accumulate edges.
       - `("edges_end", None)` — break the recv loop and proceed to compute.
@@ -68,6 +74,9 @@ def _worker_entry(conn) -> None:
       - `("mid_regions", [(comm_uuid_bytes, [node_uuid_bytes, ...]), ...])`
       - `("rich_club", [uuid_bytes, ...])`
       - `("max_degree", int)`
+      - repeated `("centrality", [(node_uuid_bytes, float), ...])` of size
+        `<= _ASSIGN_CHUNK`, streaming the same map computed for rich-club
+        ranking (no second Brandes pass)
       - `("done", None)`
     """
     # Late imports — execute FIRST, unconditionally. These are the only
@@ -103,12 +112,16 @@ def _worker_entry(conn) -> None:
             if kind == "abort":
                 return
             elif kind == "nodes":
-                for id_str, emb_blob in payload:
+                for entry in payload:
+                    id_str, emb_blob = entry[0], entry[1]
+                    created_at = entry[2] if len(entry) > 2 else ""
                     # Keep the buffer compact: .tolist() boxes every float and
                     # a corpus-scale graph in this child is what the memory
                     # watchdog kills. The frame is reused, so copy.
                     emb = np.frombuffer(emb_blob, dtype=np.float32).copy()
-                    nodes_buf.append((UUID(id_str), None, emb, {}))
+                    nodes_buf.append((
+                        UUID(id_str), None, emb, {"created_at": created_at or ""},
+                    ))
                 node_chunks_received += 1
                 if crash_after is not None and node_chunks_received >= crash_after:
                     # TEST-ONLY: simulate a mid-stream crash. Skip the
@@ -210,6 +223,19 @@ def _worker_entry(conn) -> None:
                 nd_chunk = []
         if nd_chunk:
             conn.send(("node_degrees", nd_chunk))
+        # Stream the SAME map computed above for rich-club ranking -- reusing
+        # it (never recomputing via _stream_centrality) keeps this worker's
+        # timeout headroom unchanged.
+        cent_chunk: list = []
+        for node_uuid, value in sorted(
+            worker_centrality.items(), key=lambda kv: kv[0].bytes
+        ):
+            cent_chunk.append((node_uuid.bytes, float(value)))
+            if len(cent_chunk) >= _ASSIGN_CHUNK:
+                conn.send(("centrality", cent_chunk))
+                cent_chunk = []
+        if cent_chunk:
+            conn.send(("centrality", cent_chunk))
         conn.send(("done", None))
     except RuntimeError:
         # Protocol violation — re-raise so the in-process driver tests see it.

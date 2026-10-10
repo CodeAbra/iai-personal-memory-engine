@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -354,3 +355,145 @@ def test_immediate_path_writes_genuine_prompt(tmp_path: Path):
     assert len(matches) == 1, turns
     assert matches[0]["text"] == prompt
     assert matches[0]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# Convergence-point guard: capture_turn() itself rejects structural noise on
+# EVERY route (RPC, CLI, drain workers), not only the transcript-parse walk
+# above. The recorded pollution signature is a query-generation eval
+# harness's own prompt template header -- structural scaffolding, not any
+# specific leaked phrase a user typed.
+# ---------------------------------------------------------------------------
+
+REAL_POLLUTION_SIGNATURE = (
+    "Below is one record from a developer's personal memory system.\n\n"
+    "Write the single most natural short query this person would type to "
+    "pull this exact record back out by MEANING alone. Do not copy "
+    "identifiers/paths/version numbers."
+)
+
+
+def _select_driver(driver: str, monkeypatch) -> None:
+    if driver == "lilli":
+        try:
+            import iai_mcp_native  # noqa: F401
+        except ImportError:
+            pytest.skip("iai_mcp_native not built — lilli driver unavailable in this env")
+        monkeypatch.setenv("LILLI_STORAGE_DRIVER", "lilli")
+    else:
+        monkeypatch.delenv("LILLI_STORAGE_DRIVER", raising=False)
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_rejects_the_real_recorded_pollution_signature(
+    driver, tmp_path: Path, monkeypatch,
+):
+    """The exact eval-harness template shape recorded as the live pollution
+    instance, fed through the REAL capture_turn(), must be rejected as a
+    skip-shaped result and write no record."""
+    _select_driver(driver, monkeypatch)
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path / "lancedb")
+    result = capture_turn(
+        store, cue="c", text=REAL_POLLUTION_SIGNATURE,
+        session_id="s-noise-real", role="user",
+    )
+
+    assert result["status"] == "skipped", result
+    assert result["record_id"] is None
+    assert list(store.iter_records()) == []
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_rejects_generic_noise_at_the_convergence_point(
+    driver, tmp_path: Path, monkeypatch,
+):
+    """A pre-existing _NOISE_PATTERNS signature, fed directly through
+    capture_turn() (not through transcript parsing), proves the coverage
+    extension itself -- every capture_turn caller now sees the guard."""
+    _select_driver(driver, monkeypatch)
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path / "lancedb")
+    result = capture_turn(
+        store, cue="c", text="<system-reminder>\nStale context.\n</system-reminder>",
+        session_id="s-noise-generic", role="user",
+    )
+
+    assert result["status"] == "skipped", result
+    assert result["record_id"] is None
+    assert list(store.iter_records()) == []
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_rejects_noise_even_with_working_tier_durable_marker(
+    driver, tmp_path: Path, monkeypatch,
+):
+    """working_tier_durable relaxes only the length floor -- a durable
+    payload that matches the structural noise guard is still rejected by
+    it, not silently exempted."""
+    _select_driver(driver, monkeypatch)
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path / "lancedb")
+    result = capture_turn(
+        store, cue="c", text="[Request interrupted by user]",
+        session_id="s-noise-durable", role="user",
+        provenance_extra={"working_tier_durable": True},
+    )
+
+    assert result["status"] == "skipped", result
+    assert result["reason"] == "structural noise pattern", result
+    assert result["record_id"] is None
+    assert list(store.iter_records()) == []
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_durable_marker_bypasses_only_the_length_floor(
+    driver, tmp_path: Path, monkeypatch,
+):
+    """Control for the test above: a short, non-noise durable payload
+    inserts below MIN_CAPTURE_LEN -- proving the length floor (not the
+    noise guard) is what working_tier_durable relaxes."""
+    _select_driver(driver, monkeypatch)
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path / "lancedb")
+    result = capture_turn(
+        store, cue="c", text="ok go",
+        session_id="s-durable-short", role="user",
+        provenance_extra={"working_tier_durable": True},
+    )
+
+    assert result["status"] == "inserted", result
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_capture_turn_ordinary_turn_survives_the_convergence_guard(
+    driver, tmp_path: Path, monkeypatch,
+):
+    """An ordinary multi-sentence conversational turn is stored exactly as
+    today -- the guard must never over-block real dialogue."""
+    _select_driver(driver, monkeypatch)
+    from iai_mcp.capture import capture_turn
+    from iai_mcp.store import MemoryStore
+
+    store = MemoryStore(path=tmp_path / "lancedb")
+    genuine_text = (
+        "the deploy checklist requires a green gate first. after that, "
+        "cut the release branch and tag it."
+    )
+    result = capture_turn(
+        store, cue="c", text=genuine_text,
+        session_id="s-noise-genuine", role="user",
+    )
+
+    assert result["status"] == "inserted", result
+    rec = store.get(UUID(result["record_id"]))
+    assert rec is not None
+    assert rec.literal_surface == genuine_text

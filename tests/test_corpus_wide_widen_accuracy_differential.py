@@ -243,12 +243,25 @@ def test_full_pool_scores_all_embedded_graph_nodes(tmp_path, monkeypatch, driver
     captured: dict = {}
     _orig_score = _RankIndexHandle.score
 
-    def _spy_score(self, graph, pool_ids, cosine, cosine_top_indices, *rest, **kwargs):
+    def _spy_score(self, pool_ids, cosine, cosine_top_indices, *rest, **kwargs):
         captured["pool_ids"] = list(pool_ids)
         captured["cosine_top_indices"] = np.array(cosine_top_indices)
-        return _orig_score(self, graph, pool_ids, cosine, cosine_top_indices, *rest, **kwargs)
+        return _orig_score(self, pool_ids, cosine, cosine_top_indices, *rest, **kwargs)
 
     monkeypatch.setattr(_RankIndexHandle, "score", _spy_score)
+
+    # Independent witness for the pool-membership invariant itself: the full
+    # graph node count BEFORE _collect_graph_pool resolves embeddings, so
+    # `pool_ids` can be checked against it directly rather than only against
+    # its own derived cosine array (argsort output always spans its own
+    # input 1:1 -- that alone cannot detect a pool built too small).
+    _orig_collect_pool = _pm._collect_graph_pool
+
+    def _spy_collect_pool(graph, records_cache, store_arg):
+        captured["graph_node_count"] = len(list(graph.iter_nodes()))
+        return _orig_collect_pool(graph, records_cache, store_arg)
+
+    monkeypatch.setattr(_pm, "_collect_graph_pool", _spy_collect_pool)
 
     _pm._last_recall_latency_ms = 0.0
     core.dispatch(store, "memory_recall", {
@@ -257,11 +270,18 @@ def test_full_pool_scores_all_embedded_graph_nodes(tmp_path, monkeypatch, driver
 
     pool_ids = captured.get("pool_ids") or []
     cosine_top_indices = captured.get("cosine_top_indices")
+    graph_node_count = captured.get("graph_node_count")
     assert cosine_top_indices is not None, "the Rust scorer path must have run"
+    assert graph_node_count is not None, "_collect_graph_pool must have run"
     assert len(pool_ids) > K_CANDIDATES, (
         f"pool_ids ({len(pool_ids)}) does not exceed K_CANDIDATES "
         f"({K_CANDIDATES}) on {driver} -- the truncation-is-inert proof "
         "needs a pool that actually exceeds the old cutoff"
+    )
+    assert len(pool_ids) == graph_node_count, (
+        f"pool_ids ({len(pool_ids)}) does not cover every embedded graph "
+        f"node ({graph_node_count}) on {driver} -- some node was dropped "
+        "before reaching the candidate pool"
     )
     assert len(cosine_top_indices) == len(pool_ids), (
         f"cosine_top_indices ({len(cosine_top_indices)}) does not cover the "

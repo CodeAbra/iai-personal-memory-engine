@@ -67,5 +67,5 @@ if text.strip():
     key = "userMessage" if first else "ephemeralMessage"
     print(json.dumps({"injectSteps": [{key: text}]}))
 '
-printf '%s' "$input" | /usr/bin/python3 -c "$PY_SCRIPT" "$here" 2>/dev/null || true
+printf '%s' "$input" | python3 -c "$PY_SCRIPT" "$here" 2>/dev/null || true
 exit 0

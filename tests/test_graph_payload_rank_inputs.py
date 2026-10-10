@@ -76,6 +76,75 @@ def test_production_builder_payloads_carry_rank_inputs(tmp_path):
     assert abs(float(payload["stability"]) - 0.9) < 1e-9
 
 
+def test_build_runtime_graph_impl_has_no_redundant_payload_copy():
+    """Source-level guard, scoped to `_build_runtime_graph_impl`: it must not
+    reconstruct a parallel boxed node_payload dict -- `graph._node_payload`
+    (already populated by every `set_node_payload` call) is the only source
+    `save()` reads from. Scoped to this one function (not the whole module)
+    because `build_runtime_graph_incremental` has its own, out-of-scope,
+    delta-tracking local of the same name that this task does not touch."""
+    import inspect
+
+    from iai_mcp.retrieve import _build_runtime_graph_impl
+
+    src = inspect.getsource(_build_runtime_graph_impl)
+    assert "node_payload_for_cache" not in src, (
+        "node_payload_for_cache must be fully removed from "
+        "_build_runtime_graph_impl -- it is the redundant ~15KB/node "
+        "boxed-list copy this task exists to delete"
+    )
+
+
+def test_production_builder_persists_rank_fields_via_graph_node_payload(tmp_path):
+    """`save()` now receives `graph._node_payload` directly (no parallel
+    boxed copy). The persisted cache must carry every rank field and a real
+    (non-zero) centrality for an interior node on a graph where betweenness
+    is meaningful -- proving the single-copy path loses nothing the old
+    parallel dict carried."""
+    from iai_mcp import runtime_graph_cache
+    from iai_mcp.retrieve import _build_runtime_graph_impl
+    from iai_mcp.store import flush_record_buffer
+
+    store = MemoryStore(path=tmp_path / "store")
+    rng = np.random.default_rng(23)
+    recs = [
+        _rec(
+            (lambda v: (v / np.linalg.norm(v)).tolist())(rng.normal(size=EMBED_DIM)),
+            aaak=f"aaak-{i}", days_old=i, stability=0.1 * i,
+        )
+        for i in range(5)
+    ]
+    for rec in recs:
+        store.insert(rec)
+    flush_record_buffer(store)
+    ids = [r.id for r in recs]
+    store.boost_edges(
+        [(ids[i], ids[i + 1]) for i in range(len(ids) - 1)],
+        delta=1.0, edge_type="hebbian",
+    )
+
+    _build_runtime_graph_impl(store)
+
+    loaded = runtime_graph_cache.try_load(store)
+    assert loaded is not None, "the impl must persist a cache this call built"
+    _assignment, _rich, persisted_payload, _max_degree, _node_degrees = loaded
+    assert persisted_payload, "persisted node_payload must be non-empty for this small corpus"
+
+    interior_id = str(ids[2])
+    assert interior_id in persisted_payload
+    node = persisted_payload[interior_id]
+    for field in RANK_FIELDS:
+        assert field in node, f"persisted node_payload is missing {field!r}"
+    assert node["aaak_index"] == "aaak-2"
+    assert abs(float(node["stability"]) - 0.2) < 1e-9
+    assert node["centrality"] > 0.0, (
+        "an interior node on a path graph must carry non-zero betweenness "
+        "centrality in the persisted cache"
+    )
+    for field in ("embedding", "surface", "tier", "pinned", "tags", "language"):
+        assert field in node, f"persisted node_payload is missing {field!r}"
+
+
 def test_authority_merge_transplants_stale_state():
     from iai_mcp.pipeline import merge_authority_hits
 

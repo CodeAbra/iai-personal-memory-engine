@@ -96,7 +96,7 @@ def _cold_store_and_handle(tmp_path: Path, name: str, specs):
     for spec in specs:
         store.insert(_record_from_spec(store, spec))
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
+    handle = rank_index_for(store)
     return store, graph, handle
 
 
@@ -108,8 +108,8 @@ def _warm_store_and_handle(tmp_path: Path, name: str, specs):
     store = MemoryStore(path=tmp_path / name / "lancedb")
     store.root = tmp_path / name
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
-    handle.snapshot(graph, [])  # trivial empty build, establishes the handle
+    handle = rank_index_for(store)
+    handle.snapshot([])  # trivial empty build, establishes the handle
     for spec in specs:
         store.insert(_record_from_spec(store, spec))
     return store, graph, handle
@@ -129,8 +129,8 @@ def test_cold_build_index_to_index_parity_with_warm_incremental_build(tmp_path: 
     _store_warm, graph_warm, handle_warm = _warm_store_and_handle(tmp_path, "warm", specs)
 
     query_token = "marker3"
-    gen_cold, ids_cold, matrix_cold, degree_cold, postings_cold = handle_cold.snapshot(graph_cold, [query_token])
-    gen_warm, ids_warm, matrix_warm, degree_warm, postings_warm = handle_warm.snapshot(graph_warm, [query_token])
+    gen_cold, ids_cold, matrix_cold, degree_cold, postings_cold = handle_cold.snapshot([query_token])
+    gen_warm, ids_warm, matrix_warm, degree_warm, postings_warm = handle_warm.snapshot([query_token])
 
     assert set(ids_cold) == set(ids_warm), "cold and warm builds must resolve to the same id set"
     assert len(ids_cold) == n and len(ids_warm) == n
@@ -174,10 +174,10 @@ def test_cold_start_build_time_is_measured_and_recorded(tmp_path: Path):
         # build (_RankIndexHandle._build, triggered by the first snapshot())
         # is measured.
         graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-        handle = rank_index_for(store, graph)
+        handle = rank_index_for(store)
 
         start = time.perf_counter()
-        handle.snapshot(graph, [])
+        handle.snapshot([])
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         samples_ms.append(elapsed_ms)
 

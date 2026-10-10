@@ -146,6 +146,7 @@ _STEP_SOURCE_FILE: dict[SleepStep, str] = {
     SleepStep.RECONSOLIDATION_VALENCE: "_reconsolidation_valence.py",
     SleepStep.PROC_MINE: "_proc_mine.py",
     SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: "_transcript_sweep_backstop.py",
+    SleepStep.SALIENCE_AUTO_MIGRATION: "_salience_auto_migration.py",
 }
 
 

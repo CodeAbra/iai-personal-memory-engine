@@ -57,6 +57,8 @@ BENCH_SCRIPTS_NEEDING_SHIM = [
     "fhrr_verdict_membership.py",
     "fhrr_verdict_recall_delta.py",
     "proc_corpus_census.py",
+    "recall_quality_fixture.py",
+    "recall_quality_verdict.py",
 ]
 
 BENCH_SCRIPTS_NO_SHIM = [
@@ -69,6 +71,10 @@ BENCH_SCRIPTS_NO_SHIM = [
     "make_parity_summary.py",
     "memorygraph_adj_spike.py",
     "cofire_shape_probe.py",
+    "_check_recall_quality_artifact.py",
+]
+
+BENCH_SCRIPTS_DYNAMIC_PATH: list[str] = [
 ]
 
 

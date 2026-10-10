@@ -33,6 +33,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from iai_mcp.model_attribution import normalize_model
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,19 @@ a task (focal or parked) is considered stale and is closed on the next turn."""
 
 WORKING_TIER_MAX_GOAL_CHARS: int = 512
 """Verbatim (never smoothed) upper bound on a first-turn-seeded goal."""
+
+WORKING_TIER_GOAL_DRIFT_COS_THRESHOLD: float = 0.5
+"""Cosine distance (1 - cosine similarity) between a turn's embedding and
+the cached goal vector above which the turn counts as off-topic. Plain
+retunable constant, never a KnobSpec."""
+
+WORKING_TIER_GOAL_DRIFT_RUN_MIN: int = 3
+"""Consecutive over-threshold turns required before a pivot counts as
+sustained -- a single stray off-topic turn must never re-anchor the goal."""
+
+WORKING_TIER_GOAL_DRIFT_COOLDOWN_MIN: int = 5
+"""Turns since the last re-anchor (or task open) required before another
+fire is allowed."""
 
 _WORKING_TIER_ROLES: tuple[str, ...] = ("GOAL", "SUBGOAL", "HYPOTHESIS", "RESULT", "FOCUS")
 """Private BSC role names for the structure encoder. Never added to
@@ -77,6 +92,14 @@ class WorkingSetEntry:
         default_factory=list,
         kw_only=True,
     )
+    goal_embedding: list[float] | None = field(default=None, kw_only=True)
+    """RAM-only cached vector of the current goal text; never persisted or
+    rendered. None always means "recompute against the current goal" --
+    the staleness fence set on every re-anchor fire and on task open."""
+    goal_drift_run: int = field(default=0, kw_only=True)
+    """RAM-only consecutive-over-threshold turn count; never persisted."""
+    goal_drift_cooldown: int = field(default=0, kw_only=True)
+    """RAM-only turns-since-last-re-anchor count; never persisted."""
 
 
 _lock = threading.Lock()
@@ -379,7 +402,18 @@ def update_task(
         if entry is None:
             return None
         if goal is not None and goal.strip():
-            entry.goal = goal.strip()[:WORKING_TIER_MAX_GOAL_CHARS]
+            new_goal = goal.strip()[:WORKING_TIER_MAX_GOAL_CHARS]
+            if new_goal != entry.goal:
+                # Staleness fence: a goal change re-baselines the drift gate
+                # here too, not just on the automatic fire path -- otherwise
+                # the gate keeps comparing against the OLD goal's vector.
+                # Gated on an actual change so a caller re-sending the same
+                # goal text every turn can never reset the cooldown/run
+                # counters and silently disable the drift gate.
+                entry.goal_embedding = None
+                entry.goal_drift_run = 0
+                entry.goal_drift_cooldown = 0
+            entry.goal = new_goal
         if sub_goal is not None:
             _bounded_append(
                 entry.open_subgoals, sub_goal.strip(),
@@ -501,6 +535,34 @@ def _turn_ts(record: Any) -> float:
 def _literal_surface_of(record: Any) -> str:
     text = getattr(record, "literal_surface", None)
     return text if isinstance(text, str) else ""
+
+
+def _cosine_distance(a: list[float], b: list[float]) -> float:
+    """1 - cosine similarity, zero-norm guarded: a degenerate vector reads
+    as zero distance, never a false pivot."""
+    av = np.asarray(a, dtype=np.float32)
+    bv = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(av))
+    nb = float(np.linalg.norm(bv))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return 1.0 - float(np.dot(av, bv) / (na * nb))
+
+
+def _goal_embedding(store: Any, goal: str) -> list[float] | None:
+    """Embed goal text for the drift comparison. Fail-open on any failure.
+    MUST run OFF the working-tier _lock (transitively takes the store's own
+    locks via the embed-identity guard)."""
+    if getattr(store, "db", None) is None:
+        return None
+    try:
+        from iai_mcp.embed import embedder_for_store
+
+        embedder = embedder_for_store(store)
+        return embedder.embed(goal)
+    except Exception as exc:  # noqa: BLE001 -- priming is best-effort, never a write failure
+        logger.debug("working_tier goal embedding failed: %s", exc)
+        return None
 
 
 def _is_own_consolidation_write(record: Any) -> bool:
@@ -732,6 +794,33 @@ def update_from_record(record: Any, *, store: Any = None) -> None:
             # re-trip (or fail to trip) the idle gap on the next in-order turn.
             entry.last_turn_ts = max(entry.last_turn_ts, now)
 
+            # Drift decision: PURE ARITHMETIC ONLY -- no embed call while
+            # _lock is held (the embedder transitively takes the store's own
+            # locks; _lock is not reentrant). Reads the CACHED goal_embedding
+            # only; priming/recompute happens post-lock below.
+            entry.goal_drift_cooldown += 1
+            should_refresh = False
+            record_embedding = getattr(record, "embedding", None)
+            if record_embedding is not None and entry.goal_embedding is not None:
+                distance = _cosine_distance(record_embedding, entry.goal_embedding)
+                if distance > WORKING_TIER_GOAL_DRIFT_COS_THRESHOLD:
+                    entry.goal_drift_run += 1
+                else:
+                    entry.goal_drift_run = 0
+                should_refresh = (
+                    bool(text)
+                    and distance > WORKING_TIER_GOAL_DRIFT_COS_THRESHOLD
+                    and entry.goal_drift_run >= WORKING_TIER_GOAL_DRIFT_RUN_MIN
+                    and entry.goal_drift_cooldown >= WORKING_TIER_GOAL_DRIFT_COOLDOWN_MIN
+                )
+            if should_refresh:
+                # Staleness fence: a fire always nulls the cached vector so
+                # the next eligible turn re-primes it against the NEW goal,
+                # never leaving it pointed at the just-replaced one.
+                entry.goal_drift_run = 0
+                entry.goal_drift_cooldown = 0
+                entry.goal_embedding = None
+
         # Consolidation may re-enter store.insert() -> _feed_working ->
         # update_from_record, which must acquire _lock again — never call
         # _consolidate while holding it (lock is not re-entrant).
@@ -748,7 +837,29 @@ def update_from_record(record: Any, *, store: Any = None) -> None:
                 with _lock:
                     parked.results.extend(undelivered)
             _persist_entry(store, parked)
-        _persist_entry(store, entry)
+
+        # Fire the re-anchor OFF the lock: update_task re-acquires _lock
+        # itself (non-reentrant) and already persists on this call, so the
+        # trailing unconditional persist below is skipped for this turn to
+        # avoid a redundant double continuity-write.
+        if should_refresh:
+            update_task(goal=text, session_id=sid, store=store)
+        else:
+            _persist_entry(store, entry)
+
+        # _goal_embedding must never run while _lock is held (non-reentrant;
+        # transitively takes the store's own locks).
+        if (
+            record_embedding is not None
+            and getattr(store, "db", None) is not None
+            and entry.goal_embedding is None
+        ):
+            goal_snapshot = entry.goal
+            vector = _goal_embedding(store, goal_snapshot)
+            if vector is not None:
+                with _lock:
+                    if entry.goal_embedding is None and entry.goal == goal_snapshot:
+                        entry.goal_embedding = vector
     except Exception as exc:  # noqa: BLE001 -- hook isolation, never crash a write
         logger.debug("working_tier update_from_record failed: %s", exc)
 
@@ -794,4 +905,7 @@ __all__ = [
     "WORKING_TIER_PARK_SLOTS",
     "WORKING_TIER_IDLE_CLOSE_SEC",
     "WORKING_TIER_MAX_GOAL_CHARS",
+    "WORKING_TIER_GOAL_DRIFT_COS_THRESHOLD",
+    "WORKING_TIER_GOAL_DRIFT_RUN_MIN",
+    "WORKING_TIER_GOAL_DRIFT_COOLDOWN_MIN",
 ]

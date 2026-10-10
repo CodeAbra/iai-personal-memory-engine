@@ -61,10 +61,21 @@ def test_capture_embeds_with_date_prefix_surface_verbatim(
     assert result["status"] == "inserted"
 
     assert recording_embedder.inputs, "embedder was never called"
-    embed_input = recording_embedder.inputs[-1]
-    assert _DATE_PREFIX_RE.match(embed_input), (
-        f"embed input must carry the date prefix, got: {embed_input[:60]!r}"
+    # capture_turn's own embed call carries the date prefix, but a
+    # working-tier goal-priming embed on the same shared embedder can
+    # follow it with the bare text -- find the capture embed by its shape
+    # (mirrors test_capture_embed_date_blend_bounded_component's own
+    # filtered lookup below) rather than assuming it is the last call.
+    date_prefixed_inputs = [
+        s for s in recording_embedder.inputs if _DATE_PREFIX_RE.match(s)
+    ]
+    assert date_prefixed_inputs, (
+        f"no embed input carried the date prefix: {recording_embedder.inputs}"
     )
+    assert len(date_prefixed_inputs) == 1, (
+        f"expected exactly one date-prefixed capture embed: {date_prefixed_inputs}"
+    )
+    embed_input = date_prefixed_inputs[0]
     assert embed_input.endswith(text)
 
     from iai_mcp.store import flush_record_buffer

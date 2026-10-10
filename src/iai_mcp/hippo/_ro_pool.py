@@ -158,7 +158,7 @@ class RoConnPool:
     def _open_slot(self) -> Any:
         from iai_mcp.lillibrain.connection import get_lilli_raw_conn
 
-        conn = get_lilli_raw_conn(self._path, read_only=True)
+        conn = get_lilli_raw_conn(self._path, read_only=True, ro_pool_size=self._size)
         if conn is None:
             raise RuntimeError(
                 f"RoConnPool: no lilli engine connection available for {self._path!r}"

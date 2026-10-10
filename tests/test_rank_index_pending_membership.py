@@ -1,15 +1,16 @@
 """Membership-exact proof: the resident Rust rank index vs today's
 LexicalIndex, over a corpus containing an `embedding_pending` row.
 
-`build_runtime_graph` and `_rank_builder_graph_for` both exclude pending
-rows at the SQL level (matching the vector/cosine scan's exclusion), while
-`LexicalIndex` includes them. Feeding pending rows into the Rust index with
-a zero vector and `pending=True` closes that membership gap. The
-corpus-wide graph built here matches `build_runtime_graph`'s active-only
-scope but skips its community-detection/centrality machinery, which is
-irrelevant to index membership -- NOT a stand-in for `_rank_builder_graph_for`,
-whose per-recall hydrated-candidate accumulation is a strict subset by
-design and out of scope for this proof.
+`build_runtime_graph` and the live recall path's resident-candidate cache
+both exclude pending rows at the SQL level (matching the vector/cosine
+scan's exclusion), while `LexicalIndex` includes them. Feeding pending rows
+into the Rust index with a zero vector and `pending=True` closes that
+membership gap. The corpus-wide graph built here matches
+`build_runtime_graph`'s active-only scope but skips its
+community-detection/centrality machinery, which is irrelevant to index
+membership -- NOT a stand-in for the recall path's per-call hydrated
+candidate set, whose accumulation is a strict subset by design and out of
+scope for this proof.
 """
 from __future__ import annotations
 
@@ -150,10 +151,10 @@ def _store(tmp_path: Path) -> MemoryStore:
 def test_pending_row_in_lexical_out_of_cosine(_store: MemoryStore):
     ids = _build_corpus(_store)
     graph = _build_corpus_wide_graph(_store)
-    handle = rank_index_for(_store, graph)
+    handle = rank_index_for(_store)
 
     generation, rust_ids, matrix, _degree, postings = handle.snapshot(
-        graph, tokens=[_PENDING_TOKEN]
+        tokens=[_PENDING_TOKEN]
     )
     assert generation >= 0
 
@@ -194,9 +195,9 @@ def test_pending_row_in_lexical_out_of_cosine(_store: MemoryStore):
 def test_membership_matches_lexical_index(_store: MemoryStore):
     ids = _build_corpus(_store)
     graph = _build_corpus_wide_graph(_store)
-    handle = rank_index_for(_store, graph)
+    handle = rank_index_for(_store)
 
-    _generation, rust_ids, _matrix, _degree, _postings = handle.snapshot(graph, tokens=[])
+    _generation, rust_ids, _matrix, _degree, _postings = handle.snapshot(tokens=[])
     rust_membership = {str(UUID(int=i)) for i in rust_ids}
 
     _store.lexical_search("irrelevant probe query", k=1)

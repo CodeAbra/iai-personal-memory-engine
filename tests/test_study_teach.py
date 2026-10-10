@@ -17,6 +17,7 @@ from uuid import UUID
 
 import pytest
 
+import iai_mcp.study
 from iai_mcp.capture import capture_turn
 from iai_mcp.store import MemoryStore
 from iai_mcp.study import (
@@ -423,6 +424,102 @@ def test_iter_study_files_excludes_dot_directories(tmp_path):
     rels = {str(p.relative_to(tmp_path)) for p in found}
     assert "notes/a.md" in rels, rels
     assert not any(".obsidian" in str(p) for p in found), found
+
+
+def test_iter_study_files_dot_dir_allowlist_is_root_scoped_and_bounded(tmp_path):
+    """A named dot-directory is admitted only at the walk root, and only its
+    non-archive contents: nested non-archive content stays visible, the
+    archive subdirectory is dropped beneath the admitted dot-directory (a
+    top-level directory of the same name elsewhere is untouched), a
+    dot-directory nested deeper than the walk root stays pruned, and every
+    junk/cache/build directory plus a non-allowlisted dot-directory stay
+    excluded. The empty default still excludes the admitted dot-directory
+    entirely -- proving the allowlist is opt-in, not a global exception.
+    Walk-level only -- no store, no embedder."""
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "a.md").write_text("a real note", encoding="utf-8")
+
+    planning = tmp_path / ".planning"
+    planning.mkdir()
+    (planning / "roadmap.md").write_text("a planning root doc", encoding="utf-8")
+    phases = planning / "phases"
+    phases.mkdir()
+    (phases / "x.md").write_text("a nested planning doc", encoding="utf-8")
+    archive = planning / "milestones"
+    archive.mkdir()
+    (archive / "old.md").write_text("an archived doc", encoding="utf-8")
+
+    top_level_milestones = tmp_path / "milestones"
+    top_level_milestones.mkdir()
+    (top_level_milestones / "keep.md").write_text("not an archive", encoding="utf-8")
+
+    nested_planning = notes / ".planning"
+    nested_planning.mkdir()
+    (nested_planning / "deep.md").write_text("a dot-dir below the walk root", encoding="utf-8")
+
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config.md").write_text("git config", encoding="utf-8")
+
+    node_modules = tmp_path / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "pkg.md").write_text("a dependency", encoding="utf-8")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "out.md").write_text("a build artifact", encoding="utf-8")
+
+    other_hidden = tmp_path / ".other_hidden"
+    other_hidden.mkdir()
+    (other_hidden / "h.md").write_text("a non-allowlisted dot-dir", encoding="utf-8")
+
+    found = iter_study_files(
+        tmp_path, dot_dir_allowlist=frozenset({".planning"}), max_files=1_000_000,
+    )
+    rels = {str(p.relative_to(tmp_path)) for p in found}
+
+    for expected in (
+        "notes/a.md", ".planning/roadmap.md", ".planning/phases/x.md", "milestones/keep.md",
+    ):
+        assert expected in rels, rels
+    for excluded in (
+        ".git/config.md", "node_modules/pkg.md", "target/out.md", ".other_hidden/h.md",
+        ".planning/milestones/old.md", "notes/.planning/deep.md",
+    ):
+        assert excluded not in rels, rels
+
+    default_found = iter_study_files(tmp_path, max_files=1_000_000)
+    default_rels = {str(p.relative_to(tmp_path)) for p in default_found}
+    assert ".planning/roadmap.md" not in default_rels, default_rels
+
+
+def test_study_directory_never_teaches_planning_docs(tmp_path, monkeypatch):
+    """study_directory's walk keeps the empty default allowlist -- a
+    .planning/ file must never reach study_document, so .planning/ content
+    never enters Hippo memory. Walk-level only -- no store, no embedder."""
+    recorded: "list[str | None]" = []
+
+    def _spy(store, **kwargs):
+        recorded.append(kwargs.get("source_name"))
+        return {}
+
+    monkeypatch.setattr(iai_mcp.study, "study_document", _spy)
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "a.md").write_text("a real note", encoding="utf-8")
+
+    planning = tmp_path / ".planning"
+    planning.mkdir()
+    (planning / "secret.md").write_text("planning-only content", encoding="utf-8")
+
+    study_directory(object(), tmp_path)
+
+    assert "notes/a.md" in recorded, recorded
+    assert not any(
+        name is not None and name.startswith(".planning") for name in recorded
+    ), recorded
 
 
 @pytest.mark.parametrize("driver", ["stdlib", "lilli"])

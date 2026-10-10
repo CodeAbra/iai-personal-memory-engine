@@ -820,6 +820,10 @@ def capture_turn(
                     "record_id": str(existing_id),
                     "reason": "exact-key re-drain",
                 }
+        # Convergence-point structural noise guard: every capture_turn caller
+        # (RPC, CLI, drain workers) passes through here.
+        if _is_noise(text):
+            return {"status": "skipped", "record_id": None, "reason": "structural noise pattern"}
         if directive:
             directive_reason = _directive_budget_reject_reason(store, text)
             if directive_reason is not None:
@@ -842,6 +846,9 @@ def capture_turn(
                     # A budget-accepted directive must land its own row --
                     # folding it into an existing neighbour would silently
                     # drop the standing-order intent.
+                    # Fold-protection gate is never_merge only -- tombstoning
+                    # (destructive/irreversible) uses a broader never_merge-
+                    # or-never_decay gate; see migrate/_template_pollution.py.
                     if getattr(record, "never_merge", False) or directive:
                         continue
                     try:
@@ -1243,6 +1250,9 @@ _NOISE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("startswith", "Base directory for this skill:"),
     ("startswith", "<task-notification>"),
     ("startswith", "<system-reminder>"),
+    # A query-generation eval harness's own prompt template header — its
+    # structural scaffolding, not a denylist of any specific leaked phrase.
+    ("startswith", "Below is one record from a developer"),
     ("equals",     "[Request interrupted by user]"),
 )
 

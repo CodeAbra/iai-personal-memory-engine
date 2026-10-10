@@ -15,12 +15,14 @@ from pathlib import Path
 import pytest
 
 # Every test in this module exercises PRAGMA cache_size / cached_statements,
-# which configures the SQLite page cache and statement cache; the native
-# engine has no page-cache analog and accepts-and-ignores the PRAGMA. Its
-# at-rest footprint bound is proven separately by the per-record size and
-# float32-blob tests in test_hippo_memory_footprint.py. Each test therefore
-# opens its store against the legacy driver explicitly rather than relying on
-# whatever the ambient default happens to be.
+# which configures the SQLite page cache and statement cache. On the native
+# engine, PRAGMA cache_size sets the pager's page-cache budget too (the
+# setter converts the KiB value at the engine's real page size and calls
+# set_cache_pages); this module's assertions run against the legacy stdlib
+# driver, while the RO/raw engine connection path is covered by
+# tests/test_ro_conn_cache_bound.py. Each test therefore opens its store
+# against the legacy driver explicitly rather than relying on whatever the
+# ambient default happens to be.
 
 
 @pytest.fixture(autouse=True)

@@ -1,7 +1,10 @@
 """Page-level constants for the LilliBrain storage engine."""
 from __future__ import annotations
 
+import logging
 import os
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Magic and page geometry
@@ -90,3 +93,68 @@ OVERFLOW_DATA_OFFSET: int = 4
 # are the next-page pointer).  Used only by check_integrity when labelling
 # pages discovered by following cell overflow pointers.
 PAGE_TYPE_OVERFLOW: int = 0xFF
+
+# ---------------------------------------------------------------------------
+# Pager page-cache budgets (PRAGMA cache_size, KiB) — shared resolver
+# ---------------------------------------------------------------------------
+
+MIN_CACHE_KIB = 4096       # below this the page cache thrashes
+MAIN_CACHE_KIB = 65536     # main read-write connection default (64 MiB)
+RO_CONN_CACHE_KIB = 8192   # per-slot RO/raw-reader default (8 MiB); multiplied
+                           # by the RO pool size, so this must stay well under
+                           # MAIN_CACHE_KIB to keep the aggregate RO ceiling in
+                           # parity with the single main connection's budget.
+
+
+def resolve_cache_size_kib(env_key: str, default_kib: int, env=os.environ) -> int:
+    """Resolve a PRAGMA cache_size budget in KiB from an env override.
+
+    Non-int or <=0 -> default_kib. Positive and below MIN_CACHE_KIB -> clamped
+    up to MIN_CACHE_KIB. A negative env value is never abs()-rewritten; it is
+    treated as "use default" like any other <=0 value.
+    """
+    raw = env.get(env_key, str(default_kib))
+    try:
+        kib = int(raw)
+    except (TypeError, ValueError):
+        return default_kib
+    if kib <= 0:
+        return default_kib
+    if kib < MIN_CACHE_KIB:
+        return MIN_CACHE_KIB
+    return kib
+
+
+# Ceiling on the aggregate RO pager footprint (RO_CONN_CACHE_KIB * pool size).
+# IAI_MCP_RO_CONN_CACHE_SIZE_KIB and IAI_MCP_RO_POOL_SIZE are independently
+# operator-configurable; without this ceiling their product is unbounded.
+RO_AGGREGATE_CEILING_KIB = 4 * MAIN_CACHE_KIB  # 256 MiB
+
+
+def resolve_ro_slot_cache_kib(pool_size: int, env=os.environ) -> int:
+    """Resolve the per-slot RO pager cache in KiB, clamped toward keeping the
+    aggregate (per-slot KiB * pool_size) at or under RO_AGGREGATE_CEILING_KIB,
+    but never below MIN_CACHE_KIB per slot.
+
+    Defaults are unaffected: 8192 KiB/slot * 8 slots = 64 MiB, well under the
+    ceiling. An operator-requested product above the ceiling is reduced, with
+    a warning logged at the point of the clamp. Above pool_size roughly 64,
+    the per-slot floor wins and the aggregate ceiling is no longer strictly
+    enforced -- a 0 KiB/slot result would read as an unbounded cache to the
+    engine, worse than exceeding the ceiling.
+    """
+    resolved = resolve_cache_size_kib(
+        "IAI_MCP_RO_CONN_CACHE_SIZE_KIB", RO_CONN_CACHE_KIB, env=env
+    )
+    per_slot_ceiling = RO_AGGREGATE_CEILING_KIB // max(1, pool_size)
+    # Floor wins over the aggregate ceiling above pool_size ~64: never return
+    # below MIN_CACHE_KIB (0 reads as "-0" to the engine, which parses that as
+    # unbounded rather than minimal).
+    clamped = max(MIN_CACHE_KIB, min(resolved, per_slot_ceiling))
+    if resolved > per_slot_ceiling:
+        _log.warning(
+            "RO connection cache clamped: %d KiB/slot * pool_size=%d would "
+            "exceed the %d KiB aggregate ceiling; using %d KiB/slot instead",
+            resolved, pool_size, RO_AGGREGATE_CEILING_KIB, clamped,
+        )
+    return clamped
