@@ -139,7 +139,7 @@ def install_antigravity_hooks() -> int:
         entries.append({
             "hooks": [{
                 "type": "command",
-                "command": f"{_CMD_PREFIX}{hooks_dir / marker}",
+                "command": exact_command,
                 "timeout": timeout,
             }]
         })
@@ -148,7 +148,7 @@ def install_antigravity_hooks() -> int:
 
     if changed or not hooks_json.exists():
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
-        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _atomic_write_text(hooks_json, json.dumps(data, indent=2))
 
     if _IS_WIN:
         print("\nSetting up auto-scan for Antigravity GUI (Desktop App) users...")
@@ -234,7 +234,7 @@ def uninstall_antigravity_hooks() -> int:
         return 1
     if _GROUP in data:
         data.pop(_GROUP, None)
-        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _atomic_write_text(hooks_json, json.dumps(data, indent=2))
         print(f"patched: {hooks_json} ({_GROUP} group removed)")
     else:
         print(f"(no {_GROUP} group to remove) {hooks_json}")
@@ -265,11 +265,9 @@ def status_antigravity_hooks() -> int:
     for event, marker, _timeout in _EVENT_WIRING:
         exact_command = f"{_CMD_PREFIX}{_quote(str(hooks_dir / marker))}"
         wired = isinstance(group, dict) and any(
-            marker in (h.get("command") or "")
+            _entry_matches_exact(e, exact_command)
             for e in group.get(event, [])
             if isinstance(e, dict)
-            for h in (e.get("hooks") or [])
-            if isinstance(h, dict)
         )
         all_wired = all_wired and wired
         print(

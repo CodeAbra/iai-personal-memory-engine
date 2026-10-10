@@ -648,7 +648,8 @@ def cmd_cowork_install(args: argparse.Namespace) -> int:
         print(f"installed: {unit_list}")
 
     _seed_cli_path_cache()
-    print(_patch_claude_desktop_config("install"))
+    desktop_msg, _desktop_ok = _patch_claude_desktop_config("install")
+    print(desktop_msg)
 
     print(
         "\nThe memory system will keep reading new Claude conversations in "

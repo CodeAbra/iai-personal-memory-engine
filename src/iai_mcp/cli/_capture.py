@@ -1468,14 +1468,6 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
 
     settings.write_text(_json.dumps(data, indent=2), encoding="utf-8")
 
-    from iai_mcp.cli._agent_allowlist import migrate_agent_allowlists
-    agents_dir = Path.home() / ".claude" / "agents"
-    if agents_dir.exists():
-        n_agents = migrate_agent_allowlists(agents_dir)
-        print(f"agent allowlists: {n_agents} file(s) augmented with mcp__iai-tools__* in {agents_dir}")
-    else:
-        print(f"agent allowlists: {agents_dir} absent — skipped")
-
     code_msg, code_ok = _patch_claude_code_config("install")
     print(code_msg)
     desktop_msg, desktop_ok = _patch_claude_desktop_config("install")
@@ -1723,14 +1715,6 @@ def cmd_capture_hooks_uninstall(args: argparse.Namespace) -> int:
             print(f"patched: {settings} (iai-tools agent-inject PreToolUse entry removed)")
         else:
             print(f"(no iai-tools agent-inject PreToolUse entry to remove) {settings}")
-
-    from iai_mcp.cli._agent_allowlist import remove_iai_tools_token
-    agents_dir = Path.home() / ".claude" / "agents"
-    if agents_dir.exists():
-        n_agents = remove_iai_tools_token(agents_dir)
-        print(f"agent allowlists: {n_agents} file(s) had mcp__iai-tools__* removed in {agents_dir}")
-    else:
-        print(f"agent allowlists: {agents_dir} absent — skipped")
 
     code_msg, code_ok = _patch_claude_code_config("uninstall")
     print(code_msg)

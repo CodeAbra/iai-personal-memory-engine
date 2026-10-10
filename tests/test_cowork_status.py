@@ -367,7 +367,7 @@ def cowork_status_env(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(
         "iai_mcp.cli._capture._patch_claude_desktop_config",
-        lambda action: "Claude Desktop: stubbed",
+        lambda action: ("Claude Desktop: stubbed", True),
     )
     monkeypatch.setattr(
         "iai_mcp.cli._cowork._issue_sweeper_load", lambda paths: None,

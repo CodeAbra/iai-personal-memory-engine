@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path under "Program Files" no longer breaks every hook command, and the
   Antigravity installer quotes its hook script path; re-running install heals
   an already-broken entry in place (#118, #121).
+- The Antigravity hook installer writes `hooks.json` atomically, like the
+  Codex and Cursor installers, and matches an existing entry by its exact
+  command instead of a substring, so a stale or hand-edited entry no longer
+  suppresses a correct install.
 - `iai-mcp cowork status` on a platform with no supported scheduler prints the
   same honest message as the installer instead of suggesting a command that
   will decline (#119).
