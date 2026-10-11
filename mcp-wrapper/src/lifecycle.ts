@@ -26,7 +26,7 @@ export const SOCKET_PROBE_DELAY_MS = 2_000;
 
 export const HEARTBEAT_SCHEMA_VERSION = 1;
 
-export const WRAPPER_VERSION = "3.2.3";
+export const WRAPPER_VERSION = "3.3.0";
 
 const LAUNCHCTL_BIN = "/bin/launchctl";
 

@@ -188,9 +188,10 @@ memory_reinforce           memory_consolidate
 profile_get_set            topology
 schema_list                events_query
 episodes_recent            curiosity_pending
+claim_check
 ```
 
-共十四个工具，涵盖线索式、时间式、结构式和词法式召回；捕获与纠正；强化与巩固；行为画像控制；以及存储自省。
+共十五个工具，涵盖线索式、时间式、结构式和词法式召回；对照记忆核查某个说法；捕获与纠正；强化与巩固；行为画像控制；以及存储自省。
 
 ---
 

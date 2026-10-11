@@ -230,11 +230,12 @@ memory_reinforce           memory_consolidate
 profile_get_set            topology
 schema_list                events_query
 episodes_recent            curiosity_pending
+claim_check
 ```
 
-Fourteen tools cover cue, temporal, structural, and lexical recall; capture and
-correction; reinforcement and consolidation; behavioural-profile control; and
-store introspection.
+Fifteen tools cover cue, temporal, structural, and lexical recall; checking a
+claim against memory; capture and correction; reinforcement and consolidation;
+behavioural-profile control; and store introspection.
 
 ---
 

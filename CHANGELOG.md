@@ -5,9 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.3.0] - 2026-10-21
 
 ### Added
+- The Claude Code plugin now ships an icon.
+- `ROADMAP.md`: what's planned next and where help is wanted.
 - `iai-tools`: a separate, brain-free code index, session-event store, and
   command executor, shipped as its own `iai-tools` console script, an
   `iai-mcp tools` subcommand, and an `iai-tools` MCP server. It indexes code
@@ -38,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a dev/holdout split, with an A/A null-arm check (#85).
 
 ### Changed
+- The plugin's MCP launcher moved from `bin/` to `scripts/`. It is the same
+  readable shell script; reinstall or update the plugin to pick up the new path.
+- The plugin README now lists every place the engine touches the network and
+  the local files the hooks read.
 - Read-only engine connections bound their page cache to 8 MiB by default
   (`IAI_MCP_RO_CONN_CACHE_SIZE_KIB`), and the read pool is clamped to a
   256 MiB aggregate ceiling across `IAI_MCP_RO_CONN_CACHE_SIZE_KIB` and
@@ -52,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `standing directive:` marker.
 
 ### Fixed
+- The plugin manifest, marketplace entry, README, and reference docs now say
+  fifteen MCP tools and list `claim_check`; they previously said fourteen.
 - Windows: the daemon no longer crashes at boot on the missing hangup signal
   or on Unix-socket introspection ahead of its Windows branch, and every
   deployed hook script resolves `python3` from `PATH` instead of a hardcoded

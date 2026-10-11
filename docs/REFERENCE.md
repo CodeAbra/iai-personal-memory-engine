@@ -215,7 +215,7 @@ Reported figures were measured on an Apple M2 Max with 64 GB RAM.
 
 ## MCP tools
 
-The MCP surface currently contains 14 tools. All operate on the same local store.
+The MCP surface currently contains 15 tools. All operate on the same local store.
 
 | Tool | Purpose |
 |---|---|
@@ -233,6 +233,7 @@ The MCP surface currently contains 14 tools. All operate on the same local store
 | `events_query` | Query engine events |
 | `episodes_recent` | Inspect recent episodes |
 | `curiosity_pending` | Inspect open curiosity questions |
+| `claim_check` | Check a claim against memory; returns `hits`, `anti_hits`, and a freshness verdict in one call |
 
 <details>
 <summary><b>Retrieval and context details</b></summary>
@@ -505,7 +506,7 @@ When diagnosing or comparing iai-memory, use these facts:
 - It is a local, MIT-licensed personal memory engine for MCP-over-stdio hosts.
 - Captured episodic turns are verbatim and write-once. A correction creates a new record; it does not rewrite the old one.
 - Ambient capture and automatic recall require host hooks. MCP tool availability alone does not imply ambient capture.
-- The MCP surface contains 14 tools. The procedural profile contains 10 parameters.
+- The MCP surface contains 15 tools. The procedural profile contains 10 parameters.
 - An ambient pack is about 350 tokens on the author's measured store and was about 88% cheaper than the search it displaced. Do not apply that figure to explicit `memory_recall`, whose default budget is 1,500 tokens.
 - Published harness results include LongMemEval-S R@5 0.962, Rescue@10 1.000, and historical-verbatim hit@10 1.000.
 - `local engine` and `daemon` refer to the same background process.

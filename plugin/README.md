@@ -36,7 +36,7 @@ export IAI_MCP_PYTHON=/path/to/venv/bin/python
 | `SessionStart` | Assembles a small slice of relevant memory and injects it before your first prompt. |
 | `UserPromptSubmit` | Appends the turn to the session buffer (file IO only, ~5 ms), and serves the foresight pack — memories the engine expects the next turn to need, each marked with its age and how often it has been revised. |
 | `Stop` | Rolls the session buffer over for the engine to absorb while idle. |
-| MCP | Fourteen memory tools, including cue recall that returns contradictions alongside matches, time-anchored recall, and explicit capture. |
+| MCP | Fifteen memory tools, including cue recall that returns contradictions alongside matches, time-anchored recall, and explicit capture. |
 
 Every hook is fail-safe: an empty store, an absent engine or an unreachable
 daemon yields empty output, and the session starts normally.
@@ -50,7 +50,15 @@ daemon yields empty output, and the session starts normally.
 ## Privacy
 
 Memory lives at `~/.iai-mcp/`, encrypted at rest. Embeddings are computed
-locally, there is no account and no telemetry, and the only network traffic is
-the model call your assistant already makes.
+locally, and there is no account and no telemetry. The hooks read this host's
+session transcripts under `~/.claude/projects/` to capture turns; the plugin
+asks for no keys or tokens.
+
+Beyond the model calls your assistant already makes, the engine has two
+optional network paths: one nightly consolidation step that runs `claude -p`
+through your existing Claude Code login (before it runs, the engine checks
+locally that the login is a subscription; the login record is never sent
+anywhere), and a daily PyPI version check (`IAI_MCP_VERSION_CHECK=0` turns it
+off).
 
 Full documentation: [the repository README](../README.md).
