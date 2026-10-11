@@ -11,6 +11,11 @@ import pytest
 HOOK_MARKER = "iai-tools-session-capture.sh"
 
 
+@pytest.fixture(autouse=True)
+def _tools_preflight_ready(monkeypatch):
+    monkeypatch.setattr("iai_mcp.cli._capture._iai_tools_preflight", lambda: [])
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -44,7 +49,7 @@ def _submit_entries(data: dict) -> list:
 def test_install_deploys_and_wires_both_lifecycles(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     dst = fake_home / ".claude" / "hooks" / HOOK_MARKER
@@ -80,9 +85,9 @@ def test_install_deploys_and_wires_both_lifecycles(fake_home):
 def test_reinstall_is_idempotent_single_entry_per_lifecycle(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc1 = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc1 = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc1 == 0
-    rc2 = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc2 = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc2 == 0
 
     data = json.loads(_settings_path(fake_home).read_text())
@@ -106,7 +111,7 @@ def test_uninstall_removes_script_and_both_entries_preserves_foreign_entry(fake_
         }
     }), encoding="utf-8")
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     dst = fake_home / ".claude" / "hooks" / HOOK_MARKER
     assert dst.exists(), "install did not deploy the session-capture hook"
@@ -130,7 +135,7 @@ def test_uninstall_removes_script_and_both_entries_preserves_foreign_entry(fake_
 def test_status_reports_session_capture_wired(fake_home, capsys):
     from iai_mcp import cli as cli_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     capsys.readouterr()
     cli_mod.cmd_capture_hooks_status(argparse.Namespace())
     out = capsys.readouterr().out
@@ -143,7 +148,7 @@ def test_status_stays_active_when_session_capture_template_unshipped(fake_home, 
     from iai_mcp import cli as cli_mod
     from iai_mcp.cli import _capture as capture_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     dst = fake_home / ".claude" / "hooks" / HOOK_MARKER
     dst.unlink()

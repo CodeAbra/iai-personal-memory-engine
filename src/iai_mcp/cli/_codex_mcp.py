@@ -284,13 +284,18 @@ def uninstall_codex_mcp() -> int:
     return 0
 
 
+def codex_mcp_registered() -> bool:
+    text = _load_config_text(_codex_config_path())
+    return _existing_entry(text) is not None or _find_table_range(text, _TABLE_PATH) is not None
+
+
 def status_codex_mcp() -> int:
     config_path = _codex_config_path()
     text = _load_config_text(config_path)
     entry = _existing_entry(text)
     if entry is None:
         print(f"Codex {_TABLE_HEADER}: {config_path} NOT WIRED")
-        print("\nstatus: INACTIVE — run: iai-mcp capture-hooks install --target codex")
+        print("\nstatus: INACTIVE — run: iai-mcp capture-hooks install --target codex --with-tools")
         return 1
 
     try:

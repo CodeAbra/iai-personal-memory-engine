@@ -19,6 +19,11 @@ HOOK_PATH = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _tools_preflight_ready(monkeypatch):
+    monkeypatch.setattr("iai_mcp.cli._capture._iai_tools_preflight", lambda: [])
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -45,7 +50,7 @@ def _tools_index_entries(data: dict) -> list:
 def test_install_deploys_and_wires_tools_index_hook(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     dst = fake_home / ".claude" / "hooks" / "iai-tools-session-index.sh"
@@ -74,7 +79,7 @@ def test_install_backs_up_and_warns_on_malformed_settings_json(fake_home, capsys
     settings = _settings_path(fake_home)
     settings.write_text("{not valid json", encoding="utf-8")
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     out = capsys.readouterr().out
@@ -95,9 +100,9 @@ def test_install_backs_up_and_warns_on_malformed_settings_json(fake_home, capsys
 def test_reinstall_is_idempotent_single_entry(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc1 = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc1 = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc1 == 0
-    rc2 = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc2 = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc2 == 0
 
     data = json.loads(_settings_path(fake_home).read_text())
@@ -121,7 +126,7 @@ def test_uninstall_removes_tools_index_entry_and_file_preserves_foreign_entry(fa
         }
     }), encoding="utf-8")
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     tools_index_dst = fake_home / ".claude" / "hooks" / "iai-tools-session-index.sh"
     assert tools_index_dst.exists(), "install did not deploy the tools-index hook"
@@ -145,7 +150,7 @@ def test_uninstall_removes_tools_index_entry_and_file_preserves_foreign_entry(fa
 def test_status_reports_tools_index_wired(fake_home, capsys):
     from iai_mcp import cli as cli_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     capsys.readouterr()
     cli_mod.cmd_capture_hooks_status(argparse.Namespace())
     out = capsys.readouterr().out
@@ -156,7 +161,7 @@ def test_status_reports_tools_index_wired(fake_home, capsys):
 def test_status_rc_reflects_broken_tools_index_deploy(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc_install = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc_install = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc_install == 0
 
     # Simulate a broken deploy: the packaged template exists (this build
@@ -173,7 +178,7 @@ def test_status_stays_active_when_tools_index_template_unshipped(fake_home, monk
     from iai_mcp import cli as cli_mod
     from iai_mcp.cli import _capture as capture_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     # Soft, coexisting rollout: a machine whose packaged template is absent
     # (not yet shipped this build) must not flip to INACTIVE just because
@@ -673,7 +678,7 @@ def test_install_swallows_cache_write_exception_and_continues(fake_home, monkeyp
 
     monkeypatch.setattr(capture_mod, "_write_tools_cli_path_cache", _raise)
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     out = capsys.readouterr().out

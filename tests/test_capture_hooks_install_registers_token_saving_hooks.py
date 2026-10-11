@@ -17,6 +17,11 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _tools_preflight_ready(monkeypatch):
+    monkeypatch.setattr("iai_mcp.cli._capture._iai_tools_preflight", lambda: [])
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -44,7 +49,7 @@ def _entries(data: dict, event: str, marker: str) -> list:
 def test_fresh_install_registers_session_hierarchy_hook(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     dst = fake_home / ".claude" / "hooks" / "iai-tools-session-hierarchy.sh"
@@ -63,7 +68,7 @@ def test_fresh_install_registers_session_hierarchy_hook(fake_home):
 def test_fresh_install_registers_agent_inject_hook(fake_home):
     from iai_mcp import cli as cli_mod
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     dst = fake_home / ".claude" / "hooks" / "iai-tools-agent-inject.sh"
@@ -82,8 +87,8 @@ def test_fresh_install_registers_agent_inject_hook(fake_home):
 def test_reinstall_is_idempotent_single_entry_each(fake_home):
     from iai_mcp import cli as cli_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     data = json.loads(_settings_path(fake_home).read_text())
     assert len(_entries(data, "SessionStart", "iai-tools-session-hierarchy.sh")) == 1
@@ -107,7 +112,7 @@ def test_install_on_settings_with_prior_enforce_entry_still_adds_new_hooks(fake_
         }
     }), encoding="utf-8")
 
-    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    rc = cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     data = json.loads(settings.read_text())
@@ -137,7 +142,7 @@ def test_status_reports_both_new_hooks_wired_after_upgrade_install(fake_home, ca
         }
     }), encoding="utf-8")
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     capsys.readouterr()
     rc = cli_mod.cmd_capture_hooks_status(argparse.Namespace())
     out = capsys.readouterr().out
@@ -151,7 +156,7 @@ def test_status_reports_both_new_hooks_wired_after_upgrade_install(fake_home, ca
 def test_uninstall_removes_both_new_hooks_symmetrically(fake_home):
     from iai_mcp import cli as cli_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     session_hierarchy_dst = fake_home / ".claude" / "hooks" / "iai-tools-session-hierarchy.sh"
     agent_inject_dst = fake_home / ".claude" / "hooks" / "iai-tools-agent-inject.sh"
@@ -182,7 +187,7 @@ def test_uninstall_preserves_foreign_pretooluse_entry(fake_home):
         }
     }), encoding="utf-8")
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     cli_mod.cmd_capture_hooks_uninstall(argparse.Namespace())
 
     data = json.loads(settings.read_text())
@@ -209,7 +214,7 @@ def test_uninstall_preserves_foreign_sessionstart_entry(fake_home):
         }
     }), encoding="utf-8")
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     cli_mod.cmd_capture_hooks_uninstall(argparse.Namespace())
 
     data = json.loads(settings.read_text())
@@ -226,7 +231,7 @@ def test_uninstall_preserves_foreign_sessionstart_entry(fake_home):
 def test_status_reports_both_new_hooks_wired(fake_home, capsys):
     from iai_mcp import cli as cli_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     capsys.readouterr()
     rc = cli_mod.cmd_capture_hooks_status(argparse.Namespace())
     out = capsys.readouterr().out
@@ -270,7 +275,7 @@ def test_status_stays_active_when_new_hook_templates_unshipped(fake_home, monkey
     from iai_mcp import cli as cli_mod
     from iai_mcp.cli import _capture as capture_mod
 
-    cli_mod.cmd_capture_hooks_install(argparse.Namespace())
+    cli_mod.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     dst_sh = fake_home / ".claude" / "hooks" / "iai-tools-session-hierarchy.sh"
     dst_ai = fake_home / ".claude" / "hooks" / "iai-tools-agent-inject.sh"

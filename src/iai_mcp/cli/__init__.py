@@ -756,6 +756,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="copy the hook scripts and register them with the host",
     )
     ch_install.add_argument("--target", **_target_kwargs)
+    ch_install.add_argument(
+        "--with-tools",
+        dest="with_tools",
+        action="store_true",
+        help=(
+            "also install iai-tools (off by default): its MCP server plus five "
+            "hooks, including a PreToolUse hook that blocks Grep, Glob, and "
+            "shell grep/rg/find/fd/cat/head/tail/gh reads in favor of the "
+            "iai-tools search and executor"
+        ),
+    )
     ch_install.set_defaults(func=cmd_capture_hooks_install)
     ch_uninstall = ch_sub.add_parser(
         "uninstall",

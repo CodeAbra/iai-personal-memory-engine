@@ -27,6 +27,11 @@ _BUILDERS = [
 
 
 @pytest.fixture(autouse=True)
+def _tools_preflight_ready(monkeypatch):
+    monkeypatch.setattr("iai_mcp.cli._capture._iai_tools_preflight", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def _restore_capture_constants():
     # _IS_WIN/_BASH are derived at import time, so a reload under a patched
     # platform leaks into every later test in the session unless undone here.
@@ -74,12 +79,13 @@ def _reload_as_windows(monkeypatch, which=None):
         which or (lambda name: _WIN_BASH if name == "bash" else None),
     )
     importlib.reload(_capture)
+    monkeypatch.setattr(_capture, "_iai_tools_preflight", lambda: [])
 
 
 def test_windows_stop_hook_quotes_the_interpreter_and_the_script_path(home, monkeypatch):
     with mock.patch("platform.system", return_value="Windows"):
         _reload_as_windows(monkeypatch)
-        rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+        rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     assert rc == 0
     dst = home / ".claude" / "hooks" / "iai-mcp-session-capture.sh"
@@ -87,7 +93,7 @@ def test_windows_stop_hook_quotes_the_interpreter_and_the_script_path(home, monk
 
 
 def test_posix_stop_hook_command_is_byte_identical_to_before(home):
-    rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+    rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     assert rc == 0
     dst = home / ".claude" / "hooks" / "iai-mcp-session-capture.sh"
@@ -100,7 +106,7 @@ def test_posix_stop_hook_command_is_byte_identical_to_before(home):
 def test_windows_every_builder_quotes_the_interpreter(home, monkeypatch, event, name, trailing_arg):
     with mock.patch("platform.system", return_value="Windows"):
         _reload_as_windows(monkeypatch)
-        rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+        rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     assert rc == 0
     dst = home / ".claude" / "hooks" / name
@@ -113,7 +119,7 @@ def test_windows_every_builder_quotes_the_interpreter(home, monkeypatch, event, 
 
 @pytest.mark.parametrize(("event", "name", "trailing_arg"), _BUILDERS)
 def test_posix_every_builder_is_byte_identical_to_before(home, event, name, trailing_arg):
-    rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+    rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     assert rc == 0
     dst = home / ".claude" / "hooks" / name
@@ -127,7 +133,7 @@ def test_posix_every_builder_is_byte_identical_to_before(home, event, name, trai
 def test_windows_session_capture_hooks_keep_trailing_argument_outside_the_quoted_segment(home, monkeypatch):
     with mock.patch("platform.system", return_value="Windows"):
         _reload_as_windows(monkeypatch)
-        rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+        rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     assert rc == 0
     dst = home / ".claude" / "hooks" / "iai-tools-session-capture.sh"
@@ -151,7 +157,7 @@ def test_heal_on_reinstall_rewrites_a_stale_posix_stop_command_in_place(home):
         encoding="utf-8",
     )
 
-    rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+    rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     data = json.loads(settings.read_text(encoding="utf-8"))
@@ -175,7 +181,7 @@ def test_heal_on_reinstall_rewrites_a_stale_unquoted_windows_stop_command_in_pla
 
     with mock.patch("platform.system", return_value="Windows"):
         _reload_as_windows(monkeypatch)
-        rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+        rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
 
     assert rc == 0
     data = json.loads(settings.read_text(encoding="utf-8"))
@@ -185,11 +191,11 @@ def test_heal_on_reinstall_rewrites_a_stale_unquoted_windows_stop_command_in_pla
 
 
 def test_heal_on_reinstall_does_not_disturb_an_already_correct_command(home):
-    rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+    rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
     first_pass = _stop_command(home)
 
-    rc = _capture.cmd_capture_hooks_install(argparse.Namespace())
+    rc = _capture.cmd_capture_hooks_install(argparse.Namespace(with_tools=True))
     assert rc == 0
 
     data = json.loads(_settings_path(home).read_text(encoding="utf-8"))

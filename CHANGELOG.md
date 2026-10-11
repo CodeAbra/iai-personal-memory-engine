@@ -15,7 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vector lanes; runs commands through a resident executor daemon with bounded
   output; and offers bounded `git-log`/`git-blame`/`git-diff` queries. On
   Windows the executor binds a TCP-loopback transport behind a mandatory
-  per-user auth token.
+  per-user auth token. It is off by default: `iai-mcp capture-hooks install
+  --with-tools` registers its MCP server and five hooks, one of which blocks
+  Grep, Glob, and shell `grep`/`rg`/`find`/`fd`/`cat`/`head`/`tail`/`gh`
+  reads in favor of the iai-tools search and executor. The flag needs the
+  MCP server and executor built from a source checkout (see
+  `docs/DEPLOYMENT.md`); install refuses it and changes nothing until both
+  are present.
 - New operator command `iai-mcp prune-snapshots` removes the pre-write
   snapshot directories that migration commands leave behind after `--apply`.
 - New operator command `iai-mcp template-pollution-sweep` tombstones internal

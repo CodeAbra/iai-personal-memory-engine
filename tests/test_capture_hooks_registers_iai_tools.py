@@ -1,6 +1,6 @@
-"""A single `iai-mcp capture-hooks install/uninstall/status --target codex`
-run wires the iai-tools MCP server into both the Codex config.toml and
-the Claude Code host config, and reverses both on uninstall.
+"""A single `iai-mcp capture-hooks install --target codex --with-tools` run
+wires the iai-tools MCP server into both the Codex config.toml and the
+Claude Code host config, and `uninstall --target codex` reverses both.
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ def temp_hosts(tmp_path, monkeypatch):
     tools_wrapper = tmp_path / "tools-index.js"
     tools_wrapper.write_text("// fake tools wrapper\n", encoding="utf-8")
     monkeypatch.setenv("IAI_MCP_TOOLS_WRAPPER_PATH", str(tools_wrapper))
+    monkeypatch.setattr("iai_mcp.cli._capture._iai_tools_preflight", lambda: [])
 
     # Simulate a machine that already ran `capture-hooks install --target
     # claude` for the memory server, so the codex-targeted run below can
@@ -45,7 +46,7 @@ def temp_hosts(tmp_path, monkeypatch):
 
 
 def _args(target: str) -> argparse.Namespace:
-    return argparse.Namespace(target=target)
+    return argparse.Namespace(target=target, with_tools=True)
 
 
 class TestInstall:

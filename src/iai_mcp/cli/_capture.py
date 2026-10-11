@@ -1109,207 +1109,40 @@ def _write_tools_cli_path_cache() -> None:
         print(f"WARN: failed to write {cache_path}: {exc}")
 
 
-def _per_turn_recall_hook_paths() -> tuple:
-    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-per-turn-recall.sh"
-    dst = Path.home() / ".claude" / "hooks" / "iai-mcp-per-turn-recall.sh"
-    return src, dst
+def _iai_tools_preflight() -> "list[str]":
+    """Return what `--with-tools` still needs on this machine; empty when ready.
 
+    The enforce hook denies Grep/Glob and shell search in favor of the
+    iai-tools MCP server and executor, so neither may be missing when it is
+    wired.
+    """
+    from iai_mcp.cli._codex_mcp import _resolve_tools_wrapper_path
+    from iai_mcp.tools_exec_client import _resolve_execd_bin
 
-def _recall_render_helper_paths() -> tuple:
-    # Deployed next to the per-turn hook in lockstep -- the hook imports it
-    # by sys.path-inserting its own directory (HOOK_DIR), so a stale or
-    # missing copy here silently drops the dated-staleness render, not the
-    # whole accelerator.
-    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "_recall_render.py"
-    dst = Path.home() / ".claude" / "hooks" / "_recall_render.py"
-    return src, dst
-
-
-def _load_settings(path, *, backup_on_error: bool = False):
-    import json as _json
-    if not path.exists():
-        return {}
+    missing: list[str] = []
     try:
-        return _json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        if backup_on_error:
-            import time as _time
-            stamp = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
-            backup_path = path.with_name(f"{path.name}.bak-{stamp}")
-            try:
-                backup_path.write_bytes(path.read_bytes())
-                print(f"WARN: {path} failed to parse ({exc}) -- backed up unparseable "
-                      f"file to {backup_path} before treating it as empty and rewriting it")
-            except OSError as backup_exc:
-                print(f"WARN: {path} failed to parse ({exc}) -- backup to {backup_path} "
-                      f"also failed ({backup_exc}); proceeding anyway, treating it as empty")
-        return {}
+        _resolve_tools_wrapper_path()
+    except FileNotFoundError:
+        missing.append(
+            "iai-tools MCP server (tools-index.js): build it with "
+            "`cd mcp-wrapper && npm ci && npm run build`"
+        )
+    try:
+        execd_found = Path(_resolve_execd_bin()).is_file()
+    except FileNotFoundError:
+        execd_found = False
+    if not execd_found:
+        missing.append(
+            "iai-tools executor (iai_tools_execd): build it with "
+            "`cargo build --release -p iai_mcp_tools_core --bins`"
+        )
+    return missing
 
 
-def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
-    from iai_mcp import cli as _cli
-    import json as _json
+def _install_iai_tools_hooks(data: dict, settings: Path) -> None:
     import stat
 
-    target = getattr(args, "target", "claude")
-    # Under "all", a host whose config dir is absent is skipped — installing
-    # would fabricate ~/.cursor / ~/.gemini/config / ~/.hermes / ~/.openclaw
-    # on machines that never had the host. Explicit targets install anyway.
-    host_rcs: list[int] = []
-    if target in ("codex", "all"):
-        from iai_mcp.cli._codex_hooks import install_codex_hooks
-        from iai_mcp.cli._codex_mcp import install_codex_mcp
-        rc = max(install_codex_hooks(), install_codex_mcp())
-        if target == "codex":
-            code_msg, code_ok = _patch_claude_code_tools_config("install")
-            print(code_msg)
-            return max(rc, 0 if code_ok else 1)
-        host_rcs.append(rc)
-    if target in ("cursor", "all"):
-        from iai_mcp.cli._cursor_hooks import _cursor_home, install_cursor_hooks
-        if target == "cursor":
-            return install_cursor_hooks()
-        if _cursor_home().exists():
-            host_rcs.append(install_cursor_hooks())
-        else:
-            print(f"cursor: {_cursor_home()} absent — skipped")
-    if target in ("antigravity", "all"):
-        from iai_mcp.cli._antigravity_hooks import (
-            _antigravity_config_dir,
-            install_antigravity_hooks,
-        )
-        if target == "antigravity":
-            return install_antigravity_hooks()
-        if _antigravity_config_dir().exists():
-            # A SID-resolution RuntimeError must not abort the remaining
-            # hosts in this loop (hermes, openclaw, the core Claude-Code
-            # hook block) -- isolate it here and let the aggregate rc
-            # below carry the failure instead.
-            try:
-                host_rcs.append(install_antigravity_hooks())
-            except RuntimeError as exc:
-                print(f"antigravity: {exc}")
-                host_rcs.append(1)
-        else:
-            print(f"antigravity: {_antigravity_config_dir()} absent — skipped")
-    if target in ("hermes", "all"):
-        from iai_mcp.cli._hermes_hooks import _hermes_home, install_hermes_hooks
-        if target == "hermes":
-            return install_hermes_hooks()
-        if _hermes_home().exists():
-            host_rcs.append(install_hermes_hooks())
-        else:
-            print(f"hermes: {_hermes_home()} absent — skipped")
-    if target in ("openclaw", "all"):
-        from iai_mcp.cli._openclaw_mcp import _openclaw_home, install_openclaw_mcp
-        if target == "openclaw":
-            return install_openclaw_mcp()
-        if _openclaw_home().exists():
-            host_rcs.append(install_openclaw_mcp())
-        else:
-            print(f"openclaw: {_openclaw_home()} absent — skipped")
-
-    src, dst, settings = _capture_hook_paths()
-    turn_src, turn_dst = _turn_hook_paths()
-
-    if not src.exists():
-        print(f"ERROR: hook template missing in package data: {src}", file=_cli.sys.stderr)
-        return 1
-    if not turn_src.exists():
-        print(f"ERROR: turn-hook template missing in package data: {turn_src}", file=_cli.sys.stderr)
-        return 1
-
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_bytes(src.read_bytes())
-    dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
-    print(f"installed: {dst}")
-
-    turn_dst.parent.mkdir(parents=True, exist_ok=True)
-    turn_dst.write_bytes(turn_src.read_bytes())
-    turn_dst.chmod(turn_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
-    print(f"installed: {turn_dst}")
-
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    data = _load_settings(settings, backup_on_error=True)
-    data.setdefault("hooks", {})
-    stop_list = data["hooks"].setdefault("Stop", [])
     submit_list = data["hooks"].setdefault("UserPromptSubmit", [])
-
-    hook_cmd = f"{_BASH}{quote_posix(str(dst))}"
-    turn_cmd = f"{_BASH}{quote_posix(str(turn_dst))}"
-
-    stop_result = _heal_or_register_hook(stop_list, _CAPTURE_HOOK_MARKER, hook_cmd)
-    if stop_result == "already":
-        print(f"settings.json already has Stop hook — no change")
-    elif stop_result == "healed":
-        print(f"patched: {settings} (Stop hook command healed)")
-    else:
-        stop_list.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 35}]})
-        print(f"patched: {settings} (Stop hook registered)")
-
-    turn_result = _heal_or_register_hook(submit_list, _TURN_HOOK_MARKER, turn_cmd)
-    if turn_result == "already":
-        print(f"settings.json already has UserPromptSubmit hook — no change")
-    elif turn_result == "healed":
-        print(f"patched: {settings} (UserPromptSubmit hook command healed)")
-    else:
-        submit_list.append({"hooks": [{"type": "command", "command": turn_cmd, "timeout": 5}]})
-        print(f"patched: {settings} (UserPromptSubmit hook registered)")
-
-    pt_src, pt_dst = _per_turn_recall_hook_paths()
-    if pt_src.exists():
-        pt_dst.parent.mkdir(parents=True, exist_ok=True)
-        pt_dst.write_bytes(pt_src.read_bytes())
-        pt_dst.chmod(pt_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
-        print(f"installed: {pt_dst}")
-
-        # Deploy the render helper in lockstep with the hook that imports
-        # it -- an old hook next to a missing/stale _recall_render.py would
-        # silently lose the dated-staleness signal.
-        render_src, render_dst = _recall_render_helper_paths()
-        if render_src.exists():
-            render_dst.parent.mkdir(parents=True, exist_ok=True)
-            render_dst.write_bytes(render_src.read_bytes())
-            print(f"installed: {render_dst}")
-        else:
-            print(f"WARN: recall render helper missing in package data: {render_src}")
-
-        pt_cmd = f"{_BASH}{quote_posix(str(pt_dst))}"
-        pt_result = _heal_or_register_hook(submit_list, _PER_TURN_RECALL_HOOK_MARKER, pt_cmd)
-        if pt_result == "already":
-            print("settings.json already has per-turn recall hook — no change")
-        elif pt_result == "healed":
-            print(f"patched: {settings} (per-turn recall hook command healed)")
-        else:
-            submit_list.append(
-                {"hooks": [{"type": "command", "command": pt_cmd, "timeout": 5}]}
-            )
-            print(f"patched: {settings} (per-turn recall hook registered)")
-    else:
-        print(f"WARN: per-turn recall hook template missing in package data: {pt_src}")
-
-    src_recall, dst_recall, _ = _session_recall_hook_paths()
-    if src_recall.exists():
-        dst_recall.parent.mkdir(parents=True, exist_ok=True)
-        dst_recall.write_bytes(src_recall.read_bytes())
-        dst_recall.chmod(dst_recall.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
-        print(f"installed: {dst_recall}")
-
-        ss_list = data["hooks"].setdefault("SessionStart", [])
-        recall_cmd = f"{_BASH}{quote_posix(str(dst_recall))}"
-        recall_result = _heal_or_register_hook(ss_list, _SESSION_RECALL_HOOK_MARKER, recall_cmd)
-        if recall_result == "already":
-            print("settings.json already has SessionStart hook — no change")
-        elif recall_result == "healed":
-            print(f"patched: {settings} (SessionStart hook command healed)")
-        else:
-            ss_list.append({
-                "matcher": "startup|resume|clear|compact",
-                "hooks": [{"type": "command", "command": recall_cmd, "timeout": 30}],
-            })
-            print(f"patched: {settings} (SessionStart hook registered)")
-    else:
-        print(f"WARN: recall hook template missing in package data: {src_recall}")
 
     src_tools_index, dst_tools_index, _ = _tools_index_hook_paths()
     if src_tools_index.exists():
@@ -1466,21 +1299,244 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     else:
         print(f"WARN: iai-tools agent-inject hook template missing in package data: {src_agent_inject}")
 
+
+def _per_turn_recall_hook_paths() -> tuple:
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-per-turn-recall.sh"
+    dst = Path.home() / ".claude" / "hooks" / "iai-mcp-per-turn-recall.sh"
+    return src, dst
+
+
+def _recall_render_helper_paths() -> tuple:
+    # Deployed next to the per-turn hook in lockstep -- the hook imports it
+    # by sys.path-inserting its own directory (HOOK_DIR), so a stale or
+    # missing copy here silently drops the dated-staleness render, not the
+    # whole accelerator.
+    src = _res.files("iai_mcp") / "_deploy" / "hooks" / "_recall_render.py"
+    dst = Path.home() / ".claude" / "hooks" / "_recall_render.py"
+    return src, dst
+
+
+def _load_settings(path, *, backup_on_error: bool = False):
+    import json as _json
+    if not path.exists():
+        return {}
+    try:
+        return _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        if backup_on_error:
+            import time as _time
+            stamp = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+            backup_path = path.with_name(f"{path.name}.bak-{stamp}")
+            try:
+                backup_path.write_bytes(path.read_bytes())
+                print(f"WARN: {path} failed to parse ({exc}) -- backed up unparseable "
+                      f"file to {backup_path} before treating it as empty and rewriting it")
+            except OSError as backup_exc:
+                print(f"WARN: {path} failed to parse ({exc}) -- backup to {backup_path} "
+                      f"also failed ({backup_exc}); proceeding anyway, treating it as empty")
+        return {}
+
+
+def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    import json as _json
+    import stat
+
+    target = getattr(args, "target", "claude")
+    with_tools = bool(getattr(args, "with_tools", False))
+    if with_tools:
+        missing = _iai_tools_preflight()
+        if missing:
+            print("ERROR: --with-tools needs components this install does not have:",
+                  file=_cli.sys.stderr)
+            for item in missing:
+                print(f"  - {item}", file=_cli.sys.stderr)
+            print("Nothing was changed. Run without --with-tools to install the memory hooks only.",
+                  file=_cli.sys.stderr)
+            return 1
+    # Under "all", a host whose config dir is absent is skipped — installing
+    # would fabricate ~/.cursor / ~/.gemini/config / ~/.hermes / ~/.openclaw
+    # on machines that never had the host. Explicit targets install anyway.
+    host_rcs: list[int] = []
+    if target in ("codex", "all"):
+        from iai_mcp.cli._codex_hooks import install_codex_hooks
+        rc = install_codex_hooks()
+        if with_tools:
+            from iai_mcp.cli._codex_mcp import install_codex_mcp
+            rc = max(rc, install_codex_mcp())
+        if target == "codex":
+            if with_tools:
+                code_msg, code_ok = _patch_claude_code_tools_config("install")
+                print(code_msg)
+                rc = max(rc, 0 if code_ok else 1)
+            return rc
+        host_rcs.append(rc)
+    if target in ("cursor", "all"):
+        from iai_mcp.cli._cursor_hooks import _cursor_home, install_cursor_hooks
+        if target == "cursor":
+            return install_cursor_hooks()
+        if _cursor_home().exists():
+            host_rcs.append(install_cursor_hooks())
+        else:
+            print(f"cursor: {_cursor_home()} absent — skipped")
+    if target in ("antigravity", "all"):
+        from iai_mcp.cli._antigravity_hooks import (
+            _antigravity_config_dir,
+            install_antigravity_hooks,
+        )
+        if target == "antigravity":
+            return install_antigravity_hooks()
+        if _antigravity_config_dir().exists():
+            # A SID-resolution RuntimeError must not abort the remaining
+            # hosts in this loop (hermes, openclaw, the core Claude-Code
+            # hook block) -- isolate it here and let the aggregate rc
+            # below carry the failure instead.
+            try:
+                host_rcs.append(install_antigravity_hooks())
+            except RuntimeError as exc:
+                print(f"antigravity: {exc}")
+                host_rcs.append(1)
+        else:
+            print(f"antigravity: {_antigravity_config_dir()} absent — skipped")
+    if target in ("hermes", "all"):
+        from iai_mcp.cli._hermes_hooks import _hermes_home, install_hermes_hooks
+        if target == "hermes":
+            return install_hermes_hooks()
+        if _hermes_home().exists():
+            host_rcs.append(install_hermes_hooks())
+        else:
+            print(f"hermes: {_hermes_home()} absent — skipped")
+    if target in ("openclaw", "all"):
+        from iai_mcp.cli._openclaw_mcp import _openclaw_home, install_openclaw_mcp
+        if target == "openclaw":
+            return install_openclaw_mcp()
+        if _openclaw_home().exists():
+            host_rcs.append(install_openclaw_mcp())
+        else:
+            print(f"openclaw: {_openclaw_home()} absent — skipped")
+
+    src, dst, settings = _capture_hook_paths()
+    turn_src, turn_dst = _turn_hook_paths()
+
+    if not src.exists():
+        print(f"ERROR: hook template missing in package data: {src}", file=_cli.sys.stderr)
+        return 1
+    if not turn_src.exists():
+        print(f"ERROR: turn-hook template missing in package data: {turn_src}", file=_cli.sys.stderr)
+        return 1
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(src.read_bytes())
+    dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+    print(f"installed: {dst}")
+
+    turn_dst.parent.mkdir(parents=True, exist_ok=True)
+    turn_dst.write_bytes(turn_src.read_bytes())
+    turn_dst.chmod(turn_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+    print(f"installed: {turn_dst}")
+
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_settings(settings, backup_on_error=True)
+    data.setdefault("hooks", {})
+    stop_list = data["hooks"].setdefault("Stop", [])
+    submit_list = data["hooks"].setdefault("UserPromptSubmit", [])
+
+    hook_cmd = f"{_BASH}{quote_posix(str(dst))}"
+    turn_cmd = f"{_BASH}{quote_posix(str(turn_dst))}"
+
+    stop_result = _heal_or_register_hook(stop_list, _CAPTURE_HOOK_MARKER, hook_cmd)
+    if stop_result == "already":
+        print(f"settings.json already has Stop hook — no change")
+    elif stop_result == "healed":
+        print(f"patched: {settings} (Stop hook command healed)")
+    else:
+        stop_list.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 35}]})
+        print(f"patched: {settings} (Stop hook registered)")
+
+    turn_result = _heal_or_register_hook(submit_list, _TURN_HOOK_MARKER, turn_cmd)
+    if turn_result == "already":
+        print(f"settings.json already has UserPromptSubmit hook — no change")
+    elif turn_result == "healed":
+        print(f"patched: {settings} (UserPromptSubmit hook command healed)")
+    else:
+        submit_list.append({"hooks": [{"type": "command", "command": turn_cmd, "timeout": 5}]})
+        print(f"patched: {settings} (UserPromptSubmit hook registered)")
+
+    pt_src, pt_dst = _per_turn_recall_hook_paths()
+    if pt_src.exists():
+        pt_dst.parent.mkdir(parents=True, exist_ok=True)
+        pt_dst.write_bytes(pt_src.read_bytes())
+        pt_dst.chmod(pt_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        print(f"installed: {pt_dst}")
+
+        # Deploy the render helper in lockstep with the hook that imports
+        # it -- an old hook next to a missing/stale _recall_render.py would
+        # silently lose the dated-staleness signal.
+        render_src, render_dst = _recall_render_helper_paths()
+        if render_src.exists():
+            render_dst.parent.mkdir(parents=True, exist_ok=True)
+            render_dst.write_bytes(render_src.read_bytes())
+            print(f"installed: {render_dst}")
+        else:
+            print(f"WARN: recall render helper missing in package data: {render_src}")
+
+        pt_cmd = f"{_BASH}{quote_posix(str(pt_dst))}"
+        pt_result = _heal_or_register_hook(submit_list, _PER_TURN_RECALL_HOOK_MARKER, pt_cmd)
+        if pt_result == "already":
+            print("settings.json already has per-turn recall hook — no change")
+        elif pt_result == "healed":
+            print(f"patched: {settings} (per-turn recall hook command healed)")
+        else:
+            submit_list.append(
+                {"hooks": [{"type": "command", "command": pt_cmd, "timeout": 5}]}
+            )
+            print(f"patched: {settings} (per-turn recall hook registered)")
+    else:
+        print(f"WARN: per-turn recall hook template missing in package data: {pt_src}")
+
+    src_recall, dst_recall, _ = _session_recall_hook_paths()
+    if src_recall.exists():
+        dst_recall.parent.mkdir(parents=True, exist_ok=True)
+        dst_recall.write_bytes(src_recall.read_bytes())
+        dst_recall.chmod(dst_recall.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        print(f"installed: {dst_recall}")
+
+        ss_list = data["hooks"].setdefault("SessionStart", [])
+        recall_cmd = f"{_BASH}{quote_posix(str(dst_recall))}"
+        recall_result = _heal_or_register_hook(ss_list, _SESSION_RECALL_HOOK_MARKER, recall_cmd)
+        if recall_result == "already":
+            print("settings.json already has SessionStart hook — no change")
+        elif recall_result == "healed":
+            print(f"patched: {settings} (SessionStart hook command healed)")
+        else:
+            ss_list.append({
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [{"type": "command", "command": recall_cmd, "timeout": 30}],
+            })
+            print(f"patched: {settings} (SessionStart hook registered)")
+    else:
+        print(f"WARN: recall hook template missing in package data: {src_recall}")
+
+    if with_tools:
+        _install_iai_tools_hooks(data, settings)
+
     settings.write_text(_json.dumps(data, indent=2), encoding="utf-8")
 
     code_msg, code_ok = _patch_claude_code_config("install")
     print(code_msg)
     desktop_msg, desktop_ok = _patch_claude_desktop_config("install")
     print(desktop_msg)
-    tools_msg, tools_ok = _patch_claude_code_tools_config("install")
-    print(tools_msg)
+    patch_rcs = [0 if code_ok else 1, 0 if desktop_ok else 1]
+    if with_tools:
+        tools_msg, tools_ok = _patch_claude_code_tools_config("install")
+        print(tools_msg)
+        patch_rcs.append(0 if tools_ok else 1)
 
     print("\nNext: fully quit + relaunch Claude Code AND Claude Desktop")
     print("      so both pick up the registration (macOS: `killall Claude`).")
     print("Verify: iai-mcp capture-hooks status")
     print("Note: hooks are applied to the user-scope ~/.claude copy automatically; "
           "a project-scope <repo>/.claude copy, if present, must be re-applied manually.")
-    patch_rcs = [0 if code_ok else 1, 0 if desktop_ok else 1, 0 if tools_ok else 1]
     return max(host_rcs + patch_rcs, default=0)
 
 
@@ -1736,12 +1792,20 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     # uninstalled host is not a failure of this machine's wiring.
     if target in ("codex", "all"):
         from iai_mcp.cli._codex_hooks import status_codex_hooks
-        from iai_mcp.cli._codex_mcp import status_codex_mcp
+        from iai_mcp.cli._codex_mcp import codex_mcp_registered, status_codex_mcp
         hooks_rc = status_codex_hooks()
         print()
-        mcp_rc = status_codex_mcp()
+        tools_line, tools_wired = _claude_code_tools_status()
+        codex_tools_enabled = codex_mcp_registered() or tools_wired
+        if codex_tools_enabled:
+            mcp_rc = status_codex_mcp()
+        else:
+            mcp_rc = 0
+            print("Codex iai-tools MCP server: off "
+                  "(opt in: iai-mcp capture-hooks install --target codex --with-tools)")
         if target == "codex":
-            tools_line, tools_wired = _claude_code_tools_status()
+            if not codex_tools_enabled:
+                return hooks_rc
             print()
             print(tools_line)
             return max(hooks_rc, mcp_rc, 0 if tools_wired else 1)
@@ -1821,16 +1885,6 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     print(f"Per-turn installed:   {pt_dst}  {_installed_state(pt_src, pt_dst)}")
     print(f"Recall-render template:  {render_src}  {'PRESENT' if render_src.exists() else 'MISSING'}")
     print(f"Recall-render installed: {render_dst}  {_installed_state(render_src, render_dst)}")
-    print(f"Tools-index template:    {src_tools_index}  {'PRESENT' if src_tools_index.exists() else 'MISSING'}")
-    print(f"Tools-index installed:   {dst_tools_index}  {_installed_state(src_tools_index, dst_tools_index)}")
-    print(f"Session-capture template:  {src_session_capture}  {'PRESENT' if src_session_capture.exists() else 'MISSING'}")
-    print(f"Session-capture installed: {dst_session_capture}  {_installed_state(src_session_capture, dst_session_capture)}")
-    print(f"Enforce template:    {src_enforce}  {'PRESENT' if src_enforce.exists() else 'MISSING'}")
-    print(f"Enforce installed:   {dst_enforce}  {_installed_state(src_enforce, dst_enforce)}")
-    print(f"Session-hierarchy template:  {src_session_hierarchy}  {'PRESENT' if src_session_hierarchy.exists() else 'MISSING'}")
-    print(f"Session-hierarchy installed: {dst_session_hierarchy}  {_installed_state(src_session_hierarchy, dst_session_hierarchy)}")
-    print(f"Agent-inject template:  {src_agent_inject}  {'PRESENT' if src_agent_inject.exists() else 'MISSING'}")
-    print(f"Agent-inject installed: {dst_agent_inject}  {_installed_state(src_agent_inject, dst_agent_inject)}")
 
     data = _load_settings(settings)
     stop_list = data.get("hooks", {}).get("Stop", [])
@@ -1892,12 +1946,38 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
     print(f"Claude Code settings.json UserPromptSubmit: {settings}  {'WIRED' if turn_wired else 'NOT WIRED'}")
     print(f"Claude Code settings.json SessionStart:     {settings}  {'WIRED' if recall_wired else 'NOT WIRED'}")
     print(f"Claude Code settings.json per-turn recall:  {settings}  {'WIRED' if pt_wired else 'NOT WIRED'}")
-    print(f"Claude Code settings.json tools-index:      {settings}  {'WIRED' if tools_index_wired else 'NOT WIRED'}")
-    print(f"Claude Code settings.json session-capture PostToolUse:      {settings}  {'WIRED' if session_capture_post_wired else 'NOT WIRED'}")
-    print(f"Claude Code settings.json session-capture UserPromptSubmit: {settings}  {'WIRED' if session_capture_submit_wired else 'NOT WIRED'}")
-    print(f"Claude Code settings.json enforce PreToolUse:       {settings}  {'WIRED' if enforce_wired else 'NOT WIRED'}")
-    print(f"Claude Code settings.json session-hierarchy SessionStart: {settings}  {'WIRED' if session_hierarchy_wired else 'NOT WIRED'}")
-    print(f"Claude Code settings.json agent-inject PreToolUse:        {settings}  {'WIRED' if agent_inject_wired else 'NOT WIRED'}")
+
+    tools_line, tools_registered = _claude_code_tools_status()
+    tools_enabled = (
+        tools_registered
+        or any(p.exists() for p in (
+            dst_tools_index, dst_session_capture, dst_enforce,
+            dst_session_hierarchy, dst_agent_inject,
+        ))
+        or any((
+            tools_index_wired, session_capture_post_wired, session_capture_submit_wired,
+            enforce_wired, session_hierarchy_wired, agent_inject_wired,
+        ))
+    )
+    if tools_enabled:
+        print(f"Tools-index template:    {src_tools_index}  {'PRESENT' if src_tools_index.exists() else 'MISSING'}")
+        print(f"Tools-index installed:   {dst_tools_index}  {_installed_state(src_tools_index, dst_tools_index)}")
+        print(f"Session-capture template:  {src_session_capture}  {'PRESENT' if src_session_capture.exists() else 'MISSING'}")
+        print(f"Session-capture installed: {dst_session_capture}  {_installed_state(src_session_capture, dst_session_capture)}")
+        print(f"Enforce template:    {src_enforce}  {'PRESENT' if src_enforce.exists() else 'MISSING'}")
+        print(f"Enforce installed:   {dst_enforce}  {_installed_state(src_enforce, dst_enforce)}")
+        print(f"Session-hierarchy template:  {src_session_hierarchy}  {'PRESENT' if src_session_hierarchy.exists() else 'MISSING'}")
+        print(f"Session-hierarchy installed: {dst_session_hierarchy}  {_installed_state(src_session_hierarchy, dst_session_hierarchy)}")
+        print(f"Agent-inject template:  {src_agent_inject}  {'PRESENT' if src_agent_inject.exists() else 'MISSING'}")
+        print(f"Agent-inject installed: {dst_agent_inject}  {_installed_state(src_agent_inject, dst_agent_inject)}")
+        print(f"Claude Code settings.json tools-index:      {settings}  {'WIRED' if tools_index_wired else 'NOT WIRED'}")
+        print(f"Claude Code settings.json session-capture PostToolUse:      {settings}  {'WIRED' if session_capture_post_wired else 'NOT WIRED'}")
+        print(f"Claude Code settings.json session-capture UserPromptSubmit: {settings}  {'WIRED' if session_capture_submit_wired else 'NOT WIRED'}")
+        print(f"Claude Code settings.json enforce PreToolUse:       {settings}  {'WIRED' if enforce_wired else 'NOT WIRED'}")
+        print(f"Claude Code settings.json session-hierarchy SessionStart: {settings}  {'WIRED' if session_hierarchy_wired else 'NOT WIRED'}")
+        print(f"Claude Code settings.json agent-inject PreToolUse:        {settings}  {'WIRED' if agent_inject_wired else 'NOT WIRED'}")
+    else:
+        print("iai-tools: off (opt in: iai-mcp capture-hooks install --with-tools)")
 
     desktop_cfg = _cli._claude_desktop_config_path()
     if desktop_cfg is None:
@@ -1916,8 +1996,8 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
             desktop_wired = False
     print(desktop_line)
 
-    tools_line, _tools_wired = _claude_code_tools_status()
-    print(tools_line)
+    if tools_enabled:
+        print(tools_line)
 
     # Soft, coexisting rollout: a machine whose packaged template is absent
     # (not yet shipped this build) must not flip to INACTIVE. Only a
@@ -1942,16 +2022,19 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
         not src_agent_inject.exists()
         or (dst_agent_inject.exists() and agent_inject_wired)
     )
+    tools_ok = (
+        tools_index_ok
+        and session_capture_ok
+        and enforce_ok
+        and session_hierarchy_ok
+        and agent_inject_ok
+    )
     ok = (
         dst.exists() and wired
         and turn_dst.exists() and turn_wired
         and dst_recall.exists() and recall_wired
         and pt_dst.exists() and pt_wired
-        and tools_index_ok
-        and session_capture_ok
-        and enforce_ok
-        and session_hierarchy_ok
-        and agent_inject_ok
+        and (tools_ok or not tools_enabled)
     )
     desktop_problem = desktop_cfg is not None and desktop_cfg.exists() and not desktop_wired
 
@@ -1964,5 +2047,6 @@ def cmd_capture_hooks_status(args: argparse.Namespace) -> int:
         msg.append("Claude Code not fully wired")
     if desktop_problem:
         msg.append("Claude Desktop present but iai-mcp not registered")
-    print(f"\nstatus: INACTIVE — {'; '.join(msg)}. Run: iai-mcp capture-hooks install")
+    fix_cmd = "iai-mcp capture-hooks install" + (" --with-tools" if tools_enabled else "")
+    print(f"\nstatus: INACTIVE — {'; '.join(msg)}. Run: {fix_cmd}")
     return 1

@@ -25,7 +25,7 @@ input=$(cat 2>/dev/null || true)
 # Locate the iai-tools executable. Resolution order (trusted sources only):
 #   1. IAI_MCP_SESSION_CAPTURE_CLI environment variable (developer override).
 #   2. ~/.iai-mcp/.tools-cli-path cache file -- written by `iai-mcp
-#      capture-hooks install` at install time, shared with the code-index
+#      capture-hooks install --with-tools`, shared with the code-index
 #      SessionStart hook (both resolve the same console script). This hook
 #      only ever reads the cache, never writes it -- self-caching is the
 #      installer's job.

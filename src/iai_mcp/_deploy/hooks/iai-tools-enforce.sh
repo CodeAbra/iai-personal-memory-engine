@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PreToolUse hook -- ships to every end user via `iai-mcp capture-hooks install`.
+# PreToolUse hook -- wired only by `iai-mcp capture-hooks install --with-tools`.
 # Blocks the native Grep/Glob tools plus Bash search shapes and routes the
 # caller to mcp__iai-tools__code_search / mcp__iai-tools__execute. Also
 # silently rewrites bare noisy Bash commands (curl, gradle, ...) to run
