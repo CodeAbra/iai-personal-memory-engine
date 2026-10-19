@@ -8,7 +8,8 @@ Package: `iai-pme` on PyPI. Repo: https://github.com/CodeAbra/iai-personal-memor
 
 - An MCP-over-stdio server plus a local background engine (called `daemon` in the CLI).
 - Storage, clustering (MOSAIC), hyperdimensional substrate and the native engine are first-party Rust/Python code; no external vector DB or graph DB is required.
-- Store is encrypted at rest with AES-256-GCM and lives in `~/.iai-mcp/`.
+- Records are encrypted at rest with AES-256-GCM in `~/.iai-mcp/`. The per-turn capture spool (until the engine's next pass) and the hook injection caches there are plain text; see [plugin/README.md](plugin/README.md#privacy).
+- Network: the nightly REM `claude -p` step (on by default, `IAI_MCP_REM_DISABLED=1`), a daily PyPI version check (`IAI_MCP_VERSION_CHECK=0`), and the first-use embedding model download from Hugging Face (`IAI_MCP_EMBED_OFFLINE=1`).
 - Embeddings run locally (bge-small-en-v1.5, 384-dim, Rust embedder).
 
 ## What it is not

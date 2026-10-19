@@ -23,6 +23,7 @@ HOOK_SCRIPTS = (
     "iai-mcp-per-turn-recall.sh",
     "iai-mcp-session-capture.sh",
 )
+HOOK_HELPERS = ("_recall_render.py",)
 
 
 def _json(path: Path) -> dict:
@@ -43,22 +44,30 @@ def test_manifest_and_marketplace_agree() -> None:
     )
 
 
-def test_manifest_version_tracks_the_package() -> None:
-    manifest = _json(PLUGIN / ".claude-plugin" / "plugin.json")
+def _package_version() -> str:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     for line in pyproject.splitlines():
         if line.startswith("version = "):
-            package_version = line.split('"')[1]
-            break
-    else:  # pragma: no cover - pyproject always declares a version
-        pytest.fail("pyproject.toml has no version")
-    assert manifest["version"] == package_version, (
+            return line.split('"')[1]
+    pytest.fail("pyproject.toml has no version")  # pragma: no cover
+
+
+def test_manifest_version_tracks_the_package() -> None:
+    manifest = _json(PLUGIN / ".claude-plugin" / "plugin.json")
+    assert manifest["version"] == _package_version(), (
         "a version mismatch between the plugin manifest and the package is the "
         "most common reason a marketplace submission is rejected"
     )
 
 
-@pytest.mark.parametrize("script", HOOK_SCRIPTS)
+def test_readme_install_line_pins_the_engine_version() -> None:
+    readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
+    assert f'pip install "iai-pme=={_package_version()}"' in readme, (
+        "the plugin README must name the engine version this plugin expects"
+    )
+
+
+@pytest.mark.parametrize("script", HOOK_SCRIPTS + HOOK_HELPERS)
 def test_plugin_hook_scripts_match_the_packaged_originals(script: str) -> None:
     plugin_copy = (PLUGIN / "hooks" / script).read_bytes()
     packaged = (PACKAGED_HOOKS / script).read_bytes()

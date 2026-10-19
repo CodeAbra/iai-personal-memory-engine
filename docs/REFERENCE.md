@@ -344,7 +344,7 @@ Language selection is stored in `~/.iai-mcp/config.json`; environment variables 
 
 - **Local memory:** captures, embeddings, graph operations, and storage remain on the machine.
 - **No telemetry or account:** iai-memory does not send memory contents or usage analytics to a hosted service.
-- **Encrypted at rest:** records use AES-256-GCM; the key is `~/.iai-mcp/.crypto.key` and should be backed up with the store.
+- **Encrypted at rest:** records use AES-256-GCM; the key is `~/.iai-mcp/.crypto.key` and should be backed up with the store. Two kinds of files under `~/.iai-mcp/` are plain text: the per-turn capture spool until the engine's next pass encrypts it, and the caches the hooks inject memory from (`*.cached.md` and their `.state.json` files).
 - **No external databases:** the store, vector index, and graph are local.
 - **macOS/Linux transport:** Unix domain socket; no public bind address.
 - **Windows transport:** ephemeral `127.0.0.1` port with a per-user token and ACL-restricted token file.
@@ -354,9 +354,12 @@ Language selection is stored in `~/.iai-mcp/config.json`; environment variables 
 Network activity is limited and explicit:
 
 - your assistant continues making its normal model calls;
-- an optional REM step may call `claude -p` through the existing Claude subscription;
+- the nightly REM step may call `claude -p` through the existing Claude subscription; it is on by default and `IAI_MCP_REM_DISABLED=1` turns it off;
 - the updater checks PyPI once per day unless `IAI_MCP_VERSION_CHECK=0`;
+- the embedder downloads `bge-small-en-v1.5` from Hugging Face on first use unless `IAI_MCP_EMBED_OFFLINE=1`;
 - installation and updates download packages or repository changes in the normal way.
+
+The engine reads Claude Code's login record (`~/.claude/.credentials.json`, or the macOS Keychain item) when the MCP server starts and before the REM step, to check that the login is a subscription. It looks only at the subscription type, the granted scopes and the expiry, and sends nothing from the record anywhere.
 
 There is no separate iai-memory cloud inference or memory service.
 

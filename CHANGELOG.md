@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The plugin's MCP launcher moved from `bin/` to `scripts/`. It is the same
   readable shell script; reinstall or update the plugin to pick up the new path.
+- The plugin README, the repository README, the reference and `llms.txt` now
+  say which files under `~/.iai-mcp/` are plain text (the per-turn capture
+  spool until the engine's next pass, and the hook injection caches). They also
+  list every network path with its off switch (REM `claude -p` is on by default,
+  `IAI_MCP_REM_DISABLED=1`; the embedding model download,
+  `IAI_MCP_EMBED_OFFLINE=1`), state when and why the engine reads the Claude
+  Code login record, and explain that the background engine outlives the
+  session, with how to stop it and delete the store. The plugin install line
+  pins the engine version.
 - The plugin README now lists every place the engine touches the network and
   the local files the hooks read.
 - Read-only engine connections bound their page cache to 8 MiB by default
@@ -60,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - The plugin manifest, marketplace entry, README, and reference docs now say
   fifteen MCP tools and list `claim_check`; they previously said fourteen.
+- The Claude Code plugin ships the recall renderer its per-turn hook imports,
+  so the plugin's per-turn memory block is no longer empty.
 - Windows: the daemon no longer crashes at boot on the missing hangup signal
   or on Unix-socket introspection ahead of its Windows branch, and every
   deployed hook script resolves `python3` from `PATH` instead of a hardcoded
@@ -100,6 +111,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file layer refuses a write.
 
 ### Security
+- The plugin's MCP launcher no longer puts the working directory on Python's
+  import path, so a folder named `iai_mcp` in the project cannot stand in for
+  the installed engine.
 - Bumped `rustls` to 0.23.45 (RUSTSEC-2026-0285) and `rustls-webpki` to
   0.103.15.
 

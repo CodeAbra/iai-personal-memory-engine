@@ -131,7 +131,7 @@ iai-mcp capture-hooks install --target codex
 
 本地、无需大模型的召回路径结合了语义相似度、图证据、时近性、时间有效性和词法证据。`memory_recall` 同时返回 `hits` 和 `anti_hits`；`memory_contradict` 会关闭旧记录的有效区间、创建新记录并把二者链接起来。
 
-空闲时，引擎会把相关情景分组、归纳语义记忆、强化有用路径、衰减未复核的弱边。一个可选的 REM 步骤可能通过用户已有的 Claude 订阅调用一次 `claude -p`，上限不超过每日配额的 1%。无需 Anthropic API 密钥。
+空闲时，引擎会把相关情景分组、归纳语义记忆、强化有用路径、衰减未复核的弱边。一个默认开启的 REM 步骤可能通过用户已有的 Claude 订阅调用一次 `claude -p`，上限不超过每日配额的 1%；设置 `IAI_MCP_REM_DISABLED=1` 可关闭。无需 Anthropic API 密钥。
 
 ### 自研核心组件
 
@@ -212,10 +212,12 @@ claim_check
 
 ## 隐私与限制
 
-- 记录以 AES-256-GCM 静态加密。存储与密钥位于 `~/.iai-mcp/`；请一起备份。
+- 记录以 AES-256-GCM 静态加密。存储与密钥位于 `~/.iai-mcp/`；请一起备份。其中有两类文件是明文：每轮捕获的暂存队列（在引擎下一次处理将其加密之前），以及钩子注入记忆时读取的缓存。[插件 README](plugin/README.md#privacy) 列出了它们。
 - macOS 与 Linux 使用 Unix 套接字。Windows 使用带每用户令牌的临时回环端口。
 - 没有 iai-memory 账号、遥测管线、托管仪表盘或跨机同步。
-- 可选的 iai-memory 网络活动仅有 REM 的 `claude -p` 步骤和每日一次 PyPI 版本检查。设置 `IAI_MCP_VERSION_CHECK=0` 可关闭该检查。
+- iai-memory 只在三处联网，每处都可关闭：夜间 REM 的 `claude -p` 步骤（默认开启，`IAI_MCP_REM_DISABLED=1`）、每日一次 PyPI 版本检查（`IAI_MCP_VERSION_CHECK=0`），以及首次使用时从 Hugging Face 下载嵌入模型（`IAI_MCP_EMBED_OFFLINE=1`）。
+- 引擎在 MCP 服务器启动时以及 REM 步骤之前读取 Claude Code 的登录记录（`~/.claude/.credentials.json`，或 macOS 钥匙串中的对应项），以确认登录为订阅账号。记录中的任何内容都不会被发送出去。
+- MCP 服务器会在后台启动引擎，会话结束后引擎仍会继续运行。用 `iai-mcp daemon stop` 停止它。
 - 存储拒绝混用不兼容的嵌入代（generation）；更换嵌入器需要一次显式迁移。
 - 在最初大约十个会话里召回通常一般，其质量与延迟取决于语料规模、语言、嵌入器与已存历史。
 - 默认存储以英语为先。原始的非英语记录需要显式的 `raw:<lang>` 标签以及一个多语言或自定义嵌入器。
