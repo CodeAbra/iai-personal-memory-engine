@@ -25,7 +25,7 @@ def cowork_env(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setattr(
         "iai_mcp.cli._capture._patch_claude_desktop_config",
-        lambda action: "Claude Desktop: stubbed",
+        lambda action: ("Claude Desktop: stubbed", True),
     )
     return {"home": home}
 

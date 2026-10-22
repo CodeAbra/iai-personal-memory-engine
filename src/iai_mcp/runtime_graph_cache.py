@@ -241,6 +241,7 @@ def _drain_worker_result(parent_conn, timeout: float) -> dict:
     rich_club: list = []
     max_degree: int = 0
     node_degrees: dict = {}
+    centrality: dict = {}
     done = False
 
     while not done:
@@ -290,6 +291,9 @@ def _drain_worker_result(parent_conn, timeout: float) -> dict:
                     node_degrees[UUID(bytes=node_bytes)] = int(deg_val)
                 except (ValueError, TypeError):
                     pass
+        elif kind == "centrality":
+            for node_bytes, value in payload:
+                centrality[UUID(bytes=node_bytes)] = float(value)
         elif kind == "done":
             done = True
         elif kind == "error":
@@ -311,6 +315,7 @@ def _drain_worker_result(parent_conn, timeout: float) -> dict:
         "rich_club": rich_club,
         "max_degree": max_degree,
         "node_degrees": node_degrees,
+        "centrality": centrality,
     }
 
 
@@ -1500,49 +1505,26 @@ def save(
     node_payload: "dict[str, dict] | None" = None,
     max_degree: int = 0,
     node_degrees: "dict | None" = None,
+    centrality: "dict | None" = None,
+    node_count: "int | None" = None,
 ) -> bool:
     path = _cache_path(store)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    encoded_node_payload: dict[str, dict] | None = None
-    # The betweenness centrality is expensive to recompute (O(V*E) Brandes on
-    # the whole corpus) but tiny to store: one float per node. The node_payload
-    # that carries it is large (a 384-dim embedding + decrypted surface per node)
-    # and is cheap to rebuild by streaming the store, so it is the first thing
-    # shed when the cache exceeds its size cap. To keep the expensive centrality
-    # from being lost together with the large rebuildable payload, it is lifted
-    # into a compact top-level map that survives the shedding.
     centrality_map: dict[str, float] = {}
     payload_record_count = 0
     if node_payload:
-        encoded_node_payload = {}
         for k, v in node_payload.items():
             if not isinstance(v, dict):
                 continue
-            # The cache is JSON, so the vector must be encoded as a list here.
-            # A caller may hand over graph-owned payloads, whose vectors are
-            # float32 buffers — a bare truth test on one raises.
-            raw_emb = v.get("embedding")
-            if raw_emb is None:
-                raw_emb = []
-            raw_tags = v.get("tags") or []
-            node_centrality = float(v.get("centrality") or 0.0)
-            encoded_node_payload[str(k)] = {
-                "embedding": [float(x) for x in raw_emb],
-                "surface": str(v.get("surface", "")),
-                "centrality": node_centrality,
-                "tier": str(v.get("tier", "episodic")),
-                "pinned": bool(v.get("pinned", False)),
-                "tags": [str(t) for t in raw_tags if t is not None],
-                "language": str(v.get("language", "en") or "en"),
-                # Rank columns: dropping any of these silently kills the
-                # matching rank term for every cache-served recall (aaak
-                # overlap, age decay, stability) until the next rebuild.
-                "aaak_index": str(v.get("aaak_index", "") or ""),
-                "created_at": str(v.get("created_at", "") or ""),
-                "stability": float(v.get("stability", 0.5) or 0.5),
-            }
-            centrality_map[str(k)] = node_centrality
-        payload_record_count = len(encoded_node_payload)
+            centrality_map[str(k)] = float(v.get("centrality") or 0.0)
+        payload_record_count = len(centrality_map)
+    elif centrality:
+        # No large node_payload this call (the DB->child streaming rebuild
+        # never builds one) -- persist the already-computed compact centrality
+        # directly so save() does not zero a caller's centrality just because
+        # it has no per-node payload to extract it from.
+        centrality_map = {str(k): float(v) for k, v in centrality.items()}
+        payload_record_count = int(node_count or 0)
 
     # Serialize per-node degree map — compact (one int per node) so it is kept
     # through the size-cap shedding that may drop node_payload.  Stored as a
@@ -1561,7 +1543,7 @@ def save(
         "key": list(_cache_key(store)),
         "assignment": _encode_assignment(assignment),
         "rich_club": _encode_rich_club(rich_club),
-        "node_payload": encoded_node_payload or {},
+        "node_payload": {},
         # Compact, expensive-to-recompute results that must outlive the size-cap
         # shedding of node_payload. The map is a flat {node_id: centrality}; the
         # count records the corpus size the cache was built at so drift can be
@@ -1577,14 +1559,50 @@ def save(
         "rebuild_timestamp": _rebuild_timestamp_override or "",
     }
 
-    estimated_bytes = _estimate_serialised_bytes(data)
-    _maybe_emit_snapshot_near_limit(store, estimated_bytes)
-    # Shedding order: drop the large rebuildable payload first, then the
-    # assignment's centroids/mid_regions if still over cap. The compact
-    # `centrality` map and `payload_record_count` are NEVER shed — they are the
-    # results the warm read path reuses to skip the betweenness recompute.
-    if estimated_bytes > MAX_CACHE_BYTES:
-        data["node_payload"] = {}
+    projected_bytes = _estimate_serialised_bytes(data)
+    if node_payload:
+        # Must equal _estimate_serialised_bytes' node_payload coefficient
+        # (_NODE_PAYLOAD_BYTES_PER_RECORD + _JSON_DICT_ENTRY_OVERHEAD + 38) —
+        # drift here moves the shed boundary.
+        projected_bytes += payload_record_count * (
+            _NODE_PAYLOAD_BYTES_PER_RECORD + _JSON_DICT_ENTRY_OVERHEAD + 38
+        )
+    _maybe_emit_snapshot_near_limit(store, projected_bytes)
+
+    if node_payload and projected_bytes <= MAX_CACHE_BYTES:
+        encoded_node_payload: dict[str, dict] = {}
+        for k, v in node_payload.items():
+            if not isinstance(v, dict):
+                continue
+            # The cache is JSON, so the vector must be encoded as a list here.
+            # A caller may hand over graph-owned payloads, whose vectors are
+            # float32 buffers — a bare truth test on one raises.
+            raw_emb = v.get("embedding")
+            if raw_emb is None:
+                raw_emb = []
+            raw_tags = v.get("tags") or []
+            encoded_node_payload[str(k)] = {
+                "embedding": [float(x) for x in raw_emb],
+                "surface": str(v.get("surface", "")),
+                "centrality": centrality_map[str(k)],
+                "tier": str(v.get("tier", "episodic")),
+                "pinned": bool(v.get("pinned", False)),
+                "tags": [str(t) for t in raw_tags if t is not None],
+                "language": str(v.get("language", "en") or "en"),
+                # Rank columns: dropping any of these silently kills the
+                # matching rank term for every cache-served recall (aaak
+                # overlap, age decay, stability) until the next rebuild.
+                "aaak_index": str(v.get("aaak_index", "") or ""),
+                "created_at": str(v.get("created_at", "") or ""),
+                "stability": float(v.get("stability", 0.5) or 0.5),
+            }
+        data["node_payload"] = encoded_node_payload
+
+    # Shedding order: the large rebuildable payload is never built over cap;
+    # if still over cap, drop the assignment's centroids/mid_regions next. The
+    # compact `centrality` map and `payload_record_count` are NEVER shed —
+    # they are the results the warm read path reuses to skip the betweenness
+    # recompute.
     if _estimate_serialised_bytes(data) > MAX_CACHE_BYTES:
         if isinstance(data.get("assignment"), dict):
             data["assignment"]["community_centroids"] = {}
@@ -1634,6 +1652,8 @@ def save_with_generation(
     node_payload: "dict[str, dict] | None" = None,
     max_degree: int = 0,
     node_degrees: "dict | None" = None,
+    centrality: "dict | None" = None,
+    node_count: "int | None" = None,
 ) -> bool:
     ts_iso = datetime.now(timezone.utc).isoformat()
     global _rebuild_timestamp_override, _generation_override  # noqa: PLW0603
@@ -1647,7 +1667,8 @@ def save_with_generation(
         result = save(
             store, assignment, rich_club,
             node_payload=node_payload, max_degree=max_degree,
-            node_degrees=node_degrees,
+            node_degrees=node_degrees, centrality=centrality,
+            node_count=node_count,
         )
     finally:
         # The snapshot on disk carries next_gen; the module epoch must commit
@@ -1729,6 +1750,17 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
             except Exception:  # noqa: BLE001 -- a probe failure must never drop a warm-up
                 structural_source = "cold_degrade"  # fail toward rebuilding
             cache_is_warm = structural_source in ("overlay", "normal")
+            if cache_is_warm:
+                # Structural decodability alone does not prove the cache is
+                # USABLE for recall: a cache saved before the centrality
+                # stream landed (or on any path that wrote no node_payload
+                # and no centrality) decodes fine but carries an empty
+                # centrality map. Skipping on structural warmth alone would
+                # inherit that wiped state forever across a restart, since
+                # the dirty counter itself resets to 0 on every process
+                # start. Require populated centrality too.
+                cache_results = try_load_cache_results(store)
+                cache_is_warm = cache_results is not None and len(cache_results[0]) > 0
             if cache_is_warm and get_dirty_counter() <= _fuse_dirty_threshold(store):
                 return {
                     "rebuilt": False,
@@ -1816,6 +1848,8 @@ def _rebuild_and_save_rgc(store: Any, *, force: bool = False) -> dict:
             saved = save_with_generation(
                 store, assignment, rich_club, max_degree=max_degree,
                 node_degrees=node_degrees,
+                centrality=result.get("centrality") or {},
+                node_count=node_count,
             )
 
             duration_s = time.perf_counter() - t0

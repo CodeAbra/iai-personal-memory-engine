@@ -56,6 +56,7 @@ def _build_index(surfaces: "list[str]", aaak: "list[str] | None" = None):
         _DIM, 1, ids, matrix, [], surfaces, aaak,
         ["2024-01-01T00:00:00+00:00"] * n, [0.5] * n, ["episodic"] * n,
         [[] for _ in range(n)], [0] * n, [0.0] * n, [False] * n,
+        [0.0] * n, ["en"] * n,
     )
     return idx, ids
 
@@ -152,25 +153,24 @@ def test_build_decrypt_fires_at_most_once_per_store_lifetime(
     from iai_mcp.store._rank_index import rank_index_for
 
     store, graph, _recs = _build_store_and_graph(tmp_path, n=6)
-    handle = rank_index_for(store, graph)
+    handle = rank_index_for(store)
 
     calls = {"n": 0}
     orig_build = handle._build
 
-    def _spy_build(g):
+    def _spy_build():
         calls["n"] += 1
-        orig_build(g)
+        orig_build()
 
     monkeypatch.setattr(handle, "_build", _spy_build)
 
     for _ in range(4):
-        handle.snapshot(graph, [])
+        handle.snapshot([])
 
     assert calls["n"] == 1, (
         "the whole-corpus decrypt build must fire at most once per store "
-        f"lifetime for an unchanged graph identity -- got {calls['n']} calls; "
-        "a per-recall re-trigger would re-pay the whole-corpus decrypt cost "
-        "on every recall instead of once"
+        f"lifetime -- got {calls['n']} calls; a per-recall re-trigger would "
+        "re-pay the whole-corpus decrypt cost on every recall instead of once"
     )
 
 

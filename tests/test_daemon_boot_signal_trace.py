@@ -31,8 +31,11 @@ def test_daemon_boot_window_signal_breadcrumb(monkeypatch, tmp_path):
 
     _install_boot_signal_trace()
 
+    expected_sigs = {signal.SIGTERM, signal.SIGINT}
+    if hasattr(signal, "SIGHUP"):
+        expected_sigs.add(signal.SIGHUP)
     registered_sigs = {sig for sig, _handler in registered}
-    assert registered_sigs == {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+    assert registered_sigs == expected_sigs
     handlers = {handler for _sig, handler in registered}
     assert len(handlers) == 1, "all three signals must map to the same handler"
     trace = registered[0][1]
@@ -81,5 +84,30 @@ def test_daemon_boot_window_signal_breadcrumb(monkeypatch, tmp_path):
 
     # ordering: the SIG_DFL restore was recorded before the kill call.
     state_at_kill = signal_state_at_kill[0]
-    assert len(state_at_kill) == 4
+    assert len(state_at_kill) == len(expected_sigs) + 1
     assert state_at_kill[-1] == (signal.SIGTERM, signal.SIG_DFL)
+
+
+def test_daemon_boot_window_signal_breadcrumb_without_sighup(monkeypatch, tmp_path):
+    # Simulates a platform whose signal module has no SIGHUP attribute.
+    monkeypatch.delattr(signal, "SIGHUP", raising=False)
+
+    from iai_mcp.daemon import _install_boot_signal_trace
+
+    watchdog_log = tmp_path / "watchdog.log"
+    monkeypatch.setattr(
+        "iai_mcp.daemon._watchdog._watchdog_log_path",
+        lambda: watchdog_log,
+    )
+
+    registered: list[int] = []
+
+    def signal_recorder(sig, handler):
+        registered.append(sig)
+        return None
+
+    monkeypatch.setattr("signal.signal", signal_recorder)
+
+    _install_boot_signal_trace()
+
+    assert set(registered) == {signal.SIGTERM, signal.SIGINT}

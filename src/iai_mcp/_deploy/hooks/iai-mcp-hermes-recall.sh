@@ -39,5 +39,5 @@ except Exception:
 if text.strip():
     print(json.dumps({"context": text}))
 '
-printf '%s' "$input" | /usr/bin/python3 -c "$PY_SCRIPT" "$here" 2>/dev/null || true
+printf '%s' "$input" | python3 -c "$PY_SCRIPT" "$here" 2>/dev/null || true
 exit 0

@@ -738,6 +738,82 @@ def cmd_idem_dedup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune_snapshots(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate._snapshot_retention import prune_snapshots
+
+    if getattr(args, "store_path", None) is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    if args.keep < 0:
+        print(
+            "error: --keep must be a non-negative integer",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+
+    try:
+        summary = prune_snapshots(store_path, keep=args.keep, apply=apply)
+    except ValueError as exc:
+        print(f"error: {exc}", file=_cli.sys.stderr)
+        return 2
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp prune-snapshots [{mode_str}]")
+
+    if summary.get("locked"):
+        print(
+            f"  skipped: store locked (holder={summary.get('holder')})",
+            file=_cli.sys.stderr,
+        )
+        return 1 if apply else 0
+
+    prune_key = "pruned" if apply else "planned_prune"
+    orphan_key = "orphans_removed" if apply else "planned_orphan_removal"
+    sizes = summary.get("sizes", {})
+    pruned = summary.get(prune_key, [])
+    orphans_found = summary.get("orphans_found", [])
+    orphans_acted = summary.get(orphan_key, [])
+    action = "removed" if apply else "planned for removal"
+
+    print(f"  snapshots found:       {summary.get('snapshots_found', 0)}")
+    print(f"  kept:                  {len(summary.get('kept', []))}")
+    print(f"  snapshots {action}: {len(pruned)}")
+    for name in pruned:
+        print(f"    {name}  ({sizes.get(name, 0)} bytes)")
+
+    print(f"  orphans found:         {len(orphans_found)}")
+    print(f"  orphans {action}:   {len(orphans_acted)}")
+    for name in orphans_acted:
+        print(f"    {name}  ({sizes.get(name, 0)} bytes)")
+
+    if apply:
+        print(f"  reclaimed:             {summary.get('reclaimed_bytes', 0)} bytes")
+    elif pruned or orphans_found:
+        print()
+        print("  Run with --apply to execute.")
+
+    errors = summary.get("errors") or []
+    if errors:
+        print(f"error: {len(errors)} item(s) failed to remove:", file=_cli.sys.stderr)
+        for line in errors[:10]:
+            print(f"  {line}", file=_cli.sys.stderr)
+        return 1
+
+    return 0
+
+
 def cmd_blob_quarantine(args: argparse.Namespace) -> int:
     from iai_mcp import cli as _cli
     from iai_mcp.migrate._blob_quarantine import quarantine_notification_blobs
@@ -812,6 +888,74 @@ def cmd_directive_sweep(args: argparse.Namespace) -> int:
     if summary.get("snapshot_dir"):
         print(f"  snapshot directory:     {summary['snapshot_dir']}")
     if mode_str == "dry-run" and summary.get("unstamped", 0) > 0:
+        print()
+        print("  Run with --apply to execute.")
+    errors = summary.get("errors") or []
+    if errors:
+        print(f"error: {len(errors)} record(s) failed:", file=_cli.sys.stderr)
+        for line in errors[:10]:
+            print(f"  {line}", file=_cli.sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_template_pollution_sweep(args: argparse.Namespace) -> int:
+    from iai_mcp import cli as _cli
+    from iai_mcp.migrate._template_pollution import sweep_template_pollution
+    from iai_mcp.store import MemoryStore
+
+    if args.store_path is not None:
+        store_path = Path(args.store_path).expanduser()
+    else:
+        store_path = Path.home() / ".iai-mcp"
+
+    if not store_path.exists():
+        print(
+            f"error: store path does not exist: {store_path}",
+            file=_cli.sys.stderr,
+        )
+        return 2
+
+    apply = bool(getattr(args, "apply", False))
+    explicit_ids = list(getattr(args, "explicit_id", None) or [])
+    store = MemoryStore(path=store_path)
+    summary = sweep_template_pollution(
+        store, apply=apply, store_path=store_path, explicit_ids=explicit_ids,
+    )
+
+    mode_str = summary.get("mode", "dry-run")
+    print(f"iai-mcp template-pollution-sweep [{mode_str}]")
+    print(f"  records scanned:      {summary.get('records_scanned', 0)}")
+    print(f"  pollution found:      {summary.get('pollution_found', 0)}")
+    print(f"  tombstoned:           {summary.get('tombstoned', 0)}")
+    print(f"  skipped (pinned):     {summary.get('skipped_pinned', 0)}")
+    if summary.get("explicit_ids_protected"):
+        print(
+            f"  explicit ids protected (found, pinned, NOT tombstoned): "
+            f"{summary['explicit_ids_protected']}"
+        )
+    if summary.get("explicit_ids_already_tombstoned"):
+        print(
+            f"  explicit ids already tombstoned (prior run): "
+            f"{summary['explicit_ids_already_tombstoned']}"
+        )
+    if summary.get("missing_explicit_ids"):
+        print(f"  missing explicit ids (not found in store): {summary['missing_explicit_ids']}")
+    if summary.get("snapshot_dir"):
+        print(f"  snapshot directory:   {summary['snapshot_dir']}")
+    if summary.get("journal"):
+        print(f"  journal:              {summary['journal']}")
+    orphan_sweep = summary.get("orphan_edge_sweep")
+    if orphan_sweep is not None:
+        print(
+            f"  orphan edges deleted (full-store sweep, not scoped to this "
+            f"purge): {orphan_sweep.get('orphan_edges_deleted', 0)} "
+            f"(of {orphan_sweep.get('edges_scanned', 0)} scanned)"
+        )
+    if mode_str == "apply" and summary.get("tombstoned", 0) > 0:
+        print(f"  ann rebuild invoked:  {summary.get('ann_rebuild_invoked', False)}")
+        print(f"  exact index invalidated: {summary.get('exact_index_invalidated', False)}")
+    if mode_str == "dry-run" and summary.get("pollution_found", 0) > 0:
         print()
         print("  Run with --apply to execute.")
     errors = summary.get("errors") or []
@@ -934,7 +1078,38 @@ def cmd_salience_backfill(args: argparse.Namespace) -> int:
     ):
         print()
         print("  Run with --apply to execute.")
-    errors = list(summary.get("errors") or []) + list(entity_summary.get("errors") or [])
+
+    from iai_mcp.migrate._salience_auto_migration import (
+        MAX_ATTEMPTS,
+        _DONE_MARKER_KEY,
+        _NATIVE_KEY,
+        _combined_backfill_errors,
+        _marker_present,
+        _read_attempts,
+        mark_migration_done,
+        resolve_migration_state,
+    )
+
+    errors = _combined_backfill_errors(summary)
+
+    if apply and not errors:
+        state = resolve_migration_state(
+            done=_marker_present(store.db, _DONE_MARKER_KEY),
+            native=_marker_present(store.db, _NATIVE_KEY),
+            attempts=_read_attempts(store.db),
+            max_attempts=MAX_ATTEMPTS,
+        )
+        if state == "native":
+            print("  store is born-native -- nothing to migrate, done marker not written")
+        else:
+            try:
+                mark_migration_done(store)
+            except Exception as exc:  # noqa: BLE001 -- marker write failure must not crash the CLI
+                print(
+                    f"warning: could not record migration-done marker: {exc}",
+                    file=_cli.sys.stderr,
+                )
+
     if errors:
         print(f"error: {len(errors)} record(s) failed:", file=_cli.sys.stderr)
         for line in errors[:10]:

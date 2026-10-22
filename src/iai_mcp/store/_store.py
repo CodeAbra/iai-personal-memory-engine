@@ -664,6 +664,17 @@ class MemoryStore:
             )
             self._record_tags_backfill_ok = False
 
+        # O(1) born-native stamp only (a marker read + a single LIMIT 1
+        # probe) -- the heavy salience backfill runs in the sleep pipeline,
+        # never on this awake/boot path.
+        from iai_mcp.migrate._salience_auto_migration import stamp_native_if_fresh
+        try:
+            stamp_native_if_fresh(self)
+        except Exception as exc:  # noqa: BLE001 — boot migration must not abort open
+            logger.warning(
+                "boot migration stamp_native_if_fresh failed (non-fatal): %s", exc
+            )
+
     def _table_names(self) -> list[str]:
         result = self.db.list_tables()
         if hasattr(result, "tables"):
@@ -2194,9 +2205,13 @@ class MemoryStore:
         conn = open_store_conn(db_path, read_only=True)
         if conn is None:
             conn = _sqlite_stdlib.connect(
-                db_path, check_same_thread=False, isolation_level=None,
+                f"file:{db_path}?mode=ro",
+                uri=True, check_same_thread=False, isolation_level=None,
             )
             conn.row_factory = _sqlite_stdlib.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=2000")
+            return conn
         with _cl.suppress(Exception):
             conn.execute("PRAGMA busy_timeout=2000")
         with _cl.suppress(Exception):

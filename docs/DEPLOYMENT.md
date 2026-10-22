@@ -165,6 +165,25 @@ to a deferred-captures buffer; the SessionStart hook reads the daemon's
 pre-cached session-start payload and injects it as `additionalContext`
 before the first prompt of every session.
 
+### Optional: iai-tools
+
+`iai-tools` is a separate code index, session-event store, and command
+executor. It is off by default and turned on per machine:
+
+```bash
+iai-mcp capture-hooks install --with-tools   # add --target codex for Codex
+```
+
+This registers the `iai-tools` MCP server and adds five hooks. One of them is
+a PreToolUse hook that blocks Grep, Glob, and shell `grep`/`rg`/`find`/`fd`/
+`cat`/`head`/`tail`/`gh` reads and points the agent at the iai-tools search
+and executor instead. The flag needs the MCP server and the executor built
+from a source checkout (`cd mcp-wrapper && npm ci && npm run build`, then
+`cargo build --release -p iai_mcp_tools_core --bins`, or set
+`IAI_TOOLS_EXECD_BIN`). Until both are present, install refuses the flag and
+changes nothing. `iai-mcp capture-hooks uninstall` removes iai-tools together
+with the memory hooks.
+
 ## MCP host registration
 
 After `scripts/install.sh` completes, register iai with the operator's

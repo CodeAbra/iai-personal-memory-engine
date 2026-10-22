@@ -92,6 +92,8 @@ fn build_fixture() -> (Inner, usize) {
     let tags = vec![Vec::new(); N_RECORDS];
     let salience_level = vec![0u8; N_RECORDS];
     let centrality = vec![0.0f32; N_RECORDS];
+    let valence = vec![0.0f32; N_RECORDS];
+    let language = vec!["en".to_string(); N_RECORDS];
 
     for i in 0..N_RECORDS {
         let id = i as u128 + 1;
@@ -111,6 +113,7 @@ fn build_fixture() -> (Inner, usize) {
     let inner = Inner::from_columns(
         DIM, 1, ids, vectors_flat, edge_map, surfaces, aaak_index,
         created_at, stability, tier, tags, salience_level, centrality, pending,
+        valence, language,
     )
     .expect("fixture build must not fail");
     (inner, adjacency_count)
@@ -126,7 +129,7 @@ const LAYER1_WARM_ITERS: usize = 9;
 type LayerColumns = (
     usize, u64, Vec<u128>, Vec<f32>, HashMap<u128, Vec<(u128, f32, String)>>,
     Vec<String>, Vec<String>, Vec<i64>, Vec<f32>, Vec<String>, Vec<Vec<String>>,
-    Vec<u8>, Vec<f32>, Vec<bool>,
+    Vec<u8>, Vec<f32>, Vec<bool>, Vec<f32>, Vec<String>,
 );
 
 fn synthetic_edges_at(node: usize, n: usize, rng: &mut u32) -> Vec<(u128, f32, String)> {
@@ -160,16 +163,20 @@ fn build_columns_at_scale(n: usize) -> LayerColumns {
     let salience_level = vec![0u8; n];
     let centrality = vec![0.0f32; n];
     let pending = vec![false; n];
+    let valence = vec![0.0f32; n];
+    let language = vec!["en".to_string(); n];
     (
         DIM, 1, ids, vectors_flat, edge_map, surfaces, aaak_index,
         created_at, stability, tier, tags, salience_level, centrality, pending,
+        valence, language,
     )
 }
 
 fn bench_from_columns_layer1() {
     for &n in LAYER1_SIZES.iter() {
         let (dim, generation, ids, vectors_flat, edge_map, surfaces, aaak_index,
-             created_at, stability, tier, tags, salience_level, centrality, pending) =
+             created_at, stability, tier, tags, salience_level, centrality, pending,
+             valence, language) =
             build_columns_at_scale(n);
 
         let mut samples_ms = Vec::with_capacity(LAYER1_WARM_ITERS);
@@ -179,7 +186,7 @@ fn bench_from_columns_layer1() {
                 dim, generation, ids.clone(), vectors_flat.clone(), edge_map.clone(),
                 surfaces.clone(), aaak_index.clone(), created_at.clone(), stability.clone(),
                 tier.clone(), tags.clone(), salience_level.clone(), centrality.clone(),
-                pending.clone(),
+                pending.clone(), valence.clone(), language.clone(),
             )
             .expect("layer1 fixture build must not fail");
             samples_ms.push(start.elapsed().as_secs_f64() * 1000.0);
@@ -206,6 +213,8 @@ fn build_burst(rng: &mut u32) -> Vec<PendingOp> {
             salience_level: 0,
             centrality: 0.0,
             pending: false,
+            valence: 0.0,
+            language: String::new(),
         });
     }
     for i in 0..BURST_DELETES {

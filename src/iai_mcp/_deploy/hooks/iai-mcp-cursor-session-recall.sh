@@ -9,7 +9,7 @@ core="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/iai-mcp-session-recall.sh"
 [ -f "$core" ] || exit 0
 out=$(printf '%s' "$input" | bash "$core" 2>/dev/null || true)
 [ -n "$out" ] || exit 0
-printf '%s' "$out" | /usr/bin/python3 -c '
+printf '%s' "$out" | python3 -c '
 import json, sys
 text = sys.stdin.read()
 if text.strip():

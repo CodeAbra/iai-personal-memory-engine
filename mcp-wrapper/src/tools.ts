@@ -788,7 +788,7 @@ export async function runDirectRecency(
     spawnArgs.push("--session", sessionId);
   }
   return new Promise((resolve) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
     const proc = spawnFn(cli, spawnArgs, opts);
     let stdout = "";
     const stdoutStream = proc.stdout;
@@ -835,7 +835,7 @@ export async function runDirectWrite(
     spawnArgs.push("--session-id", sessionId);
   }
   return new Promise((resolve) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
     const proc = spawnFn(cli, spawnArgs, opts);
     let stdout = "";
     const stdoutStream = proc.stdout;
@@ -884,7 +884,7 @@ export async function runDirectRecall(
   );
   const spawnArgs: string[] = ["recall", "--json", "--limit", limit, cue];
   return new Promise((resolve, reject) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
     const proc = spawnFn(cli, spawnArgs, opts);
     let stdout = "";
     const stdoutStream = proc.stdout;
@@ -952,7 +952,7 @@ export async function runDirectTemporal(
     spawnArgs.push(cue);
   }
   return new Promise((resolve) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
     const proc = spawnFn(cli, spawnArgs, opts);
     let stdout = "";
     const stdoutStream = proc.stdout;
@@ -1053,7 +1053,7 @@ export async function runDirectSearch(
   const limit = String(typeof args.k === "number" ? args.k : 8);
   const spawnArgs: string[] = ["search", "--json", "--limit", limit, query];
   return new Promise((resolve) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
     const proc = spawnFn(cli, spawnArgs, opts);
     let stdout = "";
     const stdoutStream = proc.stdout;
@@ -1099,7 +1099,7 @@ export async function runBankFallback(
     "--json",
   ];
   return new Promise((resolve) => {
-    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    const opts: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
     const proc = spawnFn(cli, args, opts);
     let stdout = "";
     const stdoutStream = proc.stdout;

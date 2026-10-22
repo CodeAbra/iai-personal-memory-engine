@@ -73,7 +73,7 @@ def test_budget_full_lands_as_ordinary_and_reports_distinctly(driver, tmp_path, 
 
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = iai_cli.cmd_capture(_args("the eleventh standing order that overflows the count cap"))
+        rc = iai_cli.cmd_capture(_args("standing directive: the eleventh standing order that overflows the count cap"))
 
     assert rc == 0
     out = buf.getvalue().lower()
@@ -92,7 +92,7 @@ def test_budget_full_lands_as_ordinary_and_reports_distinctly(driver, tmp_path, 
         ordinary = [
             rec
             for rec in check_store.iter_records(where="tombstoned_at IS NULL")
-            if rec.literal_surface == "the eleventh standing order that overflows the count cap"
+            if rec.literal_surface == "standing directive: the eleventh standing order that overflows the count cap"
         ]
         assert len(ordinary) == 1
         assert ordinary[0].directive is False

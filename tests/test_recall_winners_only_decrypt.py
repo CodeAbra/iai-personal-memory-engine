@@ -94,7 +94,7 @@ def test_decrypt_count_is_order_winners(tmp_path, monkeypatch):
 
     # Prime the resident index once, off the measured window -- this is a
     # one-time whole-corpus cold build, not a per-recall cost.
-    rank_index_for(store, graph).snapshot(graph)
+    rank_index_for(store).snapshot()
 
     # Isolate scoring + response assembly from the upstream candidate-
     # retrieval site: calling recall_for_response directly instead of
@@ -127,7 +127,7 @@ def test_decrypt_count_bounded_no_new_site(tmp_path, monkeypatch):
     site was introduced there."""
     embedder = Embedder()
     store, graph, assignment, rich_club = _build_scaled_store(tmp_path, monkeypatch, embedder)
-    rank_index_for(store, graph).snapshot(graph)
+    rank_index_for(store).snapshot()
 
     counter = _decrypt_counter(monkeypatch)
     _pm._last_recall_latency_ms = 0.0
@@ -220,7 +220,7 @@ def test_ffi_params_no_per_candidate_churn(tmp_path, monkeypatch):
     actually catch it."""
     embedder = Embedder()
     store, graph, assignment, rich_club = _build_scaled_store(tmp_path, monkeypatch, embedder)
-    rank_index_for(store, graph).snapshot(graph)
+    rank_index_for(store).snapshot()
 
     construction_count = {"n": 0}
     real_uuid = _pm.UUID

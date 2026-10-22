@@ -279,8 +279,8 @@ def test_export_memoized_once_per_generation_change(store: MemoryStore):
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
 
-    handle = rank_index_for(store, graph)
-    handle._build(graph)  # populate self._index; the export memo stays empty
+    handle = rank_index_for(store)
+    handle._build()  # populate self._index; the export memo stays empty
 
     calls = {"n": 0}
     real_index = handle._index
@@ -296,20 +296,20 @@ def test_export_memoized_once_per_generation_change(store: MemoryStore):
 
     handle._index = _SnapshotSpy()
 
-    gen1, ids1, *_rest1 = handle.snapshot(graph, [])
+    gen1, ids1, *_rest1 = handle.snapshot([])
     assert calls["n"] == 1, "the first call after a fresh build must compute the export"
 
-    gen1b, ids1b, *_rest1b = handle.snapshot(graph, [])
+    gen1b, ids1b, *_rest1b = handle.snapshot([])
     assert calls["n"] == 1, "a repeated call at the same generation must hit the memo"
     assert gen1b == gen1
     assert list(ids1b) == list(ids1)
 
     rec2 = _make_record(store, "advance-generation", 0.4)
     store.insert(rec2)
-    gen2, ids2, *_rest2 = handle.snapshot(graph, [])
+    gen2, ids2, *_rest2 = handle.snapshot([])
     assert gen2 > gen1, (
-        "the fixture must actually advance graph._pool_content_version, "
-        "or the recompute-once assertion below is vacuous"
+        "the write-time hook must have marked the handle dirty, or the "
+        "recompute-once assertion below is vacuous"
     )
     assert calls["n"] == 2, "a generation change must invalidate the memo and recompute exactly once"
     assert rec2.id.int in ids2
@@ -322,12 +322,12 @@ def test_export_memo_keyed_on_tokens_not_generation_alone(store: MemoryStore):
     rec = _make_record(store, "hello searchable world", 0.3)
     store.insert(rec)
     graph, _assignment, _rc = retrieve.build_runtime_graph(store)
-    handle = rank_index_for(store, graph)
+    handle = rank_index_for(store)
 
-    gen_a, _ids_a, _mat_a, _degree_a, postings_a = handle.snapshot(graph, ["hello"])
+    gen_a, _ids_a, _mat_a, _degree_a, postings_a = handle.snapshot(["hello"])
     assert "hello" in postings_a
 
-    gen_b, _ids_b, _mat_b, _degree_b, postings_b = handle.snapshot(graph, ["searchable"])
+    gen_b, _ids_b, _mat_b, _degree_b, postings_b = handle.snapshot(["searchable"])
     assert gen_b == gen_a, "generation must not have changed between the two calls"
     assert "searchable" in postings_b
     assert set(postings_b) == {"searchable"}, (

@@ -27,14 +27,19 @@ _HOOK = (
 )
 
 
-def _make(text: str, session_id: str) -> MemoryRecord:
+def _make(
+    text: str,
+    session_id: str,
+    *,
+    embedding: list[float] | None = None,
+) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
         id=uuid4(),
         tier="episodic",
         literal_surface=text,
         aaak_index="",
-        embedding=[0.1] * EMBED_DIM,
+        embedding=embedding if embedding is not None else [0.1] * EMBED_DIM,
         community_id=None,
         centrality=0.0,
         detail_level=2,
@@ -394,3 +399,86 @@ def test_hook_ignores_stale_per_session_snapshot(tmp_path):
     # snapshot age -- it reads the same file with no freshness check.
     assert "<iai-mcp-live-state>" in out
     assert "yesterday's task" in out
+
+
+def _pinned_vec(axis: int) -> list[float]:
+    vec = [0.0] * EMBED_DIM
+    vec[axis] = 1.0
+    return vec
+
+
+_DRIFT_TOPIC_A_TEXT = "alice discusses coffee brewing methods"
+_DRIFT_TOPIC_A_VEC = _pinned_vec(0)
+_DRIFT_PIVOT_TEXT = "alice debugs a rust borrow checker error"
+_DRIFT_PIVOT_VEC = _pinned_vec(1)
+_DRIFT_SESSION_B_TEXT = "session B's own unrelated goal"
+_DRIFT_SESSION_B_VEC = _pinned_vec(2)
+
+
+def _drift_vec_for(_store: object, goal: str) -> list[float]:
+    if _DRIFT_PIVOT_TEXT in goal:
+        return _DRIFT_PIVOT_VEC
+    if _DRIFT_SESSION_B_TEXT in goal:
+        return _DRIFT_SESSION_B_VEC
+    return _DRIFT_TOPIC_A_VEC
+
+
+def test_concurrent_sessions_drift_reanchors_only_the_drifting_session(
+    tmp_path, monkeypatch,
+):
+    """A sustained drift re-anchor on session A must never bleed into
+    session B's cached goal file or its live entry. Uses a real tmp
+    store so the per-session sidecar path is exercised end to end; the
+    embedder stays monkeypatched via the _goal_embedding seam so cosine is
+    deterministic."""
+    monkeypatch.setattr(wt, "_goal_embedding", _drift_vec_for)
+    store = MemoryStore(path=tmp_path / "store")
+    try:
+        wt.update_from_record(
+            _make(_DRIFT_TOPIC_A_TEXT, "sess-a", embedding=_DRIFT_TOPIC_A_VEC),
+            store=store,
+        )
+        for _ in range(4):  # cooldown 2..5
+            wt.update_from_record(
+                _make(
+                    f"{_DRIFT_TOPIC_A_TEXT} continuing", "sess-a",
+                    embedding=_DRIFT_TOPIC_A_VEC,
+                ),
+                store=store,
+            )
+
+        # Interleave a session B turn -- an explicit task switch that parks A.
+        wt.update_from_record(
+            _make(_DRIFT_SESSION_B_TEXT, "sess-b", embedding=_DRIFT_SESSION_B_VEC),
+            store=store,
+        )
+        file_b = tmp_path / "store" / ".working-tier.sess-b.cached.md"
+        assert file_b.is_file()
+        b_snapshot_before = file_b.read_bytes()
+        b_goal_before = wt.read_task(session_id="sess-b").goal
+
+        # Sustained pivot on session A -- each turn restores A, re-parks B.
+        for _ in range(3):
+            wt.update_from_record(
+                _make(_DRIFT_PIVOT_TEXT, "sess-a", embedding=_DRIFT_PIVOT_VEC),
+                store=store,
+            )
+
+        entry_a = wt.read_task(session_id="sess-a")
+        assert entry_a.goal == _DRIFT_PIVOT_TEXT, (
+            "session A's sustained, cooled-down pivot must re-anchor"
+        )
+        file_a = tmp_path / "store" / ".working-tier.sess-a.cached.md"
+        assert file_a.is_file()
+        assert _DRIFT_PIVOT_TEXT in file_a.read_text(encoding="utf-8")
+
+        assert file_b.read_bytes() == b_snapshot_before, (
+            "session B's cached snapshot file must be byte-unchanged by "
+            "session A's re-anchor"
+        )
+        entry_b = wt.read_task(session_id="sess-b")
+        assert entry_b.goal == b_goal_before, (
+            "session B's live goal must be unaffected by session A's re-anchor"
+        )
+    finally:
+        store.close()

@@ -1,0 +1,396 @@
+{
+  "cue_count": 43,
+  "cues": [
+    {
+      "cluster_id": "hub_rank_0",
+      "cue_id": "rank_budget_dropped_0",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 0",
+      "gold_record_id": "97e84c24-0000-0000-46fd-db9a00000000",
+      "quote": "quarterly budget review notes",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_rank_0",
+      "cue_id": "rank_budget_dropped_1",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 1",
+      "gold_record_id": "8d5a7a34-0000-0000-434e-b8fe00000000",
+      "quote": "quarterly budget review notes",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_rank_0",
+      "cue_id": "rank_budget_dropped_2",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 2",
+      "gold_record_id": "da9d0133-0000-0000-96e3-ec8900000000",
+      "quote": "quarterly budget review notes",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_rank_1",
+      "cue_id": "rank_budget_dropped_3",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 3",
+      "gold_record_id": "e7a63fc7-0000-0000-f21f-9f4000000000",
+      "quote": "quarterly budget review notes",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_rank_1",
+      "cue_id": "rank_budget_dropped_4",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 4",
+      "gold_record_id": "d4abb01d-0000-0000-3714-1acc00000000",
+      "quote": "quarterly budget review notes",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_rank_1",
+      "cue_id": "rank_budget_dropped_5",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 5",
+      "gold_record_id": "d5b755df-0000-0000-a62a-4e1f00000000",
+      "quote": "quarterly budget review notes",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_rank_2",
+      "cue_id": "rank_budget_dropped_6",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 6",
+      "gold_record_id": "6a203381-0000-0000-c487-04c900000000",
+      "quote": "quarterly budget review notes",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_rank_2",
+      "cue_id": "rank_budget_dropped_7",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 7",
+      "gold_record_id": "db6f348d-0000-0000-53ca-1a5300000000",
+      "quote": "quarterly budget review notes",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_rank_2",
+      "cue_id": "rank_budget_dropped_8",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 8",
+      "gold_record_id": "f1136533-0000-0000-2ff3-44da00000000",
+      "quote": "quarterly budget review notes",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_rank_3",
+      "cue_id": "rank_budget_dropped_9",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 9",
+      "gold_record_id": "20da014a-0000-0000-09bd-c25e00000000",
+      "quote": "quarterly budget review notes",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_rank_3",
+      "cue_id": "rank_budget_dropped_10",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 10",
+      "gold_record_id": "177e1b68-0000-0000-3675-69fd00000000",
+      "quote": "quarterly budget review notes",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_rank_3",
+      "cue_id": "rank_budget_dropped_11",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "quarterly budget review notes for rollout cluster 11",
+      "gold_record_id": "91e887da-0000-0000-3ad9-1e3900000000",
+      "quote": "quarterly budget review notes",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_served_0",
+      "cue_id": "served_0",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 0 for a new infrastructure teammate",
+      "gold_record_id": "8fa48b54-0000-0000-a0a1-ca9a00000000",
+      "quote": "onboarding checklist entry",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_served_0",
+      "cue_id": "served_1",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 1 for a new infrastructure teammate",
+      "gold_record_id": "b9cb5d6d-0000-0000-c02e-d4b200000000",
+      "quote": "onboarding checklist entry",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_served_0",
+      "cue_id": "served_2",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 2 for a new infrastructure teammate",
+      "gold_record_id": "99e82f19-0000-0000-3a0c-c17400000000",
+      "quote": "onboarding checklist entry",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "hub_served_1",
+      "cue_id": "served_3",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 3 for a new infrastructure teammate",
+      "gold_record_id": "565f656a-0000-0000-5f55-ab4e00000000",
+      "quote": "onboarding checklist entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_served_1",
+      "cue_id": "served_4",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 4 for a new infrastructure teammate",
+      "gold_record_id": "ae71267d-0000-0000-866a-086700000000",
+      "quote": "onboarding checklist entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_served_1",
+      "cue_id": "served_5",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 5 for a new infrastructure teammate",
+      "gold_record_id": "f023c915-0000-0000-8cd9-f63400000000",
+      "quote": "onboarding checklist entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_served_2",
+      "cue_id": "served_6",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 6 for a new infrastructure teammate",
+      "gold_record_id": "b0ee2ff2-0000-0000-a4f2-d3d300000000",
+      "quote": "onboarding checklist entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_served_2",
+      "cue_id": "served_7",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "onboarding checklist entry 7 for a new infrastructure teammate",
+      "gold_record_id": "4b5baaa4-0000-0000-b31f-997700000000",
+      "quote": "onboarding checklist entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_spread_0",
+      "cue_id": "spread_did_not_reach_0",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "isolated archival record 0 with no relational context at all",
+      "gold_record_id": "720142dc-0000-0000-6b79-cbae00000000",
+      "quote": "isolated archival record",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_spread_0",
+      "cue_id": "spread_did_not_reach_1",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "isolated archival record 1 with no relational context at all",
+      "gold_record_id": "24e03430-0000-0000-51c9-607b00000000",
+      "quote": "isolated archival record",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_spread_0",
+      "cue_id": "spread_did_not_reach_2",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "isolated archival record 2 with no relational context at all",
+      "gold_record_id": "e35d241f-0000-0000-c66f-b0f600000000",
+      "quote": "isolated archival record",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_spread_1",
+      "cue_id": "spread_did_not_reach_3",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "isolated archival record 3 with no relational context at all",
+      "gold_record_id": "73c9ec02-0000-0000-3a1c-d8b400000000",
+      "quote": "isolated archival record",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "hub_spread_1",
+      "cue_id": "spread_did_not_reach_4",
+      "cue_text": "__baseline_cue_vec__:hub_cue",
+      "gold_literal_surface": "isolated archival record 4 with no relational context at all",
+      "gold_record_id": "ed4999ac-0000-0000-0b23-335500000000",
+      "quote": "isolated archival record",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_0",
+      "cue_id": "discovery_excluded_0",
+      "cue_text": "how does the archive protocol handle stored records in bucket 0",
+      "gold_literal_surface": "vault decommission log entry 0 sealed for the winter migration",
+      "gold_record_id": "6c4a8d37-0000-0000-97e7-6da900000000",
+      "quote": "vault decommission log entry",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "archive_1",
+      "cue_id": "discovery_excluded_1",
+      "cue_text": "how does the archive protocol handle stored records in bucket 1",
+      "gold_literal_surface": "vault decommission log entry 1 sealed for the winter migration",
+      "gold_record_id": "d04f73dc-0000-0000-93fb-89e000000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_2",
+      "cue_id": "discovery_excluded_2",
+      "cue_text": "how does the archive protocol handle stored records in bucket 2",
+      "gold_literal_surface": "vault decommission log entry 2 sealed for the winter migration",
+      "gold_record_id": "c918086b-0000-0000-5e5d-a3db00000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_3",
+      "cue_id": "discovery_excluded_3",
+      "cue_text": "how does the archive protocol handle stored records in bucket 3",
+      "gold_literal_surface": "vault decommission log entry 3 sealed for the winter migration",
+      "gold_record_id": "77af1667-0000-0000-8c92-9b2f00000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_4",
+      "cue_id": "discovery_excluded_4",
+      "cue_text": "how does the archive protocol handle stored records in bucket 4",
+      "gold_literal_surface": "vault decommission log entry 4 sealed for the winter migration",
+      "gold_record_id": "688aa972-0000-0000-d3ef-844d00000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_5",
+      "cue_id": "discovery_excluded_5",
+      "cue_text": "how does the archive protocol handle stored records in bucket 5",
+      "gold_literal_surface": "vault decommission log entry 5 sealed for the winter migration",
+      "gold_record_id": "2c9b68f8-0000-0000-9379-96e400000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_6",
+      "cue_id": "discovery_excluded_6",
+      "cue_text": "how does the archive protocol handle stored records in bucket 6",
+      "gold_literal_surface": "vault decommission log entry 6 sealed for the winter migration",
+      "gold_record_id": "630990dc-0000-0000-6b4a-488e00000000",
+      "quote": "vault decommission log entry",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "archive_7",
+      "cue_id": "discovery_excluded_7",
+      "cue_text": "how does the archive protocol handle stored records in bucket 7",
+      "gold_literal_surface": "vault decommission log entry 7 sealed for the winter migration",
+      "gold_record_id": "a0129a37-0000-0000-835e-9f1f00000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "archive_8",
+      "cue_id": "discovery_excluded_8",
+      "cue_text": "how does the archive protocol handle stored records in bucket 8",
+      "gold_literal_surface": "vault decommission log entry 8 sealed for the winter migration",
+      "gold_record_id": "74120797-0000-0000-9ecc-7b4f00000000",
+      "quote": "vault decommission log entry",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "gateway_0",
+      "cue_id": "lexical_cold_or_idf_gated_0",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq000 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq000 rotated last night in the token store",
+      "gold_record_id": "66f13ec1-0000-0000-82a2-55c500000000",
+      "quote": "gateway_auth_token_zzq000",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "gateway_1",
+      "cue_id": "lexical_cold_or_idf_gated_1",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq001 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq001 rotated last night in the token store",
+      "gold_record_id": "398a6e0b-0000-0000-7172-69a700000000",
+      "quote": "gateway_auth_token_zzq001",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "gateway_2",
+      "cue_id": "lexical_cold_or_idf_gated_2",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq002 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq002 rotated last night in the token store",
+      "gold_record_id": "df1cac91-0000-0000-7ecc-cc1f00000000",
+      "quote": "gateway_auth_token_zzq002",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "gateway_3",
+      "cue_id": "lexical_cold_or_idf_gated_3",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq003 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq003 rotated last night in the token store",
+      "gold_record_id": "1dd72fad-0000-0000-725d-484800000000",
+      "quote": "gateway_auth_token_zzq003",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "gateway_4",
+      "cue_id": "lexical_cold_or_idf_gated_4",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq004 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq004 rotated last night in the token store",
+      "gold_record_id": "9b8c3e73-0000-0000-cbcd-0ac200000000",
+      "quote": "gateway_auth_token_zzq004",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "gateway_5",
+      "cue_id": "lexical_cold_or_idf_gated_5",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq005 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq005 rotated last night in the token store",
+      "gold_record_id": "48cbdfc5-0000-0000-5f68-6eeb00000000",
+      "quote": "gateway_auth_token_zzq005",
+      "split": "holdout"
+    },
+    {
+      "cluster_id": "gateway_6",
+      "cue_id": "lexical_cold_or_idf_gated_6",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq006 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq006 rotated last night in the token store",
+      "gold_record_id": "907040a2-0000-0000-3688-ab9d00000000",
+      "quote": "gateway_auth_token_zzq006",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "gateway_7",
+      "cue_id": "lexical_cold_or_idf_gated_7",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq007 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq007 rotated last night in the token store",
+      "gold_record_id": "debf7ca1-0000-0000-dfb6-470000000000",
+      "quote": "gateway_auth_token_zzq007",
+      "split": "dev"
+    },
+    {
+      "cluster_id": "gateway_8",
+      "cue_id": "lexical_cold_or_idf_gated_8",
+      "cue_text": "unrelated background note mentioning gateway_auth_token_zzq008 in passing",
+      "gold_literal_surface": "the gateway_auth_token_zzq008 rotated last night in the token store",
+      "gold_record_id": "ac788a7c-0000-0000-c7f5-e7f000000000",
+      "quote": "gateway_auth_token_zzq008",
+      "split": "dev"
+    }
+  ],
+  "dev_count": 29,
+  "holdout_count": 14,
+  "n_rationale": "43 cues verified against real dispatch (built 44, 1 dropped for disagreeing with their engineered cause: ['spread_did_not_reach_5']) -- target sized from a per-cue wall-clock measurement's recommended full N (bench.recall_quality_verdict --smoke), split across 12 rank_budget_dropped, 8 served, 6 spread_did_not_reach, 9 discovery_excluded, and 9 lexical_cold_or_idf_gated instances.",
+  "seed": 0
+}

@@ -8,7 +8,11 @@
 set -eu
 
 resolve_wrapper() {
+    # A script read from stdin runs with the working directory first on
+    # sys.path; drop it so a project folder cannot stand in for the package.
     "$1" - <<'PY' 2>/dev/null || true
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 try:
     from iai_mcp.cli._capture import _resolve_wrapper_path
     print(_resolve_wrapper_path())

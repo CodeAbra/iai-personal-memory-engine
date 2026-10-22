@@ -761,8 +761,9 @@ def _make_graph_sync_hook(graph, store=None):
             if store is not None:
                 try:
                     from iai_mcp.store._rank_index import rank_index_for
-                    _rank_handle = rank_index_for(store, graph)
+                    _rank_handle = rank_index_for(store)
                     _rank_handle.feed(op, record)
+                    _rank_handle.resident.evict(record.id)
                     # Write-time-only: never call maybe_fold() from a recall
                     # read path (see _RankIndexHandle.maybe_fold's docstring).
                     _rank_handle.maybe_fold()
@@ -778,8 +779,9 @@ def _make_graph_sync_hook(graph, store=None):
             if store is not None:
                 try:
                     from iai_mcp.store._rank_index import rank_index_for
-                    _rank_handle = rank_index_for(store, graph)
+                    _rank_handle = rank_index_for(store)
                     _rank_handle.feed(op, record)
+                    _rank_handle.resident.evict(record.id)
                     _rank_handle.maybe_fold()
                 except Exception as exc:  # noqa: BLE001 -- rank-index feed isolation, never break a record delete
                     log.debug("rank_index_feed_failed op=%s: %s", op, exc)
@@ -1294,9 +1296,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "stability": float(payload.get("stability", 0.5) or 0.5),
                 "valence": float(payload.get("valence") or 0.0),
             })
-        node_payload_for_cache = cached_node_payload
     else:
-        node_payload_for_cache = {}
         decrypt_fail_events = 0
         decrypt_fail_unique: set[str] = set()
         # Stream the corpus column-by-column in bounded batches instead of
@@ -1402,16 +1402,6 @@ def _build_runtime_graph_impl(store: MemoryStore):
                 "language": language,
                 **_rank_fields,
             })
-            node_payload_for_cache[str(rid)] = {
-                "embedding": list(embedding),
-                "surface": str(literal_raw),
-                "centrality": centrality,
-                "tier": str(tier),
-                "pinned": pinned,
-                "tags": list(tags_list),
-                "language": language,
-                **_rank_fields,
-            }
 
         if decrypt_fail_events > 0:
             log.warning(
@@ -1452,17 +1442,11 @@ def _build_runtime_graph_impl(store: MemoryStore):
     graph._max_degree = int(max_degree)
 
     def _apply_centrality_map(centrality_map) -> None:
-        """Write a node->value centrality map into the graph and the cache
-        payload, identically to the in-parent path."""
+        """Write a node->value centrality map into the graph payload."""
         for rid, cval in centrality_map.items():
             nid_str = str(rid)
             if nid_str in graph._node_payload:
                 graph.set_node_centrality(rid, float(cval))
-                if (
-                    node_payload_for_cache is not None
-                    and nid_str in node_payload_for_cache
-                ):
-                    node_payload_for_cache[nid_str]["centrality"] = float(cval)
 
     # `child_centrality` carries the centrality map when the detection child
     # computed it on the same graph build (cache-miss path) — avoiding both a
@@ -1567,12 +1551,6 @@ def _build_runtime_graph_impl(store: MemoryStore):
                     for nid in graph.iter_nodes():
                         graph.set_node_centrality(nid, 0.0)
                         resolved_centrality[nid] = 0.0
-                        nid_str = str(nid)
-                        if (
-                            node_payload_for_cache is not None
-                            and nid_str in node_payload_for_cache
-                        ):
-                            node_payload_for_cache[nid_str]["centrality"] = 0.0
                 centrality_degraded = True
 
     # Rich club from the resolved centrality, never a fresh in-parent betweenness
@@ -1590,7 +1568,7 @@ def _build_runtime_graph_impl(store: MemoryStore):
     if not centrality_degraded and (cached_node_payload is None or needs_centrality):
         runtime_graph_cache.save(
             store, assignment, rich_club,
-            node_payload=node_payload_for_cache,
+            node_payload=graph._node_payload,
             max_degree=int(getattr(graph, "_max_degree", 0) or 0),
         )
 

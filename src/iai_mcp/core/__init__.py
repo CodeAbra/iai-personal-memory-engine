@@ -289,6 +289,7 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
         from iai_mcp.embed import embed_query, embedder_for_store
         from iai_mcp.pipeline import K_CANDIDATES
         from iai_mcp.core._serializers import _hit_to_json
+        from iai_mcp.core._serving_filter import is_excludable_noise
         from iai_mcp.types import MemoryHit
 
         cue_mode, _cue_intent, _triggered_pattern = _classify_cue(params.get("cue", ""))
@@ -366,8 +367,14 @@ def _crisis_degraded_recall(store: MemoryStore, params: dict) -> dict:
             _rec = _candidate_recs.get(_rid)
             if _rec is None:
                 continue
-            if not _passes_mode_filter(_rec, cue_mode):
-                continue
+            try:
+                if not _passes_mode_filter(_rec, cue_mode):
+                    continue
+                if is_excludable_noise(_rec):
+                    continue
+            except Exception as _filter_exc:  # noqa: BLE001 -- fail toward leak: a
+                # broken predicate must serve the candidate, never empty this tier.
+                logger.debug("crisis_degraded_filter_failed: %s", _filter_exc)
             # Per-hit build + serialize: one hit that fails to assemble or
             # serialize is skipped, never collapsing the whole response to
             # the last-resort empty.
@@ -456,118 +463,96 @@ def _incident_edges_warm(
     return result
 
 
-_RANK_BUILDER_ATTR = "_rank_builder_graph"
+class _ResidentHitView:
+    """Reconstructs the shape the hydrate block expects from a cached
+    `_ResidentFields` entry plus the embedding row `published_view()`
+    resolves for it -- used ONLY for ids the resident-cache split below
+    already proved were hydrated by a prior call, so literal_surface is
+    never decrypted a second time for the same id."""
+
+    __slots__ = (
+        "id", "embedding", "literal_surface", "aaak_index", "created_at",
+        "stability", "tier", "tags", "language", "community_id",
+        "centrality", "valence", "salience_level",
+    )
+
+    def __init__(self, node_id: UUID, fields, embedding) -> None:
+        self.id = node_id
+        # An ndarray row from published_view(), never a list and never
+        # None -- callers using the `_rec.embedding or []` idiom raise on
+        # array truthiness; the ephemeral-graph build below branches on
+        # `is not None` instead.
+        self.embedding = embedding
+        self.literal_surface = fields.literal_surface
+        self.aaak_index = fields.aaak_index
+        self.created_at = fields.created_at
+        self.stability = fields.stability
+        self.tier = fields.tier
+        self.tags = list(fields.tags)
+        self.language = fields.language
+        self.community_id = fields.community_id
+        self.centrality = fields.centrality
+        self.valence = fields.valence
+        self.salience_level = fields.salience_level
 
 
-def _rank_builder_graph_for(store: "MemoryStore"):
-    """The store-resident graph the live recall path feeds and reads the
-    Rust rank index against -- one persistent instance per store, never a
-    fresh object per call. Distinct from `retrieve.build_runtime_graph`'s
-    corpus-wide graph: this one accumulates only what live recall has
-    actually hydrated, and never registers a `graph_sync_hook` (that slot
-    already belongs to the warm-bundle graph)."""
-    graph = getattr(store, _RANK_BUILDER_ATTR, None)
-    if graph is None:
-        from iai_mcp.graph import MemoryGraph
-        graph = MemoryGraph()
-        setattr(store, _RANK_BUILDER_ATTR, graph)
-    return graph
-
-
-def _rank_builder_split(builder_graph, ids: list) -> "tuple[list, list]":
-    """Bulk membership split against the resident builder graph: ids
-    already hydrated by a prior call skip a fresh decrypt; ids never seen
-    still fetch through store.get_batch exactly as before."""
+def _resident_split(handle, ids: list) -> "tuple[list, list]":
+    """Bulk membership split against the handle's resident-candidate cache:
+    ids already hydrated by a prior call skip a fresh decrypt; ids never
+    seen (or since evicted by a write) still fetch through
+    store.get_batch exactly as before."""
     resident: list = []
     miss: list = []
     for _rid in ids:
-        if builder_graph.has_node(_rid):
+        if handle.resident.get(_rid) is not None:
             resident.append(_rid)
         else:
             miss.append(_rid)
     return resident, miss
 
 
-class _ResidentCandidateView:
-    """Reconstructs the shape the hydrate block expects from a fresh
-    store.get_batch(decode="rank") row, sourced from the builder graph's
-    already-decrypted payload instead -- used ONLY for ids the residency
-    split above already proved were hydrated by a prior call, so
-    literal_surface is never decrypted a second time for the same id."""
-
-    __slots__ = (
-        "id", "embedding", "literal_surface", "aaak_index", "created_at",
-        "stability", "tier", "tags", "language", "community_id", "centrality",
-    )
-
-    def __init__(self, node_id: UUID, payload: dict, community_id) -> None:
-        self.id = node_id
-        # Always a plain list, never the graph payload's numpy array: this
-        # object stands in for a RankCandidateView, whose own `.embedding`
-        # is a list -- callers throughout the hydrate block use the
-        # `_rec.embedding or []` idiom, which raises on array truthiness.
-        _raw_embedding = payload.get("embedding")
-        self.embedding = (
-            list(_raw_embedding) if _raw_embedding is not None else []
-        )
-        self.literal_surface = payload.get("surface", "") or ""
-        self.aaak_index = payload.get("aaak_index", "") or ""
-        _created_raw = payload.get("created_at") or ""
-        try:
-            self.created_at = (
-                datetime.fromisoformat(_created_raw) if _created_raw
-                else datetime.now(timezone.utc)
-            )
-        except (TypeError, ValueError):
-            self.created_at = datetime.now(timezone.utc)
-        self.stability = float(payload.get("stability", 0.5) or 0.5)
-        self.tier = payload.get("tier") or "episodic"
-        self.tags = list(payload.get("tags") or [])
-        self.language = payload.get("language") or "en"
-        self.community_id = community_id
-        self.centrality = float(payload.get("centrality", 0.0) or 0.0)
+def _resident_hit_views(handle, resident_ids: list) -> "tuple[dict, list]":
+    """Resolve resident-hit candidate views for `resident_ids` against the
+    handle's resident-candidate cache, sourcing embeddings and pending
+    flags from `hit_view_source()`'s single-lock (matrix, slot_map,
+    pending) triple -- called only when there are resident hits to
+    resolve, avoiding an unnecessary export on a miss-only batch, and
+    guaranteed aligned to one committed buffer even under a concurrent
+    `snapshot()`. An id present in the cache but absent from the
+    published slot_map (fed this call, not yet drained) is returned in
+    `miss`, as is any id whose cache entry was evicted between the split
+    and this resolve, and as is any id the pending flag marks
+    `embedding_pending` -- that slot's matrix row is `_build()`'s
+    fabricated `np.zeros(dim)` fill, never a real embedding, so a
+    pending id is always routed to a store re-fetch instead of being
+    served a zero vector as though it were scored content."""
+    views: dict = {}
+    miss: list = []
+    if not resident_ids:
+        return views, miss
+    matrix, slot_map, pending_flags = handle.hit_view_source()
+    for node_id in resident_ids:
+        fields = handle.resident.get(node_id)
+        slot = slot_map.get(node_id.int) if fields is not None else None
+        if fields is None or slot is None or pending_flags.get(node_id.int, False):
+            miss.append(node_id)
+            continue
+        views[node_id] = _ResidentHitView(node_id, fields, matrix[slot])
+    return views, miss
 
 
-def _rank_builder_resident_view(builder_graph, node_id: UUID) -> "_ResidentCandidateView | None":
-    payload = builder_graph.get_payload(node_id)
-    if not payload:
-        return None
-    community_id = builder_graph._attrs.get(node_id, {}).get("community_id")
-    return _ResidentCandidateView(node_id, payload, community_id)
-
-
-def _rank_builder_feed(builder_graph, handle, fetched: dict) -> None:
-    """Populate the resident builder graph from freshly hydrated rank-view
+def _resident_feed(handle, fetched: dict) -> None:
+    """Populate the resident-candidate cache from freshly hydrated rank-view
     records and forward the same records to the Rust index's pending
     queue -- the only place new content enters either structure, so a
     later residency check never sees an id the index handle was not also
     fed."""
     for _rid, _rec in fetched.items():
-        if not builder_graph.has_node(_rid):
-            builder_graph.add_node(
-                _rid,
-                community_id=getattr(_rec, "community_id", None),
-                embedding=list(_rec.embedding or []),
-            )
-        builder_graph.set_node_payload(_rid, {
-            "embedding": list(_rec.embedding or []),
-            "surface": _rec.literal_surface or "",
-            "centrality": float(getattr(_rec, "centrality", 0.0) or 0.0),
-            "tier": _rec.tier or "episodic",
-            "tags": list(_rec.tags or []),
-            "language": _rec.language or "en",
-            "aaak_index": str(getattr(_rec, "aaak_index", "") or ""),
-            "created_at": (
-                _rec.created_at.isoformat()
-                if getattr(_rec, "created_at", None) else ""
-            ),
-            "stability": float(getattr(_rec, "stability", 0.5) or 0.5),
-            "valence": float(getattr(_rec, "valence", 0.0) or 0.0),
-        })
+        handle.resident.put(_rec)
         try:
             handle.feed("upsert", _rec)
         except Exception as exc:  # noqa: BLE001 -- index feed isolation, never break recall
-            logger.debug("rank_builder_feed_failed id=%s: %s", _rid, exc)
+            logger.debug("rank_resident_feed_failed id=%s: %s", _rid, exc)
 
 
 def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
@@ -832,18 +817,15 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         _ann_scan_ms = _ann_inlist_ms = _ann_decode_ms = 0.0
                         _ann_rows_fetched = _ann_rows_served = 0.0
 
-                    # Persistent, store-resident rank index handle: the SAME
-                    # graph object is reused across every recall for this
-                    # store (never a fresh MemoryGraph() per call), so the
-                    # handle's staleness check stops forcing a full rebuild
-                    # every call. Fed here from the ANN hydrate; the hop/
-                    # rich-club stages below both feed it further and read
-                    # its resident id set to skip a redundant decrypt for an
-                    # id a prior call already hydrated.
+                    # Persistent, store-resident rank index handle -- one
+                    # per store, never rebuilt per call. Fed here from the
+                    # ANN hydrate; the hop/rich-club stages below both feed
+                    # it further and read its bounded resident-candidate
+                    # cache to skip a redundant decrypt for an id a prior
+                    # call already hydrated.
                     from iai_mcp.store._rank_index import rank_index_for
-                    _rank_builder_graph = _rank_builder_graph_for(store)
-                    _rank_handle = rank_index_for(store, _rank_builder_graph)
-                    _rank_builder_feed(_rank_builder_graph, _rank_handle, _candidate_recs)
+                    _rank_handle = rank_index_for(store)
+                    _resident_feed(_rank_handle, _candidate_recs)
 
                     # Exact-similarity authority: a bounded exact-cosine scan
                     # that backstops the fast (approximate) index above. The
@@ -968,18 +950,26 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         if _nbr not in _candidate_recs
                     })
                     if _hop1_new_ids:
-                        _hop1_resident, _hop1_miss = _rank_builder_split(_rank_builder_graph, _hop1_new_ids)
-                        for _hrid in _hop1_resident:
-                            _hview = _rank_builder_resident_view(_rank_builder_graph, _hrid)
-                            if _hview is not None:
-                                _candidate_recs[_hrid] = _hview
-                        if _hop1_miss:
+                        _hop1_resident, _hop1_miss = _resident_split(_rank_handle, _hop1_new_ids)
+                        _hop1_hits, _hop1_slot_miss = _resident_hit_views(_rank_handle, _hop1_resident)
+                        _hop1_all_miss = _hop1_miss + _hop1_slot_miss
+                        _hop1_fetched: dict = {}
+                        if _hop1_all_miss:
                             _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
-                            _hop1_fetched = store.get_batch(_hop1_miss, decode="rank")
-                            _candidate_recs.update(_hop1_fetched)
-                            _rank_builder_feed(_rank_builder_graph, _rank_handle, _hop1_fetched)
+                            _hop1_fetched = store.get_batch(_hop1_all_miss, decode="rank")
+                            _resident_feed(_rank_handle, _hop1_fetched)
                             if _stage_profile_on:
                                 _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
+                        # Insertion order: resident ids (cache hit or
+                        # slot-miss refetch) before miss ids.
+                        for _hrid in _hop1_resident:
+                            if _hrid in _hop1_hits:
+                                _candidate_recs[_hrid] = _hop1_hits[_hrid]
+                            elif _hrid in _hop1_fetched:
+                                _candidate_recs[_hrid] = _hop1_fetched[_hrid]
+                        for _hrid in _hop1_miss:
+                            if _hrid in _hop1_fetched:
+                                _candidate_recs[_hrid] = _hop1_fetched[_hrid]
                     _trace_mark("hop1_fetch")
 
                     _hop2_t0 = _time.perf_counter() if _stage_profile_on else 0.0
@@ -995,37 +985,55 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         if _nbr not in _candidate_recs
                     })
                     if _hop2_new_ids:
-                        _hop2_resident, _hop2_miss = _rank_builder_split(_rank_builder_graph, _hop2_new_ids)
-                        for _hrid2 in _hop2_resident:
-                            _hview2 = _rank_builder_resident_view(_rank_builder_graph, _hrid2)
-                            if _hview2 is not None:
-                                _candidate_recs[_hrid2] = _hview2
-                        if _hop2_miss:
+                        _hop2_resident, _hop2_miss = _resident_split(_rank_handle, _hop2_new_ids)
+                        _hop2_hits, _hop2_slot_miss = _resident_hit_views(_rank_handle, _hop2_resident)
+                        _hop2_all_miss = _hop2_miss + _hop2_slot_miss
+                        _hop2_fetched: dict = {}
+                        if _hop2_all_miss:
                             _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
-                            _hop2_fetched = store.get_batch(_hop2_miss, decode="rank")
-                            _candidate_recs.update(_hop2_fetched)
-                            _rank_builder_feed(_rank_builder_graph, _rank_handle, _hop2_fetched)
+                            _hop2_fetched = store.get_batch(_hop2_all_miss, decode="rank")
+                            _resident_feed(_rank_handle, _hop2_fetched)
                             if _stage_profile_on:
                                 _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
+                        # Insertion order: resident ids (cache hit or
+                        # slot-miss refetch) before miss ids.
+                        for _hrid2 in _hop2_resident:
+                            if _hrid2 in _hop2_hits:
+                                _candidate_recs[_hrid2] = _hop2_hits[_hrid2]
+                            elif _hrid2 in _hop2_fetched:
+                                _candidate_recs[_hrid2] = _hop2_fetched[_hrid2]
+                        for _hrid2 in _hop2_miss:
+                            if _hrid2 in _hop2_fetched:
+                                _candidate_recs[_hrid2] = _hop2_fetched[_hrid2]
                     _trace_mark("hop2_fetch")
 
                     _RC_CAP = 50
                     _rc_cap = (rc or [])[:_RC_CAP]
                     _rc_new_ids = [_rid for _rid in _rc_cap if _rid not in _candidate_recs]
+                    _rc_resident: list = []
+                    _rc_hits: dict = {}
+                    _rc_miss: list = []
                     if _rc_new_ids:
-                        _rc_resident, _rc_miss = _rank_builder_split(_rank_builder_graph, _rc_new_ids)
-                        for _rcrid in _rc_resident:
-                            _rcview = _rank_builder_resident_view(_rank_builder_graph, _rcrid)
-                            if _rcview is not None:
-                                _candidate_recs[_rcrid] = _rcview
-                        _rc_new_ids = _rc_miss
-                    if _rc_new_ids:
+                        _rc_resident, _rc_miss = _resident_split(_rank_handle, _rc_new_ids)
+                        _rc_hits, _rc_slot_miss = _resident_hit_views(_rank_handle, _rc_resident)
+                        _rc_miss = _rc_miss + _rc_slot_miss
+                    _rc_fetched: dict = {}
+                    if _rc_miss:
                         _hgb_t0 = _time.perf_counter() if _stage_profile_on else 0.0
-                        _rc_fetched = store.get_batch(_rc_new_ids, decode="rank")
-                        _candidate_recs.update(_rc_fetched)
-                        _rank_builder_feed(_rank_builder_graph, _rank_handle, _rc_fetched)
+                        _rc_fetched = store.get_batch(_rc_miss, decode="rank")
+                        _resident_feed(_rank_handle, _rc_fetched)
                         if _stage_profile_on:
                             _hydrate_getbatch_ms += (_time.perf_counter() - _hgb_t0) * 1000.0
+                    # Insertion order: resident ids (cache hit or
+                    # slot-miss refetch) before miss ids.
+                    for _rcrid in _rc_resident:
+                        if _rcrid in _rc_hits:
+                            _candidate_recs[_rcrid] = _rc_hits[_rcrid]
+                        elif _rcrid in _rc_fetched:
+                            _candidate_recs[_rcrid] = _rc_fetched[_rcrid]
+                    for _rcrid in _rc_miss:
+                        if _rcrid not in _rc_resident and _rcrid in _rc_fetched:
+                            _candidate_recs[_rcrid] = _rc_fetched[_rcrid]
 
                     # Repeat-seen candidate-id overlap (IAI_MCP_STAGE_PROFILE=1
                     # only): the fraction of this call's candidate ids already
@@ -1051,15 +1059,15 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         except AttributeError:
                             pass
 
-                    # Persistent Rust index snapshot: the SAME builder graph
-                    # object is handed to the handle on every call, so a
-                    # second (and every later) recall never re-triggers the
-                    # full Python-side rebuild in _RankIndexHandle._build --
-                    # only the Rust engine's own generation-tagged drain of
-                    # whatever this call's _rank_builder_feed calls queued.
+                    # Persistent Rust index snapshot: the handle is one per
+                    # store, never rebuilt per call, so a second (and every
+                    # later) recall never re-triggers the full Python-side
+                    # rebuild in _RankIndexHandle._build -- only the Rust
+                    # engine's own generation-tagged drain of whatever this
+                    # call's _resident_feed calls queued.
                     _hops_snapshot_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     try:
-                        _rank_handle.snapshot(_rank_builder_graph)
+                        _rank_handle.snapshot()
                     except Exception as exc:  # noqa: BLE001 -- a broken index snapshot degrades to Python-only scoring, never breaks recall
                         logger.debug("rank_index_snapshot_failed: %s", exc)
                     _hops_snapshot_ms = (
@@ -1071,13 +1079,20 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                     _ge_populate_t0 = _time.perf_counter() if _stage_profile_on else 0.0
                     graph = MemoryGraph()
                     for _rec in _candidate_recs.values():
+                        # A resident hit's `.embedding` is an ndarray
+                        # (published_view()'s matrix row); the `or []` idiom
+                        # raises on multi-element array truthiness, so the
+                        # empty case is checked with `is not None` instead.
+                        _rec_embedding = (
+                            _rec.embedding if _rec.embedding is not None else []
+                        )
                         graph.add_node(
                             _rec.id,
                             community_id=getattr(_rec, "community_id", None),
-                            embedding=list(_rec.embedding or []),
+                            embedding=_rec_embedding,
                         )
                         graph.set_node_payload(_rec.id, {
-                            "embedding": list(_rec.embedding or []),
+                            "embedding": _rec_embedding,
                             "surface": _rec.literal_surface or "",
                             "centrality": float(getattr(_rec, "centrality", 0.0) or 0.0),
                             "tier": _rec.tier or "episodic",
@@ -1497,7 +1512,17 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                         budget_tokens=params.get("budget_tokens") or _arousal_budget_tokens,
                     )
         try:
+            from iai_mcp.core._serving_filter import exclude_serving_noise
+            resp.hits = exclude_serving_noise(store, resp.hits)
+            resp.anti_hits = exclude_serving_noise(store, resp.anti_hits)
+        except Exception as exc:  # noqa: BLE001 -- a filter bug must never
+            # break recall; degrade to unfiltered hits.
+            logger.debug("serving_noise_filter_failed: %s", exc)
+
+        try:
             if not _claim_check_active.get():
+                # Must read resp.hits AFTER the noise filter above -- an
+                # all-noise match set must report a miss, not a success.
                 _arousal_event = "recall_success" if resp.hits else "recall_failed"
                 _update_arousal(_arousal_state, _arousal_event)
         except Exception:  # noqa: BLE001 -- arousal update fail-safe
@@ -1687,8 +1712,16 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
                                 _candidate_recs.get(h.record_id)
                                 if _candidate_recs is not None else None
                             )
-                            if _cand is not None and getattr(_cand, "embedding", None):
-                                _emb_cache[h.record_id] = _cand.embedding
+                            # A resident hit's `.embedding` is an ndarray --
+                            # `and` truthiness on it raises, so emptiness is
+                            # checked with `len()` under an explicit
+                            # `is not None` guard instead.
+                            _cand_embedding = (
+                                getattr(_cand, "embedding", None)
+                                if _cand is not None else None
+                            )
+                            if _cand_embedding is not None and len(_cand_embedding) > 0:
+                                _emb_cache[h.record_id] = _cand_embedding
                             else:
                                 _miss_ids.append(h.record_id)
                         if _miss_ids:
@@ -1956,6 +1989,8 @@ def dispatch(store: MemoryStore, method: str, params: dict) -> dict:
             session_id=params.get("session_id", "-"),
             role=params.get("role", "user"),
             live_turn=True,
+            # never_merge and directive rows still land their own row.
+            near_dup_gate=True,
             epistemic_status=params.get("epistemic_status", "unknown"),
             salience_level=params.get("salience_level", "unflagged"),
         )

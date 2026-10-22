@@ -14,6 +14,7 @@
 //! by a constant size estimate without a cursor.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use lillibrain::{Store, Value};
 
@@ -21,7 +22,8 @@ use crate::ast::{DeleteStmt, Expr, InsertStmt, UpdateStmt};
 use crate::catalog::{coerce_affinity, Catalog, ColumnMeta};
 use crate::error::{EngineError, Result};
 use crate::eval::{
-    eval_predicate, eval_scalar, order_key, sort_value, sql_compare, DirectedKey, Row, SortKey,
+    eval_predicate, eval_scalar, order_key, sort_value, sql_compare, DirectedKey, Row, RowSchema,
+    SortKey,
 };
 use crate::meta::MetaTable;
 use crate::plan::{too_few_bindings_error, too_many_bindings_error, ScanType, SelectPlan};
@@ -110,6 +112,9 @@ pub fn execute_select_instrumented(
     let col_names = catalog.column_names(table)?;
     let cols = catalog.get(table)?;
     let vec_label_is_rowid_alias = has_autoincrement_vec_label(cols);
+    // Shared once for every row this call decodes below (fast paths and the
+    // standard scan alike) — see `full_row_schema`.
+    let schema = full_row_schema(&col_names);
 
     // Bind placeholders in textual order: select-list exprs, then WHERE, then
     // LIMIT, then OFFSET. A count mismatch fails loud like the reference.
@@ -201,14 +206,9 @@ pub fn execute_select_instrumented(
         store
             .tree(root)
             .scan_cells_with(|key, payload| {
-                let mut vals = crate::rowcodec::decode_row_columns(&payload, &pred_mask)?;
-                while vals.len() < col_names.len() {
-                    vals.push(Value::Null);
-                }
-                let mut pairs: Vec<(String, Value)> =
-                    col_names.iter().cloned().zip(vals.into_iter()).collect();
-                pairs.push((ROWKEY.to_string(), Value::Int(key)));
-                let row = Row::from_pairs(pairs);
+                let vals = crate::rowcodec::decode_row_columns(&payload, &pred_mask)?;
+                let mut row = row_from_schema(&schema, vals);
+                row.set(ROWKEY, Value::Int(key));
                 if eval_predicate(where_expr, &row) == Some(true) {
                     count += 1;
                 }
@@ -247,8 +247,8 @@ pub fn execute_select_instrumented(
                         }
                         for &key in keys.iter() {
                             if let Some(payload) = tree.get(key).map_err(store_err)? {
-                                let mut row = decode_to_row(&payload, &col_names)?;
-                                row.set(ROWKEY.to_string(), Value::Int(key));
+                                let mut row = decode_to_row(&payload, &schema)?;
+                                row.set(ROWKEY, Value::Int(key));
                                 let pass = bound_where
                                     .as_ref()
                                     .map(|w| eval_predicate(w, &row) == Some(true))
@@ -291,10 +291,10 @@ pub fn execute_select_instrumented(
                     match idx.lookup(&id_val) {
                         Some(row_key) => match tree.get(row_key).map_err(store_err)? {
                             Some(payload) => {
-                                let mut row = decode_to_row(&payload, &col_names)?;
+                                let mut row = decode_to_row(&payload, &schema)?;
                                 // Thread the raw B-tree key for rowid resolution,
                                 // matching scan_rows so projection is identical.
-                                row.set(ROWKEY.to_string(), Value::Int(row_key));
+                                row.set(ROWKEY, Value::Int(row_key));
                                 if eval_predicate(where_expr, &row) == Some(true) {
                                     vec![row]
                                 } else {
@@ -357,8 +357,8 @@ pub fn execute_select_instrumented(
             for (id_val, key) in candidate_keys {
                 match tree.get(key).map_err(store_err)? {
                     Some(payload) => {
-                        let mut row = decode_to_row(&payload, &col_names)?;
-                        row.set(ROWKEY.to_string(), Value::Int(key));
+                        let mut row = decode_to_row(&payload, &schema)?;
+                        row.set(ROWKEY, Value::Int(key));
                         if eval_predicate(where_expr, &row) == Some(true) {
                             rows.push(row);
                         }
@@ -417,8 +417,8 @@ pub fn execute_select_instrumented(
             let fetched = tree.get_many(&candidate_keys).map_err(store_err)?;
             let mut rows: Vec<Row> = Vec::with_capacity(fetched.len());
             for (key, payload) in fetched {
-                let mut row = decode_to_row(&payload, &col_names)?;
-                row.set(ROWKEY.to_string(), Value::Int(key));
+                let mut row = decode_to_row(&payload, &schema)?;
+                row.set(ROWKEY, Value::Int(key));
                 if eval_predicate(where_expr, &row) == Some(true) {
                     rows.push(row);
                 }
@@ -452,8 +452,8 @@ pub fn execute_select_instrumented(
             let mut rows: Vec<Row> = Vec::with_capacity(candidate_keys.len());
             for key in candidate_keys {
                 if let Some(payload) = tree.get(key).map_err(store_err)? {
-                    let mut row = decode_to_row(&payload, &col_names)?;
-                    row.set(ROWKEY.to_string(), Value::Int(key));
+                    let mut row = decode_to_row(&payload, &schema)?;
+                    row.set(ROWKEY, Value::Int(key));
                     // Re-apply the FULL bound predicate (including any equality
                     // conjuncts such as kind=? or severity=? that the index did
                     // not filter).  This is what produces byte-identical results.
@@ -503,8 +503,8 @@ pub fn execute_select_instrumented(
                 for (_tag, keys) in oidx.walk_buckets(k1.desc, lower.as_ref()) {
                     for &key in keys.iter() {
                         if let Some(payload) = tree.get(key).map_err(store_err)? {
-                            let mut row = decode_to_row(&payload, &col_names)?;
-                            row.set(ROWKEY.to_string(), Value::Int(key));
+                            let mut row = decode_to_row(&payload, &schema)?;
+                            row.set(ROWKEY, Value::Int(key));
                             let pass = bound_where
                                 .as_ref()
                                 .map(|w| eval_predicate(w, &row) == Some(true))
@@ -560,7 +560,44 @@ pub fn execute_select_instrumented(
     // point, so aggregate != None here means MIN/MAX/SUM (always full decode).
     let use_selective =
         !plan.columns.is_empty() && plan.columns != ["*"] && plan.aggregate.is_none();
-    let mut rows: Vec<Row> = if use_selective {
+    // Mutually exclusive with `rows`: exactly one of rows/projected is
+    // populated per branch.
+    let use_fast_project = use_selective && plan.order_by.is_none();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut projected: Vec<OutRow> = Vec::new();
+    if use_fast_project {
+        let mut needed: std::collections::HashSet<String> = predicate_columns(bound_where.as_ref());
+        for c in &plan.columns {
+            if c != "*" && c != ROWID {
+                needed.insert(c.clone());
+            }
+        }
+        let mask = mask_from_names(&col_names, &needed);
+        let wants_rowid = plan.columns.iter().any(|c| c == ROWID);
+        store
+            .tree(root)
+            .scan_cells_with(|key, payload| {
+                let vals = crate::rowcodec::decode_row_columns(&payload, &mask)?;
+                let mut row = row_from_schema(&schema, vals);
+                row.set(ROWKEY, Value::Int(key));
+                if let Some(where_expr) = &bound_where {
+                    if eval_predicate(where_expr, &row) != Some(true) {
+                        return Ok(());
+                    }
+                }
+                if wants_rowid {
+                    resolve_rowid(&mut row, vec_label_is_rowid_alias);
+                }
+                let out_row: OutRow = plan
+                    .columns
+                    .iter()
+                    .map(|c| (c.clone(), row.get_or_null(c)))
+                    .collect();
+                projected.push(out_row);
+                Ok(())
+            })
+            .map_err(|e: EngineError| e)?;
+    } else if use_selective {
         let mut needed: std::collections::HashSet<String> = predicate_columns(bound_where.as_ref());
         // Add projected columns.
         for c in &plan.columns {
@@ -584,30 +621,25 @@ pub fn execute_select_instrumented(
         store
             .tree(root)
             .scan_cells_with(|key, payload| {
-                let mut vals = crate::rowcodec::decode_row_columns(&payload, &mask)?;
-                while vals.len() < col_names.len() {
-                    vals.push(Value::Null);
-                }
-                let mut pairs: Vec<(String, Value)> =
-                    col_names.iter().cloned().zip(vals.into_iter()).collect();
-                pairs.push((ROWKEY.to_string(), Value::Int(key)));
-                out.push(Row::from_pairs(pairs));
+                let vals = crate::rowcodec::decode_row_columns(&payload, &mask)?;
+                let mut row = row_from_schema(&schema, vals);
+                row.set(ROWKEY, Value::Int(key));
+                out.push(row);
                 Ok(())
             })
             .map_err(|e: EngineError| e)?;
         if let Some(where_expr) = &bound_where {
             out.retain(|r| eval_predicate(where_expr, r) == Some(true));
         }
-        out
+        rows = out;
     } else {
         let mut r = scan_rows(store, root, &col_names)?;
         if let Some(where_expr) = &bound_where {
             r.retain(|r| eval_predicate(where_expr, r) == Some(true));
         }
-        r
+        rows = r;
     };
 
-    // Scalar aggregates collapse to a single row (ORDER BY is irrelevant).
     if let Some(agg) = plan.aggregate.as_deref() {
         let rs = aggregate_scalar(
             agg,
@@ -619,36 +651,55 @@ pub fn execute_select_instrumented(
         return Ok((rs, ScanStats { decoded_rows: true }));
     }
 
-    // ORDER BY before projection and LIMIT.
     if plan.order_by.is_some() {
         order_rows(&mut rows, plan, &col_names);
     }
 
-    // rowid resolution for the projection.
     if plan.columns.iter().any(|c| c == ROWID) {
         for r in &mut rows {
             resolve_rowid(r, vec_label_is_rowid_alias);
         }
     }
 
-    // OFFSET then LIMIT.
-    if let Some(off) = effective_offset {
-        if off > 0 {
-            let off = off as usize;
-            rows = if off >= rows.len() {
-                Vec::new()
-            } else {
-                rows.split_off(off)
-            };
+    if use_fast_project {
+        if let Some(off) = effective_offset {
+            if off > 0 {
+                let off = off as usize;
+                projected = if off >= projected.len() {
+                    Vec::new()
+                } else {
+                    projected.split_off(off)
+                };
+            }
         }
-    }
-    if let Some(lim) = effective_limit {
-        if lim > 0 && (lim as usize) < rows.len() {
-            rows.truncate(lim as usize);
+        if let Some(lim) = effective_limit {
+            if lim > 0 && (lim as usize) < projected.len() {
+                projected.truncate(lim as usize);
+            }
+        }
+    } else {
+        if let Some(off) = effective_offset {
+            if off > 0 {
+                let off = off as usize;
+                rows = if off >= rows.len() {
+                    Vec::new()
+                } else {
+                    rows.split_off(off)
+                };
+            }
+        }
+        if let Some(lim) = effective_limit {
+            if lim > 0 && (lim as usize) < rows.len() {
+                rows.truncate(lim as usize);
+            }
         }
     }
 
-    let out = project_rows(rows, &plan.columns, &col_names, vec_label_is_rowid_alias);
+    let out = if use_fast_project {
+        projected
+    } else {
+        project_rows(rows, &plan.columns, &col_names, vec_label_is_rowid_alias)
+    };
     let cols = output_columns(&plan.columns, &col_names);
     Ok((
         ResultSet {
@@ -1040,6 +1091,7 @@ fn scan_rows_two_phase(
     where_expr: Option<&Expr>,
     early_limit: Option<usize>,
 ) -> Result<Vec<Row>> {
+    let schema = full_row_schema(col_names);
     let pred_mask = mask_from_names(col_names, pred_cols);
     // Second-pass mask: projection columns NOT already decoded in the first pass.
     let mut proj_only = proj_cols.clone();
@@ -1060,14 +1112,9 @@ fn scan_rows_two_phase(
     const EARLY_LIMIT_SENTINEL: &str = "__scan_early_limit__";
 
     let scan_result: Result<()> = store.tree(root).scan_cells_with(|key, payload| {
-        let mut vals = crate::rowcodec::decode_row_columns(&payload, &pred_mask)?;
-        while vals.len() < col_names.len() {
-            vals.push(Value::Null);
-        }
-        let mut pairs: Vec<(String, Value)> =
-            col_names.iter().cloned().zip(vals.into_iter()).collect();
-        pairs.push((ROWKEY.to_string(), Value::Int(key)));
-        let mut row = Row::from_pairs(pairs);
+        let vals = crate::rowcodec::decode_row_columns(&payload, &pred_mask)?;
+        let mut row = row_from_schema(&schema, vals);
+        row.set(ROWKEY, Value::Int(key));
         if let Some(w) = where_expr {
             if eval_predicate(w, &row) != Some(true) {
                 return Ok(());
@@ -1107,16 +1154,12 @@ fn scan_rows_two_phase(
 /// threading the raw B-tree key for rowid fallback.
 fn scan_rows(store: &Store, root: u32, col_names: &[String]) -> Result<Vec<Row>> {
     let raw = store.tree(root).full_scan().map_err(store_err)?;
+    let schema = full_row_schema(col_names);
     let mut rows = Vec::with_capacity(raw.len());
     for (key, payload) in raw {
-        let mut vals = decode_row(&payload)?;
-        while vals.len() < col_names.len() {
-            vals.push(Value::Null);
-        }
-        let mut pairs: Vec<(String, Value)> =
-            col_names.iter().cloned().zip(vals.into_iter()).collect();
-        pairs.push((ROWKEY.to_string(), Value::Int(key)));
-        rows.push(Row::from_pairs(pairs));
+        let mut row = decode_to_row(&payload, &schema)?;
+        row.set(ROWKEY, Value::Int(key));
+        rows.push(row);
     }
     Ok(rows)
 }
@@ -1496,10 +1539,11 @@ fn indexed_candidate_rows(
     // order.
     candidate_keys.sort_unstable();
     let fetched = tree.get_many(&candidate_keys).map_err(store_err)?;
+    let schema = full_row_schema(col_names);
     let mut rows: Vec<Row> = Vec::with_capacity(fetched.len());
     for (key, payload) in fetched {
-        let mut row = decode_to_row(&payload, col_names)?;
-        row.set(ROWKEY.to_string(), Value::Int(key));
+        let mut row = decode_to_row(&payload, &schema)?;
+        row.set(ROWKEY, Value::Int(key));
         rows.push(row);
     }
     Ok(Some(rows))
@@ -2858,15 +2902,39 @@ fn store_err(e: lillibrain::StoreError) -> EngineError {
     EngineError::from(e)
 }
 
-/// Decode a stored record into a row map, padding a short record (written before
-/// an ALTER TABLE ADD COLUMN) with trailing NULLs.
-fn decode_to_row(payload: &[u8], col_names: &[String]) -> Result<Row> {
-    let mut vals = decode_row(payload)?;
-    while vals.len() < col_names.len() {
-        vals.push(Value::Null);
+/// The full-catalog-width row schema for one scan: the table's columns in
+/// declaration order, plus the reserved `_rowkey`/`rowid` pseudo-column slots
+/// so their later `row.set` always replaces a real slot instead of falling to
+/// `Row`'s extras allocation. Callers build this ONCE per function invocation
+/// and share the `Arc` across every row the invocation decodes.
+fn full_row_schema(col_names: &[String]) -> Arc<RowSchema> {
+    let mut names: Vec<String> = col_names.to_vec();
+    names.push(ROWKEY.to_string());
+    names.push(ROWID.to_string());
+    Arc::new(RowSchema::new(names))
+}
+
+/// Wrap already-decoded, catalog-ordered values (possibly short — a mask-only
+/// decode or a record written before an ALTER TABLE ADD COLUMN) in a `Row`
+/// sharing `schema`, padding with trailing NULLs up to the schema's full width
+/// (catalog columns plus any reserved pseudo-column slots).
+// reserve_exact avoids doubling an already-full decode buffer's capacity
+// when padding on the reserved slots.
+fn row_from_schema(schema: &Arc<RowSchema>, mut vals: Vec<Value>) -> Row {
+    if vals.len() < schema.len() {
+        vals.reserve_exact(schema.len() - vals.len());
+        while vals.len() < schema.len() {
+            vals.push(Value::Null);
+        }
     }
-    let pairs: Vec<(String, Value)> = col_names.iter().cloned().zip(vals).collect();
-    Ok(Row::from_pairs(pairs))
+    Row::from_schema(schema.clone(), vals)
+}
+
+/// Decode a stored record into a row, padding a short record (written before
+/// an ALTER TABLE ADD COLUMN) with trailing NULLs.
+fn decode_to_row(payload: &[u8], schema: &Arc<RowSchema>) -> Result<Row> {
+    let vals = decode_row(payload)?;
+    Ok(row_from_schema(schema, vals))
 }
 
 /// True when `table`'s primary key is a single AUTOINCREMENT-style `vec_label`
@@ -2982,6 +3050,7 @@ pub fn execute_insert(
         .ok_or_else(|| EngineError::parse(format!("insert: unknown table {table:?}")))?;
     let cols = catalog.get(table)?.to_vec();
     let col_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+    let schema = full_row_schema(&col_names);
     // Whether `table` carries a col-index at all (a live cache handle was
     // supplied — the caller only supplies one for a table with declared
     // indexed columns, see `catalog_col_index_columns`). Gates the
@@ -3064,7 +3133,7 @@ pub fn execute_insert(
             Some(key) => {
                 let payload = tree.get(key).map_err(store_err)?;
                 match payload {
-                    Some(p) => Some((key, decode_to_row(&p, &col_names)?)),
+                    Some(p) => Some((key, decode_to_row(&p, &schema)?)),
                     // The index pointed at a row that is gone: a consistency lapse.
                     // Drop to the safe full-scan probe rather than miss the conflict.
                     None => scan_conflict(&tree, &conflict_keys, &value_map, &col_names)?,
@@ -3361,8 +3430,9 @@ fn existing_owner_of_ckey(
             return Ok(idx.lookup(conflict_keys, ckey));
         }
     }
+    let schema = full_row_schema(col_names);
     for (k, payload) in tree.full_scan().map_err(store_err)? {
-        let row = decode_to_row(&payload, col_names)?;
+        let row = decode_to_row(&payload, &schema)?;
         if row_conflict_key(conflict_keys, &row).as_deref() == Some(ckey) {
             return Ok(Some(k));
         }
@@ -3395,8 +3465,9 @@ fn scan_conflict(
     value_map: &HashMap<String, Value>,
     col_names: &[String],
 ) -> Result<Option<(i64, Row)>> {
+    let schema = full_row_schema(col_names);
     for (key, payload) in tree.full_scan().map_err(store_err)? {
-        let row = decode_to_row(&payload, col_names)?;
+        let row = decode_to_row(&payload, &schema)?;
         let matched = conflict_keys.iter().all(|ck| {
             let lhs = row.get_or_null(ck);
             let rhs = value_map.get(ck).cloned().unwrap_or(Value::Null);
@@ -3449,6 +3520,7 @@ pub fn execute_update(
         .get(table)
         .ok_or_else(|| EngineError::parse(format!("update: unknown table {table:?}")))?;
     let col_names = catalog.column_names(table)?;
+    let schema = full_row_schema(&col_names);
     let tree = store.tree(root);
     // See `execute_insert`'s `has_col_index`: gates the write-generation bump to
     // tables that actually carry a col-index, so a table with none never pays
@@ -3500,7 +3572,7 @@ pub fn execute_update(
             idx.ensure_built(&tree, &col_names)?;
             if let Some(row_key) = idx.lookup(&id_val) {
                 if let Some(payload) = tree.get(row_key).map_err(store_err)? {
-                    let row = decode_to_row(&payload, &col_names)?;
+                    let row = decode_to_row(&payload, &schema)?;
                     if eval_predicate(w, &row) == Some(true) {
                         to_update.push((row_key, row));
                     }
@@ -3535,7 +3607,7 @@ pub fn execute_update(
                             }
                             match tree.get(row_key).map_err(store_err)? {
                                 Some(payload) => {
-                                    let row = decode_to_row(&payload, &col_names)?;
+                                    let row = decode_to_row(&payload, &schema)?;
                                     if eval_predicate(w, &row) == Some(true) {
                                         to_update.push((row_key, row));
                                     }
@@ -3599,7 +3671,7 @@ pub fn execute_update(
                 } else {
                     skip_scan = true;
                     for (key, payload) in fetched {
-                        let row = decode_to_row(&payload, &col_names)?;
+                        let row = decode_to_row(&payload, &schema)?;
                         if eval_predicate(w, &row) == Some(true) {
                             to_update.push((key, row));
                         }
@@ -3611,7 +3683,7 @@ pub fn execute_update(
 
     if !skip_scan {
         for (key, payload) in tree.full_scan().map_err(store_err)? {
-            let row = decode_to_row(&payload, &col_names)?;
+            let row = decode_to_row(&payload, &schema)?;
             let pass = match &bound_where {
                 None => true,
                 Some(w) => eval_predicate(w, &row) == Some(true),
@@ -3767,6 +3839,7 @@ pub fn execute_delete(
         .get(table)
         .ok_or_else(|| EngineError::parse(format!("delete: unknown table {table:?}")))?;
     let col_names = catalog.column_names(table)?;
+    let schema = full_row_schema(&col_names);
     let tree = store.tree(root);
 
     let mut binder = Binder::new(params, named);
@@ -3792,7 +3865,7 @@ pub fn execute_delete(
     let mut deleted_ids: Vec<String> = Vec::new();
     let mut deleted_rows: Vec<(Row, i64)> = Vec::new();
     for (key, payload) in tree.full_scan().map_err(store_err)? {
-        let row = decode_to_row(&payload, &col_names)?;
+        let row = decode_to_row(&payload, &schema)?;
         let pass = match &bound_where {
             None => true,
             Some(w) => eval_predicate(w, &row) == Some(true),

@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read, Seek, SeekFrom, Write as _};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -29,6 +29,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 const MAGIC: &[u8; 8] = b"LVECIDX1";
+/// Streaming chunk size for save/load: bounds the transient read/write buffer
+/// so peak allocation is ~1x the file, not the whole file held in one buffer.
+const CHUNK_BYTES: usize = 1 << 20;
 
 struct Inner {
     dim: usize,
@@ -146,81 +149,199 @@ impl Inner {
         )
     }
 
+    // crc offset (8) precedes payload (12+), so the real crc is patched in
+    // after a single streamed pass; one sync_all covers both writes.
     fn save(&self, path: &Path) -> std::io::Result<()> {
         let n = self.labels.len();
-        let mut payload: Vec<u8> = Vec::with_capacity(24 + n * 9 + n * self.dim * 4);
-        payload.extend_from_slice(&(self.dim as u64).to_le_bytes());
-        payload.extend_from_slice(&(n as u64).to_le_bytes());
-        for &l in &self.labels {
-            payload.extend_from_slice(&l.to_le_bytes());
-        }
-        for &d in &self.deleted {
-            payload.push(d as u8);
-        }
-        for &v in &self.rows[..n * self.dim] {
-            payload.extend_from_slice(&v.to_le_bytes());
-        }
-        let crc = crc32fast::hash(&payload);
-
         let tmp = path.with_extension("tmp-vecidx");
         {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(MAGIC)?;
+            f.write_all(&0u32.to_le_bytes())?; // crc placeholder, patched below
+
+            let mut hasher = crc32fast::Hasher::new();
+            {
+                let mut w = std::io::BufWriter::new(&mut f);
+                let mut buf: Vec<u8> = Vec::with_capacity(CHUNK_BYTES);
+
+                let dim_bytes = (self.dim as u64).to_le_bytes();
+                hasher.update(&dim_bytes);
+                w.write_all(&dim_bytes)?;
+                let n_bytes = (n as u64).to_le_bytes();
+                hasher.update(&n_bytes);
+                w.write_all(&n_bytes)?;
+
+                for chunk in self.labels.chunks(CHUNK_BYTES / 8) {
+                    buf.clear();
+                    for &l in chunk {
+                        buf.extend_from_slice(&l.to_le_bytes());
+                    }
+                    hasher.update(&buf);
+                    w.write_all(&buf)?;
+                }
+                for chunk in self.deleted.chunks(CHUNK_BYTES) {
+                    buf.clear();
+                    buf.extend(chunk.iter().map(|&d| d as u8));
+                    hasher.update(&buf);
+                    w.write_all(&buf)?;
+                }
+                for chunk in self.rows[..n * self.dim].chunks(CHUNK_BYTES / 4) {
+                    buf.clear();
+                    for &v in chunk {
+                        buf.extend_from_slice(&v.to_le_bytes());
+                    }
+                    hasher.update(&buf);
+                    w.write_all(&buf)?;
+                }
+                w.flush()?;
+            }
+
+            let crc = hasher.finalize();
+            f.seek(SeekFrom::Start(8))?;
             f.write_all(&crc.to_le_bytes())?;
-            f.write_all(&payload)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, path)?;
         Ok(())
     }
 
+    // Pass 1 verifies the crc before dim/n are trusted for any allocation;
+    // pass 2 re-reads the payload now that n/dim are CRC-verified.
     fn load(path: &Path, capacity: usize) -> Result<Self, String> {
-        let raw = fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
-        if raw.len() < 12 || &raw[..8] != MAGIC {
+        let mut f = fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?;
+        let file_len = f
+            .metadata()
+            .map_err(|e| format!("stat {path:?}: {e}"))?
+            .len();
+        if file_len < 12 {
             return Err("not an exact-vec index file".to_string());
         }
-        let stored_crc = u32::from_le_bytes(raw[8..12].try_into().unwrap());
-        let payload = &raw[12..];
-        if crc32fast::hash(payload) != stored_crc {
+        let mut header = [0u8; 12];
+        f.read_exact(&mut header)
+            .map_err(|e| format!("read {path:?}: {e}"))?;
+        if &header[..8] != MAGIC {
+            return Err("not an exact-vec index file".to_string());
+        }
+        let stored_crc = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        // Trusted: derived from the file's own actual size, never from a
+        // header field the payload's own bytes could lie about.
+        let payload_len = file_len - 12;
+
+        let mut hasher = crc32fast::Hasher::new();
+        let mut chunk_buf = vec![0u8; CHUNK_BYTES.min(payload_len.max(1) as usize)];
+        let mut remaining = payload_len;
+        while remaining > 0 {
+            let want = (chunk_buf.len() as u64).min(remaining) as usize;
+            f.read_exact(&mut chunk_buf[..want])
+                .map_err(|e| format!("read {path:?}: {e}"))?;
+            hasher.update(&chunk_buf[..want]);
+            remaining -= want as u64;
+        }
+        if hasher.finalize() != stored_crc {
             return Err("exact-vec index CRC mismatch".to_string());
         }
-        if payload.len() < 16 {
+
+        if payload_len < 16 {
             return Err("exact-vec index truncated header".to_string());
         }
-        let dim = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
-        let n = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
-        let need = 16 + n * 8 + n + n * dim * 4;
-        if payload.len() != need {
+        f.seek(SeekFrom::Start(12))
+            .map_err(|e| format!("seek {path:?}: {e}"))?;
+        let mut hdr2 = [0u8; 16];
+        f.read_exact(&mut hdr2)
+            .map_err(|e| format!("read {path:?}: {e}"))?;
+        let dim = u64::from_le_bytes(hdr2[0..8].try_into().unwrap()) as usize;
+        let n = u64::from_le_bytes(hdr2[8..16].try_into().unwrap()) as usize;
+        let need = 16u64
+            .checked_add(n as u64 * 8)
+            .and_then(|v| v.checked_add(n as u64))
+            .and_then(|v| v.checked_add(n as u64 * dim as u64 * 4))
+            .ok_or_else(|| "exact-vec index size overflow".to_string())?;
+        if payload_len != need {
             return Err(format!(
-                "exact-vec index length {} != expected {}",
-                payload.len(),
-                need
+                "exact-vec index length {payload_len} != expected {need}"
             ));
         }
+
         let mut inner = Inner::new(dim, capacity.max(n));
-        let mut off = 16;
-        for _ in 0..n {
-            inner.labels.push(i64::from_le_bytes(
-                payload[off..off + 8].try_into().unwrap(),
-            ));
-            off += 8;
-        }
-        for i in 0..n {
-            inner.deleted.push(payload[off + i] != 0);
-        }
-        off += n;
-        inner.rows.reserve(n * dim);
-        for _ in 0..(n * dim) {
-            inner.rows.push(f32::from_le_bytes(
-                payload[off..off + 4].try_into().unwrap(),
-            ));
-            off += 4;
-        }
+        inner.labels.reserve_exact(n);
+        read_i64_chunks(&mut f, n, &mut inner.labels, path)?;
+        inner.deleted.reserve_exact(n);
+        read_bool_chunks(&mut f, n, &mut inner.deleted, path)?;
+        inner.rows.reserve_exact(n * dim);
+        read_f32_chunks(&mut f, n * dim, &mut inner.rows, path)?;
+
         for (slot, &l) in inner.labels.iter().enumerate() {
             inner.label_to_slot.insert(l, slot);
         }
         Ok(inner)
     }
+}
+
+/// Stream `count` little-endian `i64`s from `f` into `out`, in ~1 MiB chunks.
+fn read_i64_chunks(
+    f: &mut fs::File,
+    count: usize,
+    out: &mut Vec<i64>,
+    path: &Path,
+) -> Result<(), String> {
+    let per_chunk = (CHUNK_BYTES / 8).max(1);
+    let mut buf = vec![0u8; per_chunk * 8];
+    let mut remaining = count;
+    while remaining > 0 {
+        let take = remaining.min(per_chunk);
+        let want = take * 8;
+        f.read_exact(&mut buf[..want])
+            .map_err(|e| format!("read {path:?}: {e}"))?;
+        for chunk in buf[..want].chunks_exact(8) {
+            out.push(i64::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        remaining -= take;
+    }
+    Ok(())
+}
+
+/// Stream `count` bytes from `f` into `out` as bools (non-zero == true), in
+/// ~1 MiB chunks.
+fn read_bool_chunks(
+    f: &mut fs::File,
+    count: usize,
+    out: &mut Vec<bool>,
+    path: &Path,
+) -> Result<(), String> {
+    let per_chunk = CHUNK_BYTES.max(1);
+    let mut buf = vec![0u8; per_chunk];
+    let mut remaining = count;
+    while remaining > 0 {
+        let take = remaining.min(per_chunk);
+        f.read_exact(&mut buf[..take])
+            .map_err(|e| format!("read {path:?}: {e}"))?;
+        out.extend(buf[..take].iter().map(|&b| b != 0));
+        remaining -= take;
+    }
+    Ok(())
+}
+
+/// Stream `count` little-endian `f32`s from `f` into `out`, in ~1 MiB chunks.
+fn read_f32_chunks(
+    f: &mut fs::File,
+    count: usize,
+    out: &mut Vec<f32>,
+    path: &Path,
+) -> Result<(), String> {
+    let per_chunk = (CHUNK_BYTES / 4).max(1);
+    let mut buf = vec![0u8; per_chunk * 4];
+    let mut remaining = count;
+    while remaining > 0 {
+        let take = remaining.min(per_chunk);
+        let want = take * 4;
+        f.read_exact(&mut buf[..want])
+            .map_err(|e| format!("read {path:?}: {e}"))?;
+        for chunk in buf[..want].chunks_exact(4) {
+            out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        remaining -= take;
+    }
+    Ok(())
 }
 
 /// Exact cosine index with the ANN-shaped surface the storage layer calls.
@@ -516,6 +637,109 @@ mod tests {
         assert!(Inner::load(&good, 4).is_err());
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&good).ok();
+    }
+
+    #[test]
+    fn truncated_file_errs_without_panicking() {
+        let dir = std::env::temp_dir().join("lvecidx-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Truncated below the 12-byte header: the length check must reject it
+        // before any magic/crc read is attempted.
+        let too_short = dir.join("too-short.idx");
+        std::fs::write(&too_short, b"LVEC").unwrap();
+        assert!(Inner::load(&too_short, 4).is_err());
+
+        // Truncated mid-payload (past the header, short of the full file): the
+        // streaming crc pass must hit EOF via a checked read and return Err,
+        // never panic on a short read.
+        let mid = dir.join("mid-truncated.idx");
+        idx3().save(&mid).unwrap();
+        let mut raw = std::fs::read(&mid).unwrap();
+        raw.truncate(raw.len() - 4);
+        std::fs::write(&mid, &raw).unwrap();
+        assert!(Inner::load(&mid, 4).is_err());
+
+        // Truncated to exactly the 12-byte header, zero payload bytes: the
+        // crc pass sees an empty payload (never matches a real stored_crc)
+        // and returns Err rather than reading a phantom dim/n.
+        let header_only = dir.join("header-only.idx");
+        idx3().save(&header_only).unwrap();
+        let mut raw = std::fs::read(&header_only).unwrap();
+        raw.truncate(12);
+        std::fs::write(&header_only, &raw).unwrap();
+        assert!(Inner::load(&header_only, 4).is_err());
+
+        std::fs::remove_file(&too_short).ok();
+        std::fs::remove_file(&mid).ok();
+        std::fs::remove_file(&header_only).ok();
+    }
+
+    #[test]
+    fn save_format_is_byte_identical_header_and_payload_order() {
+        // A hand-decoded assertion of the on-disk layout — the round-trip
+        // test alone is symmetric and blind to a field-order regression that
+        // happens to still decode back correctly.
+        let dir = std::env::temp_dir().join("lvecidx-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("layout.idx");
+        let mut inner = Inner::new(2, 4);
+        inner.add_one(&[1.0, 0.0], 7).unwrap();
+        inner.add_one(&[0.0, 1.0], 8).unwrap();
+        inner.deleted[0] = true;
+        inner.save(&path).unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[0..8], MAGIC);
+        let stored_crc = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+        assert_eq!(crc32fast::hash(&raw[12..]), stored_crc);
+
+        let dim = u64::from_le_bytes(raw[12..20].try_into().unwrap());
+        let n = u64::from_le_bytes(raw[20..28].try_into().unwrap());
+        assert_eq!(dim, 2);
+        assert_eq!(n, 2);
+
+        let labels_off = 28;
+        let label0 = i64::from_le_bytes(raw[labels_off..labels_off + 8].try_into().unwrap());
+        let label1 = i64::from_le_bytes(raw[labels_off + 8..labels_off + 16].try_into().unwrap());
+        assert_eq!((label0, label1), (7, 8));
+
+        let deleted_off = labels_off + 16;
+        assert_eq!(raw[deleted_off], 1);
+        assert_eq!(raw[deleted_off + 1], 0);
+
+        let rows_off = deleted_off + 2;
+        assert_eq!(raw.len(), rows_off + 2 * 2 * 4);
+        let row0v0 = f32::from_le_bytes(raw[rows_off..rows_off + 4].try_into().unwrap());
+        assert_eq!(row0v0, 1.0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn round_trip_spans_multiple_chunk_boundaries() {
+        // dim=1 keeps per-row cost tiny; label count crosses the label
+        // chunk's element boundary (CHUNK_BYTES/8 == 131072) so the streaming
+        // loop's boundary handling is genuinely exercised, not just its
+        // single-chunk common case.
+        let dir = std::env::temp_dir().join("lvecidx-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chunked.idx");
+
+        const N: i64 = 131_072 + 5;
+        let mut inner = Inner::new(1, N as usize);
+        for i in 0..N {
+            inner.add_one(&[(i % 7) as f32], i).unwrap();
+        }
+        inner.deleted[3] = true;
+        inner.save(&path).unwrap();
+
+        let loaded = Inner::load(&path, 4).unwrap();
+        assert_eq!(loaded.labels, inner.labels);
+        assert_eq!(loaded.deleted, inner.deleted);
+        assert_eq!(loaded.rows, inner.rows);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -1,8 +1,8 @@
 {
   "name": "iai-memory",
   "displayName": "iai-pme — personal memory engine",
-  "version": "3.2.3",
-  "description": "Persistent local memory for your assistant: every turn captured verbatim, relevant memory injected at session start and before each turn, and fourteen memory tools over MCP. Requires the iai-pme package (pip install iai-pme).",
+  "version": "3.3.0",
+  "description": "Persistent local memory for your assistant: every turn captured verbatim, relevant memory injected at session start and before each turn, and fifteen memory tools over MCP. Requires the iai-pme package (pip install iai-pme).",
   "author": {
     "name": "Areg Aramovich Noya",
     "url": "https://github.com/CodeAbra"
@@ -10,5 +10,6 @@
   "homepage": "https://github.com/CodeAbra/iai-personal-memory-engine",
   "repository": "https://github.com/CodeAbra/iai-personal-memory-engine",
   "license": "MIT",
+  "icon": "./icon.png",
   "keywords": ["memory", "recall", "local-first", "mcp", "persistent-memory", "context"]
 }

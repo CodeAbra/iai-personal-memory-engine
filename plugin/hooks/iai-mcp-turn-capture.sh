@@ -38,7 +38,7 @@ _extract_tmp=$(mktemp 2>/dev/null || echo "/tmp/iai-mcp-turn-extract-$$.tmp")
 if command -v jq >/dev/null 2>&1; then
   printf '%s' "$input" | jq -r '(.session_id // "") + "\t" + (.transcript_path // "") + "\t" + (.prompt_id // "")' >"$_extract_tmp" 2>/dev/null
 else
-  printf '%s' "$input" | /usr/bin/python3 -c "
+  printf '%s' "$input" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -272,6 +272,7 @@ _NOISE_STARTSWITH = (
     "Base directory for this skill:",
     "<task-notification>",
     "<system-reminder>",
+    "Below is one record from a developer",
 )
 _NOISE_EQUALS = ("[Request interrupted by user]",)
 
@@ -835,11 +836,11 @@ except Exception:
 '
 
 if command -v timeout >/dev/null 2>&1; then
-  timeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
+  timeout 5 python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout 5 /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
+  gtimeout 5 python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
 else
-  /usr/bin/python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
+  python3 -c "$PY_SCRIPT" "$session_id" "$transcript_path" "$_payload_tmp" "$prompt_id" 2>/dev/null
 fi
 rc=$?
 # _payload_tmp / _extract_tmp cleanup runs via the EXIT trap above.

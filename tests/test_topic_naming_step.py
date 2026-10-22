@@ -495,6 +495,7 @@ def test_wal_recovery_from_curiosity_mine_runs_tail_three(
         SleepStep.RECONSOLIDATION_VALENCE,
         SleepStep.PROC_MINE,
         SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+        SleepStep.SALIENCE_AUTO_MIGRATION,
     ]
     after = load_state(state_path)
     assert after["sleep_cycle_progress"] is None
@@ -522,6 +523,7 @@ def test_wal_recovery_from_embedding_integrity_runs_tail_two(
         SleepStep.RECONSOLIDATION_VALENCE,
         SleepStep.PROC_MINE,
         SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+        SleepStep.SALIENCE_AUTO_MIGRATION,
     ]
     after = load_state(state_path)
     assert after["sleep_cycle_progress"] is None

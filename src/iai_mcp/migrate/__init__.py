@@ -155,6 +155,7 @@ from iai_mcp.migrate._cleanup import (  # noqa: E402
     cleanup_schema_duplicates,
 )
 from iai_mcp.migrate._directive_sweep import sweep_phantom_directives  # noqa: E402
+from iai_mcp.migrate._template_pollution import sweep_template_pollution  # noqa: E402
 from iai_mcp.migrate._timestamps import (  # noqa: E402
     migrate_rederive_collapsed_timestamps,
     _find_transcript_ts,
@@ -200,6 +201,7 @@ __all__ = [
     "cleanup_idem_duplicates",
     "cleanup_schema_duplicates",
     "sweep_phantom_directives",
+    "sweep_template_pollution",
     "migrate_rederive_collapsed_timestamps",
     "migrate_dedupe_episodic_captures",
     "migrate_salvage_torn_permanent_failed",

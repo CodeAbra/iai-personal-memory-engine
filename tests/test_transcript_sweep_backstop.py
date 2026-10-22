@@ -250,6 +250,7 @@ _EXPECTED_VALUE_AND_POSITION: "list[tuple[SleepStep, int, int]]" = [
     (SleepStep.RECONSOLIDATION_VALENCE, 18, 17),
     (SleepStep.PROC_MINE, 19, 18),
     (SleepStep.TRANSCRIPT_SWEEP_BACKSTOP, 20, 19),
+    (SleepStep.SALIENCE_AUTO_MIGRATION, 21, 20),
 ]
 
 
@@ -301,4 +302,7 @@ def test_wal_round_trip_resumes_new_tail_step_after_legacy_value(
     calls = _patch_steps_to_noop(pipeline, monkeypatch)
     pipeline.run()
 
-    assert calls == [SleepStep.TRANSCRIPT_SWEEP_BACKSTOP]
+    assert calls == [
+        SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+        SleepStep.SALIENCE_AUTO_MIGRATION,
+    ]

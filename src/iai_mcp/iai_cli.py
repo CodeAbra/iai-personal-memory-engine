@@ -598,6 +598,19 @@ def cmd_capture(args: argparse.Namespace) -> int:
             )
             return 2
 
+        from iai_mcp.directive_marker import is_directive_marker
+
+        # Second guard, after isatty(): the flag alone must never be
+        # sufficient to mint a directive from arbitrary text -- only text
+        # anchored with the typed "standing directive:" marker proceeds.
+        if not is_directive_marker(text):
+            print(
+                "error: --directive requires text beginning with the "
+                "'standing directive:' marker",
+                file=sys.stderr,
+            )
+            return 2
+
         from uuid import UUID
 
         from iai_mcp.capture import capture_turn

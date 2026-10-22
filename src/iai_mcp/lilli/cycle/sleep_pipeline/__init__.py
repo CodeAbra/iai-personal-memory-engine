@@ -57,6 +57,7 @@ class SleepStep(Enum):
     RECONSOLIDATION_VALENCE = 18
     PROC_MINE = 19
     TRANSCRIPT_SWEEP_BACKSTOP = 20
+    SALIENCE_AUTO_MIGRATION = 21
 
 
 class SleepPhase(Enum):
@@ -86,6 +87,7 @@ STEP_PHASE: dict[SleepStep, SleepPhase] = {
     SleepStep.RECONSOLIDATION_VALENCE: SleepPhase.REM,
     SleepStep.PROC_MINE: SleepPhase.REM,
     SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: SleepPhase.NREM,
+    SleepStep.SALIENCE_AUTO_MIGRATION: SleepPhase.NREM,
 }
 
 
@@ -114,6 +116,7 @@ _LIVENESS_SPEC: dict[SleepStep, tuple[str | None, str | None]] = {
     SleepStep.RECONSOLIDATION_VALENCE: ("candidates_labile", "valence_writes"),
     SleepStep.PROC_MINE: ("candidates_gated", "chunks_persisted"),
     SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: ("files_seen", "sessions_staged"),
+    SleepStep.SALIENCE_AUTO_MIGRATION: ("records_scanned", "salience_promoted"),
 }
 
 
@@ -486,6 +489,7 @@ class SleepPipeline:
             SleepStep.RECONSOLIDATION_VALENCE: self._step_reconsolidation_valence,
             SleepStep.PROC_MINE: self._step_proc_mine,
             SleepStep.TRANSCRIPT_SWEEP_BACKSTOP: self._step_transcript_sweep_backstop,
+            SleepStep.SALIENCE_AUTO_MIGRATION: self._step_salience_auto_migration,
         }
 
 
@@ -526,6 +530,11 @@ class SleepPipeline:
         # on the courier's own enablement flag; a no-op when the flag is
         # absent or a transcript was already swept by the courier.
         SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+        # Tail-appended (see the WAL-recovery note above): one-time,
+        # marker-gated activation of the shipped salience backfill. Lands
+        # after RECALL_INDEX_REBUILD, so a promoted mark is served on the
+        # NEXT daemon boot (one-cycle lag), not the current cycle.
+        SleepStep.SALIENCE_AUTO_MIGRATION,
     )
 
     # Steps whose bodies materialize large transients (clustering / columnar
@@ -761,7 +770,7 @@ from iai_mcp.lilli.cycle.sleep_pipeline import (  # noqa: E402
     _cluster_replay, _reconsolidation, _user_model, _dmn, _crisis,
     _cluster_summary, _recall_index, _essential_variable, _entity_link,
     _curiosity_mine, _embed_integrity, _topic_naming, _reconsolidation_valence,
-    _proc_mine, _transcript_sweep_backstop,
+    _proc_mine, _transcript_sweep_backstop, _salience_auto_migration,
 )
 
 SleepPipeline._step_schema_mine = _schema_mine.step_schema_mine
@@ -787,6 +796,9 @@ SleepPipeline._step_reconsolidation_valence = _reconsolidation_valence.step_reco
 SleepPipeline._step_proc_mine = _proc_mine.step_proc_mine
 SleepPipeline._step_transcript_sweep_backstop = (
     _transcript_sweep_backstop.step_transcript_sweep_backstop
+)
+SleepPipeline._step_salience_auto_migration = (
+    _salience_auto_migration.step_salience_auto_migration
 )
 SleepPipeline._run_essential_variable_tracker_hook = _essential_variable.run_essential_variable_tracker_hook
 SleepPipeline._clear_crisis_mode_via_s2_or_fallback = _essential_variable.clear_crisis_mode_via_s2_or_fallback

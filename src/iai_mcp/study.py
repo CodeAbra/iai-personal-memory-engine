@@ -542,14 +542,39 @@ _SKIP_DIR_NAMES = frozenset({
     "__pycache__", ".pytest_cache", ".claude", ".idea", ".vscode", "artifacts",
 })
 
+TOOLS_INDEX_DOT_DIR_ALLOWLIST: "frozenset[str]" = frozenset({".planning"})
+"""Dot-directory names a code-index caller may opt an admitted walk root
+into. Never consulted unless a caller passes it explicitly."""
 
-def iter_study_files(root: "str | Path", *, max_files: "int | None" = None) -> "list[Path]":
+_TOOLS_INDEX_ARCHIVE_SUBDIR_NAMES_BY_DOT_DIR: "dict[str, frozenset[str]]" = {
+    ".planning": frozenset({"milestones"}),
+}
+"""Archive subdirectory names pruned beneath their OWN admitted dot-directory
+only -- keyed by dot-dir name so extending the allowlist never silently
+inherits another dot-dir's prune list."""
+
+
+def iter_study_files(
+    root: "str | Path", *, max_files: "int | None" = None, return_skipped: bool = False,
+    dot_dir_allowlist: "frozenset[str]" = frozenset(),
+) -> "list[Path] | tuple[list[Path], int]":
     """The one directory scanner every study consumer shares (direct passes
     and the CLI's daemon-relay loop): allowed suffixes, skip-dirs, size cap,
     and the no-symlink rule live here and only here.
 
     os.walk with IN-PLACE dir pruning: skip-dirs are cut BEFORE descent so the
-    walk never enumerates files under .git/node_modules."""
+    walk never enumerates files under .git/node_modules.
+
+    `return_skipped=True` returns `(files, skipped_over_cap)` instead of
+    just `files` -- opt-in so every existing caller's return shape is
+    unchanged. A caller that must distinguish "nothing dropped" from
+    "the cap actually bit" (e.g. a `truncated` flag) needs this count:
+    `len(files) == max_files` alone is a false positive when the source
+    has exactly `max_files` eligible entries and nothing was dropped.
+
+    `dot_dir_allowlist` defaults to empty so every existing caller (the
+    brain-teach path included) keeps excluding every dot-directory; only a
+    caller that opts in by name can see one, and only at the walk root."""
     import os as _os
 
     from iai_mcp.ingest._parsers import SUPPORTED_SUFFIXES
@@ -562,12 +587,24 @@ def iter_study_files(root: "str | Path", *, max_files: "int | None" = None) -> "
         except (TypeError, ValueError):
             max_files = 500
 
+    root_str = str(root)
+    admitted_dot_dir_names_by_path = {str(root / name): name for name in dot_dir_allowlist}
+
     files: "list[Path]" = []
     skipped_over_cap = 0
     for dirpath, dirnames, filenames in _os.walk(str(root), followlinks=False):
+        at_root = dirpath == root_str
+        admitted_dot_dir_name = admitted_dot_dir_names_by_path.get(dirpath)
+        archive_subdir_names = _TOOLS_INDEX_ARCHIVE_SUBDIR_NAMES_BY_DOT_DIR.get(
+            admitted_dot_dir_name, frozenset()
+        )
+        # Code-index callers may admit a named dot-directory at the walk
+        # root; brain-teach callers never do (dot_dir_allowlist stays empty).
         dirnames[:] = sorted(
             d for d in dirnames
-            if d not in _SKIP_DIR_NAMES and not d.startswith(".")
+            if d not in _SKIP_DIR_NAMES
+            and (not d.startswith(".") or (at_root and d in dot_dir_allowlist))
+            and not (admitted_dot_dir_name is not None and d in archive_subdir_names)
         )
         for name in sorted(filenames):
             path = Path(dirpath) / name
@@ -593,6 +630,8 @@ def iter_study_files(root: "str | Path", *, max_files: "int | None" = None) -> "
             "skipped (raise %s to study more)",
             root, skipped_over_cap, max_files, STUDY_DIR_MAX_FILES_ENV,
         )
+    if return_skipped:
+        return files, skipped_over_cap
     return files
 
 

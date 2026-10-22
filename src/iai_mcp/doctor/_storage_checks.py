@@ -1555,6 +1555,129 @@ def check_jj_watermark_fence() -> CheckResult:
     )
 
 
+_SALIENCE_AUTO_MIGRATION_CHECK_NAME = "(ll) salience auto-migration status"
+
+# Never an unbounded COUNT(*) on `records` -- the sleep gate itself avoids
+# that scan, and a diagnostic read must not reintroduce it. Past the cap
+# the check reports "≥cap" instead of an exact count.
+_LEGACY_UNFLAGGED_COUNT_CAP = 1000
+
+
+def _bounded_legacy_unflagged_count(conn, cap: int) -> "tuple[int, bool]":
+    """Bounded count of live legacy-unflagged records; returns
+    ``(count, capped)`` -- ``capped`` is True when the true count exceeds
+    ``cap``. Fetches at most ``cap + 1`` rows (never an unbounded scan, and
+    never a derived-table subquery -- the native SQL parser has no `FROM
+    (SELECT ...)` support, only a plain `LIMIT`-bounded SELECT)."""
+    rows = conn.execute(
+        "SELECT 1 FROM records WHERE tombstoned_at IS NULL"
+        " AND salience_level = 'unflagged' LIMIT ?",
+        (cap + 1,),
+    ).fetchall()
+    fetched = len(rows)
+    if fetched > cap:
+        return cap, True
+    return fetched, False
+
+
+def check_ll_salience_auto_migration() -> CheckResult:
+    """Read-only surface for the one-time salience backfill migration:
+    born-native / pending / done / gave-up state plus attempts/last-error
+    from `_hippo_meta`, and a bounded remaining legacy-unflagged count.
+    Mirrors check_s_hippo_schema_version's read-only-open pattern; marker
+    keys are imported from the migrator module, never re-declared here."""
+    from iai_mcp.migrate._salience_auto_migration import (
+        MAX_ATTEMPTS,
+        _ATTEMPTS_KEY,
+        _DONE_MARKER_KEY,
+        _LAST_ERROR_KEY,
+        _NATIVE_KEY,
+        resolve_migration_state,
+    )
+
+    name = _SALIENCE_AUTO_MIGRATION_CHECK_NAME
+    db_path = _resolve_hippo_db_path()
+    if not db_path.exists():
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="db absent (fresh install)",
+            status="PASS",
+        )
+    conn = None
+    try:
+        _eng = open_store_conn(db_path, read_only=True)
+        if _eng is not None:
+            conn = _eng
+        else:
+            conn = _sqlite_stdlib.connect(str(db_path), timeout=2.0)
+        meta_rows = conn.execute(
+            "SELECT key, value FROM _hippo_meta WHERE key IN (?, ?, ?, ?)",
+            (_NATIVE_KEY, _DONE_MARKER_KEY, _ATTEMPTS_KEY, _LAST_ERROR_KEY),
+        ).fetchall()
+        legacy_count, legacy_capped = _bounded_legacy_unflagged_count(
+            conn, _LEGACY_UNFLAGGED_COUNT_CAP,
+        )
+    except (errors.Error, _LilliParseError) as exc:  # type: ignore[misc]
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"check skipped: {type(exc).__name__}: {exc}",
+            status="WARN",
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    meta = {row[0]: row[1] for row in meta_rows}
+    native = meta.get(_NATIVE_KEY) is not None
+    done = meta.get(_DONE_MARKER_KEY) is not None
+    try:
+        attempts = int(meta.get(_ATTEMPTS_KEY) or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    last_error = meta.get(_LAST_ERROR_KEY)
+    legacy_display = f"≥{_LEGACY_UNFLAGGED_COUNT_CAP}" if legacy_capped else str(legacy_count)
+
+    state = resolve_migration_state(
+        done=done, native=native, attempts=attempts, max_attempts=MAX_ATTEMPTS,
+    )
+    if state == "done":
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=f"migration done; {legacy_display} legacy unflagged remaining",
+            status="PASS",
+        )
+    if state == "native":
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail="not needed (store created with capture-time salience active)",
+            status="PASS",
+        )
+    if state == "gave_up":
+        detail = f"migration failed after {attempts} attempt(s)"
+        if last_error:
+            detail += f" (last: {last_error})"
+        detail += " -- run `iai-mcp salience-backfill --apply`"
+        return CheckResult(
+            name=name,
+            passed=True,
+            detail=detail,
+            status="WARN",
+        )
+    return CheckResult(
+        name=name,
+        passed=True,
+        detail=f"migration pending; {legacy_display} legacy unflagged",
+        status="WARN" if legacy_count > 0 else "PASS",
+    )
+
+
 def check_p_anthropic_sdk_absent() -> CheckResult:
     try:
         import anthropic  # noqa: F401 -- presence-probe only

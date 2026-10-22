@@ -95,6 +95,10 @@ def run_neural_map_bench(
     else:
         path = Path(store_path)
 
+    # Callers import this in-process; the profiling switch must not outlive
+    # the call or every later recall in that process carries wall-clock
+    # stage_timings.
+    prev_stage_profile = os.environ.get("IAI_MCP_STAGE_PROFILE")
     try:
         store = MemoryStore(path=path)
         embedder = _BenchEmbedder(base_seed=seed, dim=store.embed_dim)
@@ -202,6 +206,10 @@ def run_neural_map_bench(
             result["cascade_warmed"] = cascade_warmed
         return result
     finally:
+        if prev_stage_profile is None:
+            os.environ.pop("IAI_MCP_STAGE_PROFILE", None)
+        else:
+            os.environ["IAI_MCP_STAGE_PROFILE"] = prev_stage_profile
         if cleanup is not None:
             cleanup.cleanup()
 

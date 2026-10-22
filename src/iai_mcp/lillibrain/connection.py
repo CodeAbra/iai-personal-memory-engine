@@ -34,6 +34,11 @@ from typing import TYPE_CHECKING
 
 from iai_mcp.lillibrain.btree.cursor import BtreeCursor
 from iai_mcp.lillibrain.btree.page import write_leaf_header
+from iai_mcp.lillibrain.constants import (
+    RO_CONN_CACHE_KIB,
+    resolve_cache_size_kib,
+    resolve_ro_slot_cache_kib,
+)
 from iai_mcp.lillibrain.record import decode_record, encode_record
 
 if TYPE_CHECKING:
@@ -1520,12 +1525,39 @@ class _OwnedEngineRawConn:
     row_factory = None
 
     def __init__(
-        self, engine_conn, *, read_only: bool = False, path: str | None = None
+        self,
+        engine_conn,
+        *,
+        read_only: bool = False,
+        path: str | None = None,
+        ro_pool_size: int | None = None,
     ) -> None:
         self._engine_conn = engine_conn
         self._read_only = read_only
         self._path = path
         self._raw = engine_conn.raw_conn(read_only=read_only)
+        # Per-slot pager bound: set unconditionally, both read-only and the rare
+        # registry-miss writer. RO_CONN_CACHE_KIB times the resolved RO pool size
+        # must stay near MAIN_CACHE_KIB (clamped below when a caller identifies
+        # itself as pool-bounded via ro_pool_size) -- raising IAI_MCP_RO_POOL_SIZE
+        # scales the aggregate RO ceiling.
+        if read_only and ro_pool_size is not None:
+            _ro_cache_kib = resolve_ro_slot_cache_kib(ro_pool_size)
+        else:
+            _ro_cache_kib = resolve_cache_size_kib(
+                "IAI_MCP_RO_CONN_CACHE_SIZE_KIB", RO_CONN_CACHE_KIB
+            )
+        try:
+            self._raw.execute(f"PRAGMA cache_size=-{_ro_cache_kib}")
+        except Exception:
+            # Drop self._raw's Arc clone first, matching close()'s own order —
+            # otherwise engine_conn.close() below is not the last holder.
+            try:
+                self._raw.close()
+            except Exception:  # noqa: BLE001
+                pass
+            engine_conn.close()
+            raise
         # A writer holds the exclusive lock; publish it so a later open borrows
         # this connection rather than colliding with the lock. Readers take no
         # lock and stay unregistered.
@@ -1688,7 +1720,11 @@ _RAW_WRITER_FENCE_MESSAGE = (
 
 
 def get_lilli_raw_conn(
-    path: str, *, read_only: bool = False, allow_writer: bool = False
+    path: str,
+    *,
+    read_only: bool = False,
+    allow_writer: bool = False,
+    ro_pool_size: int | None = None,
 ) -> "LilliBrainRawConn | None":
     """Return a LilliBrainRawConn for path if the lilli driver owns it, else None.
 
@@ -1710,6 +1746,10 @@ def get_lilli_raw_conn(
     The writer branch (read_only=False) bypasses the read-only pool's generation
     fence, so a bare default call raises errors.DatabaseError; pass
     allow_writer=True to opt in explicitly (see _RAW_WRITER_FENCE_MESSAGE).
+
+    ro_pool_size, when passed by a pool-aware caller, clamps the returned
+    connection's per-slot pager cache so ro_pool_size instances of it together
+    cannot exceed RO_AGGREGATE_CEILING_KIB (see resolve_ro_slot_cache_kib).
     """
     conn = get_lilli_engine_conn(path)
     if conn is not None:
@@ -1747,7 +1787,9 @@ def get_lilli_raw_conn(
             except Exception:  # noqa: BLE001 -- adoption is an accelerator;
                 # the lazy build stays the always-correct fallback.
                 pass
-            return _OwnedEngineRawConn(engine_conn, read_only=True, path=str(path))
+            return _OwnedEngineRawConn(
+                engine_conn, read_only=True, path=str(path), ro_pool_size=ro_pool_size
+            )
         except errors.DatabaseError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1792,7 +1834,12 @@ def get_lilli_raw_conn(
             engine_conn = _engine.Connection.open_read_only(str(path), 0)
         else:
             engine_conn = _engine.Connection.open(str(path), 0)
-        return _OwnedEngineRawConn(engine_conn, read_only=read_only, path=str(path))
+        return _OwnedEngineRawConn(
+            engine_conn,
+            read_only=read_only,
+            path=str(path),
+            ro_pool_size=ro_pool_size if read_only else None,
+        )
     except errors.DatabaseError:
         raise
     except Exception as exc:  # noqa: BLE001

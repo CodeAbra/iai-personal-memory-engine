@@ -140,6 +140,8 @@ fn build_corpus() -> Corpus {
     let tags = vec![Vec::new(); N_RECORDS];
     let mut salience_level = Vec::with_capacity(N_RECORDS);
     let centrality = vec![0.0f32; N_RECORDS];
+    let valence = vec![0.0f32; N_RECORDS];
+    let language = vec!["en".to_string(); N_RECORDS];
     let mut record_hvs = Vec::with_capacity(N_RECORDS);
 
     let query_hv = synthetic_hv(&mut rng);
@@ -227,6 +229,8 @@ fn build_corpus() -> Corpus {
         salience_level,
         centrality,
         pending,
+        valence,
+        language,
     )
     .expect("fixture build must not fail");
 

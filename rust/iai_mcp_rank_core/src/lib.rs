@@ -721,6 +721,12 @@ pub struct Inner {
     created_at: Vec<i64>, // epoch seconds
     tier_pool: Vec<String>,
     tier: Vec<u16>,
+    /// `valence` mirrors `centrality`/`stability` (plain scalar), read by
+    /// `fused_score`'s multiplier. `language` is interned like `tier`, not
+    /// yet read by any consumer.
+    valence: Vec<f32>,
+    language_pool: Vec<String>,
+    language: Vec<u16>,
     /// `embedding_pending` membership. Fed by the Python adapter's bulk
     /// pending-row scan (`_build`) and by `feed`'s `pending` kwarg on an
     /// incremental upsert -- always current, never overlay-resolved (same
@@ -794,6 +800,8 @@ impl Inner {
         salience_level: Vec<u8>,
         centrality: Vec<f32>,
         pending: Vec<bool>,
+        valence: Vec<f32>,
+        language: Vec<String>,
     ) -> Result<Inner, RankIndexError> {
         let n = ids.len();
         if vectors_flat.len() != n * dim {
@@ -832,6 +840,13 @@ impl Inner {
             .map(|t| intern16(&mut tier_pool, &mut tier_lookup, t))
             .collect();
 
+        let mut language_pool: Vec<String> = Vec::new();
+        let mut language_lookup: HashMap<String, u16> = HashMap::new();
+        let language_col: Vec<u16> = language
+            .iter()
+            .map(|l| intern16(&mut language_pool, &mut language_lookup, l))
+            .collect();
+
         let tags_working: HashMap<u128, Vec<String>> =
             ids.iter().copied().zip(tags.into_iter()).collect();
         let (tag_pool, tag_ids, tag_offsets) = rebuild_tags_csr(&ids, &tags_working);
@@ -855,6 +870,9 @@ impl Inner {
             created_at,
             tier_pool,
             tier: tier_col,
+            valence,
+            language_pool,
+            language: language_col,
             pending,
             text_arena,
             aaak_span,
@@ -901,7 +919,10 @@ impl Inner {
         salience_level: u8,
         centrality: f32,
         pending: bool,
+        valence: f32,
+        language: &str,
         tier_lookup: &mut HashMap<String, u16>,
+        language_lookup: &mut HashMap<String, u16>,
     ) -> Result<(), RankIndexError> {
         if vector.len() != self.dim {
             return Err(RankIndexError::DimMismatch {
@@ -910,6 +931,7 @@ impl Inner {
             });
         }
         let tier_id = intern16(&mut self.tier_pool, tier_lookup, tier);
+        let language_id = intern16(&mut self.language_pool, language_lookup, language);
         let surface_hash = content_hash128(surface);
 
         match self.id_to_slot.get(&id).copied() {
@@ -944,6 +966,8 @@ impl Inner {
                 self.salience_level[slot] = salience_level;
                 self.created_at[slot] = created_at;
                 self.tier[slot] = tier_id;
+                self.valence[slot] = valence;
+                self.language[slot] = language_id;
                 self.pending[slot] = pending;
                 self.aaak_span[slot] = a_span;
             }
@@ -960,6 +984,8 @@ impl Inner {
                 self.salience_level.push(salience_level);
                 self.created_at.push(created_at);
                 self.tier.push(tier_id);
+                self.valence.push(valence);
+                self.language.push(language_id);
                 self.pending.push(pending);
                 self.aaak_span.push(a_span);
                 self.token_freqs.push(surface_token_freqs.clone());
@@ -994,6 +1020,8 @@ impl Inner {
             self.salience_level.swap(slot, last);
             self.created_at.swap(slot, last);
             self.tier.swap(slot, last);
+            self.valence.swap(slot, last);
+            self.language.swap(slot, last);
             self.pending.swap(slot, last);
             self.aaak_span.swap(slot, last);
             self.token_freqs.swap(slot, last);
@@ -1008,6 +1036,8 @@ impl Inner {
         self.salience_level.truncate(last);
         self.created_at.truncate(last);
         self.tier.truncate(last);
+        self.valence.truncate(last);
+        self.language.truncate(last);
         self.pending.truncate(last);
         self.aaak_span.truncate(last);
         self.token_freqs.truncate(last);
@@ -1180,6 +1210,7 @@ impl Inner {
         &mut self,
         op: PendingOp,
         tier_lookup: &mut HashMap<String, u16>,
+        language_lookup: &mut HashMap<String, u16>,
     ) -> Result<(), RankIndexError> {
         match op {
             PendingOp::Upsert {
@@ -1195,6 +1226,8 @@ impl Inner {
                 salience_level,
                 centrality,
                 pending,
+                valence,
+                language,
             } => {
                 let postings = token_freq_map(&surface);
                 self.upsert_scalar(
@@ -1209,7 +1242,10 @@ impl Inner {
                     salience_level,
                     centrality,
                     pending,
+                    valence,
+                    &language,
                     tier_lookup,
+                    language_lookup,
                 )?;
                 self.overlay.record_upsert(id, edges, tags, postings);
             }
@@ -1399,6 +1435,8 @@ pub enum PendingOp {
         salience_level: u8,
         centrality: f32,
         pending: bool,
+        valence: f32,
+        language: String,
     },
     Delete {
         id: u128,
@@ -1494,9 +1532,10 @@ impl DoubleBuffer {
         let ops: Vec<PendingOp> = self.pending.lock().drain(..).collect();
         let mut next = (*current).clone();
         let mut tier_lookup = build_lookup16(&next.tier_pool);
+        let mut language_lookup = build_lookup16(&next.language_pool);
 
         for op in ops {
-            next.apply_incremental(op, &mut tier_lookup)?;
+            next.apply_incremental(op, &mut tier_lookup, &mut language_lookup)?;
         }
 
         next.generation = generation;
@@ -1980,18 +2019,12 @@ pub struct FusedScoreResult {
 /// the cleanup-attractor shortlist, the flat-cosine damp, and each frozen
 /// corpus-resident term (cosine, aaak overlap, edge-type-excluded degree,
 /// age, spread activation, community contribution, structural blend,
-/// stability lift, trigram/FTS/BM25 boosts) — reading corpus-resident
+/// stability lift, valence, trigram/FTS/BM25 boosts) — reading corpus-resident
 /// features through the overlay-aware accessors so a post-write call
 /// scores current, not stale, data. Returns the `k + k_margin` winners
 /// ordered by `(-partial_score, id)` (ascending id breaks a tie; proven
 /// equal to the `str(UUID(int=id))` string tie-break by
 /// `tie_break_matches_uuid_string_order` in `tests/fused_score.rs`).
-///
-/// A valence multiplier is not computed: the live rank-tier candidate
-/// view (`store/_store.py::RankCandidateView`) carries no `valence`
-/// attribute, so `getattr(rec, "valence", None) or 0.0` is always `0.0` on
-/// this data tier and the multiplier never fires — verified against the
-/// dataclass definition, not assumed.
 pub fn fused_score(inner: &Inner, params: &FusedScoreParams<'_>) -> Result<FusedScoreResult, RankIndexError> {
     let n_pool = params.pool_ids.len();
     check_score_len("cosine", params.cosine.len(), n_pool)?;
@@ -2161,6 +2194,11 @@ pub fn fused_score(inner: &Inner, params: &FusedScoreParams<'_>) -> Result<Fused
         s += (1.0 - stability.min(1.0)) * 0.1;
 
         let mut term_multiplier = 1.0f64;
+        let valence = inner.valence[slot] as f64;
+        if valence > 0.0 {
+            s *= 1.0 + valence;
+            term_multiplier *= 1.0 + valence;
+        }
         if params.t11_flags[pos as usize] {
             s *= 2.0;
             term_multiplier *= 2.0;
@@ -2266,6 +2304,8 @@ impl RankIndex {
         salience_level: Vec<u8>,
         centrality: Vec<f32>,
         pending: Vec<bool>,
+        valence: Vec<f32>,
+        language: Vec<String>,
     ) -> PyResult<Self> {
         let n = ids.len();
         check_parallel_len("surfaces", surfaces.len(), n)?;
@@ -2277,6 +2317,8 @@ impl RankIndex {
         check_parallel_len("salience_level", salience_level.len(), n)?;
         check_parallel_len("centrality", centrality.len(), n)?;
         check_parallel_len("pending", pending.len(), n)?;
+        check_parallel_len("valence", valence.len(), n)?;
+        check_parallel_len("language", language.len(), n)?;
 
         let vectors_flat = flatten_vectors(&vectors, dim, n)?;
         let edge_map: HashMap<u128, Vec<(u128, f32, String)>> = edges.into_iter().collect();
@@ -2299,6 +2341,8 @@ impl RankIndex {
             salience_level,
             centrality,
             pending,
+            valence,
+            language,
         )?;
         Ok(RankIndex {
             buf: DoubleBuffer::new(inner),
@@ -2394,7 +2438,8 @@ impl RankIndex {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (op, id, vector=None, edges=None, surface=None, aaak_index=None,
                          created_at=None, stability=None, tier=None, tags=None,
-                         salience_level=None, centrality=None, pending=None))]
+                         salience_level=None, centrality=None, pending=None,
+                         valence=None, language=None))]
     fn feed(
         &self,
         py: Python<'_>,
@@ -2411,6 +2456,8 @@ impl RankIndex {
         salience_level: Option<u8>,
         centrality: Option<f32>,
         pending: Option<bool>,
+        valence: Option<f32>,
+        language: Option<String>,
     ) -> PyResult<()> {
         let pending_op = match op {
             "delete" => PendingOp::Delete { id },
@@ -2436,6 +2483,8 @@ impl RankIndex {
                     salience_level: salience_level.unwrap_or(0),
                     centrality: centrality.unwrap_or(0.0),
                     pending: pending.unwrap_or(false),
+                    valence: valence.unwrap_or(0.0),
+                    language: language.unwrap_or_default(),
                 }
             }
             other => return Err(PyValueError::new_err(format!("unknown feed op {other:?}"))),
@@ -2749,6 +2798,8 @@ mod tests {
         let mut salience_level = Vec::with_capacity(n);
         let centrality = vec![0.0f32; n];
         let mut pending = Vec::with_capacity(n);
+        let valence = vec![0.0f32; n];
+        let language = vec!["en".to_string(); n];
 
         for r in rows {
             ids.push(r.id);
@@ -2784,6 +2835,8 @@ mod tests {
             salience_level,
             centrality,
             pending,
+            valence,
+            language,
         )
     }
 
@@ -2887,6 +2940,65 @@ mod tests {
     }
 
     #[test]
+    fn valence_and_language_round_trip_through_bulk_ingest_and_incremental_feed() {
+        let inner = Inner::from_columns(
+            2,
+            1,
+            vec![1u128, 2u128],
+            vec![1.0, 0.0, 0.0, 1.0],
+            HashMap::new(),
+            vec!["a".to_string(), "b".to_string()],
+            vec![String::new(), String::new()],
+            vec![0, 0],
+            vec![0.5, 0.5],
+            vec!["episodic".to_string(), "episodic".to_string()],
+            vec![Vec::new(), Vec::new()],
+            vec![0, 0],
+            vec![0.0, 0.0],
+            vec![false, false],
+            vec![0.7, -0.3],
+            vec!["en".to_string(), "ru".to_string()],
+        )
+        .expect("bulk ingest should succeed");
+
+        let slot1 = *inner.id_to_slot.get(&1).unwrap() as usize;
+        let slot2 = *inner.id_to_slot.get(&2).unwrap() as usize;
+        assert_eq!(inner.valence[slot1], 0.7);
+        assert_eq!(inner.valence[slot2], -0.3);
+        assert_eq!(inner.language_pool[inner.language[slot1] as usize], "en");
+        assert_eq!(inner.language_pool[inner.language[slot2] as usize], "ru");
+        assert_ne!(
+            inner.language[slot1], inner.language[slot2],
+            "two distinct language strings must intern to two distinct ids"
+        );
+
+        // Incremental path: `feed` must thread the same two columns through
+        // the read-path apply, not just the bulk constructor.
+        let buf = DoubleBuffer::new(inner);
+        buf.feed(PendingOp::Upsert {
+            id: 3,
+            vector: vec![1.0, 1.0],
+            edges: Vec::new(),
+            surface: "new row".to_string(),
+            aaak_index: String::new(),
+            created_at: 0,
+            stability: 0.5,
+            tier: "episodic".to_string(),
+            tags: Vec::new(),
+            salience_level: 0,
+            centrality: 0.0,
+            pending: false,
+            valence: 0.42,
+            language: "ja".to_string(),
+        })
+        .expect("feed must succeed");
+        let snap = buf.snapshot(2).expect("stale generation must apply incrementally");
+        let slot3 = *snap.id_to_slot.get(&3).unwrap() as usize;
+        assert_eq!(snap.valence[slot3], 0.42);
+        assert_eq!(snap.language_pool[snap.language[slot3] as usize], "ja");
+    }
+
+    #[test]
     fn adjacency_groups_by_edge_type_with_correct_counts() {
         let mut r1 = row(1, vec![1.0, 0.0], "x");
         r1.edges = vec![
@@ -2962,6 +3074,8 @@ mod tests {
             salience_level: 0,
             centrality: 0.0,
             pending: false,
+            valence: 0.0,
+            language: String::new(),
         }
     }
 
@@ -2979,6 +3093,8 @@ mod tests {
             salience_level: 0,
             centrality: 0.0,
             pending: true,
+            valence: 0.0,
+            language: String::new(),
         }
     }
 
@@ -3184,6 +3300,8 @@ mod tests {
             salience_level: 0,
             centrality: 0.0,
             pending: false,
+            valence: 0.0,
+            language: String::new(),
         }
     }
 
@@ -3528,10 +3646,11 @@ mod tests {
         let mut wrong_freqs: HashMap<u32, u32> = HashMap::new();
         wrong_freqs.insert(token_feature_id("bogus_token_that_must_never_appear"), 999);
         let mut tier_lookup: HashMap<String, u16> = HashMap::new();
+        let mut language_lookup: HashMap<String, u16> = HashMap::new();
         inner
             .upsert_scalar(
                 1, &[1.0, 0.0], "original surface text", &wrong_freqs, "",
-                0, 0.5, "", 0, 0.0, false, &mut tier_lookup,
+                0, 0.5, "", 0, 0.0, false, 0.0, "", &mut tier_lookup, &mut language_lookup,
             )
             .expect("upsert must succeed");
 
@@ -3551,10 +3670,11 @@ mod tests {
 
         let new_freqs = token_freq_map("a completely different surface");
         let mut tier_lookup: HashMap<String, u16> = HashMap::new();
+        let mut language_lookup: HashMap<String, u16> = HashMap::new();
         inner
             .upsert_scalar(
                 1, &[1.0, 0.0], "a completely different surface", &new_freqs, "",
-                0, 0.5, "", 0, 0.0, false, &mut tier_lookup,
+                0, 0.5, "", 0, 0.0, false, 0.0, "", &mut tier_lookup, &mut language_lookup,
             )
             .expect("upsert must succeed");
 
@@ -3728,11 +3848,12 @@ mod tests {
         );
 
         let mut tier_lookup: HashMap<String, u16> = HashMap::new();
+        let mut language_lookup: HashMap<String, u16> = HashMap::new();
         let new_freqs = token_freq_map("third record surface");
         inner
             .upsert_scalar(
                 3, &[1.0, 0.0], "third record surface", &new_freqs, "",
-                0, 0.5, "", 0, 0.0, false, &mut tier_lookup,
+                0, 0.5, "", 0, 0.0, false, 0.0, "", &mut tier_lookup, &mut language_lookup,
             )
             .expect("upsert must succeed");
         let slot3 = *inner.id_to_slot.get(&3).unwrap() as usize;

@@ -218,11 +218,11 @@ def capture_discovery_membership(store: Any, params: dict) -> DiscoveryMembershi
 
     # The fresh, per-call candidate pool graph (core/__init__.py's
     # `graph = MemoryGraph()`, populated only from `_candidate_recs`) is
-    # the only `MemoryGraph` this dispatch call constructs OTHER than the
-    # store-resident rank-builder graph (constructed at most once, lazily,
-    # per store) -- exclude that one by identity rather than by
-    # construction order, which is robust regardless of whether this was
-    # the store's first-ever dispatch.
+    # the only `MemoryGraph` this dispatch call constructs -- residency for
+    # the live recall path is a non-graph, id-keyed LRU
+    # (`_RankIndexHandle.resident`), never a second `MemoryGraph` instance.
+    # `getattr` stays defensive (never None-unsafe) against any future
+    # store attribute reintroducing a second graph identity to exclude.
     builder_graph = getattr(store, "_rank_builder_graph", None)
     pool_candidates = [g for g in created_graphs if g is not builder_graph]
     if len(pool_candidates) != 1:

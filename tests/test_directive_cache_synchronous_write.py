@@ -221,28 +221,27 @@ def test_ordinary_capture_does_not_rewrite_directive_cache(store, monkeypatch, t
 
 def test_default_call_shape_never_touches_the_real_home_cache(store):
     """The dangerous call shape is exactly the one production uses:
-    write_directives_cache(store) with NO explicit cache_path, relying on
-    the module-level DIRECTIVES_CACHE_PATH default. Under the hermetic
-    fixture that default is monkeypatched to a tmp path; this proves the
-    call-time-resolution fix actually honors that patch, and that the
-    operator's real ~/.iai-mcp/.directives.cached.md is neither created nor
-    modified. The real path is only stat()'d for an existence/mtime
-    fingerprint -- never opened or read."""
-    import iai_mcp.directive_cache as directive_cache_mod
+    write_directives_cache(store) with NO explicit cache_path. The default
+    resolution branch derives the path from store.root first (the store
+    fixture roots under tmp_path); this proves a cache_path-less call lands
+    under the store's own root, and that the operator's real
+    ~/.iai-mcp/.directives.cached.md is neither created nor modified. The
+    real path is only stat()'d for an existence/mtime fingerprint -- never
+    opened or read."""
     import iai_mcp.hippo as hippo_mod
 
     real_cache_path = hippo_mod._REAL_IAI_ROOT / ".directives.cached.md"
     real_existed_before = real_cache_path.exists()
     real_mtime_before = real_cache_path.stat().st_mtime if real_existed_before else None
 
-    resolved = directive_cache_mod.DIRECTIVES_CACHE_PATH
+    resolved = store.root / ".directives.cached.md"
     assert hippo_mod._REAL_IAI_ROOT.resolve() not in resolved.resolve().parents, (
-        f"DIRECTIVES_CACHE_PATH={resolved!r} resolves under the real store "
+        f"store.root={store.root!r} resolves under the real store "
         f"{hippo_mod._REAL_IAI_ROOT!r} -- the hermetic fixture failed to patch it"
     )
 
     store.insert(_directive_record("isolation proof directive"))
-    directive_cache_mod.write_directives_cache(store)  # no cache_path override
+    write_directives_cache(store)  # no cache_path override
 
     assert resolved.exists()
     assert "isolation proof directive" in resolved.read_text(encoding="utf-8")
@@ -259,3 +258,23 @@ def test_default_call_shape_never_touches_the_real_home_cache(store):
             "real ~/.iai-mcp/.directives.cached.md was created by a "
             "cache_path-less write_directives_cache() call"
         )
+
+
+@pytest.mark.parametrize("driver", ["stdlib", "lilli"])
+def test_default_call_shape_writes_under_a_non_default_store_root(driver, tmp_path: Path, monkeypatch):
+    """A store rooted somewhere other than the module-level
+    DIRECTIVES_CACHE_PATH's parent must still get its own directive cache
+    from a bare, cache_path-less write_directives_cache(store) call --
+    store.root wins over the module default whenever a root is resolvable."""
+    _select_driver(driver, monkeypatch)
+    alt_root = tmp_path / "alt-store-root"
+    store = MemoryStore(path=alt_root)
+    try:
+        store.insert(_directive_record("alt root directive"))
+        write_directives_cache(store)  # no cache_path override
+
+        expected = alt_root / ".directives.cached.md"
+        assert expected.exists()
+        assert "alt root directive" in expected.read_text(encoding="utf-8")
+    finally:
+        store.close()

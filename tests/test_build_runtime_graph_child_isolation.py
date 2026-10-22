@@ -305,6 +305,7 @@ def _run_isolation_arm(seed_base: int, in_parent: bool, root: Path) -> int:
     return int(json.loads(proc.stdout.strip().splitlines()[-1])["peak_rss_raw"])
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     platform.system() != "Darwin",
     reason="settled-RSS isolation proof calibrated on this host's allocator",

@@ -79,6 +79,7 @@ def _patch_pipeline_steps_to_noop(
         (SleepStep.RECONSOLIDATION_VALENCE, "_step_reconsolidation_valence"),
         (SleepStep.PROC_MINE, "_step_proc_mine"),
         (SleepStep.TRANSCRIPT_SWEEP_BACKSTOP, "_step_transcript_sweep_backstop"),
+        (SleepStep.SALIENCE_AUTO_MIGRATION, "_step_salience_auto_migration"),
     ]
 
     for step, method_name in _NOOP_STEPS:
@@ -112,26 +113,27 @@ def test_happy_path_runs_pipeline_and_prints_progress(
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sleep cycle started." in out
-    assert "[1/20] schema_mine" in out
-    assert "[2/20] knob_tune" in out
-    assert "[3/20] optimize_hippo" in out
-    assert "[4/20] hippo_cleanup" in out
-    assert "[5/20] dream_decay" in out
-    assert "[6/20] erasure_agent" in out
-    assert "[7/20] cluster_replay" in out
-    assert "[8/20] reconsolidation" in out
-    assert "[9/20] user_model_update" in out
-    assert "[10/20] dmn_reflection" in out
-    assert "[11/20] crisis_recluster" in out
-    assert "[12/20] cluster_summary" in out
-    assert "[13/20] recall_index_rebuild" in out
-    assert "[14/20] entity_link" in out
-    assert "[15/20] curiosity_mine" in out
-    assert "[16/20] embedding_integrity" in out
-    assert "[17/20] community_naming" in out
-    assert "[18/20] reconsolidation_valence" in out
-    assert "[19/20] proc_mine" in out
-    assert "[20/20] transcript_sweep_backstop" in out
+    assert "[1/21] schema_mine" in out
+    assert "[2/21] knob_tune" in out
+    assert "[3/21] optimize_hippo" in out
+    assert "[4/21] hippo_cleanup" in out
+    assert "[5/21] dream_decay" in out
+    assert "[6/21] erasure_agent" in out
+    assert "[7/21] cluster_replay" in out
+    assert "[8/21] reconsolidation" in out
+    assert "[9/21] user_model_update" in out
+    assert "[10/21] dmn_reflection" in out
+    assert "[11/21] crisis_recluster" in out
+    assert "[12/21] cluster_summary" in out
+    assert "[13/21] recall_index_rebuild" in out
+    assert "[14/21] entity_link" in out
+    assert "[15/21] curiosity_mine" in out
+    assert "[16/21] embedding_integrity" in out
+    assert "[17/21] community_naming" in out
+    assert "[18/21] reconsolidation_valence" in out
+    assert "[19/21] proc_mine" in out
+    assert "[20/21] transcript_sweep_backstop" in out
+    assert "[21/21] salience_auto_migration" in out
     assert "Sleep cycle complete" in out
 
 
@@ -185,8 +187,8 @@ def test_force_runs_pipeline_when_quarantined(
     rc = cmd_maintenance_sleep_cycle(_make_args(force=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[13/20] recall_index_rebuild" in out
-    assert "[14/20] entity_link" in out
+    assert "[13/21] recall_index_rebuild" in out
+    assert "[14/21] entity_link" in out
     assert "Sleep cycle complete" in out
 
     record_after = load_state(LIFECYCLE_STATE_PATH)
@@ -257,9 +259,9 @@ def test_failure_returns_nonzero_with_error_in_stderr(
     rc = cmd_maintenance_sleep_cycle(_make_args())
     assert rc == 1
     captured = capsys.readouterr()
-    assert "[1/20] schema_mine" in captured.out
-    assert "[2/20] knob_tune" in captured.out
-    assert "[3/20] optimize_hippo ... FAILED" in captured.err
+    assert "[1/21] schema_mine" in captured.out
+    assert "[2/21] knob_tune" in captured.out
+    assert "[3/21] optimize_hippo ... FAILED" in captured.err
     assert "synthetic optimize failure" in captured.err
 
 

@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+import os
+
 import pytest
+
+
+def test_neural_map_bench_restores_the_stage_profile_switch(tmp_path, monkeypatch):
+    from bench.neural_map import run_neural_map_bench
+
+    monkeypatch.delenv("IAI_MCP_STAGE_PROFILE", raising=False)
+    run_neural_map_bench(n=50, iterations=1, store_path=tmp_path / "unset")
+    assert "IAI_MCP_STAGE_PROFILE" not in os.environ
+
+    monkeypatch.setenv("IAI_MCP_STAGE_PROFILE", "0")
+    run_neural_map_bench(n=50, iterations=1, store_path=tmp_path / "preset")
+    assert os.environ["IAI_MCP_STAGE_PROFILE"] == "0"
 
 
 def test_neural_map_bench_runs_small_n(tmp_path):

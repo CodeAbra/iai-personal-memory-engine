@@ -595,6 +595,12 @@ def test_recall_index_rebuild_step_position():
         # incrementally per row (hippo._table add_items), so these rows
         # reach rank time without waiting on the next full rebuild.
         SleepStep.TRANSCRIPT_SWEEP_BACKSTOP,
+        # Tail-appended -- metadata-only column write (salience_level), no
+        # embedding/vector-index participation. Unlike its neighbours, a
+        # promoted mark is NOT served this cycle: it reaches rank on the
+        # NEXT daemon boot (accepted one-cycle lag), not via incremental
+        # feed of the vector index rebuilt above.
+        SleepStep.SALIENCE_AUTO_MIGRATION,
     }
     trailing = set(step_order[idx_rebuild + 1:])
     assert trailing <= may_trail, (

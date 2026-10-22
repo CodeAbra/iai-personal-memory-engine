@@ -367,7 +367,7 @@ def cowork_status_env(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(
         "iai_mcp.cli._capture._patch_claude_desktop_config",
-        lambda action: "Claude Desktop: stubbed",
+        lambda action: ("Claude Desktop: stubbed", True),
     )
     monkeypatch.setattr(
         "iai_mcp.cli._cowork._issue_sweeper_load", lambda paths: None,
@@ -402,6 +402,63 @@ def test_status_not_installed_without_flag(cowork_status_env, monkeypatch, capsy
     assert rc != 0
     assert cowork.TIER_NOT_INSTALLED in out
     assert f"tier:                 {cowork.TIER_ACTIVE}" not in out
+
+
+def test_status_not_installed_scheduler_capable_still_suggests_install(
+    cowork_status_env, monkeypatch, capsys
+):
+    import iai_mcp.cli._cowork as cowork
+
+    monkeypatch.setattr(cowork, "_desktop_build_version", lambda: "1.44121.1")
+
+    rc = cowork.cmd_cowork_status(argparse.Namespace())
+    out = capsys.readouterr().out
+
+    assert rc != 0
+    assert cowork.TIER_NOT_INSTALLED in out
+    assert "next: run: iai-mcp cowork install" in out
+
+
+def test_status_not_installed_no_scheduler_gives_honest_message(
+    cowork_status_env, monkeypatch, capsys
+):
+    import iai_mcp.cli._cowork as cowork
+
+    monkeypatch.setattr(cowork, "_desktop_build_version", lambda: "1.44121.1")
+    monkeypatch.setattr(cowork, "_sweeper_unit_paths", lambda home: {"kind": None})
+
+    rc = cowork.cmd_cowork_status(argparse.Namespace())
+    out = capsys.readouterr().out
+
+    assert rc != 0
+    assert cowork.TIER_NOT_INSTALLED in out
+    assert "note: no supported background scheduler on this platform" in out
+    assert "next: run: iai-mcp cowork install" not in out
+
+
+def test_install_no_scheduler_message_is_byte_stable(cowork_status_env, monkeypatch, capsys):
+    import iai_mcp.cli._cowork as cowork
+
+    monkeypatch.setattr(cowork, "_sweeper_unit_paths", lambda home: {"kind": None})
+
+    rc = cowork.cmd_cowork_install(argparse.Namespace())
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert err == (
+        "ERROR: no supported background scheduler on this platform "
+        "(need launchd on macOS or a systemd user session on Linux) -- "
+        "the memory system's own overnight consolidation still sweeps "
+        "new conversations in, just not continuously through the day.\n"
+    )
+
+
+def test_sweeper_unit_paths_none_on_win32(tmp_path, monkeypatch):
+    import iai_mcp.cli._cowork as cowork
+
+    monkeypatch.setattr(cowork.sys, "platform", "win32")
+
+    assert cowork._sweeper_unit_paths(tmp_path)["kind"] is None
 
 
 def test_status_staged_after_install_without_receipt(cowork_status_env, monkeypatch, capsys):

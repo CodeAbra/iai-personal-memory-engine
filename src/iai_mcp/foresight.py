@@ -35,6 +35,13 @@ from iai_mcp import rank_boost
 logger = logging.getLogger(__name__)
 
 FORESIGHT_OFF_ENV = "IAI_MCP_FORESIGHT_OFF"
+FORESIGHT_TRACE_ENV = "IAI_MCP_FORESIGHT_TRACE"
+"""Off by default, read once per refresh_pack call (never a module-level
+flag -- a per-call read is the only shape a test's monkeypatch.setenv can
+observe). When set to "1", refresh_pack attaches a per-candidate admission
+trace (raw cosine, admission rank in the primary ANN window, which lane
+examined it, and its pack/skip outcome) to the returned report dict under
+"admission_trace"; every other code path is byte-identical to today."""
 FORESIGHT_MIN_COS_ENV = "IAI_MCP_FORESIGHT_MIN_COS"
 FORESIGHT_MAX_ITEMS_ENV = "IAI_MCP_FORESIGHT_MAX_ITEMS"
 FORESIGHT_BUDGET_TOKENS_ENV = "IAI_MCP_FORESIGHT_BUDGET_TOKENS"
@@ -130,6 +137,30 @@ FORESIGHT_ASSISTANT_TAIL_BUDGET_SEC_DEFAULT = 2.0
 """Wall-clock ceiling on the tail lane's own embed+ANN work, mirroring
 FORESIGHT_CUE_BUDGET_SEC_DEFAULT: a stalled step degrades the lane to empty
 rather than blocking the pack."""
+
+FORESIGHT_RESERVE_LANE_OFF_ENV = "IAI_MCP_FORESIGHT_RESERVE_LANE_OFF"
+FORESIGHT_RESERVE_LANE_CAP_ENV = "IAI_MCP_FORESIGHT_RESERVE_LANE_CAP"
+FORESIGHT_RESERVE_LANE_BUDGET_SEC_ENV = "IAI_MCP_FORESIGHT_RESERVE_LANE_BUDGET_SEC"
+
+FORESIGHT_RESERVE_LANE_CAP_DEFAULT = 1
+"""Slot reserved for the salience/directive existence-discovery lane. This
+lane runs FIRST and its packed count is subtracted from the primary lane's
+own slot cap (primary_slot_cap), so a record it admits does not expand the
+per-turn ceiling -- it takes a slot the primary/derived lanes would
+otherwise have used. Never folded into the primary ANN window multiplier
+below (the window derives from effective_max_items alone): this lane
+discovers candidates by an indexed WHERE predicate, not cosine, so widening
+the window would not help it."""
+FORESIGHT_RESERVE_LANE_BUDGET_SEC_DEFAULT = 2.0
+"""Wall-clock ceiling on the lane's own discovery scan, mirroring the other
+reserve lanes' budgets: a stalled step degrades the lane to empty rather
+than blocking the pack."""
+
+_RESERVE_LANE_SCAN_CAP = 200
+"""Hard cap on rows scanned from the indexed WHERE query per turn -- the
+slot budget alone bounds what gets PACKED, not what gets SCANNED; this
+caps the scan itself so a large post-backfill salience-tagged corpus never
+turns into corpus-sized work on the capture hot path."""
 
 _CUE_LATIN_TOKEN_RE = re.compile(r"[A-Za-z]{4,}")
 _CUE_CYRILLIC_TOKEN_RE = re.compile(r"[а-яёЀ-ӿ]{4,}")
@@ -705,12 +736,36 @@ def _pack_candidates(
     budget_chars: int,
     now_dt: "datetime",
     cos_marker: str = "",
+    trace: "dict[str, dict] | None" = None,
+    lane: str = "primary",
 ) -> "tuple[int, int]":
     """Pack up to slot_limit candidates[start:] into lines/packed_ids/report,
     mutating the shared dedup/budget state in place. Returns (next unconsumed
     index into candidates, updated used_chars) so a caller can resume the
     same candidate list later — the reserve fallback's retained primary
-    tail."""
+    tail.
+
+    trace is the off-by-default admission trace (IAI_MCP_FORESIGHT_TRACE):
+    None on every served-path call unless the flag is set, in which case
+    each candidate this call actually examines gets/keeps an entry noting
+    which lane examined it and its pack/skip outcome."""
+
+    def _trace_note(rid: str, cos: float, outcome: str) -> None:
+        if trace is None:
+            return
+        entry = trace.get(rid)
+        if entry is None:
+            trace[rid] = {
+                "record_id": rid, "raw_cos": cos, "admission_rank": None,
+                "lane": lane, "outcome": outcome,
+            }
+        else:
+            if entry.get("outcome") == "packed" and outcome != "packed":
+                return  # a later lane's skip must not undo a real admission
+            entry["lane"] = lane
+            entry["outcome"] = outcome
+            entry["raw_cos"] = cos
+
     packed_this_call = 0
     idx = start
     n = len(candidates)
@@ -722,18 +777,22 @@ def _pack_candidates(
             confirmed = exact.get(rid)
             if confirmed is None:
                 report["skipped_unconfirmed"] += 1
+                _trace_note(rid, cos, "skipped_unconfirmed")
                 continue
             cos = confirmed
         if cos < min_cos:
             if cos >= min_cos - _SUGGEST_MARGIN:
                 report["grey_candidates"] += 1
             report["skipped_low_cos"] += 1
+            _trace_note(rid, cos, "skipped_low_cos")
             continue
         if _record_session(rec) == session_id:
             report["skipped_same_session"] += 1
+            _trace_note(rid, cos, "skipped_same_session")
             continue
         if rid in blocked:
             report["skipped_already_injected"] += 1
+            _trace_note(rid, cos, "skipped_already_injected")
             continue
         # Identical content packs once — candidates arrive best-first, so
         # the top instance wins. An empty surface still needs a stable key
@@ -742,6 +801,7 @@ def _pack_candidates(
         dedup_key = surface_sig or f"rid:{rid}"
         if dedup_key in seen_surfaces:
             report["skipped_duplicate_content"] += 1
+            _trace_note(rid, cos, "skipped_duplicate_content")
             continue
         seen_surfaces.add(dedup_key)
 
@@ -789,12 +849,14 @@ def _pack_candidates(
                 f"{_snippet(rec.literal_surface)}"
             )
         if used_chars + len(line) > budget_chars:
+            _trace_note(rid, cos, "skipped_budget_exceeded")
             break
         lines.append(line)
         used_chars += len(line)
         packed_ids.extend(new_ids)
         report["packed"] += 1
         packed_this_call += 1
+        _trace_note(rid, cos, "packed")
         if superseded:
             report["superseded"] += 1
     return idx, used_chars
@@ -819,11 +881,17 @@ def refresh_pack(
         "skipped_already_injected": 0, "skipped_unconfirmed": 0,
         "skipped_duplicate_content": 0, "grey_candidates": 0,
         "superseded": 0, "exact_authority": False, "written": False,
-        "packed_ids": [],
+        "packed_ids": [], "admission_trace": None,
     }
     if os.environ.get(FORESIGHT_OFF_ENV) == "1":
         return report
     try:
+        # Off-by-default per-candidate admission trace (read once per call,
+        # never a module-level flag, so a test's monkeypatch.setenv is
+        # observed): see FORESIGHT_TRACE_ENV docstring for the shape.
+        admission_trace: "dict[str, dict] | None" = (
+            {} if os.environ.get(FORESIGHT_TRACE_ENV) == "1" else None
+        )
         min_cos = _f(FORESIGHT_MIN_COS_ENV, FORESIGHT_MIN_COS_DEFAULT)
         max_items = int(_f(FORESIGHT_MAX_ITEMS_ENV, FORESIGHT_MAX_ITEMS_DEFAULT))
         budget_chars = int(
@@ -864,6 +932,17 @@ def refresh_pack(
         )
         effective_max_items = max_items + assistant_tail_reserve
 
+        # Deliberately EXCLUDED from effective_max_items: this lane discovers
+        # candidates by an indexed WHERE predicate, never by cosine, so it
+        # must never widen the primary ANN window (window derives from
+        # effective_max_items below) -- that would silently turn this lane
+        # into a widen-window fix.
+        reserve_lane_off = os.environ.get(FORESIGHT_RESERVE_LANE_OFF_ENV) == "1"
+        reserve_lane_reserve = 0 if reserve_lane_off else max(
+            0,
+            int(_f(FORESIGHT_RESERVE_LANE_CAP_ENV, FORESIGHT_RESERVE_LANE_CAP_DEFAULT)),
+        )
+
         import time as _time
 
         repeat_after = _f(FORESIGHT_REPEAT_AFTER_ENV, FORESIGHT_REPEAT_AFTER_DEFAULT)
@@ -880,6 +959,16 @@ def refresh_pack(
         cue_vec = _blended_cue(store, cue_embedding, session_id)
         window = effective_max_items * _CANDIDATE_OVERFETCH
         candidates = store.query_similar(cue_vec, k=window)
+        if admission_trace is not None:
+            # Stage-1 admission snapshot, pre-boost-sort: this is the exact
+            # candidate set/order store.query_similar returned, before any
+            # reorder or reserve-lane merge touches it.
+            for _rank, (_arec, _acos) in enumerate(candidates):
+                admission_trace[str(_arec.id)] = {
+                    "record_id": str(_arec.id), "raw_cos": _acos,
+                    "admission_rank": _rank, "lane": "primary_window",
+                    "outcome": "not_examined",
+                }
 
         # The lossless exact authority re-scores the approximate window; a
         # candidate the authority does not confirm is ANN inflation and is
@@ -910,12 +999,65 @@ def refresh_pack(
         packed_ids: list[str] = []
         seen_surfaces: set[str] = set()
 
+        # Runs first: an existence-admitted record wins by list position;
+        # primary_slot_cap below is reduced by this lane's contribution to
+        # hold the ceiling.
+        # Existence-based reserve lane: a salience/directive-tagged record is
+        # discovered by a bounded, indexed, fixed-literal WHERE predicate,
+        # never by cosine -- the only path that can surface a candidate whose
+        # raw cosine sits below the primary window/floor entirely (a Stage-1
+        # admission gap the primary ANN window and the other three
+        # cosine-gated reserve lanes structurally cannot reach). Merged
+        # candidates are re-scored by the EXISTING _boost_sort before
+        # packing -- no new scoring arithmetic. Degrades to empty on any
+        # failure, never blocks the pack; a no-signal (unflagged) corpus
+        # discovers nothing, so the pack is unchanged from today.
+        if reserve_lane_reserve > 0:
+            try:
+                r_deadline = _time.monotonic() + _f(
+                    FORESIGHT_RESERVE_LANE_BUDGET_SEC_ENV,
+                    FORESIGHT_RESERVE_LANE_BUDGET_SEC_DEFAULT,
+                )
+                discovered: "list[tuple[Any, float]]" = []
+                scanned = 0
+                for rec in store.iter_records(
+                    where="salience_level != 'unflagged' AND tombstoned_at IS NULL",
+                ):
+                    scanned += 1
+                    if scanned > _RESERVE_LANE_SCAN_CAP or _time.monotonic() > r_deadline:
+                        break
+                    emb = getattr(rec, "embedding", None)
+                    if not emb:
+                        continue
+                    discovered.append((rec, _cos(emb, cue_vec)))
+                if discovered:
+                    ranked_discovered = _boost_sort(
+                        discovered, {},
+                        tier_boost=tier_boost, salience_step=salience_step,
+                        semantic_lift=semantic_lift, literal_preservation_strong=lp_strong,
+                    )
+                    _, used_chars = _pack_candidates(
+                        store, ranked_discovered, {}, start=0,
+                        slot_limit=reserve_lane_reserve,
+                        session_id=session_id, min_cos=0.0, blocked=blocked,
+                        seen_surfaces=seen_surfaces, lines=lines, packed_ids=packed_ids,
+                        report=report, used_chars=used_chars,
+                        budget_chars=item_budget_chars, now_dt=now_dt,
+                        cos_marker="◆",
+                        trace=admission_trace, lane="reserve_lane",
+                    )
+            except Exception as exc:  # noqa: BLE001 -- anticipation must never fail a capture
+                logger.debug("foresight reserve-lane discovery skipped: %s", exc)
+        reserve_lane_packed = report["packed"]
+
         multi_off = os.environ.get(FORESIGHT_MULTI_CUE_OFF_ENV) == "1"
         reserve = 0 if multi_off else max(
             0,
             min(max_items, int(_f(FORESIGHT_CUE_RESERVE_ENV, FORESIGHT_CUE_RESERVE_DEFAULT))),
         )
-        primary_slot_cap = effective_max_items - reserve - assistant_tail_reserve
+        primary_slot_cap = max(
+            0, effective_max_items - reserve - assistant_tail_reserve - reserve_lane_packed
+        )
 
         # Primary cue's candidates iterate first, in order, up to
         # max_items - reserve; the unconsumed tail is retained for the
@@ -926,6 +1068,7 @@ def refresh_pack(
             seen_surfaces=seen_surfaces, lines=lines, packed_ids=packed_ids,
             report=report, used_chars=used_chars,
             budget_chars=item_budget_chars, now_dt=now_dt,
+            trace=admission_trace, lane="primary",
         )
 
         # Reserved slots: short derived cues surface content the whole-prompt
@@ -986,11 +1129,25 @@ def refresh_pack(
                                 confirmed = d_exact.get(rid)
                                 if confirmed is None:
                                     report["skipped_unconfirmed"] += 1
+                                    if admission_trace is not None and rid not in admission_trace:
+                                        admission_trace[rid] = {
+                                            "record_id": rid, "raw_cos": cos,
+                                            "admission_rank": None,
+                                            "lane": "derived_cue_probe",
+                                            "outcome": "skipped_unconfirmed",
+                                        }
                                     continue
                                 cos = confirmed
                             if cos < derived_min_cos:
                                 if cos >= derived_min_cos - _SUGGEST_MARGIN:
                                     report["grey_candidates"] += 1
+                                if admission_trace is not None and rid not in admission_trace:
+                                    admission_trace[rid] = {
+                                        "record_id": rid, "raw_cos": cos,
+                                        "admission_rank": None,
+                                        "lane": "derived_cue_probe",
+                                        "outcome": "skipped_low_cos",
+                                    }
                                 continue
                             if rid in merged:
                                 continue
@@ -1016,6 +1173,7 @@ def refresh_pack(
                             report=report, used_chars=used_chars,
                             budget_chars=item_budget_chars, now_dt=now_dt,
                             cos_marker="↗",
+                            trace=admission_trace, lane="derived_cue",
                         )
             except Exception as exc:  # noqa: BLE001 -- anticipation must never fail a capture
                 logger.debug("foresight multi-cue derivation skipped: %s", exc)
@@ -1033,6 +1191,7 @@ def refresh_pack(
                         seen_surfaces=seen_surfaces, lines=lines, packed_ids=packed_ids,
                         report=report, used_chars=used_chars,
                         budget_chars=item_budget_chars, now_dt=now_dt,
+                        trace=admission_trace, lane="primary_tail_resume",
                     )
                 except Exception as exc:  # noqa: BLE001 -- partial pack still publishes
                     logger.debug("foresight reserve tail backfill skipped: %s", exc)
@@ -1123,9 +1282,13 @@ def refresh_pack(
                             lines=lines, packed_ids=packed_ids, report=report,
                             used_chars=used_chars, budget_chars=item_budget_chars,
                             now_dt=now_dt, cos_marker="⚑",
+                            trace=admission_trace, lane="assistant_tail",
                         )
             except Exception as exc:  # noqa: BLE001 -- anticipation must never fail a capture
                 logger.debug("foresight assistant-tail lane skipped: %s", exc)
+
+        if admission_trace is not None:
+            report["admission_trace"] = list(admission_trace.values())
 
         if _tq is not None:
             _tq_line, _tq_qid = _tq

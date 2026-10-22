@@ -16,6 +16,8 @@ import stat
 from importlib import resources as _res
 from pathlib import Path
 
+from iai_mcp.cli._atomic_write import _atomic_write_text
+
 _HOOK_SCRIPTS = (
     "iai-mcp-session-capture.sh",
     "iai-mcp-turn-capture.sh",
@@ -56,6 +58,25 @@ def _load_hooks_json(path: Path) -> "dict | None":
     return data if isinstance(data, dict) else None
 
 
+def _own_commands(hooks_dir: Path) -> "dict[str, str]":
+    return {name: f"bash {hooks_dir / name}" for name in _HOOK_SCRIPTS}
+
+
+def _entry_matches_exact(entry: dict, exact_command: str) -> bool:
+    return (entry.get("command") or "") == exact_command
+
+
+def _entry_is_own_exact(entry: dict, own_commands: "dict[str, str]") -> bool:
+    return (entry.get("command") or "") in own_commands.values()
+
+
+def _entry_is_near_miss(entry: dict, own_commands: "dict[str, str]") -> bool:
+    cmd = entry.get("command") or ""
+    if cmd in own_commands.values():
+        return False
+    return any(basename in cmd for basename in own_commands)
+
+
 def install_cursor_hooks() -> int:
     hooks_dir, hooks_json = _cursor_paths()
 
@@ -84,20 +105,20 @@ def install_cursor_hooks() -> int:
     changed = False
     for event, marker in _EVENT_WIRING:
         entries = events.setdefault(event, [])
+        exact_command = f"bash {hooks_dir / marker}"
         if any(
-            marker in (e.get("command") or "")
+            isinstance(e, dict) and _entry_matches_exact(e, exact_command)
             for e in entries
-            if isinstance(e, dict)
         ):
             print(f"hooks.json already wires {marker} on {event} — no change")
             continue
-        entries.append({"command": f"bash {hooks_dir / marker}"})
+        entries.append({"command": exact_command})
         changed = True
         print(f"patched: {hooks_json} ({event}: {marker})")
 
     if changed or not hooks_json.exists():
         hooks_json.parent.mkdir(parents=True, exist_ok=True)
-        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _atomic_write_text(hooks_json, json.dumps(data, indent=2))
 
     print(
         "\nNote: restart Cursor to pick up hooks.json. Per-turn recall is "
@@ -126,29 +147,40 @@ def uninstall_cursor_hooks() -> int:
     if data is None:
         print(f"NOT patched: cannot parse {hooks_json} — remove our entries by hand")
         return 1
+    own_commands = _own_commands(hooks_dir)
     events = data.get("hooks", {})
     changed = False
+    near_miss_events: "list[str]" = []
     if isinstance(events, dict):
         for event in list(events):
             entries = events.get(event, [])
-            kept = [
-                e for e in entries
-                if not (
-                    isinstance(e, dict)
-                    and any(m in (e.get("command") or "") for m in _HOOK_SCRIPTS)
-                )
-            ]
-            if len(kept) != len(entries):
+            kept = []
+            for e in entries:
+                if isinstance(e, dict) and _entry_is_own_exact(e, own_commands):
+                    changed = True
+                    continue
+                if isinstance(e, dict) and _entry_is_near_miss(e, own_commands):
+                    near_miss_events.append(event)
+                kept.append(e)
+            if kept != entries:
                 if kept:
                     events[event] = kept
                 else:
                     events.pop(event, None)
-                changed = True
                 print(f"patched: {hooks_json} ({event} entry removed)")
     if changed:
-        hooks_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _atomic_write_text(hooks_json, json.dumps(data, indent=2))
     else:
         print(f"(no hook entry to remove) {hooks_json}")
+
+    if near_miss_events:
+        print(
+            f"NOT removed: {hooks_json} has entries under "
+            f"{sorted(set(near_miss_events))} that mention our hook scripts "
+            "but do not match exactly what this installer writes — remove "
+            "them by hand."
+        )
+        return 1
     return 0
 
 
@@ -173,10 +205,10 @@ def status_cursor_hooks() -> int:
     events = data.get("hooks", {})
     all_wired = True
     for event, marker in _EVENT_WIRING:
+        exact_command = f"bash {hooks_dir / marker}"
         wired = isinstance(events, dict) and any(
-            marker in (e.get("command") or "")
+            isinstance(e, dict) and _entry_matches_exact(e, exact_command)
             for e in events.get(event, [])
-            if isinstance(e, dict)
         )
         all_wired = all_wired and wired
         print(f"Cursor hooks.json {event} ({marker}): {'WIRED' if wired else 'NOT WIRED'}")

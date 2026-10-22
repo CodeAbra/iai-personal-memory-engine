@@ -48,7 +48,8 @@ def _make_db(path: Path) -> sqlite3.Connection:
             id              TEXT NOT NULL UNIQUE,
             embedding       BLOB NOT NULL,
             tombstoned_at   TEXT,
-            embedding_pending INTEGER NOT NULL DEFAULT 0
+            embedding_pending INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT
         )
     """)
     conn.execute("CREATE INDEX idx_records_id ON records(id)")
@@ -126,7 +127,7 @@ def test_iter_records_chunks_pagination_complete(tmp_path: Path):
             seen: set[str] = set()
             for chunk in roexp.iter_records_chunks(ro, chunk_size=2000):
                 page_sizes.append(len(chunk))
-                for id_str, emb_blob in chunk:
+                for id_str, emb_blob, _created_at in chunk:
                     assert id_str not in seen, "duplicate id across pages"
                     seen.add(id_str)
                     assert len(emb_blob) == _DIM * 4
@@ -158,7 +159,7 @@ def test_iter_records_chunks_filters_tombstoned(tmp_path: Path):
         with roexp.read_transaction(ro):
             seen = []
             for chunk in roexp.iter_records_chunks(ro):
-                for id_str, _ in chunk:
+                for id_str, _, _created_at in chunk:
                     seen.append(id_str)
     finally:
         ro.close()
@@ -182,7 +183,7 @@ def test_iter_records_chunks_filters_embedding_pending(tmp_path: Path):
         with roexp.read_transaction(ro):
             seen = []
             for chunk in roexp.iter_records_chunks(ro):
-                for id_str, _ in chunk:
+                for id_str, _, _created_at in chunk:
                     seen.append(id_str)
     finally:
         ro.close()
@@ -306,7 +307,7 @@ def test_read_transaction_snapshot_isolation(tmp_path: Path):
             it = roexp.iter_records_chunks(ro, chunk_size=10)
             # Pull first page.
             first = next(it)
-            for id_str, _ in first:
+            for id_str, _, _created_at in first:
                 seen.append(id_str)
             # Let the writer commit a new row, then resume the in-flight
             # snapshot read.
@@ -315,7 +316,7 @@ def test_read_transaction_snapshot_isolation(tmp_path: Path):
             # Give SQLite a moment to publish the new WAL frame.
             time.sleep(0.1)
             for chunk in it:
-                for id_str, _ in chunk:
+                for id_str, _, _created_at in chunk:
                     seen.append(id_str)
     finally:
         ro.close()
@@ -376,7 +377,7 @@ def test_dangling_endpoint_unchanged_partition(tmp_path: Path):
         try:
             with roexp.read_transaction(ro):
                 for chunk in roexp.iter_records_chunks(ro):
-                    for id_str, emb_blob in chunk:
+                    for id_str, emb_blob, _created_at in chunk:
                         emb = np.frombuffer(emb_blob, dtype=np.float32).tolist()
                         nodes.append((UUID(id_str), None, emb, {}))
                 for chunk in roexp.iter_edges_chunks(ro):
@@ -599,7 +600,7 @@ def test_lilli_ro_export_records_via_engine(tmp_path: Path):
         returned_ids: list[str] = []
         with roexp.read_transaction(ro_conn):
             for chunk in roexp.iter_records_chunks(ro_conn):
-                for id_str, emb_blob in chunk:
+                for id_str, emb_blob, _created_at in chunk:
                     returned_ids.append(id_str)
                     assert len(emb_blob) == _DIM * 4, (
                         f"embedding blob should be {_DIM * 4} bytes, got {len(emb_blob)}"

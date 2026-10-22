@@ -5,6 +5,7 @@ members = [
     "rust/iai_mcp_graph_core",
     "rust/iai_mcp_vec_core",
     "rust/iai_mcp_native",
+    "rust/iai_mcp_tools_core",
     "crates/lilli-hd",
     "crates/lillibrain",
     "crates/lilliengine",

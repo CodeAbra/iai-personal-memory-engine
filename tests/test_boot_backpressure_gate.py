@@ -289,12 +289,15 @@ class TestLaunchSiteWiring:
         body_end = src.index("async def _boot_preload(")
         segment = src[body_start:body_end]
         assert "background_store_work(" in segment
-        assert "build_runtime_graph_incremental(store)" in segment
+        assert "_rebuild_and_save_rgc(store)" in segment
+        assert "build_runtime_graph(store)" in segment
         gate_idx = segment.index("background_store_work(")
-        call_idx = segment.index("build_runtime_graph_incremental(store)")
-        assert gate_idx < call_idx, (
-            "the gate must wrap the graph build, not merely appear "
-            "somewhere in the same function"
+        rebuild_idx = segment.index("_rebuild_and_save_rgc(store)")
+        graph_idx = segment.index("build_runtime_graph(store)")
+        assert gate_idx < rebuild_idx < graph_idx, (
+            "the gate must wrap both the DB->child rebuild and the runtime "
+            "graph reconstruction, not merely appear somewhere in the same "
+            "function"
         )
 
     def test_s4_background_scan_routes_through_gate(self) -> None:

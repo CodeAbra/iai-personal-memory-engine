@@ -725,19 +725,12 @@ class HippoDB:
         # let it drift unbounded across cycles. Negative values are KiB.
         # tracemalloc cannot see C-level allocations, so this cap is the
         # only explicit bound on the page cache footprint in process RSS.
-        _DEFAULT_CACHE_KIB = 65536  # 64 MiB
-        _MIN_CACHE_KIB = 4096  # 4 MiB — below this the page cache thrashes
-        _cache_kib = os.environ.get("IAI_MCP_SQLITE_CACHE_SIZE_KIB", str(_DEFAULT_CACHE_KIB))
-        try:
-            _cache_kib_int = int(_cache_kib)
-        except ValueError:
-            _cache_kib_int = _DEFAULT_CACHE_KIB
-        # Non-positive → use default; sub-floor positive → clamp to floor.
-        # Never abs()-rewrite a negative env value; treat <=0 as "use default".
-        if _cache_kib_int <= 0:
-            _cache_kib_int = _DEFAULT_CACHE_KIB
-        elif _cache_kib_int < _MIN_CACHE_KIB:
-            _cache_kib_int = _MIN_CACHE_KIB
+        from iai_mcp.lillibrain.constants import (  # noqa: PLC0415
+            MAIN_CACHE_KIB,
+            resolve_cache_size_kib,
+        )
+
+        _cache_kib_int = resolve_cache_size_kib("IAI_MCP_SQLITE_CACHE_SIZE_KIB", MAIN_CACHE_KIB)
         self._conn.execute(f"PRAGMA cache_size=-{_cache_kib_int}")
         if read_only:
             self._conn.execute("PRAGMA query_only=ON")
